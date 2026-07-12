@@ -1,36 +1,69 @@
-name: Feature Request
-description: Suggest a new feature or enhancement
+name: Feature request
+description: Propose an improvement to Simulator
+title: "[Feature]: "
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        Have an idea for Craft Agents? We'd love to hear it!
+        Describe the user problem before prescribing an implementation. Search existing issues first.
 
   - type: textarea
     id: problem
     attributes:
-      label: Problem or Motivation
-      description: What problem does this feature solve, or what workflow does it improve?
+      label: User problem
+      description: Who experiences this problem, in what workflow, and what is the impact?
     validations:
       required: true
 
   - type: textarea
-    id: solution
+    id: outcome
     attributes:
-      label: Proposed Solution
-      description: Describe the feature or change you'd like to see.
+      label: Desired outcome
+      description: Describe the observable result or capability the user needs.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed approach
+      description: Explain a possible solution, including relevant UI or workflow changes.
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-goals
+      description: State what should be included and explicitly excluded.
     validations:
       required: true
 
   - type: textarea
     id: alternatives
     attributes:
-      label: Alternatives Considered
-      description: Any workarounds or alternative approaches you've tried.
+      label: Alternatives and workarounds
+      description: What existing workflows or other approaches have you considered?
 
   - type: textarea
-    id: additional
+    id: risks
     attributes:
-      label: Additional Context
-      description: Screenshots, mockups, links, or any other context.
+      label: Risks and constraints
+      description: Note compatibility, security, privacy, permissions, data migration, performance, or licensing implications.
+
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Supporting evidence
+      description: Add mockups, recordings, examples, usage data, or links. Remove secrets and private data.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checklist
+      options:
+        - label: I searched for existing requests and did not find a duplicate.
+          required: true
+        - label: I described the user problem and outcome, not only an implementation.
+          required: true
+        - label: I removed secrets and sensitive personal or workspace data.
+          required: true

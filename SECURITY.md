@@ -1,58 +1,35 @@
-# Security Policy
+# Simulator 安全政策
 
-## Reporting a Vulnerability
+## 支持版本
 
-We take security seriously. If you discover a security vulnerability in Craft Agents, please report it responsibly.
+Simulator 目前尚未发布正式版本，因此暂时没有可列入安全支持范围的稳定版本。此政策适用于本仓库当前代码，以及未来由本仓库正式发布的 Simulator 版本。
 
-### How to Report
+## 报告安全漏洞
 
-**Please do NOT report security vulnerabilities through public GitHub issues.**
+请仅通过 GitHub 的 [Private Vulnerability Reporting](https://github.com/Jiachi-Deng/Simulator/security/advisories/new) 私密报告安全漏洞。
 
-Instead, please send an email to: **security@craft.do**
+请勿通过公开 GitHub Issue、Discussion、Pull Request 或其他公开渠道披露尚未修复的安全问题。如果 Private Vulnerability Reporting 页面不可用，请暂缓公开披露，并关注仓库后续提供的私密报告渠道。
 
-Include the following information:
-- Description of the vulnerability
-- Steps to reproduce the issue
-- Potential impact
-- Any suggested fixes (optional)
+报告中建议包含：
 
-### What to Expect
+- 漏洞描述及潜在影响
+- 受影响的组件、版本、commit 或运行环境
+- 可复现步骤或最小复现样例
+- 相关日志、截图或 proof of concept；提交前请移除无关的敏感信息
+- 已知缓解措施或修复建议（如有）
 
-- **Acknowledgment**: We will acknowledge receipt within 48 hours
-- **Initial Assessment**: We will provide an initial assessment within 7 days
-- **Resolution Timeline**: We aim to resolve critical issues within 30 days
+## 处理方式
 
-### Scope
+维护者会通过 GitHub Security Advisory 与报告者沟通、评估影响并协调修复。由于项目当前尚未正式发布，我们不承诺固定的确认、评估或修复 SLA；处理时间取决于漏洞的严重程度、可复现性和修复复杂度。
 
-This policy applies to:
-- The Craft Agents desktop application
-- The `@craft-agent/*` npm packages
-- Official Craft Agents repositories
+在维护者确认可以公开之前，请对漏洞细节、利用代码和相关讨论保密。
 
-### Out of Scope
+## 范围
 
-- Third-party dependencies (report to their maintainers)
-- Social engineering attacks
-- Denial of service attacks
+以下问题通常属于本政策范围：
 
-## Supported Versions
+- Simulator 应用及本仓库维护的 packages 中的安全漏洞
+- authentication、credential storage、permission boundary、Electron main/preload 隔离等安全边界问题
+- updater、构建或发布流程中可能影响 Simulator 用户或产物完整性的问题
 
-| Version | Supported          |
-| ------- | ------------------ |
-| Latest  | :white_check_mark: |
-| < Latest | :x:               |
-
-We only provide security updates for the latest version. Please keep your installation up to date.
-
-## Security Best Practices
-
-When using Craft Agents:
-
-1. **Keep credentials secure**: Never commit `.env` files or credentials
-2. **Use environment variables**: Store secrets in environment variables
-3. **Review permissions**: Be cautious with "Execute" permission mode
-4. **Update regularly**: Keep the application updated
-
-## Acknowledgments
-
-We appreciate responsible disclosure and will acknowledge security researchers who report valid vulnerabilities (with their permission).
+第三方 dependency 自身的漏洞应优先报告给对应维护者；如果该漏洞会通过 Simulator 的使用方式产生额外风险，也可以通过上述私密渠道报告。

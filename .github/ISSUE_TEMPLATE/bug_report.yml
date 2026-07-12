@@ -1,80 +1,71 @@
-name: Bug Report
-description: Report a bug or unexpected behavior in Craft Agents
+name: Bug report
+description: Report a reproducible problem in Simulator
+title: "[Bug]: "
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to report a bug! Please fill out the sections below so we can reproduce and fix the issue.
+        Thanks for helping improve Simulator. Search existing issues before filing a new report.
+
+        **Do not disclose security vulnerabilities here.** Use [GitHub Private Vulnerability Reporting](https://github.com/Jiachi-Deng/Simulator/security/advisories/new) instead.
 
   - type: input
     id: version
     attributes:
-      label: Craft Agents Version
-      description: "Found in Settings or the title bar (e.g. 0.4.6)"
-      placeholder: "0.4.6"
+      label: Simulator version or commit
+      description: Provide the app version, release tag, or full commit SHA.
+      placeholder: "v0.1.0 or 0123456789abcdef..."
     validations:
       required: true
 
   - type: dropdown
     id: os
     attributes:
-      label: Operating System
+      label: Operating system
       options:
         - macOS (Apple Silicon)
         - macOS (Intel)
-        - Windows 11
-        - Windows 10
-        - Linux (Ubuntu/Debian)
-        - Linux (Fedora/RHEL)
-        - Linux (Arch)
-        - Linux (Other)
+        - Windows
+        - Linux
+        - Other
     validations:
       required: true
 
   - type: input
     id: os_version
     attributes:
-      label: OS Version
-      description: "e.g. macOS 15.3, Windows 11 24H2, Ubuntu 24.04"
-      placeholder: "macOS 15.3"
-    validations:
-      required: true
-
-  - type: dropdown
-    id: ai_provider
-    attributes:
-      label: AI Provider
-      description: Which AI provider/connection are you using?
-      options:
-        - Anthropic API (direct)
-        - Anthropic API (custom endpoint)
-        - OpenAI / Codex
-        - Copilot (GitHub)
-        - Other
+      label: OS version
+      placeholder: "macOS 15.5, Windows 11 24H2, or Ubuntu 24.04"
     validations:
       required: true
 
   - type: input
-    id: model
+    id: install_method
     attributes:
-      label: Model
-      description: "Which model are you using? (e.g. Claude Opus 4.7, GPT-4.1)"
-      placeholder: "Claude Opus 4.7"
+      label: Installation method
+      description: State whether this is a release build, local build, package-manager install, or another setup.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Relevant environment
+      description: Include provider, model, workspace type, enabled integrations, and configuration relevant to the bug. Remove secrets and personal data.
 
   - type: textarea
     id: description
     attributes:
-      label: Description
-      description: A clear description of what the bug is.
+      label: Problem
+      description: Clearly describe the observed problem and its impact.
     validations:
       required: true
 
   - type: textarea
     id: steps
     attributes:
-      label: Steps to Reproduce
-      description: Step-by-step instructions to reproduce the behavior.
+      label: Steps to reproduce
       value: |
         1.
         2.
@@ -85,39 +76,43 @@ body:
   - type: textarea
     id: expected
     attributes:
-      label: Expected Behavior
-      description: What did you expect to happen?
+      label: Expected behavior
     validations:
       required: true
 
   - type: textarea
     id: actual
     attributes:
-      label: Actual Behavior
-      description: What actually happened?
+      label: Actual behavior
     validations:
       required: true
 
   - type: textarea
-    id: screenshots
+    id: evidence
     attributes:
-      label: Screenshots / Screen Recordings
-      description: |
-        For **UI issues**, please attach screenshots or screen recordings showing the problem.
-        You can drag and drop images/videos directly into this field.
+      label: Logs and UI evidence
+      description: Attach minimal logs, screenshots, or recordings. Redact tokens, credentials, private prompts, file paths, and personal data.
 
   - type: textarea
-    id: logs
+    id: regression
     attributes:
-      label: Debug Logs
-      description: |
-        For **non-UI issues** (crashes, errors, connection problems), please attach relevant logs from a debug session.
-
-        Launch the app with `-- --debug` and reproduce the issue. See the [Troubleshooting section in the README](https://github.com/craft-ai-agents/craft-agents-oss#troubleshooting) for platform-specific commands and log file locations.
-      render: shell
+      label: Regression details
+      description: Did this work before? If known, provide the last working version and first broken version.
 
   - type: textarea
     id: additional
     attributes:
-      label: Additional Context
-      description: Any other context about the problem (MCP sources used, workspace config, etc.)
+      label: Additional context
+      description: Include workarounds, frequency, or links to related issues.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Submission checklist
+      options:
+        - label: I searched for existing issues and did not find a duplicate.
+          required: true
+        - label: I removed secrets, credentials, and sensitive personal or workspace data.
+          required: true
+        - label: This report does not disclose a security vulnerability.
+          required: true

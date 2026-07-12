@@ -1,0 +1,28 @@
+# Simulator 默认代码所有者
+* @Jiachi-Deng
+
+# GitHub 配置与自动化
+/.github/ @Jiachi-Deng
+
+# Electron 高权限边界
+/apps/electron/src/main/ @Jiachi-Deng
+/apps/electron/src/preload/ @Jiachi-Deng
+
+# 认证、凭据与权限
+/packages/shared/src/auth/ @Jiachi-Deng
+/packages/shared/src/credentials/ @Jiachi-Deng
+/packages/server-core/src/webui/auth.ts @Jiachi-Deng
+/packages/server-core/src/handlers/rpc/auth.ts @Jiachi-Deng
+/apps/electron/resources/permissions/ @Jiachi-Deng
+
+# 更新、构建与发布
+/apps/electron/src/main/auto-update.ts @Jiachi-Deng
+/apps/electron/build/ @Jiachi-Deng
+/apps/electron/electron-builder.yml @Jiachi-Deng
+/apps/electron/resources/release-notes/ @Jiachi-Deng
+/apps/electron/scripts/ @Jiachi-Deng
+/scripts/build/ @Jiachi-Deng
+
+# Dependency manifests 与 lockfile
+/**/package.json @Jiachi-Deng
+/bun.lock @Jiachi-Deng

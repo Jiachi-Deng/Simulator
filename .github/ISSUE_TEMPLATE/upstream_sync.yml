@@ -1,0 +1,72 @@
+name: Upstream sync
+description: Propose or track a sync from craft-ai-agents/craft-agents-oss
+title: "[Upstream sync]: "
+labels: ["upstream-sync"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form for deliberate upstream imports. Keep Simulator-specific behavior explicit and preserve source provenance and license notices.
+
+  - type: input
+    id: upstream_ref
+    attributes:
+      label: Upstream reference
+      description: Link the upstream commit, tag, release, PR, or compare view.
+      placeholder: "https://github.com/craft-ai-agents/craft-agents-oss/commit/..."
+    validations:
+      required: true
+
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Explain why Simulator should take this upstream change now.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope and non-scope
+      description: List the upstream areas to import and the areas intentionally excluded.
+    validations:
+      required: true
+
+  - type: textarea
+    id: local_divergence
+    attributes:
+      label: Simulator divergence
+      description: Identify local behavior, patches, or product decisions that must be preserved or reconciled.
+    validations:
+      required: true
+
+  - type: textarea
+    id: risk
+    attributes:
+      label: Risks and recovery
+      description: Cover conflicts, migrations, compatibility, rollback, and any security, permission, data, or license impact.
+    validations:
+      required: true
+
+  - type: textarea
+    id: validation
+    attributes:
+      label: Validation plan
+      description: List automated checks, manual workflows, platforms, and UI evidence required before merge.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Readiness checklist
+      options:
+        - label: The upstream source and exact reference are recorded.
+          required: true
+        - label: Simulator-specific divergence and non-scope are documented.
+          required: true
+        - label: License, attribution, and provenance requirements have been reviewed.
+          required: true
+        - label: The recovery path and validation plan are defined.
+          required: true
