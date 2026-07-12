@@ -26,6 +26,29 @@ describe("package script target inventory", () => {
         "bun run scripts/a.ts && bash scripts/b.sh; powershell -ExecutionPolicy Bypass -File scripts/c.ps1",
       ),
     ).toEqual(["scripts/a.ts", "scripts/b.sh", "scripts/c.ps1"])
+    expect(
+      directScriptTargets(
+        'node scripts/node.js && ./scripts/direct.sh && bash "scripts/quoted.sh" && vite --config scripts/vite.config.ts',
+      ),
+    ).toEqual([
+      "./scripts/direct.sh",
+      "scripts/node.js",
+      "scripts/quoted.sh",
+      "scripts/vite.config.ts",
+    ])
+  })
+
+  test("does not accept a directory in place of a script file", () => {
+    manifest(join(fixtureRoot, "package.json"), {
+      name: "root",
+      version: "1.0.0",
+      scripts: { broken: "bash scripts/not-a-file.sh" },
+    })
+    mkdirSync(join(fixtureRoot, "scripts", "not-a-file.sh"), { recursive: true })
+    mkdirSync(join(fixtureRoot, "apps"), { recursive: true })
+    mkdirSync(join(fixtureRoot, "packages"), { recursive: true })
+
+    expect(findMissingScriptTargets(fixtureRoot)).toHaveLength(1)
   })
 
   test("reports missing targets with package and script context", () => {

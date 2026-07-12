@@ -52,6 +52,22 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+HOST_ARCH=$(uname -m)
+case "$HOST_ARCH" in
+    arm64|aarch64) HOST_ARCH="arm64" ;;
+    x86_64) HOST_ARCH="x64" ;;
+    *)
+        echo "ERROR: Unsupported macOS host architecture: $HOST_ARCH"
+        exit 1
+        ;;
+esac
+if [ "$HOST_ARCH" != "$ARCH" ]; then
+    echo "ERROR: Cross-architecture packaging is disabled because native dependencies"
+    echo "       such as ripgrep are installed for the host architecture."
+    echo "       Run this build on a ${ARCH} macOS host."
+    exit 1
+fi
+
 # Configuration
 BUN_VERSION="bun-v1.3.10"  # Keep aligned with the public CI toolchain.
 

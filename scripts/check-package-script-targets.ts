@@ -1,5 +1,6 @@
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, statSync } from "node:fs"
 import { dirname, relative, resolve } from "node:path"
+import { parse } from "shell-quote"
 import { workspaceManifestPaths } from "./check-version"
 
 interface PackageManifest {
@@ -14,16 +15,31 @@ export interface MissingScriptTarget {
   target: string
 }
 
-const DIRECT_SCRIPT_PATTERNS = [
-  /\b(?:bun(?:\s+run)?|bash|sh)\s+([\w./-]+\.(?:ts|js|mjs|cjs|sh))\b/g,
-  /\bpowershell\b[^;&|]*?\s-File\s+([\w./-]+\.ps1)\b/g,
-]
+const SCRIPT_EXTENSION = /\.(?:ts|js|mjs|cjs|sh|ps1)$/
+const SCRIPT_RUNNERS = new Set(["bun", "bash", "sh", "node"])
 
 export function directScriptTargets(command: string): string[] {
   const targets = new Set<string>()
-  for (const pattern of DIRECT_SCRIPT_PATTERNS) {
-    for (const match of command.matchAll(pattern)) {
-      if (match[1]) targets.add(match[1])
+  const tokens = parse(command, () => "").filter((token): token is string => typeof token === "string")
+
+  for (let index = 0; index < tokens.length; index += 1) {
+    const token = tokens[index]!
+    if ((token.startsWith("./") || token.startsWith("../")) && SCRIPT_EXTENSION.test(token)) {
+      targets.add(token)
+      continue
+    }
+
+    if (token === "--config" || token === "-c" || token.toLowerCase() === "-file") {
+      const target = tokens[index + 1]
+      if (target && SCRIPT_EXTENSION.test(target)) targets.add(target)
+      continue
+    }
+
+    if (SCRIPT_RUNNERS.has(token)) {
+      let targetIndex = index + 1
+      if (token === "bun" && tokens[targetIndex] === "run") targetIndex += 1
+      const target = tokens[targetIndex]
+      if (target && SCRIPT_EXTENSION.test(target)) targets.add(target)
     }
   }
   return [...targets].sort()
@@ -42,7 +58,12 @@ export function findMissingScriptTargets(rootDir: string): MissingScriptTarget[]
       )
       for (const target of directScriptTargets(command)) {
         const candidateDirectories = [dirname(manifestPath), rootDir, ...commandDirectories]
-        if (!candidateDirectories.some((directory) => existsSync(resolve(directory, target)))) {
+        if (
+          !candidateDirectories.some((directory) => {
+            const candidate = resolve(directory, target)
+            return existsSync(candidate) && statSync(candidate).isFile()
+          })
+        ) {
           missing.push({
             manifestPath: relative(rootDir, manifestPath),
             packageName: manifest.name ?? "<unnamed>",

@@ -1481,7 +1481,6 @@ function clearAnnotationMarks(root: HTMLElement): void {
   annotatedInlineCodeNodes.forEach((codeNode) => {
     codeNode.removeAttribute('data-ca-annotation-inline-code')
     codeNode.style.backgroundColor = ''
-    codeNode.style.boxShadow = ''
   })
 
   const marks = root.querySelectorAll('span[data-ca-annotation-id]')
@@ -1556,7 +1555,6 @@ function applyTextHighlightRange(
     if (inlineCodeParent) {
       inlineCodeParent.setAttribute('data-ca-annotation-inline-code', 'true')
       inlineCodeParent.style.backgroundColor = annotationColorToCss(annotation.style?.color)
-      inlineCodeParent.style.boxShadow = 'none'
     }
 
     const mark = document.createElement('span')
