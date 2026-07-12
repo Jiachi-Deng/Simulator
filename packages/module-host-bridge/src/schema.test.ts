@@ -1,9 +1,9 @@
 import { describe, expect, test } from 'bun:test'
 import { assertPlainJson, ContractValidationError } from './json.ts'
-import { parseRequestEnvelope } from './schema.ts'
-import { DEFAULT_LIMITS } from './types.ts'
+import { parseEventEnvelope, parseRequestEnvelope, parseResponseEnvelope } from './schema.ts'
+import { DEFAULT_LIMITS, type EventEnvelope, type RequestEnvelope, type ResponseEnvelope } from './types.ts'
 
-const request = {
+const request: RequestEnvelope = {
   schemaVersion: 1,
   type: 'request',
   requestId: 'req-1',
@@ -44,5 +44,18 @@ describe('plain JSON and envelope contracts', () => {
   test('rejects undefined and non-finite values', () => {
     expect(() => assertPlainJson({ value: undefined }, DEFAULT_LIMITS)).toThrow(ContractValidationError)
     expect(() => assertPlainJson({ value: Number.NaN }, DEFAULT_LIMITS)).toThrow('finite')
+  })
+
+  test('strictly parses response and event envelopes', () => {
+    const response: ResponseEnvelope = { schemaVersion: 1, type: 'response', requestId: 'req-1', ok: true, result: { authorized: true } }
+    const event: EventEnvelope = { schemaVersion: 1, type: 'event', eventId: 'event-1', event: 'capability.used', occurredAt: 1, payload: {} }
+    expect(parseResponseEnvelope(response, DEFAULT_LIMITS)).toEqual(response)
+    expect(parseEventEnvelope(event, DEFAULT_LIMITS)).toEqual(event)
+    expect(() => parseResponseEnvelope({ ...response, unknown: true }, DEFAULT_LIMITS)).toThrow('Unknown field')
+    expect(() => parseResponseEnvelope({ ...response, error: { code: 'INVALID_REQUEST', message: 'bad' } }, DEFAULT_LIMITS)).toThrow('cannot contain error')
+    expect(() => parseEventEnvelope({ ...event, unknown: true }, DEFAULT_LIMITS)).toThrow('Unknown field')
+    expect(() => parseResponseEnvelope({ ...response, ok: false, result: undefined, error: { code: 'FUTURE_ERROR', message: 'bad' } }, DEFAULT_LIMITS)).toThrow('plain JSON')
+    expect(() => parseResponseEnvelope({ schemaVersion: 1, type: 'response', requestId: 'req-1', ok: false, error: { code: 'FUTURE_ERROR', message: 'bad' } }, DEFAULT_LIMITS)).toThrow('Unknown error code')
+    expect(() => parseEventEnvelope({ ...event, event: 'future.event' }, DEFAULT_LIMITS)).toThrow('Unknown event kind')
   })
 })

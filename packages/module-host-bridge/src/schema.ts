@@ -1,7 +1,22 @@
 import { assertExactKeys, assertPlainJson, ContractValidationError, requireNumber, requireString, requireStringArray } from './json.ts'
-import { CAPABILITY_KINDS, SCHEMA_VERSION, type CapabilityKind, type ContractLimits, type JsonObject, type RequestEnvelope } from './types.ts'
+import {
+  CAPABILITY_KINDS,
+  AUDIT_EVENT_KINDS,
+  BRIDGE_ERROR_CODES,
+  SCHEMA_VERSION,
+  type AuditEventKind,
+  type BridgeErrorCode,
+  type CapabilityKind,
+  type ContractLimits,
+  type EventEnvelope,
+  type JsonObject,
+  type RequestEnvelope,
+  type ResponseEnvelope,
+} from './types.ts'
 
 const methods = new Set<string>(CAPABILITY_KINDS)
+const errorCodes = new Set<string>(BRIDGE_ERROR_CODES)
+const auditEvents = new Set<string>(AUDIT_EVENT_KINDS)
 
 export function parseRequestEnvelope(input: unknown, limits: ContractLimits): RequestEnvelope {
   assertPlainJson(input, limits)
@@ -31,6 +46,67 @@ export function parseRequestEnvelope(input: unknown, limits: ContractLimits): Re
     capabilityToken: requireString(value, 'capabilityToken', 128),
     payload: value.payload as JsonObject,
   }
+}
+
+export function parseResponseEnvelope(input: unknown, limits: ContractLimits): ResponseEnvelope {
+  const value = requireObject(input, limits, 'Response')
+  assertExactKeys(value, ['schemaVersion', 'type', 'requestId', 'ok'], ['result', 'error'])
+  assertVersionAndType(value, 'response')
+  const requestId = requireString(value, 'requestId')
+  if (typeof value.ok !== 'boolean') throw new ContractValidationError('Response ok must be a boolean')
+  if (value.ok) {
+    if (value.error !== undefined) throw new ContractValidationError('Successful response cannot contain error')
+    const result = requireNestedObject(value, 'result')
+    return { schemaVersion: SCHEMA_VERSION, type: 'response', requestId, ok: true, result }
+  }
+  if (value.result !== undefined) throw new ContractValidationError('Failed response cannot contain result')
+  const error = requireNestedObject(value, 'error')
+  assertExactKeys(error, ['code', 'message'])
+  const code = requireString(error, 'code')
+  if (!errorCodes.has(code)) throw new ContractValidationError(`Unknown error code: ${code}`)
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    type: 'response',
+    requestId,
+    ok: false,
+    error: { code: code as BridgeErrorCode, message: requireString(error, 'message', 1_024) },
+  }
+}
+
+export function parseEventEnvelope(input: unknown, limits: ContractLimits): EventEnvelope {
+  const value = requireObject(input, limits, 'Event')
+  assertExactKeys(value, ['schemaVersion', 'type', 'eventId', 'event', 'occurredAt', 'payload'])
+  assertVersionAndType(value, 'event')
+  const event = requireString(value, 'event')
+  if (!auditEvents.has(event)) throw new ContractValidationError(`Unknown event kind: ${event}`)
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    type: 'event',
+    eventId: requireString(value, 'eventId'),
+    event: event as AuditEventKind,
+    occurredAt: requireNumber(value, 'occurredAt'),
+    payload: requireNestedObject(value, 'payload'),
+  }
+}
+
+function requireObject(input: unknown, limits: ContractLimits, label: string): JsonObject {
+  assertPlainJson(input, limits)
+  if (input === null || Array.isArray(input) || typeof input !== 'object') throw new ContractValidationError(`${label} must be an object`)
+  return input as JsonObject
+}
+
+function requireNestedObject(value: JsonObject, key: string): JsonObject {
+  const nested = value[key]
+  if (nested === null || Array.isArray(nested) || typeof nested !== 'object') {
+    throw new ContractValidationError(`Field ${key} must be an object`)
+  }
+  return nested as JsonObject
+}
+
+function assertVersionAndType(value: JsonObject, type: 'response' | 'event'): void {
+  const version = requireNumber(value, 'schemaVersion')
+  if (version !== SCHEMA_VERSION) throw new ContractValidationError(`Unsupported schema version: ${version}`)
+  if (value.type !== type) throw new ContractValidationError(`Envelope type must be ${type}`)
 }
 
 export function validateMethodPayload(method: CapabilityKind, payload: JsonObject): void {

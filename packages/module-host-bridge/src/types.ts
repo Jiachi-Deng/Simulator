@@ -52,19 +52,22 @@ export interface EventEnvelope {
   payload: JsonObject
 }
 
-export type BridgeErrorCode =
-  | 'INVALID_REQUEST'
-  | 'UNSUPPORTED_VERSION'
-  | 'UNSUPPORTED_CAPABILITY'
-  | 'CAPABILITY_NOT_FOUND'
-  | 'CAPABILITY_EXPIRED'
-  | 'CAPABILITY_REVOKED'
-  | 'CAPABILITY_EXHAUSTED'
-  | 'CAPABILITY_SCOPE_MISMATCH'
-  | 'PATH_DENIED'
-  | 'REPLAY_MISMATCH'
-  | 'APPROVAL_NOT_FOUND'
-  | 'APPROVAL_NOT_PENDING'
+export const BRIDGE_ERROR_CODES = [
+  'INVALID_REQUEST',
+  'UNSUPPORTED_VERSION',
+  'UNSUPPORTED_CAPABILITY',
+  'CAPABILITY_NOT_FOUND',
+  'CAPABILITY_EXPIRED',
+  'CAPABILITY_REVOKED',
+  'CAPABILITY_EXHAUSTED',
+  'CAPABILITY_SCOPE_MISMATCH',
+  'PATH_DENIED',
+  'REPLAY_MISMATCH',
+  'APPROVAL_NOT_FOUND',
+  'APPROVAL_NOT_PENDING',
+] as const
+
+export type BridgeErrorCode = (typeof BRIDGE_ERROR_CODES)[number]
 
 export interface BridgeError {
   code: BridgeErrorCode
@@ -152,15 +155,18 @@ export interface CapabilityGrant {
   maxUses: number
 }
 
-export type AuditEventKind =
-  | 'capability.issued'
-  | 'capability.used'
-  | 'capability.denied'
-  | 'capability.revoked'
-  | 'approval.pending'
-  | 'approval.resolved'
-  | 'approval.cancelled'
-  | 'approval.timed_out'
+export const AUDIT_EVENT_KINDS = [
+  'capability.issued',
+  'capability.used',
+  'capability.denied',
+  'capability.revoked',
+  'approval.pending',
+  'approval.resolved',
+  'approval.cancelled',
+  'approval.timed_out',
+] as const
+
+export type AuditEventKind = (typeof AUDIT_EVENT_KINDS)[number]
 
 export interface BridgeSnapshot {
   activeCapabilities: number

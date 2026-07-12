@@ -255,6 +255,9 @@ export class ModuleHostBridge {
 
     const path = await this.#authorizePath(request, record)
     if (path === false) return deny('PATH_DENIED', 'Requested path is outside the workspace or targets protected host data')
+    if (request.method === 'approval.request' && (request.payload.expiresAt as number) <= this.#deps.clock.now()) {
+      return deny('INVALID_REQUEST', 'Approval expiry must be in the future')
+    }
 
     record.uses += 1
     let result: JsonObject
