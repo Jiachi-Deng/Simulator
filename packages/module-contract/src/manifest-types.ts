@@ -10,6 +10,7 @@ export const MODULE_PLATFORMS = [
 ] as const
 
 export type ModulePlatform = (typeof MODULE_PLATFORMS)[number]
+export const MAX_MODULE_ARTIFACTS = MODULE_PLATFORMS.length
 
 export const MODULE_CAPABILITIES = [
   'artifact.read',
@@ -19,6 +20,7 @@ export const MODULE_CAPABILITIES = [
 ] as const
 
 export type ModuleCapability = (typeof MODULE_CAPABILITIES)[number]
+export const MAX_MODULE_CAPABILITIES = MODULE_CAPABILITIES.length
 
 declare const moduleIdBrand: unique symbol
 declare const moduleVersionBrand: unique symbol
@@ -55,6 +57,7 @@ export type ManifestValidationErrorCode =
   | 'MISSING_FIELD'
   | 'UNKNOWN_FIELD'
   | 'INVALID_TYPE'
+  | 'LIMIT_EXCEEDED'
   | 'UNSUPPORTED_SCHEMA_VERSION'
   | 'INVALID_ID'
   | 'INVALID_VERSION'

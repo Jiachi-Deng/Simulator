@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { parseModuleManifest } from './manifest.ts'
+import { MAX_MODULE_ARTIFACTS, MAX_MODULE_CAPABILITIES } from './manifest-types.ts'
 import { GOLDEN_MODULE_MANIFEST_INPUT } from './testing/golden-manifest.ts'
 
 function manifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -78,6 +79,18 @@ describe('parseModuleManifest', () => {
     ])
   })
 
+  it('escapes dynamic JSON Pointer segments according to RFC 6901', () => {
+    const input = manifest({ 'root~/field': true })
+    ;(input.artifacts as Array<Record<string, unknown>>)[0] = {
+      ...(input.artifacts as Array<Record<string, unknown>>)[0],
+      'artifact~/field': true,
+    }
+    expect(errorsFor(input).map(({ path }) => path)).toEqual([
+      '/root~0~1field',
+      '/artifacts/0/artifact~0~1field',
+    ])
+  })
+
   it.each(['Fake', 'fake', 'org..fake', 'org.simulator_Fake', '-org.fake'])('rejects invalid module ID %p', (id) => {
     expect(errorsFor(manifest({ id }))[0]?.code).toBe('INVALID_ID')
   })
@@ -103,11 +116,26 @@ describe('parseModuleManifest', () => {
     'file:///tmp/fake.tar.gz',
     'https://user:secret@modules.example.test/fake.tar.gz',
     'https://modules.example.test/fake.tar.gz#fragment',
+    'https://modules.example.test\\fake.tar.gz',
+    'https://modules.example.test/\u0000file.tar.gz',
+    'https://modules.example.test/\tfile.tar.gz',
+    'https://modules.example.test/\nfile.tar.gz',
+    'https://modules.example.test/\u007Ffile.tar.gz',
+    'https://MODULES.example.test/fake.tar.gz',
+    'https://modules.example.test:443/fake.tar.gz',
+    'https://modules.example.test/a/../fake.tar.gz',
+    'https://modules.example.test',
     'not-a-url',
   ])('rejects unsafe artifact URL %p', (url) => {
     const input = manifest()
     ;(input.artifacts as Array<Record<string, unknown>>)[0]!.url = url
     expect(errorsFor(input)[0]?.code).toBe('INVALID_URL')
+  })
+
+  it('accepts canonical HTTPS URLs and requires the canonical slash for an origin-only URL', () => {
+    const input = manifest()
+    ;(input.artifacts as Array<Record<string, unknown>>)[0]!.url = 'https://modules.example.test/'
+    expect(parseModuleManifest(input).ok).toBe(true)
   })
 
   it.each(['abc', 'G'.repeat(64), 'A'.repeat(64), `${'a'.repeat(63)}z`])('rejects invalid SHA-256 %p', (sha256) => {
@@ -140,6 +168,30 @@ describe('parseModuleManifest', () => {
       path: '/artifacts/0',
       message: 'Sparse arrays are not accepted',
     })
+  })
+
+  it.each([
+    ['artifacts', MAX_MODULE_ARTIFACTS, 50_000_000],
+    ['capabilities', MAX_MODULE_CAPABILITIES, 50_000_000],
+  ] as const)('rejects oversized sparse %s before enumerating or traversing it', (field, maximum, length) => {
+    let ownKeyEnumerations = 0
+    const oversized = new Proxy(new Array(length), {
+      ownKeys(target) {
+        ownKeyEnumerations += 1
+        return Reflect.ownKeys(target)
+      },
+    })
+    const startedAt = performance.now()
+    const errors = errorsFor(manifest({ [field]: oversized }))
+    const elapsedMilliseconds = performance.now() - startedAt
+
+    expect(errors[0]).toEqual({
+      code: 'LIMIT_EXCEEDED',
+      path: `/${field}`,
+      message: `Array exceeds maximum item count of ${maximum}`,
+    })
+    expect(ownKeyEnumerations).toBe(0)
+    expect(elapsedMilliseconds).toBeLessThan(100)
   })
 
   it('rejects wrong collection and collection member types', () => {

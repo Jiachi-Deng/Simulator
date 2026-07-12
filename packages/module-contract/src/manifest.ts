@@ -2,6 +2,8 @@ import {
   MODULE_CAPABILITIES,
   MODULE_MANIFEST_SCHEMA_VERSION,
   MODULE_PLATFORMS,
+  MAX_MODULE_ARTIFACTS,
+  MAX_MODULE_CAPABILITIES,
   type ManifestValidationError,
   type ManifestValidationErrorCode,
   type ModuleArtifact,
@@ -38,6 +40,10 @@ function error(code: ManifestValidationErrorCode, path: string, message: string)
   return { code, path, message }
 }
 
+function pointerPath(path: string, segment: string): string {
+  return `${path}/${segment.replace(/~/g, '~0').replace(/\//g, '~1')}`
+}
+
 function asDataRecord(
   value: unknown,
   path: string,
@@ -70,6 +76,7 @@ function asDataRecord(
 function asDataArray(
   value: unknown,
   path: string,
+  maxLength: number,
   errors: ManifestValidationError[],
 ): readonly unknown[] | undefined {
   if (!Array.isArray(value)) {
@@ -81,12 +88,18 @@ function asDataArray(
     return undefined
   }
 
-  const descriptors = Object.getOwnPropertyDescriptors(value) as unknown as Record<PropertyKey, PropertyDescriptor>
-  const length = descriptors.length?.value
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length')
+  const length = lengthDescriptor?.value
   if (typeof length !== 'number' || !Number.isSafeInteger(length) || length < 0) {
     errors.push(error('UNREADABLE_INPUT', path, 'Array length is not readable plain data'))
     return undefined
   }
+  if (length > maxLength) {
+    errors.push(error('LIMIT_EXCEEDED', path, `Array exceeds maximum item count of ${maxLength}`))
+    return undefined
+  }
+
+  const descriptors = Object.getOwnPropertyDescriptors(value) as unknown as Record<PropertyKey, PropertyDescriptor>
 
   for (const key of Reflect.ownKeys(descriptors)) {
     const descriptor = descriptors[key]
@@ -117,13 +130,13 @@ function rejectUnknownFields(
 ): void {
   const allowedSet = new Set(allowed)
   for (const key of Object.keys(record).filter((candidate) => !allowedSet.has(candidate)).sort()) {
-    errors.push(error('UNKNOWN_FIELD', `${path}/${key}`, `Unknown field: ${key}`))
+    errors.push(error('UNKNOWN_FIELD', pointerPath(path, key), `Unknown field: ${key}`))
   }
 }
 
 function required(record: DataRecord, key: string, path: string, errors: ManifestValidationError[]): unknown {
   if (!Object.hasOwn(record, key)) {
-    errors.push(error('MISSING_FIELD', `${path}/${key}`, `Missing required field: ${key}`))
+    errors.push(error('MISSING_FIELD', pointerPath(path, key), `Missing required field: ${key}`))
     return undefined
   }
   return record[key]
@@ -138,7 +151,7 @@ function stringField(
   const value = required(record, key, path, errors)
   if (value === undefined && !Object.hasOwn(record, key)) return undefined
   if (typeof value !== 'string') {
-    errors.push(error('INVALID_TYPE', `${path}/${key}`, 'Expected a string'))
+    errors.push(error('INVALID_TYPE', pointerPath(path, key), 'Expected a string'))
     return undefined
   }
   return value
@@ -169,7 +182,7 @@ function parseArtifact(
     valid = false
   }
   if (url !== undefined && !isValidArtifactUrl(url)) {
-    errors.push(error('INVALID_URL', `${path}/url`, 'Artifact URL must be an absolute HTTPS URL without credentials or fragments'))
+    errors.push(error('INVALID_URL', `${path}/url`, 'Artifact URL must be a canonical absolute HTTPS URL without credentials or fragments'))
     valid = false
   }
   if (sha256 !== undefined && !SHA256_PATTERN.test(sha256)) {
@@ -193,10 +206,15 @@ function isValidEntrypoint(value: string): boolean {
 }
 
 function isValidArtifactUrl(value: string): boolean {
-  if (value.trim() !== value) return false
+  if (/[\u0000-\u001F\u007F]/.test(value) || value.includes('\\')) return false
   try {
     const url = new URL(value)
-    return url.protocol === 'https:' && url.username === '' && url.password === '' && url.hash === '' && url.hostname !== ''
+    return url.href === value
+      && url.protocol === 'https:'
+      && url.username === ''
+      && url.password === ''
+      && url.hash === ''
+      && url.hostname !== ''
   } catch {
     return false
   }
@@ -243,7 +261,7 @@ export function parseModuleManifest(input: unknown): ModuleManifestParseResult {
 
     const artifacts: ModuleArtifact[] = []
     const artifactValues = Object.hasOwn(record, 'artifacts')
-      ? asDataArray(artifactsInput, '/artifacts', errors)
+      ? asDataArray(artifactsInput, '/artifacts', MAX_MODULE_ARTIFACTS, errors)
       : undefined
     if (artifactValues?.length === 0) {
       errors.push(error('MISSING_FIELD', '/artifacts', 'At least one artifact is required'))
@@ -267,7 +285,7 @@ export function parseModuleManifest(input: unknown): ModuleManifestParseResult {
 
     const capabilities: ModuleCapability[] = []
     const capabilityValues = Object.hasOwn(record, 'capabilities')
-      ? asDataArray(capabilitiesInput, '/capabilities', errors)
+      ? asDataArray(capabilitiesInput, '/capabilities', MAX_MODULE_CAPABILITIES, errors)
       : undefined
     if (capabilityValues) {
       const seenCapabilities = new Set<ModuleCapability>()
