@@ -2,7 +2,7 @@
 
 Verified HTTPS catalog and artifact download boundary for optional Simulator modules.
 
-The package accepts injected fetch, clock, and transactional cache adapters. It verifies signed catalog envelope bytes through `@simulator/module-release-trust`, persists catalog bytes and trust state atomically, and publishes artifacts only after streaming size and SHA-256 verification.
+The package accepts injected fetch, clock, and transactional cache adapters. Cache adapters provide cross-instance leases and compare-and-swap publication. Fetch responses provide exactly-once disposal/cancellation. The downloader verifies signed catalog envelope bytes through `@simulator/module-release-trust`, persists catalog bytes and trust state atomically, and publishes artifacts only after streaming size and SHA-256 verification.
 
 It intentionally does not install or extract artifacts and has no Electron, daemon, process, UI, or domain-module integration.
 

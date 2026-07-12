@@ -15,6 +15,8 @@ export interface DownloaderResponse {
   readonly url: string
   readonly headers: DownloaderHeaders
   readonly body: AsyncIterable<Uint8Array> | null
+  /** Cancels or releases the body and transport. The downloader calls this exactly once. */
+  dispose(): void | Promise<void>
 }
 
 export interface DownloaderFetchRequest {
@@ -59,11 +61,21 @@ export interface CachedArtifactRecord {
   readonly committedAt: number
 }
 
+export interface ModuleDownloaderCacheLease {
+  release(): void | Promise<void>
+}
+
+export type ArtifactPublishResult = 'published' | 'already-present'
+
 export interface ModuleDownloaderCacheAdapter {
+  /** Must exclude the same key across every adapter instance sharing the backing store. */
+  acquireLease(key: string, signal: AbortSignal): Promise<ModuleDownloaderCacheLease>
+
   readCatalog(): Promise<CachedCatalogRecord | undefined>
   readStagedCatalog(): Promise<CachedCatalogRecord | undefined>
   stageCatalog(record: CachedCatalogRecord): Promise<void>
-  publishCatalog(): Promise<void>
+  /** Atomically publishes staged bytes plus trust state only when committed state equals expectedState. */
+  publishCatalog(expectedState: ModuleReleaseTrustState | undefined): Promise<boolean>
   discardStagedCatalog(): Promise<void>
 
   readArtifact(sha256: string): Promise<CachedArtifactRecord | undefined>
@@ -72,7 +84,8 @@ export interface ModuleDownloaderCacheAdapter {
   readPartial(id: string): Promise<AsyncIterable<Uint8Array>>
   appendPartial(id: string, bytes: Uint8Array, updatedAt: number, validator?: string): Promise<ArtifactPartialRecord>
   removePartial(id: string): Promise<void>
-  publishPartial(id: string, artifact: CachedArtifactRecord): Promise<void>
+  /** Atomically publishes the verified partial only when the hash has no committed artifact. */
+  publishPartial(id: string, artifact: CachedArtifactRecord): Promise<ArtifactPublishResult>
 }
 
 export interface RetryPolicy {
@@ -92,6 +105,7 @@ export interface ModuleDownloaderOptions {
   readonly retry?: Partial<RetryPolicy>
   readonly maxRedirects?: number
   readonly partialMaxAgeMs?: number
+  readonly maxPartialsPerArtifact?: number
 }
 
 export type DownloaderErrorCode =

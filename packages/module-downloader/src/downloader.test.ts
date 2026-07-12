@@ -1,5 +1,8 @@
 import { describe, expect, it } from 'bun:test'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { parseModuleManifest, type ModuleArtifact } from '@simulator/module-contract'
 import {
   encodeCanonicalCatalog,
@@ -7,12 +10,13 @@ import {
   type TrustedReleaseKey,
 } from '@simulator/module-release-trust'
 import { ModuleDownloader } from './downloader.ts'
-import { ModuleDownloaderError } from './types.ts'
+import { ModuleDownloaderError, type ModuleDownloaderCacheAdapter } from './types.ts'
 import {
   ManualClock,
   MemoryHeaders,
   MemoryModuleDownloaderCache,
   QueueFetchAdapter,
+  FilesystemModuleDownloaderCache,
   memoryResponse,
 } from './testing/index.ts'
 
@@ -66,7 +70,7 @@ function fixture() {
 
 function downloader(
   fetch: QueueFetchAdapter,
-  cache: MemoryModuleDownloaderCache,
+  cache: ModuleDownloaderCacheAdapter,
   trustedKey: TrustedReleaseKey,
   clock = new ManualClock(NOW),
 ) {
@@ -100,6 +104,29 @@ describe('verified catalog download', () => {
     expect(second.source).toBe('revalidated-cache')
     expect(cache.catalog?.responseBytes).toEqual(data.wireBytes)
     expect(fetch.requests[1]?.headers['if-none-match']).toBe('"catalog-v1"')
+  })
+
+  it('serializes catalog publication across two downloader instances sharing a cache lease', async () => {
+    const data = fixture()
+    const cache = new MemoryModuleDownloaderCache()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const firstFetch = new QueueFetchAdapter([
+      async () => { await gate; return memoryResponse({ url: CATALOG_URL, headers: { etag: '"catalog-v1"' }, chunks: [data.wireBytes] }) },
+    ])
+    const secondFetch = new QueueFetchAdapter([memoryResponse({ status: 304, url: CATALOG_URL })])
+    const first = downloader(firstFetch, cache, data.trustedKey)
+    const second = downloader(secondFetch, cache, data.trustedKey)
+    await Promise.all([first.initialize(), second.initialize()])
+    const leading = first.fetchCatalog(CATALOG_URL)
+    while (firstFetch.requests.length === 0) await Promise.resolve()
+    const following = second.fetchCatalog(CATALOG_URL)
+    await Promise.resolve()
+    expect(secondFetch.requests).toHaveLength(0)
+    release()
+    expect((await leading).source).toBe('network')
+    expect((await following).source).toBe('revalidated-cache')
+    expect(cache.catalog?.trustState.highestSequence).toBe(1)
   })
 
   it('serializes concurrent catalog refreshes so trust state cannot publish out of order', async () => {
@@ -171,12 +198,42 @@ describe('verified catalog download', () => {
 
   it('rejects cross-origin redirects before sending a second request', async () => {
     const data = fixture()
+    let disposed = 0
     const fetch = new QueueFetchAdapter([
-      memoryResponse({ status: 302, url: CATALOG_URL, headers: { location: 'https://evil.example/catalog' } }),
+      memoryResponse({ status: 302, url: CATALOG_URL, headers: { location: 'https://evil.example/catalog' }, onDispose: () => { disposed += 1 } }),
     ])
     await expect(downloader(fetch, new MemoryModuleDownloaderCache(), data.trustedKey).fetchCatalog(CATALOG_URL))
       .rejects.toMatchObject({ code: 'INVALID_REDIRECT' })
     expect(fetch.requests).toHaveLength(1)
+    expect(disposed).toBe(1)
+  })
+
+  it('disposes exactly once for redirect, 304, non-2xx, and declared oversize exits', async () => {
+    const data = fixture()
+    const counts = [0, 0, 0, 0, 0]
+    const cache = new MemoryModuleDownloaderCache()
+    const success = downloader(new QueueFetchAdapter([
+      memoryResponse({ status: 302, url: CATALOG_URL, headers: { location: '/catalog-v1.json' }, onDispose: () => { counts[0]! += 1 } }),
+      memoryResponse({ url: 'https://modules.example.test/catalog-v1.json', headers: { etag: '"v1"' }, chunks: [data.wireBytes], onDispose: () => { counts[1]! += 1 } }),
+    ]), cache, data.trustedKey)
+    await success.fetchCatalog(CATALOG_URL)
+
+    const revalidated = downloader(new QueueFetchAdapter([
+      memoryResponse({ status: 304, url: CATALOG_URL, onDispose: () => { counts[2]! += 1 } }),
+    ]), cache, data.trustedKey)
+    // The cache source URL follows the original request, not the final redirect URL.
+    await revalidated.fetchCatalog(CATALOG_URL)
+
+    const options = (fetch: QueueFetchAdapter) => new ModuleDownloader({
+      fetch, cache: new MemoryModuleDownloaderCache(), clock: new ManualClock(NOW), trustedKeys: [data.trustedKey], retry: { maxAttempts: 1 },
+    })
+    await expect(options(new QueueFetchAdapter([
+      memoryResponse({ status: 404, url: CATALOG_URL, onDispose: () => { counts[3]! += 1 } }),
+    ])).fetchCatalog(CATALOG_URL)).rejects.toMatchObject({ code: 'HTTP_STATUS' })
+    await expect(options(new QueueFetchAdapter([
+      memoryResponse({ url: CATALOG_URL, headers: { 'content-length': String(5 * 1024 * 1024) }, onDispose: () => { counts[4]! += 1 } }),
+    ])).fetchCatalog(CATALOG_URL)).rejects.toMatchObject({ code: 'CATALOG_TOO_LARGE' })
+    expect(counts).toEqual([1, 1, 1, 1, 1])
   })
 
   it('enforces catalog timeout through the injected clock', async () => {
@@ -200,6 +257,26 @@ describe('verified catalog download', () => {
 })
 
 describe('verified artifact download', () => {
+  it('rejects a pre-aborted request before initialization, flight creation, or fetch', async () => {
+    const data = fixture()
+    const cache = new MemoryModuleDownloaderCache()
+    cache.stagedCatalog = {
+      sourceUrl: CATALOG_URL,
+      responseBytes: new Uint8Array([1]),
+      expiresAt: '2026-07-13T00:00:00.000Z',
+      trustState: { highestSequence: 1, latestIssuedAt: '2026-07-12T00:00:00.000Z' },
+      committedAt: NOW,
+    }
+    const fetch = new QueueFetchAdapter([])
+    const controller = new AbortController()
+    controller.abort('already-cancelled')
+    await expect(downloader(fetch, cache, data.trustedKey).downloadArtifact({
+      artifact: data.artifact, expectedSize: 6, signal: controller.signal,
+    })).rejects.toMatchObject({ code: 'ABORTED' })
+    expect(fetch.requests).toHaveLength(0)
+    expect(cache.stagedCatalog).toBeDefined()
+    expect(cache.partials.size).toBe(0)
+  })
   it('streams, reports progress, verifies size/hash, and publishes atomically', async () => {
     const data = fixture()
     const cache = new MemoryModuleDownloaderCache()
@@ -233,6 +310,7 @@ describe('verified artifact download', () => {
         yield data.artifactBytes.subarray(0, 3)
         throw new ModuleDownloaderError('NETWORK_ERROR', 'connection reset', { retryable: true })
       })(),
+      dispose() {},
     }
     const fetch = new QueueFetchAdapter([
       interrupted,
@@ -251,6 +329,7 @@ describe('verified artifact download', () => {
   it('discards an invalid range response and retries from byte zero', async () => {
     const data = fixture()
     const cache = new MemoryModuleDownloaderCache()
+    const progress: number[] = []
     const fetch = new QueueFetchAdapter([
       {
         status: 200,
@@ -260,6 +339,7 @@ describe('verified artifact download', () => {
           yield data.artifactBytes.subarray(0, 3)
           throw new Error('connection reset')
         })(),
+        dispose() {},
       },
       memoryResponse({
         status: 206,
@@ -269,9 +349,32 @@ describe('verified artifact download', () => {
       }),
       memoryResponse({ url: ARTIFACT_URL, headers: { 'content-length': '6' }, chunks: [data.artifactBytes] }),
     ])
-    await downloader(fetch, cache, data.trustedKey).downloadArtifact({ artifact: data.artifact, expectedSize: 6 })
+    await downloader(fetch, cache, data.trustedKey).downloadArtifact({
+      artifact: data.artifact, expectedSize: 6, onProgress: (event) => progress.push(event.receivedBytes),
+    })
     expect(fetch.requests[1]?.headers.range).toBe('bytes=3-')
     expect(fetch.requests[2]?.headers.range).toBeUndefined()
+    expect(cache.partials.size).toBe(0)
+    expect(progress).toEqual([3, 6])
+  })
+
+  it('disposes an invalid range response exactly once and removes its terminal partial', async () => {
+    const data = fixture()
+    const cache = new MemoryModuleDownloaderCache()
+    let partial = await cache.createPartial({
+      sha256: data.artifact.sha256, sourceUrl: ARTIFACT_URL, expectedSize: 6, updatedAt: NOW,
+    })
+    partial = await cache.appendPartial(partial.id, data.artifactBytes.subarray(0, 3), NOW, '"v1"')
+    let disposed = 0
+    const client = new ModuleDownloader({
+      fetch: new QueueFetchAdapter([memoryResponse({
+        status: 200, url: ARTIFACT_URL, chunks: [data.artifactBytes], onDispose: () => { disposed += 1 },
+      })]),
+      cache, clock: new ManualClock(NOW), trustedKeys: [data.trustedKey], retry: { maxAttempts: 1 },
+    })
+    await expect(client.downloadArtifact({ artifact: data.artifact, expectedSize: 6 }))
+      .rejects.toMatchObject({ code: 'INVALID_RANGE_RESPONSE' })
+    expect(disposed).toBe(1)
     expect(cache.partials.size).toBe(0)
   })
 
@@ -285,6 +388,7 @@ describe('verified artifact download', () => {
       url: ARTIFACT_URL,
       headers: new MemoryHeaders({ 'content-length': '6' }),
       body: (async function* () { await gate; yield data.artifactBytes })(),
+      dispose() {},
     })])
     const client = downloader(fetch, cache, data.trustedKey)
     const leftProgress: number[] = []
@@ -310,6 +414,7 @@ describe('verified artifact download', () => {
       url: ARTIFACT_URL,
       headers: new MemoryHeaders({ 'content-length': '6' }),
       body: (async function* () { await gate; yield data.artifactBytes })(),
+      dispose() {},
     })])
     const client = downloader(fetch, cache, data.trustedKey)
     const controller = new AbortController()
@@ -323,6 +428,77 @@ describe('verified artifact download', () => {
     expect(fetch.requests).toHaveLength(1)
   })
 
+  it('coalesces across downloader instances through the shared artifact lease without cleanup races', async () => {
+    const data = fixture()
+    const cache = new MemoryModuleDownloaderCache()
+    let release!: () => void
+    let paused!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const atPartial = new Promise<void>((resolve) => { paused = resolve })
+    const firstFetch = new QueueFetchAdapter([async () => ({
+      status: 200,
+      url: ARTIFACT_URL,
+      headers: new MemoryHeaders({ 'content-length': '6', etag: '"v1"' }),
+      body: (async function* () {
+        yield data.artifactBytes.subarray(0, 3)
+        paused()
+        await gate
+        yield data.artifactBytes.subarray(3)
+      })(),
+      dispose() {},
+    })])
+    const secondFetch = new QueueFetchAdapter([])
+    const first = downloader(firstFetch, cache, data.trustedKey)
+    const second = downloader(secondFetch, cache, data.trustedKey)
+    const leading = first.downloadArtifact({ artifact: data.artifact, expectedSize: 6 })
+    await atPartial
+    const following = second.downloadArtifact({ artifact: data.artifact, expectedSize: 6 })
+    await Promise.resolve()
+    expect(cache.partials.size).toBe(1)
+    expect(secondFetch.requests).toHaveLength(0)
+    release()
+    expect((await leading).source).toBe('network')
+    expect((await following).source).toBe('cache')
+    expect(cache.partials.size).toBe(0)
+  })
+
+  it('coordinates two downloader instances backed by separate filesystem-cache adapters', async () => {
+    const data = fixture()
+    const root = await mkdtemp(join(tmpdir(), 'module-downloader-integration-'))
+    try {
+      let release!: () => void
+      let paused!: () => void
+      const gate = new Promise<void>((resolve) => { release = resolve })
+      const atPartial = new Promise<void>((resolve) => { paused = resolve })
+      const firstFetch = new QueueFetchAdapter([async () => ({
+        status: 200,
+        url: ARTIFACT_URL,
+        headers: new MemoryHeaders({ 'content-length': '6', etag: '"v1"' }),
+        body: (async function* () {
+          yield data.artifactBytes.subarray(0, 3)
+          paused()
+          await gate
+          yield data.artifactBytes.subarray(3)
+        })(),
+        dispose() {},
+      })])
+      const secondFetch = new QueueFetchAdapter([])
+      const first = downloader(firstFetch, new FilesystemModuleDownloaderCache(root), data.trustedKey)
+      const second = downloader(secondFetch, new FilesystemModuleDownloaderCache(root), data.trustedKey)
+      const leading = first.downloadArtifact({ artifact: data.artifact, expectedSize: 6 })
+      await atPartial
+      const following = second.downloadArtifact({ artifact: data.artifact, expectedSize: 6 })
+      await Promise.resolve()
+      expect(secondFetch.requests).toHaveLength(0)
+      release()
+      expect((await leading).source).toBe('network')
+      expect((await following).source).toBe('cache')
+      expect(await new FilesystemModuleDownloaderCache(root).listPartials()).toEqual([])
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('retries retryable status with injected exponential backoff', async () => {
     const data = fixture()
     const cache = new MemoryModuleDownloaderCache()
@@ -334,6 +510,53 @@ describe('verified artifact download', () => {
     await downloader(fetch, cache, data.trustedKey, clock).downloadArtifact({ artifact: data.artifact, expectedSize: 6 })
     expect(clock.sleeps).toHaveLength(1)
     expect(clock.sleeps[0]).toBeGreaterThanOrEqual(0)
+  })
+
+  it('maps body iterator failures to retryable network errors, disposes each attempt, and removes terminal partials', async () => {
+    const data = fixture()
+    const cache = new MemoryModuleDownloaderCache()
+    const clock = new ManualClock(NOW)
+    let disposed = 0
+    const responses = Array.from({ length: 3 }, () => ({
+      status: 200,
+      url: ARTIFACT_URL,
+      headers: new MemoryHeaders({ 'content-length': '6', etag: '"v1"' }),
+      body: { [Symbol.asyncIterator]: () => ({ next: async () => { throw new Error('socket reset') } }) },
+      dispose() { disposed += 1 },
+    }))
+    const fetch = new QueueFetchAdapter(responses)
+    await expect(downloader(fetch, cache, data.trustedKey, clock).downloadArtifact({ artifact: data.artifact, expectedSize: 6 }))
+      .rejects.toMatchObject({ code: 'NETWORK_ERROR', retryable: true })
+    expect(fetch.requests).toHaveLength(3)
+    expect(clock.sleeps).toHaveLength(2)
+    expect(disposed).toBe(3)
+    expect(cache.partials.size).toBe(0)
+  })
+
+  it('maps non-cooperative body timeouts, retries, and disposes every response', async () => {
+    const data = fixture()
+    const cache = new MemoryModuleDownloaderCache()
+    const clock = new ManualClock(NOW)
+    let disposed = 0
+    const hanging = () => ({
+      status: 200,
+      url: ARTIFACT_URL,
+      headers: new MemoryHeaders({ 'content-length': '6' }),
+      body: { [Symbol.asyncIterator]: () => ({ next: () => new Promise<IteratorResult<Uint8Array>>(() => undefined) }) },
+      dispose() { disposed += 1 },
+    })
+    const fetch = new QueueFetchAdapter([hanging(), hanging()])
+    const client = new ModuleDownloader({
+      fetch, cache, clock, trustedKeys: [data.trustedKey], artifactTimeoutMs: 10, retry: { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1 },
+    })
+    const pending = client.downloadArtifact({ artifact: data.artifact, expectedSize: 6 })
+    while (fetch.requests.length < 1) await Promise.resolve()
+    clock.advance(10)
+    while (fetch.requests.length < 2) await Promise.resolve()
+    clock.advance(10)
+    await expect(pending).rejects.toMatchObject({ code: 'TIMEOUT', retryable: true })
+    expect(disposed).toBe(2)
+    expect(cache.partials.size).toBe(0)
   })
 
   it('does not publish on hash mismatch and removes the poisoned partial', async () => {
@@ -359,7 +582,7 @@ describe('verified artifact download', () => {
     await expect(downloader(fetch, cache, data.trustedKey).downloadArtifact({ artifact: data.artifact, expectedSize: 6 }))
       .rejects.toMatchObject({ code: 'CACHE_ERROR' })
     expect(cache.artifacts.size).toBe(0)
-    expect(cache.partials.size).toBe(1)
+    expect(cache.partials.size).toBe(0)
   })
 
   it('cleans stale unique partials', async () => {
@@ -375,6 +598,45 @@ describe('verified artifact download', () => {
       fetch: new QueueFetchAdapter([]), cache, clock: new ManualClock(NOW), trustedKeys: [data.trustedKey], partialMaxAgeMs: 50,
     })
     expect(await client.cleanupStalePartials()).toBe(1)
+    expect(cache.partials.size).toBe(0)
+  })
+
+  it('bounds stale and excess partials on every download, not only initialization', async () => {
+    const data = fixture()
+    const cache = new MemoryModuleDownloaderCache()
+    const clock = new ManualClock(NOW)
+    const client = new ModuleDownloader({
+      fetch: new QueueFetchAdapter([]), cache, clock, trustedKeys: [data.trustedKey], partialMaxAgeMs: 50, maxPartialsPerArtifact: 2,
+      retry: { maxAttempts: 1 },
+    })
+    await client.initialize()
+    for (let index = 0; index < 5; index += 1) {
+      const partial = await cache.createPartial({
+        sha256: data.artifact.sha256,
+        sourceUrl: ARTIFACT_URL,
+        expectedSize: 6,
+        updatedAt: index === 0 ? NOW - 100 : NOW + index,
+      })
+      await cache.appendPartial(partial.id, new Uint8Array([97]), index === 0 ? NOW - 100 : NOW + index, '"v1"')
+    }
+    let observed = 99
+    const fetch = new QueueFetchAdapter([async () => {
+      observed = cache.partials.size
+      return memoryResponse({ status: 404, url: ARTIFACT_URL })
+    }])
+    const bounded = new ModuleDownloader({
+      fetch, cache, clock, trustedKeys: [data.trustedKey], partialMaxAgeMs: 50, maxPartialsPerArtifact: 2, retry: { maxAttempts: 1 },
+    })
+    // Avoid startup cleanup so this assertion covers the per-download pruning path.
+    await bounded.initialize()
+    for (let index = 0; index < 3; index += 1) {
+      const partial = await cache.createPartial({
+        sha256: data.artifact.sha256, sourceUrl: ARTIFACT_URL, expectedSize: 6, updatedAt: NOW + 20 + index,
+      })
+      await cache.appendPartial(partial.id, new Uint8Array([97]), NOW + 20 + index, '"v1"')
+    }
+    await expect(bounded.downloadArtifact({ artifact: data.artifact, expectedSize: 6 })).rejects.toMatchObject({ code: 'INVALID_RANGE_RESPONSE' })
+    expect(observed).toBeLessThanOrEqual(2)
     expect(cache.partials.size).toBe(0)
   })
 })

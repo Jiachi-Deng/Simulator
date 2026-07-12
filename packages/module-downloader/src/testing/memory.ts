@@ -9,6 +9,7 @@ import type {
   DownloaderHeaders,
   DownloaderResponse,
   ModuleDownloaderCacheAdapter,
+  ModuleDownloaderCacheLease,
 } from '../types.ts'
 
 export class MemoryHeaders implements DownloaderHeaders {
@@ -28,8 +29,10 @@ export function memoryResponse(options: {
   url: string
   headers?: Readonly<Record<string, string>>
   chunks?: readonly Uint8Array[]
+  onDispose?: () => void
 }): DownloaderResponse {
   const chunks = options.chunks ?? []
+  let disposed = false
   return {
     status: options.status ?? 200,
     url: options.url,
@@ -37,6 +40,11 @@ export function memoryResponse(options: {
     body: (async function* () {
       for (const chunk of chunks) yield Uint8Array.from(chunk)
     })(),
+    dispose() {
+      if (disposed) throw new Error('Response disposed more than once')
+      disposed = true
+      options.onDispose?.()
+    },
   }
 }
 
@@ -111,6 +119,27 @@ export class MemoryModuleDownloaderCache implements ModuleDownloaderCacheAdapter
   readonly artifacts = new Map<string, CachedArtifactRecord>()
   readonly partials = new Map<string, PartialData>()
   readonly faults = new Map<MemoryCacheFault, number>()
+  readonly #leases = new Map<string, { held: boolean; waiters: Array<{ resolve: (lease: ModuleDownloaderCacheLease) => void; reject: (cause: unknown) => void; signal: AbortSignal; onAbort: () => void }> }>()
+
+  async acquireLease(key: string, signal: AbortSignal): Promise<ModuleDownloaderCacheLease> {
+    if (signal.aborted) throw signal.reason
+    const state = this.#leases.get(key) ?? { held: false, waiters: [] }
+    this.#leases.set(key, state)
+    if (!state.held) {
+      state.held = true
+      return this.#lease(key, state)
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject, signal, onAbort: () => undefined }
+      waiter.onAbort = () => {
+        const index = state.waiters.indexOf(waiter)
+        if (index >= 0) state.waiters.splice(index, 1)
+        reject(signal.reason)
+      }
+      state.waiters.push(waiter)
+      signal.addEventListener('abort', waiter.onAbort, { once: true })
+    })
+  }
 
   failNext(point: MemoryCacheFault, count = 1): void {
     this.faults.set(point, count)
@@ -130,11 +159,13 @@ export class MemoryModuleDownloaderCache implements ModuleDownloaderCacheAdapter
     this.stagedCatalog = cloneCatalog(record)
   }
 
-  async publishCatalog(): Promise<void> {
+  async publishCatalog(expectedState: CachedCatalogRecord['trustState'] | undefined): Promise<boolean> {
     this.#fault('publishCatalog')
     if (!this.stagedCatalog) throw new Error('No staged catalog')
+    if (!sameTrustState(this.catalog?.trustState, expectedState)) return false
     this.catalog = cloneCatalog(this.stagedCatalog)
     this.stagedCatalog = undefined
+    return true
   }
 
   async discardStagedCatalog(): Promise<void> {
@@ -183,12 +214,17 @@ export class MemoryModuleDownloaderCache implements ModuleDownloaderCacheAdapter
     this.partials.delete(id)
   }
 
-  async publishPartial(id: string, artifact: CachedArtifactRecord): Promise<void> {
+  async publishPartial(id: string, artifact: CachedArtifactRecord): Promise<'published' | 'already-present'> {
     this.#fault('publishPartial')
     const partial = this.#partial(id)
     if (partial.record.bytesWritten !== artifact.size) throw new Error('Partial size mismatch')
+    if (this.artifacts.has(artifact.sha256)) {
+      this.partials.delete(id)
+      return 'already-present'
+    }
     this.artifacts.set(artifact.sha256, { ...artifact })
     this.partials.delete(id)
+    return 'published'
   }
 
   #partial(id: string): PartialData {
@@ -204,8 +240,37 @@ export class MemoryModuleDownloaderCache implements ModuleDownloaderCacheAdapter
     else this.faults.set(point, remaining - 1)
     throw new Error(`Injected cache fault: ${point}`)
   }
+
+  #lease(
+    key: string,
+    state: { held: boolean; waiters: Array<{ resolve: (lease: ModuleDownloaderCacheLease) => void; reject: (cause: unknown) => void; signal: AbortSignal; onAbort: () => void }> },
+  ): ModuleDownloaderCacheLease {
+    let released = false
+    return {
+      release: () => {
+        if (released) throw new Error('Lease released more than once')
+        released = true
+        while (state.waiters.length > 0) {
+          const next = state.waiters.shift()!
+          next.signal.removeEventListener('abort', next.onAbort)
+          if (next.signal.aborted) continue
+          next.resolve(this.#lease(key, state))
+          return
+        }
+        state.held = false
+        this.#leases.delete(key)
+      },
+    }
+  }
 }
 
 function cloneCatalog(value: CachedCatalogRecord | undefined): CachedCatalogRecord | undefined {
   return value ? { ...value, responseBytes: Uint8Array.from(value.responseBytes), trustState: { ...value.trustState } } : undefined
+}
+
+function sameTrustState(
+  left: CachedCatalogRecord['trustState'] | undefined,
+  right: CachedCatalogRecord['trustState'] | undefined,
+): boolean {
+  return left?.highestSequence === right?.highestSequence && left?.latestIssuedAt === right?.latestIssuedAt
 }
