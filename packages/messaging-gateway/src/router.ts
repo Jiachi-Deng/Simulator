@@ -9,7 +9,6 @@
  * applies its own pre-binding access gate.)
  */
 
-import type { ISessionManager } from '@craft-agent/server-core/handlers'
 import { readFileAttachment } from '@craft-agent/shared/utils'
 import type { FileAttachment } from '@craft-agent/shared/protocol'
 import {
@@ -20,6 +19,7 @@ import {
 import type { BindingStore } from './binding-store'
 import type { Commands } from './commands'
 import type { PendingSendersStore } from './pending-senders'
+import type { MessagingSessionManager } from './contracts'
 import type {
   IncomingMessage,
   MessagingConfig,
@@ -48,7 +48,7 @@ export class Router {
   private readonly recentRejectReplies = new Map<string, number>()
 
   constructor(
-    private readonly sessionManager: ISessionManager,
+    private readonly sessionManager: MessagingSessionManager,
     private readonly bindingStore: BindingStore,
     private readonly commands: Commands,
     private readonly log: MessagingLogger = NOOP_LOGGER,
