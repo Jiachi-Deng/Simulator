@@ -83,7 +83,7 @@ const disconnectedState: TransportConnectionState = {
   status: 'disconnected',
   url: 'wss://remote.example.com',
   attempt: 1,
-  lastClose: { code: 1001, reason: 'Going away' },
+  lastClose: { code: 1001, wasClean: true },
   updatedAt: Date.now(),
 }
 

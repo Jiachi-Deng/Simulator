@@ -640,7 +640,7 @@ describe('connection state', () => {
     expect(state.attempt).toBeGreaterThanOrEqual(1)
   })
 
-  test('captures websocket close code and reason for handshake failures', async () => {
+  test('captures only the websocket close code for handshake failures', async () => {
     const server = trackServer(new WsRpcServer({
       host: '127.0.0.1',
       port: 0,
@@ -658,6 +658,7 @@ describe('connection state', () => {
 
     const state = client.getConnectionState()
     expect(state.lastClose?.code).toBe(4005)
+    expect(state.lastClose).not.toHaveProperty('reason')
   })
 })
 

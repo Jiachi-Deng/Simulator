@@ -5,8 +5,7 @@ const DEFAULT_TIMEOUT_MS = 12_000
 function formatTransportFailure(state: TransportConnectionState): string {
   if (state.lastError?.message) return state.lastError.message
   if (state.lastClose?.code != null) {
-    const reason = state.lastClose.reason ? ` (${state.lastClose.reason})` : ''
-    return `Connection closed (${state.lastClose.code})${reason}`
+    return `Connection closed (${state.lastClose.code})`
   }
   return 'Connection failed'
 }

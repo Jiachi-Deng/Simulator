@@ -19,6 +19,7 @@ import {
 } from '@craft-agent/shared/protocol'
 import type { RpcClient } from './types'
 import { serializeEnvelope, deserializeEnvelope } from './codec'
+import { evaluateWebSocketUrl } from './websocket-url-policy'
 
 // ---------------------------------------------------------------------------
 // Pending request state
@@ -60,7 +61,6 @@ export interface TransportConnectionError {
 
 export interface TransportCloseInfo {
   code?: number
-  reason?: string
   wasClean?: boolean
 }
 
@@ -145,13 +145,15 @@ export class WsRpcClient implements RpcClient {
   private readonly autoReconnect: boolean
   private readonly connectTimeout: number
   private readonly mode: TransportMode
+  private readonly urlPolicy: ReturnType<typeof evaluateWebSocketUrl>
 
   constructor(url: string, opts?: WsRpcClientOptions) {
     this.url = url
+    this.urlPolicy = evaluateWebSocketUrl(url)
     this.workspaceId = opts?.workspaceId
     this.webContentsId = opts?.webContentsId
     this.token = opts?.token
-    this.stateUrl = this.sanitizeConnectionStateUrl(url)
+    this.stateUrl = this.redactToken(this.urlPolicy.diagnosticUrl)
     this.clientCapabilities = opts?.clientCapabilities ?? []
     this.requestTimeout = opts?.requestTimeout ?? REQUEST_TIMEOUT_MS
     this.maxReconnectDelay = opts?.maxReconnectDelay ?? 30_000
@@ -584,7 +586,6 @@ export class WsRpcClient implements RpcClient {
           if (envelope.error) {
             const err = new Error(this.redactToken(envelope.error.message))
             ;(err as any).code = envelope.error.code
-            ;(err as any).data = envelope.error.data
             req.reject(err)
           } else {
             req.resolve(envelope.result)
@@ -737,7 +738,6 @@ export class WsRpcClient implements RpcClient {
     const closeInfo: TransportCloseInfo | undefined = closeEvent
       ? {
           code: Number.isFinite(closeEvent.code) ? closeEvent.code : undefined,
-          reason: closeEvent.reason ? this.redactToken(closeEvent.reason) : undefined,
           wasClean: closeEvent.wasClean,
         }
       : undefined
@@ -747,7 +747,7 @@ export class WsRpcClient implements RpcClient {
       if (closeKind !== 'unknown') {
         this.connectError = this.createConnectionError(
           closeKind,
-          closeInfo.reason || `Connection closed (${closeInfo.code})`,
+          `Connection closed (${closeInfo.code})`,
           `WS_CLOSE_${closeInfo.code}`,
         )
       }
@@ -916,57 +916,23 @@ export class WsRpcClient implements RpcClient {
   // -------------------------------------------------------------------------
 
   private inferMode(url: string): TransportMode {
-    try {
-      const parsed = new URL(url)
-      if (parsed.protocol === 'ws:' && this.isLoopbackHostname(parsed.hostname)) return 'local'
-    } catch {
-      // Invalid URLs are rejected by the connection policy in connect().
-    }
+    const policy = evaluateWebSocketUrl(url)
+    if (!policy.error && policy.diagnosticUrl.startsWith('ws://') && policy.isLoopback) return 'local'
     return 'remote'
   }
 
   private getConnectionPolicyError(): Error | null {
-    let parsed: URL
-    try {
-      parsed = new URL(this.url)
-    } catch {
-      return this.createConnectionError('protocol', 'Invalid WebSocket server URL', 'INVALID_WEBSOCKET_URL')
-    }
-
-    if (parsed.username || parsed.password) {
-      return this.createConnectionError(
-        'protocol',
-        'WebSocket server URL must not include userinfo',
-        'WEBSOCKET_URL_USERINFO_NOT_ALLOWED',
-      )
-    }
-
-    if (parsed.protocol === 'wss:') return null
-    if (parsed.protocol === 'ws:' && this.isLoopbackHostname(parsed.hostname)) return null
-
-    const message = parsed.protocol === 'ws:'
-      ? 'Unencrypted WebSocket connections are restricted to loopback hosts; use wss:// for remote servers'
-      : 'WebSocket server URL must use wss://, or ws:// for a loopback host'
-    return this.createConnectionError('protocol', message, 'INSECURE_WEBSOCKET_URL')
-  }
-
-  private isLoopbackHostname(hostname: string): boolean {
-    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
-  }
-
-  private sanitizeConnectionStateUrl(url: string): string {
-    try {
-      const parsed = new URL(url)
-      return this.redactToken(`${parsed.protocol}//${parsed.host}${parsed.pathname}`)
-    } catch {
-      return ''
-    }
+    const violation = this.urlPolicy.error
+    return violation
+      ? this.createConnectionError('protocol', violation.message, violation.code)
+      : null
   }
 
   private redactToken(message: string): string {
     if (!this.token) return message
 
-    const variants = [...new Set([this.token, encodeURIComponent(this.token)])]
+    const encoded = encodeURIComponent(this.token)
+    const variants = [...new Set([this.token, encoded, encodeURIComponent(encoded)])]
       .sort((a, b) => b.length - a.length)
     let redacted = message
     for (const variant of variants) {

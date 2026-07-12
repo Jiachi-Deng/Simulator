@@ -192,8 +192,7 @@ function formatTransportReason(state: TransportConnectionState): string {
   }
 
   if (state.lastClose?.code != null) {
-    const reason = state.lastClose.reason ? ` (${state.lastClose.reason})` : ''
-    return `close ${state.lastClose.code}${reason}`
+    return `close ${state.lastClose.code}`
   }
 
   return 'no additional details'

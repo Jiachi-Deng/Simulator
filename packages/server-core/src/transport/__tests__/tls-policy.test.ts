@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it } from 'bun:test'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
 import { WsRpcClient } from '../client'
 import { WsRpcServer } from '../server'
+import type { MessageEnvelope } from '@craft-agent/shared/protocol'
 
 const OriginalWebSocket = globalThis.WebSocket
 
@@ -107,9 +111,10 @@ describe('WsRpcClient connection policy', () => {
     expect(JSON.stringify(state)).not.toContain(encodedToken)
   })
 
-  it('redacts literal and encoded tokens from errors and close reasons', () => {
+  it('redacts literal, encoded, and double-encoded tokens without retaining close reasons', () => {
     const token = 'secret token/with?reserved=characters'
     const encodedToken = encodeURIComponent(token)
+    const doubleEncodedToken = encodeURIComponent(encodedToken)
     let socket: {
       onopen: (() => void) | null
       onmessage: ((event: { data: string }) => void) | null
@@ -140,23 +145,92 @@ describe('WsRpcClient connection policy', () => {
       data: JSON.stringify({
         id: 'error',
         type: 'error',
-        error: { code: 'AUTH_FAILED', message: `Rejected ${token} / ${encodedToken}` },
+        error: { code: 'AUTH_FAILED', message: `Rejected ${token} / ${encodedToken} / ${doubleEncodedToken}` },
       }),
     })
     socket!.onclose?.({
       code: 4005,
-      reason: `Closed ${token} / ${encodedToken}`,
+      reason: `Closed ${token} / ${encodedToken} / ${doubleEncodedToken}`,
       wasClean: true,
     })
 
     const serializedState = JSON.stringify(client.getConnectionState())
     expect(serializedState).not.toContain(token)
     expect(serializedState).not.toContain(encodedToken)
+    expect(serializedState).not.toContain(doubleEncodedToken)
     expect(client.getConnectionState().lastError?.message).toContain('[REDACTED]')
-    expect(client.getConnectionState().lastClose?.reason).toContain('[REDACTED]')
+    expect(client.getConnectionState().lastClose).toEqual({ code: 4005, wasClean: true })
   })
 
-  it('rejects a real self-signed WSS handshake without exposing the token', async () => {
+  it('does not retain mutable RPC error data on rejected errors', async () => {
+    const sent: string[] = []
+    let socket: {
+      onopen: (() => void) | null
+      onmessage: ((event: { data: string }) => void) | null
+      send: (data: string) => void
+    } | null = null
+
+    globalThis.WebSocket = class {
+      static readonly OPEN = 1
+      readonly OPEN = 1
+      readyState = 1
+      onopen = null
+      onmessage = null
+      onclose = null
+      onerror = null
+
+      constructor() {
+        socket = this
+      }
+
+      send(data: string) {
+        sent.push(data)
+      }
+
+      close() {}
+    } as unknown as typeof WebSocket
+
+    const client = new WsRpcClient('wss://remote.example.com/rpc', { autoReconnect: false })
+    client.connect()
+    socket!.onopen?.()
+    socket!.onmessage?.({
+      data: JSON.stringify({
+        id: 'ack',
+        type: 'handshake_ack',
+        clientId: 'rpc-data-client',
+        protocolVersion: '1.0',
+      }),
+    })
+
+    const pending = client.invoke('test:error-data')
+    await Promise.resolve()
+    const request = JSON.parse(sent.at(-1)!) as MessageEnvelope
+    const mutableData = { secret: 'rpc-data-secret', nested: { state: 'original' } }
+    socket!.onmessage?.({
+      data: JSON.stringify({
+        id: request.id,
+        type: 'response',
+        error: { code: 'HANDLER_ERROR', message: 'Request failed', data: mutableData },
+      }),
+    })
+
+    let error: (Error & { code?: string; data?: unknown }) | undefined
+    try {
+      await pending
+    } catch (cause) {
+      error = cause as Error & { code?: string; data?: unknown }
+    }
+    mutableData.nested.state = 'mutated'
+
+    expect(error).toMatchObject({ message: 'Request failed', code: 'HANDLER_ERROR' })
+    expect(error).not.toHaveProperty('data')
+    expect(JSON.stringify(error)).not.toContain('rpc-data-secret')
+    expect(JSON.stringify(error)).not.toContain('mutated')
+    client.destroy()
+  })
+
+  const tlsIt = hasTlsTooling() ? it : it.skip
+  tlsIt('rejects a real self-signed WSS handshake without exposing the token (requires sh + openssl)', async () => {
     const tls = generateSelfSignedCert()
     const server = new WsRpcServer({ host: '127.0.0.1', port: 0, tls })
     await server.listen()
@@ -190,20 +264,23 @@ describe('WsRpcClient connection policy', () => {
 })
 
 function generateSelfSignedCert(): { cert: string; key: string } {
-  const result = Bun.spawnSync({
-    cmd: [
-      'openssl', 'req', '-x509', '-newkey', 'rsa:2048',
-      '-keyout', '/dev/stdout', '-out', '/dev/stdout',
-      '-days', '1', '-nodes', '-subj', '/CN=localhost', '-batch',
-    ],
-    stderr: 'pipe',
-  })
-  expect(result.exitCode, result.stderr.toString()).toBe(0)
+  const outputDir = mkdtempSync(resolve(tmpdir(), 'craft-tls-'))
+  try {
+    const result = Bun.spawnSync({
+      cmd: ['sh', resolve(import.meta.dir, '../../../../../scripts/generate-dev-cert.sh'), outputDir],
+      stderr: 'pipe',
+    })
+    expect(result.exitCode, result.stderr.toString()).toBe(0)
+    return {
+      cert: readFileSync(resolve(outputDir, 'cert.pem'), 'utf8'),
+      key: readFileSync(resolve(outputDir, 'key.pem'), 'utf8'),
+    }
+  } finally {
+    rmSync(outputDir, { recursive: true, force: true })
+  }
+}
 
-  const pem = result.stdout.toString()
-  const cert = pem.match(/(-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----)/)?.[1]
-  const key = pem.match(/(-----BEGIN (?:EC )?PRIVATE KEY-----[\s\S]+?-----END (?:EC )?PRIVATE KEY-----)/)?.[1]
-  expect(cert).toBeDefined()
-  expect(key).toBeDefined()
-  return { cert: `${cert!}\n`, key: `${key!}\n` }
+function hasTlsTooling(): boolean {
+  return Bun.spawnSync({ cmd: ['openssl', 'version'], stdout: 'ignore', stderr: 'ignore' }).exitCode === 0
+    && Bun.spawnSync({ cmd: ['sh', '-c', 'exit 0'], stdout: 'ignore', stderr: 'ignore' }).exitCode === 0
 }
