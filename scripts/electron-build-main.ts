@@ -8,6 +8,8 @@ import { existsSync, readFileSync, statSync, mkdirSync } from "fs";
 import { join } from "path";
 import {
   EMBEDDED_BUILD_VARIABLES,
+  DISABLE_UPDATES_ENV,
+  areBuildUpdatesDisabled,
   embeddedBuildValue,
   isPublicBuild,
 } from "./build-environment";
@@ -59,10 +61,14 @@ function loadEnvFile(): void {
 // NOTE: Google OAuth credentials are NOT baked into the build - users provide their own
 // via source config. See README_FOR_OSS.md for setup instructions.
 function getBuildDefines(): string[] {
-  return EMBEDDED_BUILD_VARIABLES.map((varName) => {
+  const credentialDefines = EMBEDDED_BUILD_VARIABLES.map((varName) => {
     const value = embeddedBuildValue(varName);
     return `--define:process.env.${varName}="${value}"`;
   });
+  return [
+    ...credentialDefines,
+    `--define:process.env.${DISABLE_UPDATES_ENV}="${areBuildUpdatesDisabled() ? "1" : "0"}"`,
+  ];
 }
 
 // Wait for file to stabilize (no size changes)
