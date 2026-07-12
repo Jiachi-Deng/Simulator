@@ -19,7 +19,7 @@
     "react-i18next": "^17.0.2"
   },
   "devDependencies": {
-    "@tailwindcss/typography": "^0.5.16",
+    "@tailwindcss/typography": "^0.5.20",
     "@tailwindcss/vite": "^4.0.0",
     "@vitejs/plugin-react": "^4.4.1",
     "class-variance-authority": "^0.7.1",
