@@ -26,6 +26,8 @@ jobs:
     name: Unsigned macOS arm64
     runs-on: macos-15
     timeout-minutes: 30
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Checkout
