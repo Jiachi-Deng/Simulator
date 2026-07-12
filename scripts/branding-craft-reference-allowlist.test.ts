@@ -69,8 +69,8 @@ describe('remaining Craft references', () => {
       url: 'https://github.com/Jiachi-Deng/Simulator',
     })
     expect(serverPackage.author).toEqual(electronPackage.author)
-    expect(builderConfig).toContain('copyright: Copyright © 2026 Simulator contributors')
-    expect(builderConfig).toContain('maintainer: "Simulator contributors (https://github.com/Jiachi-Deng/Simulator)"')
+    expect(builderConfig).toContain('copyright: Copyright © 2026 Craft Docs Ltd. and Simulator contributors')
+    expect(builderConfig).not.toContain('maintainer:')
     expect(builderConfig.match(/artifactName: "Simulator-\$\{arch\}/g)).toHaveLength(4)
     expect(dmgScript).toContain('DMG_NAME="Simulator-${ARCH}.dmg"')
   })

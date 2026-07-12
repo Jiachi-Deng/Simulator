@@ -24,6 +24,8 @@ export const CRAFT_REFERENCE_ALLOWLIST: CraftReferenceCategory[] = [
     reason: 'License, notice, trademark, conduct, and fork attribution must keep upstream names.',
     matches: ({ path, line }) =>
       /^(?:LICENSE|NOTICE|TRADEMARK\.md|CODE_OF_CONDUCT\.md)$/.test(path)
+      || (path === 'apps/electron/electron-builder.yml'
+        && /copyright: Copyright © 2026 Craft Docs Ltd\. and Simulator contributors/.test(line))
       || (path === 'README.md' && /upstream|independent fork|foundation|trademark/i.test(line)),
   },
   {

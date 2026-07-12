@@ -1,6 +1,6 @@
 appId: com.lukilabs.craft-agent
 productName: Simulator
-copyright: Copyright © 2026 Simulator contributors
+copyright: Copyright © 2026 Craft Docs Ltd. and Simulator contributors
 
 electronVersion: "39.2.7"
 
@@ -197,7 +197,6 @@ nsis:
 linux:
   icon: resources/icon.png
   category: Utility
-  maintainer: "Simulator contributors (https://github.com/Jiachi-Deng/Simulator)"
   target:
     - target: AppImage
       arch:
