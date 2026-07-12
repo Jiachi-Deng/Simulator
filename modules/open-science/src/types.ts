@@ -76,12 +76,12 @@ export interface TrustDecision extends VerificationIdentity {
 
 export interface TrustedProvenanceVerifier {
   readonly verifierKind: string
-  verify(attestation: unknown, expected: BuildBindings): Promise<TrustDecision>
+  verify(attestation: unknown, expected: Readonly<BuildBindings>): Promise<TrustDecision>
 }
 
 export interface TrustedRuntimeConformanceVerifier {
   readonly verifierKind: string
-  verify(evidence: unknown, expected: RuntimeBindings): Promise<TrustDecision>
+  verify(evidence: unknown, expected: Readonly<RuntimeBindings>): Promise<TrustDecision>
 }
 
 export interface ValidationOptions {

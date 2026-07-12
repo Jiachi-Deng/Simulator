@@ -61,6 +61,6 @@ node dist/src/cli.js \
   /path/to/trusted-runtime-verifier
 ```
 
-CLI 将 `{ evidence, expected }` JSON 写入 verifier stdin，只接受 exit code `0` 且 stdout 为 strict `{ "trusted": boolean, "reason"?: string }`。verifier executable 的安装、身份和 trust root 由 Host/发布流水线负责。
+CLI 将 `{ evidence, expected }` JSON 写入 verifier stdin，只接受 exit code `0` 且 stdout 为 strict `{ "trusted": true, "subject": string, "source": string, "evidence": string }`，不允许额外字段或 Symbol key。validator 会在调用 verifier 前冻结独立的 `expected` clone，并按调用前保存的 identity 校验该结果。verifier executable 的安装、身份和 trust root 由 Host/发布流水线负责。
 
 validator 完全离线并 fail closed。它拒绝未知 schema 字段、source/profile 不匹配、错误架构或 hash、缺失法律/SBOM/snapshot/evidence 文件、非 loopback policy、共享或可 alias 的 XDG root、源码/dev dependencies、其他架构、明文 auth/credential 文件、路径逃逸或 Unicode/大小写碰撞，以及超限文件。

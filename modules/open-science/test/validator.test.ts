@@ -158,6 +158,29 @@ async function mutateJson(root: string, inventory: ArtifactInventory, role: Arti
 test("accepts fixture only with explicitly injected trusted deterministic fakes", () =>
   withFixture((root, inventory) => validateArtifact(root, inventory, trustedFakeOptions)))
 
+test("passes frozen expected clones to both verifiers", () => withFixture(async (root, inventory) => {
+  const options: ValidationOptions = {
+    provenanceVerifier: {
+      verifierKind: "test-only-mutating-provenance",
+      async verify(evidence, expected) {
+        assert.equal(Object.isFrozen(expected), true)
+        assert.throws(() => { (expected as BuildBindings).binarySha256 = "0".repeat(64) }, TypeError)
+        return trustedDecision(`sha256:${expected.binarySha256}`, `${expected.sourceRepository}@${expected.sourceCommit}`, evidence)
+      },
+    },
+    runtimeVerifier: {
+      verifierKind: "test-only-mutating-runtime",
+      async verify(evidence, expected) {
+        assert.equal(Object.isFrozen(expected), true)
+        assert.throws(() => { (expected as RuntimeBindings).binarySha256 = "0".repeat(64) }, TypeError)
+        const runtimePolicy = await readFile(path.join(policyDir, "runtime-policy.json"))
+        return trustedDecision(`sha256:${expected.binarySha256}`, `runtime-policy:sha256:${hash(runtimePolicy)}`, evidence)
+      },
+    },
+  }
+  await validateArtifact(root, inventory, options)
+}))
+
 test("fails closed without trusted verifiers", () => withFixture(async (root, inventory) => {
   await assert.rejects(validateArtifact(root, inventory), /trusted provenance verifier required/)
 }))
@@ -239,11 +262,14 @@ test("rejects artifact-controlled empty component closure against trusted profil
   await assert.rejects(validateArtifact(root, inventory, trustedFakeOptions), /required trusted component missing/)
 }))
 
-test("rejects malformed and identity-unbound verifier decisions at both library boundaries", () =>
+test("rejects malformed, Symbol-keyed, and identity-unbound verifier decisions at both library boundaries", () =>
   withFixture(async (root, inventory) => {
+    const symbolDecision: Record<PropertyKey, unknown> = { trusted: true, subject: "x", source: "x", evidence: "x" }
+    symbolDecision[Symbol("extra")] = true
     const malformed: unknown[] = [
       { trusted: "false", subject: "x", source: "x", evidence: "x" },
       { trusted: true, subject: "x", source: "x", evidence: "x", extra: true },
+      symbolDecision,
       Object.defineProperty({ subject: "x", source: "x", evidence: "x" }, "trusted", { get: () => true, enumerable: true }),
       new Proxy({ trusted: true, subject: "x", source: "x", evidence: "x" }, {}),
     ]
@@ -297,11 +323,13 @@ test("rejects checksum omissions", () => withFixture(async (root, inventory) => 
   await assert.rejects(validateArtifact(root, inventory, trustedFakeOptions), /checksums leaf closure mismatch/)
 }))
 
-test("rejects inventory Unicode/case collisions and unknown fields", () => withFixture(async (_root, inventory) => {
+test("rejects inventory Unicode/case collisions, unknown fields, and Symbol fields", () => withFixture(async (_root, inventory) => {
   const collision = clone(inventory)
   entry(collision, "notice").path = "legal/Caf\u00e9"
   entry(collision, "license").path = "LEGAL/Cafe\u0301"
   assert.throws(() => parseInventory(collision), /Unicode\/case path collision/)
   const unknown = clone(inventory) as unknown as Record<string, unknown>; unknown.extra = true
   assert.throws(() => parseInventory(unknown), /unknown fields/)
+  const symbol = clone(inventory) as unknown as Record<PropertyKey, unknown>; symbol[Symbol("extra")] = true
+  assert.throws(() => parseInventory(symbol), /Symbol fields/)
 }))

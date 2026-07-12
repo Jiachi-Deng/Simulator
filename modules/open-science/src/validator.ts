@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto"
 import { lstat, readdir, readFile, realpath } from "node:fs/promises"
 import path from "node:path"
-import { types as utilTypes } from "node:util"
+import { parseTrustDecision } from "./trust-decision.js"
 import type {
   ArtifactInventory, ArtifactRole, BuildBindings, InventoryFile, RuntimeBindings, RuntimePolicy, TrustDecision,
   ValidationOptions, VerificationIdentity,
@@ -45,6 +45,7 @@ function record(value: unknown, label: string): Record<string, unknown> {
 }
 
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[], label: string, required = allowed): void {
+  if (Object.getOwnPropertySymbols(value).length !== 0) throw new Error(`${label} has Symbol fields`)
   const unknown = Object.keys(value).filter((key) => !allowed.includes(key))
   if (unknown.length) throw new Error(`${label} has unknown fields: ${unknown.join(", ")}`)
   const missing = required.filter((key) => !(key in value))
@@ -406,30 +407,20 @@ function sameBindings(actual: object, expected: object, label: string): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(`${label} binding mismatch`)
 }
 
-function validateTrustDecision(input: unknown, expected: VerificationIdentity, label: string): TrustDecision {
-  try {
-    if (typeof input !== "object" || input === null || Array.isArray(input) || utilTypes.isProxy(input) ||
-        Object.getPrototypeOf(input) !== Object.prototype) {
-      throw new Error(`${label} decision must be a plain object`)
-    }
-    const descriptors = Object.getOwnPropertyDescriptors(input)
-    const keys = Object.keys(descriptors)
-    if (JSON.stringify(keys.sort()) !== JSON.stringify(["evidence", "source", "subject", "trusted"])) {
-      throw new Error(`${label} decision must have exact keys`)
-    }
-    for (const [key, descriptor] of Object.entries(descriptors)) {
-      if (!("value" in descriptor)) throw new Error(`${label} decision accessor forbidden: ${key}`)
-    }
-    const decision = Object.fromEntries(Object.entries(descriptors).map(([key, descriptor]) => [key, descriptor.value])) as unknown as TrustDecision
-    if (decision.trusted !== true) throw new Error(`${label} decision must set trusted === true`)
-    if (decision.subject !== expected.subject || decision.source !== expected.source || decision.evidence !== expected.evidence) {
-      throw new Error(`${label} decision identity mismatch`)
-    }
-    return decision
-  } catch (error) {
-    if (error instanceof Error && error.message.startsWith(label)) throw error
-    throw new Error(`${label} decision failed closed`)
+function freezeClone<T extends object>(value: T): Readonly<T> {
+  return Object.freeze(structuredClone(value))
+}
+
+function frozenIdentity(identity: VerificationIdentity): Readonly<VerificationIdentity> {
+  return Object.freeze({ ...identity })
+}
+
+function validateTrustDecision(input: unknown, expected: Readonly<VerificationIdentity>, label: string): TrustDecision {
+  const decision = parseTrustDecision(input, label)
+  if (decision.subject !== expected.subject || decision.source !== expected.source || decision.evidence !== expected.evidence) {
+    throw new Error(`${label} decision identity mismatch`)
   }
+  return decision
 }
 
 export async function validateArtifact(root: string, rawInventory: unknown, options: ValidationOptions = {}): Promise<void> {
@@ -456,12 +447,13 @@ export async function validateArtifact(root: string, rawInventory: unknown, opti
   }
   const attestation = parseJson(leaf("build-attestation"), "build attestation")
   sameBindings(parseBuildAttestation(attestation), buildExpected, "build attestation")
-  const buildTrust = await options.provenanceVerifier.verify(attestation, buildExpected)
-  validateTrustDecision(buildTrust, {
+  const buildIdentity = frozenIdentity({
     subject: `sha256:${buildExpected.binarySha256}`,
     source: `${buildExpected.sourceRepository}@${buildExpected.sourceCommit}`,
     evidence: `sha256:${leaf("build-attestation").sha256}`,
-  }, "build provenance")
+  })
+  const buildTrust = await options.provenanceVerifier.verify(attestation, freezeClone(buildExpected))
+  validateTrustDecision(buildTrust, buildIdentity, "build provenance")
 
   const runtimeExpected: RuntimeBindings = {
     binarySha256: leaf("binary").sha256, dynamicLoopbackBind: true, hostValidation: true,
@@ -469,10 +461,11 @@ export async function validateArtifact(root: string, rawInventory: unknown, opti
   }
   const runtimeEvidence = parseJson(leaf("runtime-conformance"), "runtime conformance evidence")
   sameBindings(parseRuntimeEvidence(runtimeEvidence), runtimeExpected, "runtime evidence")
-  const runtimeTrust = await options.runtimeVerifier.verify(runtimeEvidence, runtimeExpected)
-  validateTrustDecision(runtimeTrust, {
+  const runtimeIdentity = frozenIdentity({
     subject: `sha256:${runtimeExpected.binarySha256}`,
     source: `runtime-policy:sha256:${leaf("runtime-policy").sha256}`,
     evidence: `sha256:${leaf("runtime-conformance").sha256}`,
-  }, "runtime conformance")
+  })
+  const runtimeTrust = await options.runtimeVerifier.verify(runtimeEvidence, freezeClone(runtimeExpected))
+  validateTrustDecision(runtimeTrust, runtimeIdentity, "runtime conformance")
 }

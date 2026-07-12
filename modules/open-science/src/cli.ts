@@ -1,12 +1,15 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process"
 import { readFile } from "node:fs/promises"
+import path from "node:path"
+import { fileURLToPath } from "node:url"
 import type {
   BuildBindings, RuntimeBindings, TrustedProvenanceVerifier, TrustedRuntimeConformanceVerifier, TrustDecision,
 } from "./types.js"
+import { parseTrustDecision } from "./trust-decision.js"
 import { validateArtifact } from "./validator.js"
 
-async function invokeVerifier(executable: string, evidence: unknown, expected: object): Promise<TrustDecision> {
+export async function invokeVerifier(executable: string, evidence: unknown, expected: object): Promise<TrustDecision> {
   return await new Promise((resolve, reject) => {
     const child = spawn(executable, [], { stdio: ["pipe", "pipe", "pipe"] })
     let stdout = ""; let stderr = ""
@@ -16,22 +19,18 @@ async function invokeVerifier(executable: string, evidence: unknown, expected: o
     child.on("close", (code) => {
       if (code !== 0) { reject(new Error(`verifier exited ${code}: ${stderr.trim()}`)); return }
       try {
-        const result = JSON.parse(stdout) as Record<string, unknown>
-        const keys = Object.keys(result)
-        if (keys.some((key) => key !== "trusted" && key !== "reason") || typeof result.trusted !== "boolean" ||
-            (result.reason !== undefined && typeof result.reason !== "string")) throw new Error("invalid verifier result schema")
-        resolve(result as unknown as TrustDecision)
+        resolve(parseTrustDecision(JSON.parse(stdout), "verifier result"))
       } catch (error) { reject(error) }
     })
     child.stdin.end(JSON.stringify({ evidence, expected }))
   })
 }
 
-const [root, inventoryPath, provenanceExecutable, runtimeExecutable] = process.argv.slice(2)
-if (!root || !inventoryPath || !provenanceExecutable || !runtimeExecutable) {
-  console.error("usage: validate-open-science-artifact <artifact-root> <inventory.json> <trusted-provenance-verifier> <trusted-runtime-verifier>")
-  process.exitCode = 2
-} else {
+export async function main(args: string[]): Promise<void> {
+  const [root, inventoryPath, provenanceExecutable, runtimeExecutable] = args
+  if (!root || !inventoryPath || !provenanceExecutable || !runtimeExecutable) {
+    throw new Error("usage: validate-open-science-artifact <artifact-root> <inventory.json> <trusted-provenance-verifier> <trusted-runtime-verifier>")
+  }
   const provenanceVerifier: TrustedProvenanceVerifier = {
     verifierKind: `external:${provenanceExecutable}`,
     verify: (evidence: unknown, expected: BuildBindings) => invokeVerifier(provenanceExecutable, evidence, expected),
@@ -42,4 +41,13 @@ if (!root || !inventoryPath || !provenanceExecutable || !runtimeExecutable) {
   }
   await validateArtifact(root, JSON.parse(await readFile(inventoryPath, "utf8")), { provenanceVerifier, runtimeVerifier })
   console.log("OpenScience artifact and trusted evidence valid")
+}
+
+if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
+  try {
+    await main(process.argv.slice(2))
+  } catch (error) {
+    console.error(error instanceof Error ? error.message : error)
+    process.exitCode = 2
+  }
 }
