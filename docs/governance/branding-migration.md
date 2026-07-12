@@ -33,9 +33,9 @@
 
 | 类别 | 当前值 / 证据 | 建议目标 | 兼容策略 | 退出条件 |
 | --- | --- | --- | --- | --- |
-| npm package scope | `@craft-agent/core`、`shared`、`server-core`、`server`、`ui`、`cli`、`viewer`、`session-tools-core`、`session-mcp-server`、`pi-agent-server`、messaging packages 等 workspace `package.json` 及全仓 import | `@simulator/*`（最终 scope 待 registry 确认） | 内部一次性更新 workspace package 名、imports、lockfile 和构建脚本；若已有外部消费者，在旧 scope 发布 re-export/deprecation shim，并锁定跨 scope 版本映射。不要用文本替换改第三方 attribution。 | 新 scope 可发布且安装测试通过；旧 scope deprecation 已公告；外部依赖窗口结束。 |
+| npm package scope | `@craft-agent/core`、`shared`、`server-core`、`server`、`ui`、`cli`、`viewer`、`session-tools-core`、`session-mcp-server`、`pi-agent-server`、messaging packages 等 workspace `package.json` 及全仓 import | `@simulator/*`（最终 scope 待 registry 确认） | 内部更新 workspace package 名、imports、lockfile 和构建脚本。当前没有证据表明 Simulator 有权向旧 `@craft-agent/*` scope 发布，因此默认只能发布新 scope、提供迁移指南，并允许消费端通过 package manager alias 过渡。只有取得旧 scope 的明确发布权限后，才可以另行评估 re-export/deprecation shim。不要用文本替换改第三方 attribution。 | 新 scope 所有权已验证，安装测试通过，迁移指南已发布；若不存在旧 scope 发布权限，不得把旧 package 的 deprecation 或 forwarding 作为退出条件。 |
 | CLI | 旧版自更新 CLI 使用 `craft`，安装到 `~/.local/share/craft/versions` 并建立 `craft` symlink；另有 `@craft-agent/cli` | `simulator` | 新二进制为 `simulator`；迁移期保留 `craft` wrapper，输出弃用提示后转发。CLI 参数和 exit code 不变。shell completion、README、安装/卸载脚本同时覆盖。 | 两个稳定版本；遥测或支持反馈表明旧命令可移除；提供手动卸载旧 symlink 指引。 |
-| Bundle ID / 应用身份 | `com.lukilabs.craft-agent`；`apps/electron/electron-builder.yml` | Simulator 所有者批准的反向域名，如 `com.<owner>.simulator` | Bundle ID 变更会形成新的 OS 应用身份，不能假装原位升级。迁移器从旧 app data/keychain 导入；签名、notarization、通知、权限提示、单实例锁和卸载流程分别验证。 | 新签名与发布主体可用；旧版到新版迁移演练通过；可回滚且不覆盖旧数据。 |
+| Bundle ID / 应用身份 | `com.lukilabs.craft-agent`；`apps/electron/electron-builder.yml` | Simulator 所有者批准的反向域名，如 `com.<owner>.simulator` | Simulator 当前不控制 Craft 的旧 Bundle ID、update feed 或签名身份，默认发布模型固定为“新应用安装 + 经验证的数据导入”，不能承诺原位升级。迁移器从旧 app data/keychain 导入；签名、notarization、通知、权限提示、单实例锁和卸载流程分别验证。只有未来取得旧 feed 发布权和签名连续性后，才可通过新 ADR 重新评估原位升级。 | 新签名与发布主体可用；旧数据导入演练通过；可回滚且不覆盖旧数据；文档明确说明 Simulator 是独立应用。 |
 | deep link | `craftagents://`；注册、解析与生成散布在 `apps/electron/src/main/index.ts`、`deep-link.ts`、`browser-pane-manager.ts`、server handlers | `simulator://` | 新版本同时注册并解析两个 scheme；内部只生成 `simulator://`。OAuth 回调、WebUI 与外部链接在窗口期继续接受旧 scheme。解析逻辑应参数化，不能只改入口常量而遗留 `parsed.protocol` 硬编码。 | 全路由契约测试覆盖新旧 scheme；外部页面已切换；旧链接窗口结束。 |
 | 数据目录 | `~/.craft-agent`（config、workspaces、sessions、logs、credentials、permissions 等）；CLI 另有 `~/.local/share/craft` | `~/.simulator`、`~/.local/share/simulator` | 首次启动执行可重入迁移：新目录不存在时复制或原子移动；冲突时不覆盖，记录清单并提示。读取新目录优先、旧目录回退；凭据需通过原 secure-storage/keychain 方式迁移，禁止明文落盘。保留备份与迁移版本标记。 | 空目录、真实大目录、部分迁移、磁盘满、权限失败、重复启动和降级回滚测试通过。 |
 | 环境变量 | 广泛使用 `CRAFT_*`，包括 `CRAFT_CONFIG_DIR`、`CRAFT_SERVER_URL/TOKEN`、RPC/TLS、runtime、WebUI、MCP、feature flags 等 | `SIMULATOR_*` | 建立集中 resolver：`SIMULATOR_*` 优先，`CRAFT_*` 回退并发出一次弃用告警；子进程迁移期同时注入两组关键变量。不得逐文件分散实现优先级。日志中继续遮蔽 token/secret。 | 自动生成完整变量表；冲突优先级、仅旧值、仅新值、secret redaction、子进程继承测试通过。 |
@@ -49,7 +49,7 @@
 | --- | --- | --- |
 | 许可证与版权 | 根 `LICENSE`、`NOTICE`、上游版权声明 | 保留原文；新增 Simulator 自有变更的版权行时，不覆盖 Craft Docs Ltd. 的既有版权。 |
 | 上游来源 | README 中“基于 / fork 自 Craft Agents”的事实说明 | 使用中性 attribution，不使用 Craft logo，也不暗示 Craft Docs Ltd. 认可或维护 Simulator。 |
-| 商标政策 | `TRADEMARK.md` 中 Craft 商标归属和 fork 约束 | 保留为上游政策与迁移依据；可增加 Simulator 商标政策，但不可重写历史归属。 |
+| 商标政策 | `TRADEMARK.md` 中 Craft 商标归属和 fork 约束 | 原始内容作为“Craft 上游历史政策”归档或明确标注，并由 Simulator 自有政策引用；不能让它继续以模糊身份充当 Simulator 的现行商标政策，也不能改写其中的历史归属。 |
 | 历史记录 | release notes、changelog、git 历史、旧 issue/PR 链接、历史测试 fixture | 原样保留事实；仅在仍作为当前操作指引的历史文档旁增加“旧名称/旧入口”说明。禁止重写 git 历史。 |
 | 第三方名称 | `@anthropic-ai/*`、Craft 官方服务连接器或兼容说明 | 仅当确实连接该第三方时保留准确名称；不要把第三方 package 名误改为 Simulator。 |
 
@@ -97,7 +97,7 @@
 - 切换 update、OAuth、share/viewer、docs/MCP、support/security/legal 到已验证的 Simulator 基础设施。
 - 使用新的签名身份构建 release candidate；完成旧版到新版、跨平台、离线和失败回滚演练。
 
-**测试门 G3：** `bun run validate:ci` 通过；签名/notarization/installer smoke test 通过；自动更新从最后一个 Craft 品牌版本升级成功；OAuth 全 provider、分享撤销、MCP、文档链接和联系人端到端验证通过；日志与发布物不泄露 secret。
+**测试门 G3：** `bun run validate:ci` 通过；签名/notarization/installer smoke test 通过；从受支持的 Craft 数据样本导入 Simulator 的流程成功且旧数据保持不变；OAuth 全 provider、分享撤销、MCP、文档链接和联系人端到端验证通过；日志与发布物不泄露 secret。除非 Simulator 未来取得旧 update feed 发布权和签名连续性，否则不得把自动更新描述为从 Craft 原位升级。
 
 ### 阶段 4：弃用与清理
 
@@ -116,3 +116,5 @@
 - Craft logo 仍出现在 app icon、installer、DMG、OAuth callback 或当前 README 主视觉中。
 - 旧 env、deep link、CLI 或数据目录在无兼容窗口和无公告的情况下被直接删除。
 - LICENSE、NOTICE、上游版权或来源 attribution 被删除或改写。
+- 尚未发布可访问的 Privacy Policy 和 Terms，或没有披露用户内容会发送给哪些 AI/provider 服务及其数据处理边界。
+- OAuth token、API key、分享数据的存储、保留、撤销和删除规则尚未形成可验证的用户政策与实现。
