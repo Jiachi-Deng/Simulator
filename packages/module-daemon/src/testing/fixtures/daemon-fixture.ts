@@ -1,12 +1,22 @@
 #!/usr/bin/env bun
+import { appendFileSync } from 'node:fs'
+
 const host = process.env.SIMULATOR_MODULE_HEALTH_HOST
 const port = Number(process.env.SIMULATOR_MODULE_HEALTH_PORT)
 const childPidFile = process.env.SIMULATOR_FIXTURE_CHILD_PID_FILE
 const childStopFile = process.env.SIMULATOR_FIXTURE_CHILD_STOP_FILE
 const runtime = process.env.SIMULATOR_FIXTURE_RUNTIME
+const statusFile = process.env.SIMULATOR_FIXTURE_STATUS_FILE
 const exitAfterReady = process.env.SIMULATOR_FIXTURE_EXIT_AFTER_READY === '1'
 
 if (host !== '127.0.0.1' || !Number.isSafeInteger(port) || !childPidFile || !childStopFile || !runtime) process.exit(64)
+
+function recordStatus(status: string): void {
+  if (!statusFile) return
+  appendFileSync(statusFile, `${Date.now()} ${status}\n`)
+}
+
+recordStatus(`boot pid=${process.pid} host=${host} port=${port}`)
 
 const childProgram = `
   import { writeFileSync } from 'node:fs';
@@ -17,12 +27,12 @@ const childProgram = `
   writeFileSync(${JSON.stringify(childPidFile)}, String(process.pid));
   setInterval(() => {}, 1000);
 `
-Bun.spawn([runtime, '-e', childProgram], {
+const child = Bun.spawn([runtime, '-e', childProgram], {
   stdin: 'ignore',
   stdout: 'ignore',
   stderr: 'ignore',
 })
-while (!await Bun.file(childPidFile).exists()) await Bun.sleep(1)
+recordStatus(`child-spawned pid=${child.pid}`)
 
 const server = Bun.serve({
   hostname: host,
@@ -30,12 +40,20 @@ const server = Bun.serve({
   fetch(request) {
     const url = new URL(request.url)
     if (url.pathname !== '/health') return new Response('not found', { status: 404 })
+    recordStatus('health-request')
     if (exitAfterReady) setTimeout(() => process.exit(17), 10)
     return Response.json({ status: 'healthy' })
   },
 })
+recordStatus('health-listening')
+
+void (async () => {
+  while (!await Bun.file(childPidFile).exists()) await Bun.sleep(1)
+  recordStatus('child-ready')
+})()
 
 function stop(): void {
+  recordStatus('stopping')
   server.stop(true)
   process.exit(0)
 }

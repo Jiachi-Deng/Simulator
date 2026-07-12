@@ -7,7 +7,7 @@ import { parseModuleManifest, type ModuleManifest, type ModulePlatform } from '@
 import { ModuleDaemonManager } from '../manager.ts'
 import { LoopbackHttpHealthAdapter, RealClock, RealProcessAdapter } from '../real-adapters.ts'
 import { resolveActivatedEntrypoint } from '../safety.ts'
-import { ModuleDaemonError } from '../types.ts'
+import { ModuleDaemonError, type ModuleDaemonSnapshot } from '../types.ts'
 import { KoffiWindowsJobProcessFactory } from '../windows-job.ts'
 
 const roots: string[] = []
@@ -81,6 +81,47 @@ async function waitForExit(pid: number): Promise<void> {
   assert.equal(processExists(pid), false, `pid ${pid} remained alive`)
 }
 
+async function waitForFile(path: string, timeoutMs: number): Promise<string> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    try {
+      return await readFile(path, 'utf8')
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+    }
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10))
+  }
+  throw new Error(`Timed out waiting for fixture file ${path}`)
+}
+
+async function readIfPresent(path: string): Promise<string> {
+  try {
+    return await readFile(path, 'utf8')
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return '<missing>'
+    throw error
+  }
+}
+
+async function drainAfter<T>(manager: ModuleDaemonManager, operation: () => Promise<T>): Promise<T> {
+  let result: T | undefined
+  let failure: unknown
+  try {
+    result = await operation()
+  } catch (error) {
+    failure = error
+  }
+  try {
+    await manager.drain()
+  } catch (cleanupError) {
+    failure = failure === undefined
+      ? cleanupError
+      : new AggregateError([failure, cleanupError], 'Windows native integration and manager cleanup both failed')
+  }
+  if (failure !== undefined) throw failure
+  return result as T
+}
+
 async function removeIfPresent(path: string): Promise<void> {
   await unlink(path).catch((error: NodeJS.ErrnoException) => {
     if (error.code !== 'ENOENT') throw error
@@ -146,29 +187,57 @@ async function runTwentyCycles(
   const { root, entrypoint } = await prepareFixture(bunExecutable, 'simulator-daemon-node-cycles-')
   const childPidFile = join(root, 'child.pid')
   const childStopFile = join(root, 'child-stopped')
+  const statusFile = join(root, 'fixture-status.log')
   const manager = managerFor(factory, {
     PATH: `${dirname(bunExecutable)};${join(systemRoot, 'System32')}`,
     SystemRoot: systemRoot,
     SIMULATOR_FIXTURE_CHILD_PID_FILE: childPidFile,
     SIMULATOR_FIXTURE_CHILD_STOP_FILE: childStopFile,
     SIMULATOR_FIXTURE_RUNTIME: bunExecutable,
+    SIMULATOR_FIXTURE_STATUS_FILE: statusFile,
   })
   const manifest = fixtureManifest(entrypoint)
-  try {
-    for (let cycle = 0; cycle < 20; cycle += 1) {
-      await Promise.all([removeIfPresent(childPidFile), removeIfPresent(childStopFile)])
-      const started = await manager.start({ manifest, activatedRoot: root, platform: windowsPlatform() })
-      assert.equal(started.state, 'healthy')
-      assert.ok(started.pid)
-      const childPid = Number(await readFile(childPidFile, 'utf8'))
-      assert.equal(processExists(started.pid), true)
-      assert.equal(processExists(childPid), true)
-      const stopped = await manager.stop(manifest.id)
-      assert.equal(stopped?.state, 'stopped')
-      await Promise.all([waitForExit(started.pid), waitForExit(childPid)])
+  const diagnostics: string[] = []
+  const unsubscribe = manager.subscribe((snapshot) => {
+    if (snapshot.diagnostic) {
+      diagnostics.push(`${snapshot.state}:${snapshot.diagnostic.code}:${snapshot.diagnostic.message}`)
     }
+  })
+  try {
+    await drainAfter(manager, async () => {
+      for (let cycle = 0; cycle < 20; cycle += 1) {
+        await Promise.all([childPidFile, childStopFile, statusFile].map(removeIfPresent))
+        diagnostics.length = 0
+        const startedAt = Date.now()
+        let started: ModuleDaemonSnapshot
+        try {
+          started = await manager.start({ manifest, activatedRoot: root, platform: windowsPlatform() })
+        } catch (error) {
+          const fixtureStatus = await readIfPresent(statusFile)
+          const snapshot = manager.get(manifest.id)
+          throw new Error(
+            `Windows native cycle ${cycle + 1}/20 failed to start after ${Date.now() - startedAt}ms; `
+            + `snapshot=${JSON.stringify(snapshot)} diagnostics=${JSON.stringify(diagnostics)} `
+            + `fixtureStatus=${JSON.stringify(fixtureStatus)}`,
+            { cause: error },
+          )
+        }
+        assert.equal(started.state, 'healthy')
+        assert.ok(started.pid)
+        const childPid = Number(await waitForFile(childPidFile, 5_000))
+        assert.equal(processExists(started.pid), true)
+        assert.equal(processExists(childPid), true)
+        console.log(
+          `Windows native cycle ${cycle + 1}/20 healthy in ${Date.now() - startedAt}ms `
+          + `endpoint=${started.endpoint?.host}:${started.endpoint?.port} parent=${started.pid} child=${childPid}`,
+        )
+        const stopped = await manager.stop(manifest.id)
+        assert.equal(stopped?.state, 'stopped')
+        await Promise.all([waitForExit(started.pid), waitForExit(childPid)])
+      }
+    })
   } finally {
-    await manager.drain()
+    unsubscribe()
   }
 }
 
@@ -179,6 +248,7 @@ async function runLeaderFirst(
 ): Promise<void> {
   const { root, entrypoint } = await prepareFixture(bunExecutable, 'simulator-daemon-node-leader-')
   const childPidFile = join(root, 'child.pid')
+  const statusFile = join(root, 'fixture-status.log')
   const manager = managerFor(factory, {
     PATH: `${dirname(bunExecutable)};${join(systemRoot, 'System32')}`,
     SystemRoot: systemRoot,
@@ -186,20 +256,19 @@ async function runLeaderFirst(
     SIMULATOR_FIXTURE_CHILD_STOP_FILE: join(root, 'child-stopped'),
     SIMULATOR_FIXTURE_RUNTIME: bunExecutable,
     SIMULATOR_FIXTURE_EXIT_AFTER_READY: '1',
+    SIMULATOR_FIXTURE_STATUS_FILE: statusFile,
   })
   const manifest = fixtureManifest(entrypoint)
-  try {
+  await drainAfter(manager, async () => {
     await manager.start({ manifest, activatedRoot: root, platform: windowsPlatform() })
-    const childPid = Number(await readFile(childPidFile, 'utf8'))
+    const childPid = Number(await waitForFile(childPidFile, 5_000))
     const deadline = Date.now() + 5_000
     while (manager.get(manifest.id)?.state !== 'crashed' && Date.now() < deadline) {
       await new Promise((resolveWait) => setTimeout(resolveWait, 10))
     }
     assert.deepEqual(manager.get(manifest.id)?.diagnostic?.code, 'RESTART_BUDGET_EXHAUSTED')
     await waitForExit(childPid)
-  } finally {
-    await manager.drain()
-  }
+  })
 }
 
 async function main(): Promise<void> {
