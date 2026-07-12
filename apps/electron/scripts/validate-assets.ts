@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from "node:fs"
+import { existsSync, readdirSync, statSync } from "node:fs"
 
 const requiredAssetDirectories = [
   { path: "dist/resources/themes", description: "preset themes" },
@@ -12,6 +12,18 @@ for (const asset of requiredAssetDirectories) {
   if (!existsSync(asset.path)) {
     failures.push(`${asset.path} is missing (${asset.description})`)
   } else if (readdirSync(asset.path).length === 0) {
+    failures.push(`${asset.path} is empty (${asset.description})`)
+  }
+}
+
+const requiredBuildFiles = [
+  { path: "dist/module-view-preload.cjs", description: "isolated module view preload" },
+]
+
+for (const asset of requiredBuildFiles) {
+  if (!existsSync(asset.path)) {
+    failures.push(`${asset.path} is missing (${asset.description})`)
+  } else if (statSync(asset.path).size === 0) {
     failures.push(`${asset.path} is empty (${asset.description})`)
   }
 }

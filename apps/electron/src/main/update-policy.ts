@@ -1,0 +1,2 @@
+export const AUTO_UPDATES_DISABLED = process.env.SIMULATOR_DISABLE_UPDATES === '1'
+

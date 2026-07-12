@@ -1,0 +1,17 @@
+{
+  "name": "@simulator/open-design-artifact-policy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "unicode-case-folding": "1.1.1"
+  },
+  "scripts": {
+    "build": "node ./src/validate-artifact.mjs --provenance ./provenance.json --policy ./artifact-policy.json --decisions ./resource-decisions.json --inventory ./fixtures/minimal-valid.inventory.json",
+    "test": "node --test",
+    "typecheck": "node --check ./src/validate-artifact.mjs && node --check ./test/validate-artifact.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
