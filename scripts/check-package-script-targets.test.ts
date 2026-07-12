@@ -145,4 +145,38 @@ describe("package script target inventory", () => {
       },
     ])
   })
+
+  test("does not leak cd state through pipelines or fallback branches", () => {
+    manifest(join(fixtureRoot, "package.json"), {
+      name: "root",
+      version: "1.0.0",
+      scripts: {
+        pipeline: "cd dir-a | node scripts/pipeline.js",
+        fallback: "cd missing || node scripts/fallback.js",
+      },
+    })
+    write(join(fixtureRoot, "scripts", "pipeline.js"), "export {}\n")
+    write(join(fixtureRoot, "scripts", "fallback.js"), "export {}\n")
+    mkdirSync(join(fixtureRoot, "dir-a"), { recursive: true })
+    mkdirSync(join(fixtureRoot, "apps"), { recursive: true })
+    mkdirSync(join(fixtureRoot, "packages"), { recursive: true })
+
+    expect(findMissingScriptTargets(fixtureRoot)).toEqual([])
+  })
+
+  test("restores cwd after a subshell", () => {
+    manifest(join(fixtureRoot, "package.json"), {
+      name: "root",
+      version: "1.0.0",
+      scripts: {
+        scoped: "(cd dir-a && node scripts/in.js); node scripts/post.js",
+      },
+    })
+    write(join(fixtureRoot, "dir-a", "scripts", "in.js"), "export {}\n")
+    write(join(fixtureRoot, "scripts", "post.js"), "export {}\n")
+    mkdirSync(join(fixtureRoot, "apps"), { recursive: true })
+    mkdirSync(join(fixtureRoot, "packages"), { recursive: true })
+
+    expect(findMissingScriptTargets(fixtureRoot)).toEqual([])
+  })
 })

@@ -69,9 +69,9 @@ function addCommandInvocations(
   tokens: string[],
   cwd: string,
   invocations: ScriptInvocation[],
-): string {
+): { cwd: string; changedDirectory: boolean } {
   if (tokens[0] === "cd" && tokens[1] && !tokens[1].startsWith("-")) {
-    return resolve(cwd, tokens[1])
+    return { cwd: resolve(cwd, tokens[1]), changedDirectory: true }
   }
 
   for (let index = 0; index < tokens.length; index += 1) {
@@ -91,24 +91,46 @@ function addCommandInvocations(
     }
   }
 
-  return cwd
+  return { cwd, changedDirectory: false }
 }
 
 function scriptInvocations(command: string, initialCwd: string): ScriptInvocation[] {
   const invocations: ScriptInvocation[] = []
   let cwd = initialCwd
   let commandTokens: string[] = []
+  const cwdStack: string[] = []
 
-  const flush = () => {
-    cwd = addCommandInvocations(commandTokens, cwd, invocations)
+  const flush = (operator?: string) => {
+    const result = addCommandInvocations(commandTokens, cwd, invocations)
+    if (
+      result.changedDirectory &&
+      (operator === undefined || operator === "&&" || operator === ";")
+    ) {
+      cwd = result.cwd
+    }
     commandTokens = []
   }
 
   for (const token of parse(command, () => "")) {
     if (typeof token === "string") commandTokens.push(token)
-    else flush()
+    else {
+      if (token.op === "(") {
+        flush(token.op)
+        cwdStack.push(cwd)
+        continue
+      }
+      if (token.op === ")") {
+        flush(token.op)
+        const parentCwd = cwdStack.pop()
+        if (parentCwd === undefined) throw new Error("Unbalanced package-script subshell")
+        cwd = parentCwd
+        continue
+      }
+      flush(token.op)
+    }
   }
   flush()
+  if (cwdStack.length > 0) throw new Error("Unbalanced package-script subshell")
 
   return invocations
 }
