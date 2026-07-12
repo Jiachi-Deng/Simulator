@@ -10,6 +10,8 @@ import {
   type ModuleSpawnRequest,
   type ProcessAdapter,
   type ProcessExit,
+  type RealProcessAdapterOptions,
+  type WindowsJobProcessFactory,
 } from './types.ts'
 
 function abortError(): DOMException {
@@ -58,28 +60,6 @@ class RealModuleProcess implements ModuleProcess {
   }
 
   private async stopTreeOnce(graceMs: number): Promise<void> {
-    if (process.platform === 'win32') {
-      const taskkill = await Promise.race([
-        new Promise<{ exitCode?: number; error?: unknown }>((resolve) => {
-          const killer = spawn('taskkill', ['/pid', String(this.pid), '/T', '/F'], {
-            shell: false,
-            stdio: 'ignore',
-            windowsHide: true,
-          })
-          killer.once('error', (error) => resolve({ error }))
-          killer.once('exit', (exitCode) => resolve({ exitCode: exitCode ?? undefined }))
-        }),
-        new Promise<{ timeout: true }>((resolve) => setTimeout(() => resolve({ timeout: true }), graceMs)),
-      ])
-      if ('timeout' in taskkill) throw new Error('taskkill timed out while stopping module process tree')
-      if (taskkill.error || taskkill.exitCode !== 0) {
-        throw new Error(`taskkill failed while stopping module process tree (exitCode=${taskkill.exitCode ?? 'spawn-error'})`, { cause: taskkill.error })
-      }
-      const exited = await this.waitForLeaderExit(graceMs)
-      if (!exited) throw new Error('Module process leader did not exit after taskkill')
-      return
-    }
-
     this.signalGroup('SIGTERM')
     const groupExited = await this.waitForGroupExit(graceMs)
     if (!groupExited) {
@@ -128,9 +108,22 @@ class RealModuleProcess implements ModuleProcess {
 }
 
 export class RealProcessAdapter implements ProcessAdapter {
+  private readonly platform: NodeJS.Platform
+  private windowsJobFactory?: WindowsJobProcessFactory
+
+  constructor(options: RealProcessAdapterOptions = {}) {
+    this.platform = options.platform ?? process.platform
+    this.windowsJobFactory = options.windowsJobFactory
+  }
+
   async spawn(request: ModuleSpawnRequest): Promise<ModuleProcess> {
     if (request.shell !== false || request.args.length !== 0) {
       throw new ModuleDaemonError('SPAWN_FAILED', 'Module processes must use shell:false with no host-supplied arguments')
+    }
+
+    if (this.platform === 'win32') {
+      this.windowsJobFactory ??= new (await import('./windows-job.ts')).KoffiWindowsJobProcessFactory()
+      return this.windowsJobFactory.spawn(request)
     }
 
     return await new Promise((resolve, reject) => {
@@ -138,7 +131,7 @@ export class RealProcessAdapter implements ProcessAdapter {
         cwd: request.cwd,
         env: { ...request.env },
         shell: false,
-        detached: process.platform !== 'win32',
+        detached: true,
         stdio: 'ignore',
         windowsHide: true,
       })

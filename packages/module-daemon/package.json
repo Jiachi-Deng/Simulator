@@ -14,10 +14,11 @@
     "test": "bun test src",
     "test:integration": "bun test src/real-adapters.integration.test.ts",
     "typecheck": "tsc --noEmit",
-    "build": "bun build src/index.ts src/testing/index.ts --outdir dist --target bun --external @simulator/module-contract"
+    "build": "bun build src/index.ts src/testing/index.ts --outdir dist --target bun --splitting --external @simulator/module-contract --external koffi"
   },
   "dependencies": {
-    "@simulator/module-contract": "workspace:*"
+    "@simulator/module-contract": "workspace:*",
+    "koffi": "^3.1.1"
   },
   "devDependencies": {
     "typescript": "^5.8.2"

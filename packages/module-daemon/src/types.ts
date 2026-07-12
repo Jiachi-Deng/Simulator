@@ -41,6 +41,15 @@ export interface ProcessAdapter {
   spawn(request: ModuleSpawnRequest): Promise<ModuleProcess>
 }
 
+export interface WindowsJobProcessFactory {
+  spawn(request: ModuleSpawnRequest): Promise<ModuleProcess>
+}
+
+export interface RealProcessAdapterOptions {
+  readonly platform?: NodeJS.Platform
+  readonly windowsJobFactory?: WindowsJobProcessFactory
+}
+
 export interface ClockAdapter {
   now(): number
   sleep(milliseconds: number, signal?: AbortSignal): Promise<void>
