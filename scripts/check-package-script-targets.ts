@@ -17,34 +17,6 @@ export interface MissingScriptTarget {
 
 const SCRIPT_EXTENSION = /\.(?:ts|js|mjs|cjs|sh|ps1)$/
 const SCRIPT_RUNNERS = new Set(["bun", "bash", "sh", "node"])
-const SHELL_OPTIONS_WITH_VALUE = new Set(["-o", "-O"])
-const NODE_OPTIONS_WITH_VALUE = new Set([
-  "--conditions",
-  "--diagnostic-dir",
-  "--disable-warning",
-  "--env-file",
-  "--env-file-if-exists",
-  "--eval",
-  "--experimental-loader",
-  "--heap-prof-dir",
-  "--icu-data-dir",
-  "--import",
-  "--input-type",
-  "--inspect-port",
-  "--loader",
-  "--openssl-config",
-  "--redirect-warnings",
-  "--require",
-  "--test-name-pattern",
-  "--test-reporter",
-  "--test-reporter-destination",
-  "--title",
-  "--trace-event-categories",
-  "--trace-event-file-pattern",
-  "-e",
-  "-p",
-  "-r",
-])
 
 function isScriptTarget(token: string | undefined): token is string {
   return token !== undefined && SCRIPT_EXTENSION.test(token)
@@ -55,13 +27,10 @@ function addRunnerTarget(runner: string, args: string[], targets: Set<string>): 
 
   if (runner === "bun" && args[index] === "run") index += 1
 
+  // Runner CLI flags evolve frequently. Conservatively require every script-like
+  // argument to exist instead of maintaining an incomplete option allowlist.
   while (index < args.length) {
     const argument = args[index]!
-
-    if (argument === "--") {
-      index += 1
-      break
-    }
 
     if (runner === "bash" || runner === "sh") {
       if (argument === "-c" || (/^-[^-]+$/.test(argument) && argument.includes("c"))) {
@@ -71,27 +40,11 @@ function addRunnerTarget(runner: string, args: string[], targets: Set<string>): 
         }
         return
       }
-      if (SHELL_OPTIONS_WITH_VALUE.has(argument)) {
-        index += 2
-        continue
-      }
     }
 
-    if (runner === "node" && NODE_OPTIONS_WITH_VALUE.has(argument)) {
-      index += 2
-      continue
-    }
-
-    if (argument.startsWith("-")) {
-      index += 1
-      continue
-    }
-
-    break
+    if (isScriptTarget(argument)) targets.add(argument)
+    index += 1
   }
-
-  const target = args[index]
-  if (isScriptTarget(target)) targets.add(target)
 }
 
 function addCommandTargets(tokens: string[], targets: Set<string>): void {

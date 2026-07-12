@@ -41,15 +41,25 @@ describe("package script target inventory", () => {
   test("skips runner options before script targets", () => {
     expect(
       directScriptTargets(
-        "bash -e scripts/missing.sh && node --enable-source-maps scripts/missing.js",
+        "bash --rcfile config/bashrc scripts/missing.sh && node --cpu-prof-dir profiles scripts/missing.js",
       ),
     ).toEqual(["scripts/missing.js", "scripts/missing.sh"])
+    expect(
+      directScriptTargets(
+        "node --require scripts/hook.js scripts/main.js && node --import scripts/register.mjs scripts/other.js",
+      ),
+    ).toEqual([
+      "scripts/hook.js",
+      "scripts/main.js",
+      "scripts/other.js",
+      "scripts/register.mjs",
+    ])
   })
 
   test("recursively extracts sh -c commands without treating the command as a file", () => {
     expect(
       directScriptTargets(
-        "bash -c 'node --enable-source-maps scripts/nested.js' && sh -c 'bash -e scripts/nested.sh'",
+        "bash -lc 'node --cpu-prof-dir profiles scripts/nested.js' && sh -c 'bash -e scripts/nested.sh'",
       ),
     ).toEqual(["scripts/nested.js", "scripts/nested.sh"])
   })
