@@ -55,7 +55,7 @@ uninstalled -> installed -> running -> stopped -> running
 
 非法 transition 不改变 state 或 transition history。`health` 不改变状态，仅在 `running` 时返回 `healthy`。该 fixture 用于验证 contract 和后续 registry；它不是 production module runtime。
 
-## 第二切片：Module Daemon Manager
+## Module Daemon Manager
 
 `@simulator/module-daemon` 是 host-neutral 的可选 Module 进程 supervisor。它依赖 `@simulator/module-contract` 选择当前平台声明的 artifact，但不包含 Electron/React、installer/downloader、catalog network、Host Agent API、领域 adapter 或 sandbox/container 逻辑。
 
@@ -102,3 +102,66 @@ pending start 会在 `realpath` 前登记 cancellable controller；`stop()` 或 
 POSIX real process adapter 使用独立 process group，先向整组发送 `SIGTERM`，等待整组退出，grace timeout 后才发送 `SIGKILL`。Windows 使用 Koffi 驱动原生 Job Object：declared entrypoint 以 `CREATE_SUSPENDED` 创建，先加入启用 `KILL_ON_JOB_CLOSE` 的 Job 后才 resume，因此 leader 提前 crash 或 app 异常退出都不会让 descendants 脱离 ownership；stop 通过 `TerminateJobObject` 与 active-process accounting 做有界 drain。Windows native FFI 保持在动态 chunk，非 Windows 不加载。deterministic fake process/clock/health adapters 从 `@simulator/module-daemon/testing` 导出。真实本地 fixture 在 package test 中执行 20 次 start/health/stop，并逐轮确认 parent 与 descendant PID 都已退出；POSIX 与 Windows 都覆盖 leader-first crash 后的 descendant cleanup。Windows activated-root containment 使用无需 Developer Mode 或管理员 symlink privilege 的 directory junction 回归测试。
 
 PR workflow `Module Daemon` 在 `ubuntu-latest`、`macos-latest`、`windows-latest` 上运行完整 package tests、typecheck 与 build，并以稳定的 `Module Daemon Gate` aggregate job 作为 branch protection required check。
+## Module Release Trust
+
+`@simulator/module-release-trust` 是 runtime-neutral 的 signed catalog 验证边界。它只使用调用方提供的 envelope、trusted public key set、当前时间和 monotonic sequence high-water mark；不包含 network、filesystem、downloader、Electron 或 process 能力，也不保存私钥、seed 或持久状态。
+
+### Signed Envelope 与 Canonical Bytes
+
+v1 envelope 明确携带 `keyId`、原始 `catalogBytes` 和 64-byte Ed25519 `signature`。验证器复制输入 bytes 后，直接对收到的原始 catalog bytes 验签；它不会 parse 后重序列化并用另一组 bytes 验签。签名通过后，bytes 还必须是严格 UTF-8、合法 JSON，并与该 JSON 的 deterministic canonical representation 完全一致。因此 whitespace、field order、duplicate/ambiguous representation 或任意 byte mutation 都不能跨过 trust boundary。
+
+canonical encoder 只接受 data-only plain object 和 dense plain array；拒绝 accessor、symbol、sparse array、额外 array property、循环引用、unsafe number 和 non-JSON value。固定 byte、depth 和 value-count 上限在验签边界限制 CPU 与 memory 消耗。
+
+Production API 只接受 32-byte Ed25519 public key。package 不提供 signing API，也不包含 private key 或 seed；测试使用运行时生成、明确 test-only 的内存 key pair。另有一个由 Python `cryptography` 独立生成的固定 interoperability vector，仓库只保存 public key、canonical catalog bytes 和 signature，并覆盖 catalog/signature bit flip。
+
+### Catalog v1
+
+catalog 包含递增的 positive safe-integer `sequence`、canonical ISO-8601 `issuedAt` / `expiresAt` 和 release 列表。每个 release 复用 `@simulator/module-contract` 的完整 manifest validator，并为 manifest 的每个平台 artifact 声明 positive safe-integer byte size。module ID + version、manifest platform 和 size platform 均不得重复；size platform 必须与 manifest artifacts 一一对应。
+
+manifest validator 继续负责 lowercase SHA-256、canonical absolute HTTPS URL、safe entrypoint、known platform/capability 及 deep immutability。trust package 重建并 deep-freeze catalog、release、manifest 和 size metadata，调用方不能在验签后修改 hash、size、URL 或 identity。
+
+### Trust 与 Rollback Policy
+
+trusted key 由唯一 `keyId`、public key、`activeFrom`、可选 `activeUntil` 和可选 `revokedAt` 构成，key set 最多 64 项。catalog 的 `issuedAt` 必须落在 key activation window 内且早于 revocation；`expiresAt` 不得越过 `activeUntil` 或已知的 `revokedAt`。无论 catalog 何时签发，只要 trusted `now >= revokedAt` 就立即返回 `KEY_REVOKED`；`now >= activeUntil` 同样停止接受该 key。
+
+catalog lifetime 最多 24 小时。当前时间必须位于 catalog issuance/expiry window，调用方可提供最多 5 分钟的 non-negative `clockSkewMs`；clock skew 不延迟 key revocation。options、trusted key entry、state 都按 unknown plain-data input 验证，null、accessor、proxy、sparse/oversized key set 返回结构化 diagnostic 而不执行 getter 或抛出异常。
+
+调用方必须原子持久化 `highestSequence` 和 `latestIssuedAt`；初始 state 为 `{ highestSequence: 0 }`，第一次成功后两者必须成对存在。sequence 小于或等于 high-water mark 时返回 `ROLLBACK_DETECTED`，`issuedAt` 未严格推进时返回 `BACKDATED_CATALOG`，因此 backdated catalog 不能用超高 sequence 污染 rollback state。package 自身不通过 filesystem 隐式持久化。所有失败均返回固定 `code`、阶段 `stage`、RFC 6901 风格 `path`、稳定 `message` 和适用时的 `keyId`。
+## Deterministic Module Registry
+
+`@simulator/module-registry` 是可选 Module 的 runtime-neutral metadata source of truth。它依赖 `@simulator/module-contract` 和仓库已有的 `semver`，不依赖 filesystem、network、archive、process、Electron、React 或任何领域 Module。内置 Agent workspace 不读取该 registry，因此 optional-module state 为空、损坏或不兼容时不会阻塞 Agent。
+
+### Validated Input Boundary
+
+Registry 的 `install` 只接受当前进程中由 `parseModuleManifest` 返回的 immutable manifest。`module-contract` 使用不可伪造的运行时 provenance 记录成功产物；手工构造、类型强转或仅做 `Object.freeze` 的对象会得到 `UNVALIDATED_MANIFEST`，未知 schema 会得到 `UNSUPPORTED_MANIFEST_SCHEMA`。snapshot 中的 manifest 是 immutable canonical copy，不会泄漏 registry 内部引用，也不会被当成新的 validated input。
+
+Manifest v1 已在第一切片冻结，且不包含 host version range。为避免原地改变 schema v1，安装方把 `hostVersionRange` 作为独立 compatibility declaration 与 validated manifest 一起提交。Registry 使用构造时固定的 canonical host SemVer 和 `ModulePlatform` 做两项检查：
+
+- manifest 必须包含当前 platform 的 artifact；
+- 当前 host version 必须满足规范化后的 Semantic Version range。
+
+当前 host 不兼容的安装请求失败且不改变状态。若同一份已提交状态在不同 host version/platform 下恢复，已安装版本会保留并标记为 `incompatible`，但不兼容的 active/LKG 引用会被清除并产生 deterministic recovery diagnostics。
+
+### State And Ordering
+
+每个 Module 记录所有 installed versions、一个 optional active version、一个 optional last-known-good (LKG) version 和 module-level disabled 状态。核心 invariant 是：
+
+- active 与 LKG 必须引用同一 Module 中已安装且与当前 host 兼容的版本；
+- disabled Module 保留选择状态，但在 re-enable 前不能执行新的 activation；
+- 删除 active 或 LKG 版本必须在同一个 API mutation 中显式提供替代版本或 `null`；
+- duplicate 表示相同 ID/version、canonical manifest 和 host range 均相同；任一内容不同则为 conflict；
+- 失败 mutation 始终返回之前的 immutable snapshot，不修改 registry 或 committed persistence。
+
+Snapshot 按 Module ID 的二进制字典序排列，version 按 SemVer precedence、build metadata、原始字符串依次稳定排序。Manifest 内 artifact 按 platform 排序，capability 按字符串排序。Diagnostics 按 code、Module ID、version、message 排序。因此相同输入集合不受安装顺序、Map insertion order 或原始 manifest 数组顺序影响。
+
+### Atomic Persistence And Recovery
+
+`ModuleRegistryPersistence` 只定义同步 `read` 与 `commit`，不包含 filesystem API。生产级磁盘 persistence 不在本切片范围。随 package 提供的 `InMemoryModuleRegistryPersistence` 使用 committed/staged 两份 plain-data state：
+
+```text
+previous committed -> stage complete next state -> publish committed -> clear staged
+```
+
+Registry mutation 先 copy-on-write 构造 next state，再交给 persistence commit；只有 commit 成功后才发布新的内存 state。测试 adapter 可以在 stage 后、publish 前 deterministic interrupt。重启时 registry 忽略 staged state，只恢复 previous committed snapshot，并报告 `RECOVERY_INTERRUPTED_COMMIT`。
+
+Persisted state schema、plain-data shape、manifest、Module identity、version uniqueness、host range 与 active/LKG references 会在恢复时重新验证。任一 corrupt/conflicting state 都 fail safe 为 empty optional-module registry，并只报告 `CORRUPT_PERSISTED_STATE`。`RegistryCrashRecoveryFixture` 同时持有独立且 immutable 的 built-in Agent availability state，用于证明 registry corruption 和 interrupted commit 不会传播到内置 Agent。

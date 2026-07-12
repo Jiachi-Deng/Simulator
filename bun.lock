@@ -264,7 +264,34 @@
     "packages/module-contract": {
       "name": "@simulator/module-contract",
       "version": "0.11.1",
+      "dependencies": {
+        "semver": "7.7.3",
+      },
       "devDependencies": {
+        "@types/semver": "^7.7.1",
+        "typescript": "^5.8.2",
+      },
+    },
+    "packages/module-registry": {
+      "name": "@simulator/module-registry",
+      "version": "0.11.1",
+      "dependencies": {
+        "@simulator/module-contract": "workspace:*",
+        "semver": "7.7.3",
+      },
+      "devDependencies": {
+        "@types/semver": "^7.7.1",
+        "typescript": "^5.8.2",
+      },
+    },
+    "packages/module-release-trust": {
+      "name": "@simulator/module-release-trust",
+      "version": "0.11.1",
+      "dependencies": {
+        "@simulator/module-contract": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^25.0.8",
         "typescript": "^5.8.2",
       },
     },
@@ -1330,6 +1357,8 @@
     "@simulator/module-contract": ["@simulator/module-contract@workspace:packages/module-contract"],
 
     "@simulator/module-daemon": ["@simulator/module-daemon@workspace:packages/module-daemon"],
+    "@simulator/module-release-trust": ["@simulator/module-release-trust@workspace:packages/module-release-trust"],
+    "@simulator/module-registry": ["@simulator/module-registry@workspace:packages/module-registry"],
 
     "@sinclair/typebox": ["@sinclair/typebox@0.34.48", "", {}, "sha512-kKJTNuK3AQOrgjjotVxMrCn1sUJwM76wMszfq1kdU4uYVJjvEWuFQ6HgvLt4Xz3fSmZlTOxJ/Ie13KnIcWQXFA=="],
 
