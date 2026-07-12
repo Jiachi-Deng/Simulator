@@ -2,7 +2,15 @@
   "name": "craft-agent",
   "version": "0.11.1",
   "license": "Apache-2.0",
-  "description": "Claude Code-like agent for Craft documents",
+  "description": "Simulator desktop agent workspace",
+  "homepage": "https://github.com/Jiachi-Deng/Simulator#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jiachi-Deng/Simulator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Jiachi-Deng/Simulator/issues"
+  },
   "type": "module",
   "private": true,
   "trustedDependencies": [

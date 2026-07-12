@@ -1,5 +1,5 @@
 appId: com.lukilabs.craft-agent
-productName: Craft Agents
+productName: Simulator
 copyright: Copyright © 2026 Craft Docs Ltd.
 
 electronVersion: "39.2.7"
@@ -91,7 +91,7 @@ mac:
     # Required for macOS to list the app under Privacy & Security > Local Network
     # and prompt for permission. Without it the app is silently denied LAN access
     # and never appears in the privacy pane (craft-agents-oss#938).
-    NSLocalNetworkUsageDescription: "Craft Agents uses your local network to reach LAN addresses and devices you ask an agent to access, such as local servers or APIs."
+    NSLocalNetworkUsageDescription: "Simulator uses your local network to reach LAN addresses and devices you ask an agent to access, such as local servers or APIs."
   target:
     - target: dmg
       arch:
@@ -140,7 +140,7 @@ dmg:
   # Use app icon as the mounted volume icon in Finder
   icon: resources/icon.icns
   iconSize: 80
-  title: "Craft Agents"
+  title: "Simulator"
   contents:
     - x: 130
       y: 200

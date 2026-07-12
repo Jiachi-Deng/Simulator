@@ -1,14 +1,22 @@
 {
   "name": "@craft-agent/electron",
   "version": "0.11.1",
-  "description": "Electron desktop app for Craft Agents",
+  "description": "Electron desktop app for Simulator",
   "main": "dist/main.cjs",
   "private": true,
   "author": {
     "name": "Craft Docs Ltd.",
     "email": "support@craft.do"
   },
-  "homepage": "https://agents.craft.do",
+  "homepage": "https://github.com/Jiachi-Deng/Simulator#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jiachi-Deng/Simulator.git",
+    "directory": "apps/electron"
+  },
+  "bugs": {
+    "url": "https://github.com/Jiachi-Deng/Simulator/issues"
+  },
   "license": "Apache-2.0",
   "type": "module",
   "engines": {

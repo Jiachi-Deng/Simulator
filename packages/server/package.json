@@ -1,7 +1,7 @@
 {
   "name": "@craft-agent/server",
   "version": "0.11.1",
-  "description": "Standalone headless Craft Agent server (Bun runtime)",
+  "description": "Standalone headless Simulator server (Bun runtime)",
   "type": "module",
   "main": "src/index.ts",
   "bin": {
@@ -18,7 +18,15 @@
     "email": "support@craft.do"
   },
   "license": "Apache-2.0",
-  "homepage": "https://agents.craft.do",
+  "homepage": "https://github.com/Jiachi-Deng/Simulator#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jiachi-Deng/Simulator.git",
+    "directory": "packages/server"
+  },
+  "bugs": {
+    "url": "https://github.com/Jiachi-Deng/Simulator/issues"
+  },
   "scripts": {
     "start": "bun run src/index.ts",
     "generate-token": "bun run src/index.ts --generate-token",
