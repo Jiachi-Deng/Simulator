@@ -7,6 +7,7 @@ import {
   getSessionSafeAllowedToolNames,
   getSessionSafeBlockedToolNames,
   getToolDefsAsJsonSchema,
+  UpdatePreferencesSchema,
 } from './tool-defs.ts';
 
 describe('session tool filtering helpers', () => {
@@ -72,5 +73,10 @@ describe('session tool filtering helpers', () => {
     expect(allowedPrefixed.has('mcp__session__script_sandbox')).toBe(true);
     expect(blockedPrefixed.has('mcp__session__source_oauth_trigger')).toBe(true);
     expect(blockedPrefixed.has('mcp__session__spawn_session')).toBe(true);
+  });
+
+  it('documents upstream co-authorship as an opt-in preference', () => {
+    expect(UpdatePreferencesSchema.shape.includeCoAuthoredBy.description).toContain('opt in')
+    expect(UpdatePreferencesSchema.shape.includeCoAuthoredBy.description).toContain('Defaults to false')
   });
 });

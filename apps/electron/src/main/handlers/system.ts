@@ -294,7 +294,7 @@ export function registerSystemGuiHandlers(server: RpcServer, deps: HandlerDeps):
     return getDismissedUpdateVersion()
   })
 
-  // Menu actions from renderer (for unified Craft menu)
+  // Menu actions from renderer (for unified Simulator menu)
   server.handle(RPC_CHANNELS.menu.QUIT, async () => {
     deps.platform.quit?.()
   })
