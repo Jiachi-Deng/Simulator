@@ -57,7 +57,6 @@ describe('module view preload', () => {
 
   it('delivers only matching host messages and reports cross-talk', () => {
     const received: unknown[] = []
-    const unsubscribe = exposed.simulatorModuleView.onMessage((payload: unknown) => received.push(payload))
     const listener = listeners.get('module-view:to-module')!
     const envelope = {
       version: 1,
@@ -69,9 +68,12 @@ describe('module view preload', () => {
     }
 
     listener({}, envelope)
+    const unsubscribe = exposed.simulatorModuleView.onMessage((payload: unknown) => received.push(payload))
     expect(received).toEqual([{ command: 'refresh' }])
+    listener({}, envelope)
+    expect(received).toEqual([{ command: 'refresh' }, { command: 'refresh' }])
     listener({}, { ...envelope, viewInstanceId: 'fixture-2' })
-    expect(received).toHaveLength(1)
+    expect(received).toHaveLength(2)
     expect(sent.at(-1)).toEqual(['module-view:to-host', expect.objectContaining({
       type: 'failure',
       error: expect.objectContaining({ code: 'CROSS_TALK_BLOCKED' }),
@@ -79,6 +81,6 @@ describe('module view preload', () => {
 
     unsubscribe()
     listener({}, envelope)
-    expect(received).toHaveLength(1)
+    expect(received).toHaveLength(2)
   })
 })

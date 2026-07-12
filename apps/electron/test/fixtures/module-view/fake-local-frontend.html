@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Module View Smoke Fixture</title>
+  </head>
+  <body>
+    <main id="status">waiting</main>
+    <script>
+      const moduleView = window.simulatorModuleView
+      moduleView.onMessage((message) => {
+        if (message?.type !== 'smoke-ping') return
+        document.getElementById('status').textContent = 'ready'
+        moduleView.send({ type: 'smoke-pong', nonce: message.nonce })
+      })
+    </script>
+  </body>
+</html>

@@ -27,12 +27,13 @@
     "build:main:win": "esbuild src/main/index.ts --bundle --platform=node --format=cjs --outfile=dist/main.cjs --external:electron --external:@anthropic-ai/claude-agent-sdk --alias:node-fetch=./src/main/shims/node-fetch.cjs --alias:abort-controller=./src/main/shims/abort-controller.cjs",
     "build:preload": "esbuild src/preload/bootstrap.ts --bundle --platform=node --format=cjs --outfile=dist/bootstrap-preload.cjs --external:electron",
     "build:preload-toolbar": "esbuild src/preload/browser-toolbar.ts --bundle --platform=node --format=cjs --outfile=dist/browser-toolbar-preload.cjs --external:electron",
+    "build:preload-module-view": "esbuild src/preload/module-view.ts --bundle --platform=node --format=cjs --outfile=dist/module-view-preload.cjs --external:electron",
     "build:interceptor": "esbuild ../../packages/shared/src/unified-network-interceptor.ts --bundle --platform=node --format=cjs --outfile=dist/interceptor.cjs",
     "build:renderer": "vite build",
     "build:copy": "bun scripts/copy-assets.ts",
     "build:validate": "bun scripts/validate-assets.ts",
-    "build": "bun run lint && bun run build:main && bun run build:preload && bun run build:preload-toolbar && bun run build:interceptor && bun run build:renderer && bun run build:copy && bun run build:validate",
-    "build:win": "bun run build:main:win && bun run build:preload && bun run build:preload-toolbar && bun run build:interceptor && bun run build:renderer && bun run build:copy && bun run build:validate",
+    "build": "bun run lint && bun run build:main && bun run build:preload && bun run build:preload-toolbar && bun run build:preload-module-view && bun run build:interceptor && bun run build:renderer && bun run build:copy && bun run build:validate",
+    "build:win": "bun run build:main:win && bun run build:preload && bun run build:preload-toolbar && bun run build:preload-module-view && bun run build:interceptor && bun run build:renderer && bun run build:copy && bun run build:validate",
     "start": "bun run build && electron .",
     "start:win": "bun run build:win && electron .",
     "dev": "vite dev",
@@ -41,7 +42,8 @@
     "dist:mac:x64": "bash scripts/build-dmg.sh x64",
     "dist:win": "powershell -ExecutionPolicy Bypass -File scripts/build-win.ps1",
     "lint": "eslint src/",
-    "lint:fix": "eslint src/ --fix"
+    "lint:fix": "eslint src/ --fix",
+    "smoke:module-view": "bun scripts/module-view-smoke.ts"
   },
   "dependencies": {
     "@craft-agent/core": "workspace:*",

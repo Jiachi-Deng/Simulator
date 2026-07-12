@@ -26,6 +26,8 @@ if (!isValidModuleId(moduleId) || !isValidViewInstanceId(viewInstanceId)) {
 
 type MessageListener = (payload: ModuleViewJsonValue) => void
 const listeners = new Set<MessageListener>()
+const pendingMessages: ModuleViewJsonValue[] = []
+const MAX_PENDING_MESSAGES = 16
 
 function sendFailure(code: string, message: string): void {
   ipcRenderer.send(MODULE_VIEW_CHANNELS.TO_HOST, {
@@ -50,6 +52,15 @@ ipcRenderer.on(MODULE_VIEW_CHANNELS.TO_MODULE, (_event, input: unknown) => {
   }
   if (parsed.value.type !== 'message') {
     sendFailure('INVALID_ENVELOPE', 'Host channel only accepts message envelopes')
+    return
+  }
+
+  if (listeners.size === 0) {
+    if (pendingMessages.length >= MAX_PENDING_MESSAGES) {
+      sendFailure('MESSAGE_QUEUE_FULL', 'Module view message queue reached its limit')
+      return
+    }
+    pendingMessages.push(parsed.value.payload)
     return
   }
 
@@ -79,6 +90,13 @@ const api = Object.freeze({
   onMessage(listener: MessageListener): () => void {
     if (typeof listener !== 'function') throw new TypeError('Module view listener must be a function')
     listeners.add(listener)
+    for (const payload of pendingMessages.splice(0)) {
+      try {
+        listener(payload)
+      } catch {
+        sendFailure('LISTENER_FAILED', 'Module view message listener threw an exception')
+      }
+    }
     return () => listeners.delete(listener)
   },
 })
