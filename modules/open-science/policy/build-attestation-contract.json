@@ -8,7 +8,9 @@
     "sourceCommit",
     "bunVersion",
     "modelsDevApiSha256",
-    "networkDisabled"
+    "networkDisabled",
+    "componentPolicySha256",
+    "componentSetSha256"
   ],
   "trustPolicy": {
     "default": "deny",

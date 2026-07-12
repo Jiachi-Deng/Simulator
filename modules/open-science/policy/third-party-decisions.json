@@ -10,10 +10,28 @@
       "rationale": "Embedded web capability built from the exact OpenScience source pin"
     },
     {
-      "id": "pkg:generic/rdkit@2025.03.3",
+      "id": "pkg:generic/rdkit-wasm@2025.03.3",
       "decision": "included",
       "license": "BSD-3-Clause",
-      "rationale": "RDKit capability; exact resolved component must be present in SBOM and notices"
+      "rationale": "RDKit WASM capability; exact resolved component must be present in SBOM and notices"
+    },
+    {
+      "id": "pkg:npm/pdfjs-dist",
+      "decision": "excluded",
+      "license": "Apache-2.0",
+      "rationale": "The embedded-web-rdkit profile does not ship PDF.js"
+    },
+    {
+      "id": "pkg:npm/molstar",
+      "decision": "excluded",
+      "license": "MIT",
+      "rationale": "The embedded-web-rdkit profile does not ship Mol*"
+    },
+    {
+      "id": "pkg:npm/igv",
+      "decision": "excluded",
+      "license": "MIT",
+      "rationale": "The embedded-web-rdkit profile does not ship IGV"
     },
     {
       "id": "scientific-data-apis",

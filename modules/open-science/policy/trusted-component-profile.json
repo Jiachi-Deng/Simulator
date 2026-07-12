@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "profile": "embedded-web-rdkit",
+  "components": [
+    {
+      "feature": "embedded-web",
+      "id": "pkg:generic/openscience-embedded-web@1.3.4",
+      "disposition": "required",
+      "license": "Apache-2.0"
+    },
+    {
+      "feature": "rdkit-wasm",
+      "id": "pkg:generic/rdkit-wasm@2025.03.3",
+      "disposition": "required",
+      "license": "BSD-3-Clause"
+    },
+    {
+      "feature": "pdfjs",
+      "id": "pkg:npm/pdfjs-dist",
+      "disposition": "excluded",
+      "license": "Apache-2.0"
+    },
+    {
+      "feature": "molstar",
+      "id": "pkg:npm/molstar",
+      "disposition": "excluded",
+      "license": "MIT"
+    },
+    {
+      "feature": "igv",
+      "id": "pkg:npm/igv",
+      "disposition": "excluded",
+      "license": "MIT"
+    }
+  ]
+}

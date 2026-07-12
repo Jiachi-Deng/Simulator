@@ -52,6 +52,8 @@ export interface BuildBindings {
   bunVersion: string
   modelsDevApiSha256: string
   networkDisabled: true
+  componentPolicySha256: string
+  componentSetSha256: string
 }
 
 export interface RuntimeBindings {
@@ -62,9 +64,14 @@ export interface RuntimeBindings {
   productionCredentialPersistenceDenied: true
 }
 
-export interface TrustDecision {
-  trusted: boolean
-  reason?: string
+export interface VerificationIdentity {
+  subject: string
+  source: string
+  evidence: string
+}
+
+export interface TrustDecision extends VerificationIdentity {
+  trusted: true
 }
 
 export interface TrustedProvenanceVerifier {

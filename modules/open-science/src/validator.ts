@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto"
 import { lstat, readdir, readFile, realpath } from "node:fs/promises"
 import path from "node:path"
+import { types as utilTypes } from "node:util"
 import type {
-  ArtifactInventory, ArtifactRole, BuildBindings, InventoryFile, RuntimeBindings, RuntimePolicy, ValidationOptions,
+  ArtifactInventory, ArtifactRole, BuildBindings, InventoryFile, RuntimeBindings, RuntimePolicy, TrustDecision,
+  ValidationOptions, VerificationIdentity,
 } from "./types.js"
 
 const PIN = {
@@ -34,6 +36,8 @@ const ROLES = new Set<ArtifactRole>(Object.keys(ROLE_PATHS) as ArtifactRole[])
 const FORBIDDEN_NAMES = new Set(["auth.json", "mcp-auth.json", ".env", ".npmrc"])
 
 interface ActualFile { path: string; bytes: Buffer; size: number; sha256: string }
+interface TrustedComponent { feature: string; id: string; disposition: "required" | "excluded"; license: string }
+interface TrustedComponentPolicy { policySha256: string; componentSetSha256: string; components: TrustedComponent[] }
 
 function record(value: unknown, label: string): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error(`${label} must be an object`)
@@ -254,7 +258,39 @@ export function validateModelsSnapshot(input: unknown): void {
   }
 }
 
-function parseComponentClosure(sbomInput: unknown, noticesInput: unknown, decisionsInput: unknown, modelsDigest: string): void {
+function parseTrustedComponentPolicy(bytes: Buffer): TrustedComponentPolicy {
+  const root = record(JSON.parse(bytes.toString("utf8")), "trusted component policy")
+  exactKeys(root, ["schemaVersion", "profile", "components"], "trusted component policy")
+  if (root.schemaVersion !== 1 || root.profile !== "embedded-web-rdkit") throw new Error("trusted component policy schema/profile mismatch")
+  const components = array(root.components, "trusted component policy components").map((raw, index) => {
+    const component = record(raw, `trusted component policy components[${index}]`)
+    exactKeys(component, ["feature", "id", "disposition", "license"], `trusted component policy components[${index}]`)
+    const parsed = {
+      feature: nonEmptyString(component.feature, "trusted component feature"),
+      id: nonEmptyString(component.id, "trusted component id"),
+      disposition: component.disposition,
+      license: nonEmptyString(component.license, "trusted component license"),
+    }
+    if (parsed.disposition !== "required" && parsed.disposition !== "excluded") throw new Error(`invalid trusted component disposition: ${parsed.id}`)
+    return parsed as TrustedComponent
+  })
+  const expectedFeatures = ["embedded-web", "rdkit-wasm", "pdfjs", "molstar", "igv"]
+  if (components.length !== expectedFeatures.length || new Set(components.map(({ feature }) => feature)).size !== components.length ||
+      JSON.stringify(components.map(({ feature }) => feature)) !== JSON.stringify(expectedFeatures)) {
+    throw new Error("trusted component feature profile mismatch")
+  }
+  if (new Set(components.map(({ id }) => id)).size !== components.length) throw new Error("duplicate trusted component id")
+  const componentSet = components.map(({ feature, id, disposition, license }) => ({ feature, id, disposition, license }))
+  return { policySha256: digest(bytes), componentSetSha256: digest(Buffer.from(JSON.stringify(componentSet))), components }
+}
+
+async function loadTrustedComponentPolicy(): Promise<TrustedComponentPolicy> {
+  const bytes = await readFile(new URL("../../policy/trusted-component-profile.json", import.meta.url))
+  return parseTrustedComponentPolicy(bytes)
+}
+
+function parseComponentClosure(sbomInput: unknown, noticesInput: unknown, decisionsInput: unknown, modelsDigest: string,
+  trustedPolicy: TrustedComponentPolicy): void {
   const sbom = record(sbomInput, "SBOM")
   exactKeys(sbom, ["bomFormat", "specVersion", "version", "metadata", "components"], "SBOM")
   const metadata = record(sbom.metadata, "SBOM.metadata")
@@ -303,6 +339,7 @@ function parseComponentClosure(sbomInput: unknown, noticesInput: unknown, decisi
   exactKeys(decisions, ["schemaVersion", "sourceCommit", "defaultDecision", "decisions"], "third-party decisions")
   if (decisions.schemaVersion !== 1 || decisions.sourceCommit !== PIN.commit || decisions.defaultDecision !== "excluded") throw new Error("third-party decision schema/source mismatch")
   const included = new Map<string, string>()
+  const excluded = new Map<string, string>()
   const decisionIds = new Set<string>()
   for (const [index, raw] of array(decisions.decisions, "decisions").entries()) {
     const decision = record(raw, `decisions[${index}]`)
@@ -312,6 +349,16 @@ function parseComponentClosure(sbomInput: unknown, noticesInput: unknown, decisi
     decisionIds.add(id); nonEmptyString(decision.rationale, `decision ${id} rationale`)
     const license = nonEmptyString(decision.license, `decision ${id} license`)
     if (decision.decision === "included") included.set(id, license)
+    else excluded.set(id, license)
+  }
+  const required = trustedPolicy.components.filter(({ disposition }) => disposition === "required")
+  const explicitlyExcluded = trustedPolicy.components.filter(({ disposition }) => disposition === "excluded")
+  if (required.length === 0) throw new Error("trusted component profile must require components")
+  for (const component of required) {
+    if (included.get(component.id) !== component.license) throw new Error(`required trusted component missing or mismatched: ${component.feature}`)
+  }
+  for (const component of explicitlyExcluded) {
+    if (excluded.get(component.id) !== component.license) throw new Error(`trusted component exclusion missing or mismatched: ${component.feature}`)
   }
   const sbomIds = [...sbomComponents.keys()].sort()
   const noticeIds = [...noticeComponents.keys()].sort()
@@ -341,7 +388,7 @@ function parseBuildAttestation(input: unknown): BuildBindings {
   const root = record(input, "build attestation")
   exactKeys(root, ["schemaVersion", "predicateType", "bindings"], "build attestation")
   const bindings = record(root.bindings, "build attestation bindings")
-  exactKeys(bindings, ["binarySha256", "sourceRepository", "sourceRef", "sourceCommit", "bunVersion", "modelsDevApiSha256", "networkDisabled"], "build attestation bindings")
+  exactKeys(bindings, ["binarySha256", "sourceRepository", "sourceRef", "sourceCommit", "bunVersion", "modelsDevApiSha256", "networkDisabled", "componentPolicySha256", "componentSetSha256"], "build attestation bindings")
   if (root.schemaVersion !== 1 || root.predicateType !== "https://slsa.dev/provenance/v1") throw new Error("build attestation schema mismatch")
   return bindings as unknown as BuildBindings
 }
@@ -359,10 +406,37 @@ function sameBindings(actual: object, expected: object, label: string): void {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(`${label} binding mismatch`)
 }
 
+function validateTrustDecision(input: unknown, expected: VerificationIdentity, label: string): TrustDecision {
+  try {
+    if (typeof input !== "object" || input === null || Array.isArray(input) || utilTypes.isProxy(input) ||
+        Object.getPrototypeOf(input) !== Object.prototype) {
+      throw new Error(`${label} decision must be a plain object`)
+    }
+    const descriptors = Object.getOwnPropertyDescriptors(input)
+    const keys = Object.keys(descriptors)
+    if (JSON.stringify(keys.sort()) !== JSON.stringify(["evidence", "source", "subject", "trusted"])) {
+      throw new Error(`${label} decision must have exact keys`)
+    }
+    for (const [key, descriptor] of Object.entries(descriptors)) {
+      if (!("value" in descriptor)) throw new Error(`${label} decision accessor forbidden: ${key}`)
+    }
+    const decision = Object.fromEntries(Object.entries(descriptors).map(([key, descriptor]) => [key, descriptor.value])) as unknown as TrustDecision
+    if (decision.trusted !== true) throw new Error(`${label} decision must set trusted === true`)
+    if (decision.subject !== expected.subject || decision.source !== expected.source || decision.evidence !== expected.evidence) {
+      throw new Error(`${label} decision identity mismatch`)
+    }
+    return decision
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith(label)) throw error
+    throw new Error(`${label} decision failed closed`)
+  }
+}
+
 export async function validateArtifact(root: string, rawInventory: unknown, options: ValidationOptions = {}): Promise<void> {
   if (!options.provenanceVerifier) throw new Error("trusted provenance verifier required")
   if (!options.runtimeVerifier) throw new Error("trusted runtime conformance verifier required")
   const inventory = parseInventory(rawInventory)
+  const trustedComponents = await loadTrustedComponentPolicy()
   const actual = await enumerateArtifact(root)
   closeInventory(inventory, actual)
   const leaf = (role: ArtifactRole): ActualFile => actual.get(ROLE_PATHS[role])!
@@ -372,17 +446,22 @@ export async function validateArtifact(root: string, rawInventory: unknown, opti
   validateModelsSnapshot(parseJson(leaf("models-snapshot"), "models.dev snapshot"))
   parseProvenance(parseJson(leaf("provenance"), "provenance"), leaf("models-snapshot").sha256)
   validateRuntimePolicy(parseJson(leaf("runtime-policy"), "runtime policy"))
-  parseComponentClosure(parseJson(leaf("sbom"), "SBOM"), parseJson(leaf("third-party-notices"), "THIRD_PARTY_NOTICES"), parseJson(leaf("third-party-decisions"), "third-party decisions"), leaf("models-snapshot").sha256)
+  parseComponentClosure(parseJson(leaf("sbom"), "SBOM"), parseJson(leaf("third-party-notices"), "THIRD_PARTY_NOTICES"), parseJson(leaf("third-party-decisions"), "third-party decisions"), leaf("models-snapshot").sha256, trustedComponents)
   validateChecksums(leaf("checksums").bytes, actual)
 
   const buildExpected: BuildBindings = {
     binarySha256: leaf("binary").sha256, sourceRepository: PIN.repository, sourceRef: PIN.ref,
     sourceCommit: PIN.commit, bunVersion: PIN.bun, modelsDevApiSha256: leaf("models-snapshot").sha256, networkDisabled: true,
+    componentPolicySha256: trustedComponents.policySha256, componentSetSha256: trustedComponents.componentSetSha256,
   }
   const attestation = parseJson(leaf("build-attestation"), "build attestation")
   sameBindings(parseBuildAttestation(attestation), buildExpected, "build attestation")
   const buildTrust = await options.provenanceVerifier.verify(attestation, buildExpected)
-  if (!buildTrust.trusted) throw new Error(`untrusted build provenance: ${buildTrust.reason ?? options.provenanceVerifier.verifierKind}`)
+  validateTrustDecision(buildTrust, {
+    subject: `sha256:${buildExpected.binarySha256}`,
+    source: `${buildExpected.sourceRepository}@${buildExpected.sourceCommit}`,
+    evidence: `sha256:${leaf("build-attestation").sha256}`,
+  }, "build provenance")
 
   const runtimeExpected: RuntimeBindings = {
     binarySha256: leaf("binary").sha256, dynamicLoopbackBind: true, hostValidation: true,
@@ -391,5 +470,9 @@ export async function validateArtifact(root: string, rawInventory: unknown, opti
   const runtimeEvidence = parseJson(leaf("runtime-conformance"), "runtime conformance evidence")
   sameBindings(parseRuntimeEvidence(runtimeEvidence), runtimeExpected, "runtime evidence")
   const runtimeTrust = await options.runtimeVerifier.verify(runtimeEvidence, runtimeExpected)
-  if (!runtimeTrust.trusted) throw new Error(`untrusted runtime conformance: ${runtimeTrust.reason ?? options.runtimeVerifier.verifierKind}`)
+  validateTrustDecision(runtimeTrust, {
+    subject: `sha256:${runtimeExpected.binarySha256}`,
+    source: `runtime-policy:sha256:${leaf("runtime-policy").sha256}`,
+    evidence: `sha256:${leaf("runtime-conformance").sha256}`,
+  }, "runtime conformance")
 }

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os"
 import path from "node:path"
 import test from "node:test"
 import type {
-  ArtifactInventory, ArtifactRole, BuildBindings, InventoryFile, RuntimeBindings, RuntimePolicy, ValidationOptions,
+  ArtifactInventory, ArtifactRole, BuildBindings, InventoryFile, RuntimeBindings, RuntimePolicy, TrustDecision, ValidationOptions,
 } from "../src/types.js"
 import { parseInventory, validateArtifact } from "../src/validator.js"
 
@@ -26,19 +26,26 @@ function hash(bytes: Uint8Array): string { return createHash("sha256").update(by
 function clone<T>(value: T): T { return structuredClone(value) }
 function json(value: unknown): string { return `${JSON.stringify(value, null, 2)}\n` }
 
+function trustedDecision(subject: string, source: string, evidence: unknown): TrustDecision {
+  return { trusted: true, subject, source, evidence: `sha256:${hash(Buffer.from(json(evidence)))}` }
+}
+
 const trustedFakeOptions: ValidationOptions = {
   provenanceVerifier: {
     verifierKind: "test-only-deterministic-fake-provenance",
     async verify(evidence: unknown, expected: BuildBindings) {
       const bindings = (evidence as { bindings?: unknown }).bindings
-      return { trusted: JSON.stringify(bindings) === JSON.stringify(expected), reason: "deterministic test binding mismatch" }
+      assert.deepEqual(bindings, expected)
+      return trustedDecision(`sha256:${expected.binarySha256}`, `${expected.sourceRepository}@${expected.sourceCommit}`, evidence)
     },
   },
   runtimeVerifier: {
     verifierKind: "test-only-deterministic-fake-runtime",
     async verify(evidence: unknown, expected: RuntimeBindings) {
       const bindings = (evidence as { bindings?: unknown }).bindings
-      return { trusted: JSON.stringify(bindings) === JSON.stringify(expected), reason: "deterministic test binding mismatch" }
+      assert.deepEqual(bindings, expected)
+      const runtimePolicy = await readFile(path.join(policyDir, "runtime-policy.json"))
+      return trustedDecision(`sha256:${expected.binarySha256}`, `runtime-policy:sha256:${hash(runtimePolicy)}`, evidence)
     },
   },
 }
@@ -73,11 +80,15 @@ async function fixture(): Promise<{ root: string; inventory: ArtifactInventory }
   const modelsBytes = Buffer.from(json(models))
   const components = [
     { id: "pkg:generic/openscience-embedded-web@1.3.4", name: "OpenScience embedded web", version: "1.3.4", license: "Apache-2.0" },
-    { id: "pkg:generic/rdkit@2025.03.3", name: "RDKit", version: "2025.03.3", license: "BSD-3-Clause" },
+    { id: "pkg:generic/rdkit-wasm@2025.03.3", name: "RDKit WASM", version: "2025.03.3", license: "BSD-3-Clause" },
   ]
+  const componentPolicyBytes = await readFile(path.join(policyDir, "trusted-component-profile.json"))
+  const componentPolicy = JSON.parse(componentPolicyBytes.toString("utf8")) as { components: unknown[] }
   const buildBindings: BuildBindings = {
     binarySha256: hash(binary), sourceRepository: REPOSITORY, sourceRef: REF, sourceCommit: COMMIT,
     bunVersion: "1.3.5", modelsDevApiSha256: hash(modelsBytes), networkDisabled: true,
+    componentPolicySha256: hash(componentPolicyBytes),
+    componentSetSha256: hash(Buffer.from(JSON.stringify(componentPolicy.components))),
   }
   const runtimeBindings: RuntimeBindings = {
     binarySha256: hash(binary), dynamicLoopbackBind: true, hostValidation: true, originValidation: true,
@@ -220,6 +231,35 @@ test("rejects SBOM notices and decision non-closure", () => withFixture(async (r
   await mutateJson(root, inventory, "sbom", (value) => { value.components.pop() })
   await assert.rejects(validateArtifact(root, inventory, trustedFakeOptions), /component closure mismatch/)
 }))
+
+test("rejects artifact-controlled empty component closure against trusted profile", () => withFixture(async (root, inventory) => {
+  await mutateJson(root, inventory, "sbom", (value) => { value.components = [] })
+  await mutateJson(root, inventory, "third-party-notices", (value) => { value.components = [] })
+  await mutateJson(root, inventory, "third-party-decisions", (value) => { value.decisions = [] })
+  await assert.rejects(validateArtifact(root, inventory, trustedFakeOptions), /required trusted component missing/)
+}))
+
+test("rejects malformed and identity-unbound verifier decisions at both library boundaries", () =>
+  withFixture(async (root, inventory) => {
+    const malformed: unknown[] = [
+      { trusted: "false", subject: "x", source: "x", evidence: "x" },
+      { trusted: true, subject: "x", source: "x", evidence: "x", extra: true },
+      Object.defineProperty({ subject: "x", source: "x", evidence: "x" }, "trusted", { get: () => true, enumerable: true }),
+      new Proxy({ trusted: true, subject: "x", source: "x", evidence: "x" }, {}),
+    ]
+    for (const decision of malformed) {
+      const badProvenance: ValidationOptions = {
+        ...trustedFakeOptions,
+        provenanceVerifier: { verifierKind: "malicious", async verify() { return decision as TrustDecision } },
+      }
+      await assert.rejects(validateArtifact(root, inventory, badProvenance), /build provenance decision/)
+      const badRuntime: ValidationOptions = {
+        ...trustedFakeOptions,
+        runtimeVerifier: { verifierKind: "malicious", async verify() { return decision as TrustDecision } },
+      }
+      await assert.rejects(validateArtifact(root, inventory, badRuntime), /runtime conformance decision/)
+    }
+  }))
 
 test("rejects XDG traversal", () => withFixture(async (root, inventory) => {
   await mutateJson(root, inventory, "runtime-policy", (value: RuntimePolicy) => {
