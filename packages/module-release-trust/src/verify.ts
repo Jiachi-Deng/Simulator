@@ -6,8 +6,11 @@ import {
   type ModuleManifest,
   type ModulePlatform,
 } from '@simulator/module-contract'
-import { encodeCanonicalCatalog, equalBytes } from './canonical.ts'
+import { encodeCanonicalCatalog, equalBytes, MAX_CANONICAL_CATALOG_BYTES } from './canonical.ts'
 import {
+  MAX_MODULE_RELEASE_CATALOG_TTL_MS,
+  MAX_MODULE_RELEASE_CLOCK_SKEW_MS,
+  MAX_TRUSTED_RELEASE_KEYS,
   MODULE_RELEASE_CATALOG_SCHEMA_VERSION,
   MODULE_RELEASE_ENVELOPE_SCHEMA_VERSION,
   type ModuleArtifactSize,
@@ -27,9 +30,11 @@ const ENVELOPE_FIELDS = ['schemaVersion', 'keyId', 'catalogBytes', 'signature'] 
 const CATALOG_FIELDS = ['schemaVersion', 'sequence', 'issuedAt', 'expiresAt', 'releases'] as const
 const RELEASE_FIELDS = ['manifest', 'artifactSizes'] as const
 const SIZE_FIELDS = ['platform', 'size'] as const
+const OPTIONS_FIELDS = ['trustedKeys', 'state', 'now', 'clockSkewMs'] as const
+const TRUSTED_KEY_FIELDS = ['keyId', 'publicKey', 'activeFrom', 'activeUntil', 'revokedAt'] as const
+const TRUST_STATE_FIELDS = ['highestSequence', 'latestIssuedAt'] as const
 const KEY_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,126}[a-z0-9])?$/
 const PLATFORM_SET = new Set<string>(MODULE_PLATFORMS)
-const MAX_CATALOG_BYTES = 4 * 1024 * 1024
 const MAX_RELEASES = 10_000
 const ED25519_PUBLIC_KEY_BYTES = 32
 const ED25519_SIGNATURE_BYTES = 64
@@ -80,6 +85,29 @@ function hasExactFields(record: DataRecord, fields: readonly string[]): boolean 
   return actual.length === expected.length && actual.every((field, index) => field === expected[index])
 }
 
+function hasOnlyFields(record: DataRecord, allowed: readonly string[], required: readonly string[]): boolean {
+  const keys = Object.keys(record)
+  return required.every((field) => Object.hasOwn(record, field)) && keys.every((field) => allowed.includes(field))
+}
+
+function asPlainArray(value: unknown, maximum: number): readonly unknown[] | undefined {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || value.length > maximum) return undefined
+    const descriptors = Object.getOwnPropertyDescriptors(value)
+    const keys = Reflect.ownKeys(descriptors)
+    if (keys.some((key) => typeof key !== 'string') || keys.length !== value.length + 1) return undefined
+    const result: unknown[] = []
+    for (let index = 0; index < value.length; index += 1) {
+      const descriptor = descriptors[index]
+      if (!descriptor || descriptor.get || descriptor.set || !Object.hasOwn(descriptor, 'value')) return undefined
+      result.push(descriptor.value)
+    }
+    return result
+  } catch {
+    return undefined
+  }
+}
+
 function copyBytes(value: unknown, maximum: number): Uint8Array | undefined {
   try {
     if (!(value instanceof Uint8Array) || value.byteLength > maximum) return undefined
@@ -96,21 +124,48 @@ function parseTimestamp(value: unknown): number | undefined {
   return milliseconds
 }
 
-function validateTrustedKeys(keys: readonly TrustedReleaseKey[]): ModuleReleaseTrustDiagnostic[] {
+interface ParsedOptions {
+  readonly trustedKeys: readonly TrustedReleaseKey[]
+  readonly state: {
+    readonly highestSequence: number
+    readonly latestIssuedAt?: string
+  }
+  readonly now: number
+  readonly clockSkewMs: number
+}
+
+function parseOptions(input: unknown): { value?: ParsedOptions; diagnostics: ModuleReleaseTrustDiagnostic[] } {
   const diagnostics: ModuleReleaseTrustDiagnostic[] = []
+  const record = asRecord(input)
+  if (!record || !hasOnlyFields(record, OPTIONS_FIELDS, ['trustedKeys', 'state'])) {
+    return { diagnostics: [diagnostic('INVALID_OPTIONS', 'trust', '', 'Options must contain trustedKeys and state with only supported fields')] }
+  }
+
+  const keyValues = asPlainArray(record.trustedKeys, MAX_TRUSTED_RELEASE_KEYS)
+  if (!keyValues) {
+    return { diagnostics: [diagnostic('INVALID_OPTIONS', 'trust', '/trustedKeys', `trustedKeys must be a dense plain array with at most ${MAX_TRUSTED_RELEASE_KEYS} entries`)] }
+  }
+
+  const keys: TrustedReleaseKey[] = []
   const seen = new Set<string>()
-  for (let index = 0; index < keys.length; index += 1) {
-    const key = keys[index]!
+  for (let index = 0; index < keyValues.length; index += 1) {
     const path = `/trustedKeys/${index}`
-    if (!KEY_ID_PATTERN.test(key.keyId) || key.publicKey.byteLength !== ED25519_PUBLIC_KEY_BYTES) {
+    const key = asRecord(keyValues[index])
+    if (!key || !hasOnlyFields(key, TRUSTED_KEY_FIELDS, ['keyId', 'publicKey', 'activeFrom'])) {
+      diagnostics.push(diagnostic('INVALID_TRUSTED_KEY', 'trust', path, 'Trusted key must be a plain data object with only supported fields'))
+      continue
+    }
+    const keyId = key.keyId
+    const publicKey = copyBytes(key.publicKey, ED25519_PUBLIC_KEY_BYTES)
+    if (typeof keyId !== 'string' || !KEY_ID_PATTERN.test(keyId) || !publicKey || publicKey.byteLength !== ED25519_PUBLIC_KEY_BYTES) {
       diagnostics.push(diagnostic('INVALID_TRUSTED_KEY', 'trust', path, 'Trusted key has an invalid key ID or Ed25519 public key'))
       continue
     }
-    if (seen.has(key.keyId)) {
-      diagnostics.push(diagnostic('DUPLICATE_TRUSTED_KEY', 'trust', `${path}/keyId`, 'Trusted key ID is declared more than once', key.keyId))
+    if (seen.has(keyId)) {
+      diagnostics.push(diagnostic('DUPLICATE_TRUSTED_KEY', 'trust', `${path}/keyId`, 'Trusted key ID is declared more than once', keyId))
       continue
     }
-    seen.add(key.keyId)
+    seen.add(keyId)
     const activeFrom = parseTimestamp(key.activeFrom)
     const activeUntil = key.activeUntil === undefined ? undefined : parseTimestamp(key.activeUntil)
     const revokedAt = key.revokedAt === undefined ? undefined : parseTimestamp(key.revokedAt)
@@ -118,10 +173,52 @@ function validateTrustedKeys(keys: readonly TrustedReleaseKey[]): ModuleReleaseT
       || (key.revokedAt !== undefined && revokedAt === undefined)
       || (activeUntil !== undefined && activeFrom >= activeUntil)
       || (revokedAt !== undefined && revokedAt <= activeFrom)) {
-      diagnostics.push(diagnostic('INVALID_TRUSTED_KEY', 'trust', path, 'Trusted key has an invalid activation, expiry, or revocation window', key.keyId))
+      diagnostics.push(diagnostic('INVALID_TRUSTED_KEY', 'trust', path, 'Trusted key has an invalid activation, expiry, or revocation window', keyId))
+      continue
     }
+    keys.push(freeze({
+      keyId,
+      publicKey,
+      activeFrom: key.activeFrom as string,
+      ...(key.activeUntil === undefined ? {} : { activeUntil: key.activeUntil as string }),
+      ...(key.revokedAt === undefined ? {} : { revokedAt: key.revokedAt as string }),
+    }))
   }
-  return diagnostics
+  if (diagnostics.length > 0) return { diagnostics }
+
+  const state = asRecord(record.state)
+  if (!state || !hasOnlyFields(state, TRUST_STATE_FIELDS, ['highestSequence'])
+    || !Number.isSafeInteger(state.highestSequence) || (state.highestSequence as number) < 0) {
+    return { diagnostics: [diagnostic('INVALID_OPTIONS', 'rollback', '/state', 'State must contain a non-negative safe integer highestSequence')] }
+  }
+  const latestIssuedAt = state.latestIssuedAt === undefined ? undefined : parseTimestamp(state.latestIssuedAt)
+  if ((state.latestIssuedAt !== undefined && latestIssuedAt === undefined)
+    || ((state.highestSequence as number) === 0 && latestIssuedAt !== undefined)
+    || ((state.highestSequence as number) > 0 && latestIssuedAt === undefined)) {
+    return { diagnostics: [diagnostic('INVALID_OPTIONS', 'rollback', '/state/latestIssuedAt', 'State must pair a positive highestSequence with canonical latestIssuedAt')] }
+  }
+
+  const now = record.now === undefined ? Date.now() : record.now
+  const clockSkewMs = record.clockSkewMs === undefined ? 0 : record.clockSkewMs
+  if (!Number.isSafeInteger(now) || (now as number) < 0
+    || !Number.isSafeInteger(clockSkewMs) || (clockSkewMs as number) < 0
+    || (clockSkewMs as number) > MAX_MODULE_RELEASE_CLOCK_SKEW_MS
+    || !Number.isSafeInteger((now as number) + (clockSkewMs as number))) {
+    return { diagnostics: [diagnostic('INVALID_OPTIONS', 'trust', '', `now must be a non-negative safe integer and clockSkewMs must be between 0 and ${MAX_MODULE_RELEASE_CLOCK_SKEW_MS}`)] }
+  }
+
+  return {
+    diagnostics,
+    value: freeze({
+      trustedKeys: freeze(keys),
+      state: freeze({
+        highestSequence: state.highestSequence as number,
+        ...(latestIssuedAt === undefined ? {} : { latestIssuedAt: state.latestIssuedAt as string }),
+      }),
+      now: now as number,
+      clockSkewMs: clockSkewMs as number,
+    }),
+  }
 }
 
 function verifyEd25519(publicKey: Uint8Array, bytes: Uint8Array, signature: Uint8Array): boolean {
@@ -266,8 +363,12 @@ function parseCatalog(value: unknown): { catalog?: ModuleReleaseCatalog; diagnos
 
 export function verifyModuleReleaseCatalog(
   envelopeInput: unknown,
-  options: VerifyModuleReleaseCatalogOptions,
+  optionsInput: VerifyModuleReleaseCatalogOptions,
 ): VerifyModuleReleaseCatalogResult {
+  const parsedOptions = parseOptions(optionsInput)
+  if (!parsedOptions.value) return fail(...parsedOptions.diagnostics)
+  const options = parsedOptions.value
+
   const envelope = asRecord(envelopeInput)
   if (!envelope || !hasExactFields(envelope, ENVELOPE_FIELDS)) {
     return fail(diagnostic('INVALID_ENVELOPE', 'envelope', '', 'Envelope must contain exactly the v1 envelope fields'))
@@ -278,19 +379,29 @@ export function verifyModuleReleaseCatalog(
   if (typeof envelope.keyId !== 'string' || !KEY_ID_PATTERN.test(envelope.keyId)) {
     return fail(diagnostic('INVALID_KEY_ID', 'envelope', '/keyId', 'Envelope key ID is invalid'))
   }
-  const catalogBytes = copyBytes(envelope.catalogBytes, MAX_CATALOG_BYTES)
+  const catalogBytes = copyBytes(envelope.catalogBytes, MAX_CANONICAL_CATALOG_BYTES)
   if (!catalogBytes || catalogBytes.byteLength === 0) {
-    return fail(diagnostic('INVALID_BYTE_FIELD', 'envelope', '/catalogBytes', `Catalog bytes must be a non-empty Uint8Array up to ${MAX_CATALOG_BYTES} bytes`, envelope.keyId))
+    return fail(diagnostic('INVALID_BYTE_FIELD', 'envelope', '/catalogBytes', `Catalog bytes must be a non-empty Uint8Array up to ${MAX_CANONICAL_CATALOG_BYTES} bytes`, envelope.keyId))
   }
   const signature = copyBytes(envelope.signature, ED25519_SIGNATURE_BYTES)
   if (!signature || signature.byteLength !== ED25519_SIGNATURE_BYTES) {
     return fail(diagnostic('INVALID_SIGNATURE_LENGTH', 'envelope', '/signature', `Ed25519 signature must be ${ED25519_SIGNATURE_BYTES} bytes`, envelope.keyId))
   }
 
-  const keyDiagnostics = validateTrustedKeys(options.trustedKeys)
-  if (keyDiagnostics.length > 0) return fail(...keyDiagnostics)
   const trustedKey = options.trustedKeys.find((candidate) => candidate.keyId === envelope.keyId)
   if (!trustedKey) return fail(diagnostic('UNTRUSTED_KEY', 'trust', '/keyId', 'Envelope key is not in the trusted key set', envelope.keyId))
+  const activeFrom = Date.parse(trustedKey.activeFrom)
+  const activeUntil = trustedKey.activeUntil === undefined ? undefined : Date.parse(trustedKey.activeUntil)
+  const revokedAt = trustedKey.revokedAt === undefined ? undefined : Date.parse(trustedKey.revokedAt)
+  if (options.now < activeFrom) {
+    return fail(diagnostic('KEY_NOT_ACTIVE', 'trust', '/trustedKeys', 'Signing key is not active at the trusted current time', envelope.keyId))
+  }
+  if (activeUntil !== undefined && options.now >= activeUntil) {
+    return fail(diagnostic('KEY_EXPIRED', 'trust', '/trustedKeys', 'Signing key is outside its acceptance window at the trusted current time', envelope.keyId))
+  }
+  if (revokedAt !== undefined && options.now >= revokedAt) {
+    return fail(diagnostic('KEY_REVOKED', 'trust', '/trustedKeys', 'Signing key is revoked at the trusted current time', envelope.keyId))
+  }
   if (!verifyEd25519(Uint8Array.from(trustedKey.publicKey), catalogBytes, signature)) {
     return fail(diagnostic('SIGNATURE_INVALID', 'signature', '/signature', 'Ed25519 signature does not authenticate the exact catalog bytes', envelope.keyId))
   }
@@ -322,31 +433,31 @@ export function verifyModuleReleaseCatalog(
   const catalog = parsed.catalog
   const issuedAt = Date.parse(catalog.issuedAt)
   const expiresAt = Date.parse(catalog.expiresAt)
-  const activeFrom = Date.parse(trustedKey.activeFrom)
-  const activeUntil = trustedKey.activeUntil === undefined ? undefined : Date.parse(trustedKey.activeUntil)
-  const revokedAt = trustedKey.revokedAt === undefined ? undefined : Date.parse(trustedKey.revokedAt)
   if (issuedAt < activeFrom) return fail(diagnostic('KEY_NOT_ACTIVE', 'trust', '/issuedAt', 'Catalog was issued before the signing key activation window', envelope.keyId))
   if (activeUntil !== undefined && issuedAt >= activeUntil) return fail(diagnostic('KEY_EXPIRED', 'trust', '/issuedAt', 'Catalog was issued after the signing key activation window', envelope.keyId))
   if (revokedAt !== undefined && issuedAt >= revokedAt) return fail(diagnostic('KEY_REVOKED', 'trust', '/issuedAt', 'Catalog was issued at or after key revocation', envelope.keyId))
-
-  const now = options.now ?? Date.now()
-  const clockSkewMs = options.clockSkewMs ?? 0
-  if (!Number.isSafeInteger(now) || !Number.isSafeInteger(clockSkewMs) || clockSkewMs < 0) {
-    return fail(diagnostic('INVALID_TIME_WINDOW', 'catalog', '', 'now and clockSkewMs must be non-negative safe integer milliseconds'))
+  if (expiresAt - issuedAt > MAX_MODULE_RELEASE_CATALOG_TTL_MS) {
+    return fail(diagnostic('CATALOG_TTL_EXCEEDED', 'catalog', '/expiresAt', `Catalog lifetime exceeds ${MAX_MODULE_RELEASE_CATALOG_TTL_MS} milliseconds`, envelope.keyId))
   }
-  if (issuedAt > now + clockSkewMs) return fail(diagnostic('CATALOG_NOT_YET_VALID', 'catalog', '/issuedAt', 'Catalog issuance is beyond the allowed clock skew', envelope.keyId))
-  if (expiresAt <= now - clockSkewMs) return fail(diagnostic('CATALOG_EXPIRED', 'catalog', '/expiresAt', 'Catalog has expired beyond the allowed clock skew', envelope.keyId))
-
-  if (!Number.isSafeInteger(options.state.highestSequence) || options.state.highestSequence < 0) {
-    return fail(diagnostic('INVALID_SEQUENCE', 'rollback', '/state/highestSequence', 'Trust state sequence must be a non-negative safe integer'))
+  if (activeUntil !== undefined && expiresAt > activeUntil) {
+    return fail(diagnostic('KEY_EXPIRED', 'trust', '/expiresAt', 'Catalog expiry exceeds the signing key validity window', envelope.keyId))
   }
+  if (revokedAt !== undefined && expiresAt > revokedAt) {
+    return fail(diagnostic('KEY_REVOKED', 'trust', '/expiresAt', 'Catalog expiry exceeds the signing key revocation boundary', envelope.keyId))
+  }
+  if (issuedAt > options.now + options.clockSkewMs) return fail(diagnostic('CATALOG_NOT_YET_VALID', 'catalog', '/issuedAt', 'Catalog issuance is beyond the allowed clock skew', envelope.keyId))
+  if (expiresAt <= options.now - options.clockSkewMs) return fail(diagnostic('CATALOG_EXPIRED', 'catalog', '/expiresAt', 'Catalog has expired beyond the allowed clock skew', envelope.keyId))
+
   if (catalog.sequence <= options.state.highestSequence) {
     return fail(diagnostic('ROLLBACK_DETECTED', 'rollback', '/sequence', 'Catalog sequence does not advance the trusted high-water mark', envelope.keyId))
+  }
+  if (options.state.latestIssuedAt !== undefined && issuedAt <= Date.parse(options.state.latestIssuedAt)) {
+    return fail(diagnostic('BACKDATED_CATALOG', 'rollback', '/issuedAt', 'Catalog issuance does not advance the trusted issuance high-water mark', envelope.keyId))
   }
   return freeze({
     ok: true as const,
     catalog,
-    state: freeze({ highestSequence: catalog.sequence }),
+    state: freeze({ highestSequence: catalog.sequence, latestIssuedAt: catalog.issuedAt }),
     keyId: envelope.keyId,
   })
 }

@@ -2,6 +2,9 @@ import type { ModuleManifest, ModulePlatform } from '@simulator/module-contract'
 
 export const MODULE_RELEASE_CATALOG_SCHEMA_VERSION = 1 as const
 export const MODULE_RELEASE_ENVELOPE_SCHEMA_VERSION = 1 as const
+export const MAX_TRUSTED_RELEASE_KEYS = 64
+export const MAX_MODULE_RELEASE_CATALOG_TTL_MS = 24 * 60 * 60 * 1_000
+export const MAX_MODULE_RELEASE_CLOCK_SKEW_MS = 5 * 60 * 1_000
 
 export interface ModuleArtifactSize {
   readonly platform: ModulePlatform
@@ -40,6 +43,7 @@ export interface TrustedReleaseKey {
 
 export interface ModuleReleaseTrustState {
   readonly highestSequence: number
+  readonly latestIssuedAt?: string
 }
 
 export type ModuleReleaseTrustDiagnosticCode =
@@ -50,6 +54,7 @@ export type ModuleReleaseTrustDiagnosticCode =
   | 'INVALID_SIGNATURE_LENGTH'
   | 'INVALID_TRUSTED_KEY'
   | 'DUPLICATE_TRUSTED_KEY'
+  | 'INVALID_OPTIONS'
   | 'UNTRUSTED_KEY'
   | 'KEY_NOT_ACTIVE'
   | 'KEY_EXPIRED'
@@ -64,8 +69,10 @@ export type ModuleReleaseTrustDiagnosticCode =
   | 'ROLLBACK_DETECTED'
   | 'INVALID_TIMESTAMP'
   | 'INVALID_TIME_WINDOW'
+  | 'CATALOG_TTL_EXCEEDED'
   | 'CATALOG_NOT_YET_VALID'
   | 'CATALOG_EXPIRED'
+  | 'BACKDATED_CATALOG'
   | 'LIMIT_EXCEEDED'
   | 'INVALID_RELEASE'
   | 'INVALID_MANIFEST'

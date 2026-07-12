@@ -63,7 +63,9 @@ uninstalled -> installed -> running -> stopped -> running
 
 v1 envelope 明确携带 `keyId`、原始 `catalogBytes` 和 64-byte Ed25519 `signature`。验证器复制输入 bytes 后，直接对收到的原始 catalog bytes 验签；它不会 parse 后重序列化并用另一组 bytes 验签。签名通过后，bytes 还必须是严格 UTF-8、合法 JSON，并与该 JSON 的 deterministic canonical representation 完全一致。因此 whitespace、field order、duplicate/ambiguous representation 或任意 byte mutation 都不能跨过 trust boundary。
 
-Production API 只接受 32-byte Ed25519 public key。package 不提供 signing API，也不包含 private key 或 seed；测试使用运行时生成、明确 test-only 的内存 key pair。
+canonical encoder 只接受 data-only plain object 和 dense plain array；拒绝 accessor、symbol、sparse array、额外 array property、循环引用、unsafe number 和 non-JSON value。固定 byte、depth 和 value-count 上限在验签边界限制 CPU 与 memory 消耗。
+
+Production API 只接受 32-byte Ed25519 public key。package 不提供 signing API，也不包含 private key 或 seed；测试使用运行时生成、明确 test-only 的内存 key pair。另有一个由 Python `cryptography` 独立生成的固定 interoperability vector，仓库只保存 public key、canonical catalog bytes 和 signature，并覆盖 catalog/signature bit flip。
 
 ### Catalog v1
 
@@ -73,6 +75,8 @@ manifest validator 继续负责 lowercase SHA-256、canonical absolute HTTPS URL
 
 ### Trust 与 Rollback Policy
 
-trusted key 由唯一 `keyId`、public key、`activeFrom`、可选 `activeUntil` 和可选 `revokedAt` 构成。catalog 的 `issuedAt` 必须落在 key activation window 内且早于 revocation。当前时间必须位于 catalog issuance/expiry window，允许调用方显式提供 non-negative `clockSkewMs`。
+trusted key 由唯一 `keyId`、public key、`activeFrom`、可选 `activeUntil` 和可选 `revokedAt` 构成，key set 最多 64 项。catalog 的 `issuedAt` 必须落在 key activation window 内且早于 revocation；`expiresAt` 不得越过 `activeUntil` 或已知的 `revokedAt`。无论 catalog 何时签发，只要 trusted `now >= revokedAt` 就立即返回 `KEY_REVOKED`；`now >= activeUntil` 同样停止接受该 key。
 
-调用方必须传入已持久化的 `highestSequence`；验证成功返回新的 high-water mark。sequence 小于或等于 high-water mark 时返回 `ROLLBACK_DETECTED`，package 自身不通过 filesystem 隐式持久化。所有失败均返回固定 `code`、阶段 `stage`、RFC 6901 风格 `path`、稳定 `message` 和适用时的 `keyId`。
+catalog lifetime 最多 24 小时。当前时间必须位于 catalog issuance/expiry window，调用方可提供最多 5 分钟的 non-negative `clockSkewMs`；clock skew 不延迟 key revocation。options、trusted key entry、state 都按 unknown plain-data input 验证，null、accessor、proxy、sparse/oversized key set 返回结构化 diagnostic 而不执行 getter 或抛出异常。
+
+调用方必须原子持久化 `highestSequence` 和 `latestIssuedAt`；初始 state 为 `{ highestSequence: 0 }`，第一次成功后两者必须成对存在。sequence 小于或等于 high-water mark 时返回 `ROLLBACK_DETECTED`，`issuedAt` 未严格推进时返回 `BACKDATED_CATALOG`，因此 backdated catalog 不能用超高 sequence 污染 rollback state。package 自身不通过 filesystem 隐式持久化。所有失败均返回固定 `code`、阶段 `stage`、RFC 6901 风格 `path`、稳定 `message` 和适用时的 `keyId`。
