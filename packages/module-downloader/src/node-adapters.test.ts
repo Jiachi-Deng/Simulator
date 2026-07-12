@@ -97,6 +97,15 @@ describe('production filesystem cache', () => {
     expect((await left.readCatalog())?.trustState.highestSequence).toBe(1)
   })
 
+  it('adopts and publishes a staged catalog left by another process instance', async () => {
+    const directory = await root(); const crashed = new NodeFilesystemModuleDownloaderCache(directory); const staged = catalogRecord(1, 1)
+    await crashed.stageCatalog(staged)
+    const recovery = new NodeFilesystemModuleDownloaderCache(directory)
+    expect(await recovery.readStagedCatalog()).toEqual(staged)
+    expect(await recovery.publishCatalog(undefined)).toBe(true)
+    expect(await recovery.readCatalog()).toEqual(staged)
+  })
+
   it('fails closed when a cache top-level directory is a symlink', async () => {
     for (const name of ['catalog', 'artifacts', 'partials', 'leases']) {
       const directory = await root(); const outside = await root(); await writeFile(join(outside, 'sentinel'), 'safe'); await symlink(outside, join(directory, name), 'dir')

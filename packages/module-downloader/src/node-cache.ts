@@ -33,6 +33,8 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   readonly root: string
   readonly durability: 'file-and-directory-fsync' | 'file-fsync-and-recovery-marker'
   readonly #instance = randomUUID()
+  readonly #ownStagePath: string
+  #activeStagePath: string
   readonly #staleLeaseMs: number
   readonly #leasePollMs: number
   readonly #maxStaleRecoveries: number
@@ -43,6 +45,8 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   constructor(root: string, options: NodeFilesystemCacheOptions = {}) {
     if (!root || !isAbsolute(root)) throw new TypeError('Cache root must be an absolute path')
     this.root = resolve(root)
+    this.#ownStagePath = join(this.root, 'catalog', `staged.${this.#instance}.json`)
+    this.#activeStagePath = this.#ownStagePath
     this.durability = process.platform === 'win32' ? 'file-fsync-and-recovery-marker' : 'file-and-directory-fsync'
     this.#staleLeaseMs = positive(options.staleLeaseMs, 120_000, 'staleLeaseMs')
     this.#leasePollMs = positive(options.leasePollMs, 25, 'leasePollMs')
@@ -92,19 +96,21 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   }
   async readStagedCatalog(): Promise<CachedCatalogRecord | undefined> {
     await this.#ready; await this.#assertSafeTopLevel('catalog')
-    const own = await readJson<CatalogWire>(this.#stagedCatalogPath())
-    if (own) return fromCatalogWire(own)
+    const own = await readJson<CatalogWire>(this.#ownStagePath)
+    if (own) { this.#activeStagePath = this.#ownStagePath; return fromCatalogWire(own) }
     const names = (await directoryNames(join(this.root, 'catalog'))).filter((name) => /^staged\.[a-f0-9-]{36}\.json$/.test(name)).sort()
-    return names.length ? fromCatalogWire(await readJson<CatalogWire>(join(this.root, 'catalog', names[0]!))) : undefined
+    if (!names.length) return undefined
+    this.#activeStagePath = join(this.root, 'catalog', names[0]!)
+    return fromCatalogWire(await readJson<CatalogWire>(this.#activeStagePath))
   }
   async stageCatalog(record: CachedCatalogRecord): Promise<void> {
-    await this.#ready; await this.#atomicJson(this.#stagedCatalogPath(), toCatalogWire(record))
+    await this.#ready; this.#activeStagePath = this.#ownStagePath; await this.#atomicJson(this.#activeStagePath, toCatalogWire(record))
   }
   async publishCatalog(expectedState: ModuleReleaseTrustState | undefined): Promise<boolean> {
     await this.#ready
     const lease = await this.acquireLease('__catalog-cas__', new AbortController().signal)
     try {
-      const staged = fromCatalogWire(await readJson<CatalogWire>(this.#stagedCatalogPath()))
+      const staged = fromCatalogWire(await readJson<CatalogWire>(this.#activeStagePath))
       if (!staged) throw new Error('No staged catalog transaction for this adapter')
       const committed = fromCatalogWire(await readJson<CatalogWire>(join(this.root, 'catalog', 'committed.json')))
       if (!sameTrustState(committed?.trustState, expectedState)) return false
@@ -113,7 +119,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
       return true
     } finally { await lease.release() }
   }
-  async discardStagedCatalog(): Promise<void> { await this.#ready; await this.#durableRemove(this.#stagedCatalogPath()) }
+  async discardStagedCatalog(): Promise<void> { await this.#ready; await this.#durableRemove(this.#activeStagePath); this.#activeStagePath = this.#ownStagePath }
 
   async readArtifact(sha256: string): Promise<CachedArtifactRecord | undefined> {
     await this.#ready; validateHash(sha256); await this.#assertSafeTopLevel('artifacts')
@@ -209,7 +215,6 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
       if (!await exists(other) && (await lstat(path)).mtimeMs <= cutoff) { await this.#durableRemove(path); remaining -= 1 }
     }
   }
-  #stagedCatalogPath(): string { return join(this.root, 'catalog', `staged.${this.#instance}.json`) }
   async #requiredPartial(id: string): Promise<ArtifactPartialRecord> { await this.#ready; validatePartialId(id); await this.#assertSafeTopLevel('partials'); const value = await readJson<ArtifactPartialRecord>(this.#partialMetadata(id)); if (!value || !validPartial(value)) throw new Error(`Unknown partial: ${id}`); return value }
   #partialMetadata(id: string): string { validatePartialId(id); return join(this.root, 'partials', `${id}.json`) }
   #partialData(id: string): string { validatePartialId(id); return join(this.root, 'partials', `${id}.bin`) }
