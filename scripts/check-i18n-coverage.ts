@@ -10,7 +10,7 @@
  * i18next's missing-key warnings and often map to user-defined identifiers.
  */
 
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { readdirSync, readFileSync, statSync, type Stats } from 'node:fs'
 import { join, relative, resolve } from 'node:path'
 
 const REPO_ROOT = resolve(import.meta.dir ?? new URL('.', import.meta.url).pathname, '..')
@@ -48,17 +48,39 @@ function isCodeFile(path: string): boolean {
   return false
 }
 
-function* walk(dir: string): Generator<string> {
-  for (const entry of readdirSync(dir)) {
+type FileSystem = {
+  readdirSync(path: string): string[]
+  statSync(path: string): Pick<Stats, 'isDirectory' | 'isFile'>
+}
+
+const fileSystem: FileSystem = { readdirSync, statSync }
+
+function* walk(dir: string, fs: FileSystem = fileSystem): Generator<string> {
+  for (const entry of fs.readdirSync(dir)) {
     if (SKIP_DIRS.has(entry)) continue
     const path = join(dir, entry)
-    const stat = statSync(path)
+    const stat = fs.statSync(path)
     if (stat.isDirectory()) {
-      yield* walk(path)
+      yield* walk(path, fs)
     } else if (stat.isFile() && isCodeFile(path)) {
       yield path
     }
   }
+}
+
+function isEnoent(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && 'code' in error && error.code === 'ENOENT'
+}
+
+export function filesInScanRoot(root: string, fs: FileSystem = fileSystem): string[] {
+  try {
+    if (!fs.statSync(root).isDirectory()) return []
+  } catch (error) {
+    if (isEnoent(error)) return []
+    throw error
+  }
+
+  return [...walk(root, fs)]
 }
 
 function lineColumn(source: string, index: number): { line: number; column: number } {
@@ -105,18 +127,6 @@ function collectReferences(file: string): Reference[] {
   return refs
 }
 
-const references: Reference[] = []
-for (const root of SCAN_ROOTS) {
-  const path = resolve(REPO_ROOT, root)
-  try {
-    if (statSync(path).isDirectory()) {
-      for (const file of walk(path)) references.push(...collectReferences(file))
-    }
-  } catch {
-    // Optional scan root absent in some checkouts.
-  }
-}
-
 function hasLocaleKey(key: string): boolean {
   if (enKeys.has(key)) return true
   // i18next pluralization callsites use the base key with `{ count }`, while
@@ -125,16 +135,26 @@ function hasLocaleKey(key: string): boolean {
   return enKeys.has(`${key}_one`) && enKeys.has(`${key}_other`)
 }
 
-const missing = references.filter((ref) => !hasLocaleKey(ref.key))
-
-if (missing.length) {
-  console.error('i18n coverage check failed:')
-  for (const ref of missing) {
-    console.error(`  ${ref.file}:${ref.line}:${ref.column} ${ref.kind} references missing key "${ref.key}"`)
+function main(): void {
+  const references: Reference[] = []
+  for (const root of SCAN_ROOTS) {
+    const path = resolve(REPO_ROOT, root)
+    for (const file of filesInScanRoot(path)) references.push(...collectReferences(file))
   }
-  console.error(`\n${missing.length} missing i18n key reference(s).`)
-  process.exit(1)
+
+  const missing = references.filter((ref) => !hasLocaleKey(ref.key))
+
+  if (missing.length) {
+    console.error('i18n coverage check failed:')
+    for (const ref of missing) {
+      console.error(`  ${ref.file}:${ref.line}:${ref.column} ${ref.kind} references missing key "${ref.key}"`)
+    }
+    console.error(`\n${missing.length} missing i18n key reference(s).`)
+    process.exit(1)
+  }
+
+  const uniqueKeys = new Set(references.map((ref) => ref.key))
+  console.log(`i18n coverage OK (${uniqueKeys.size} static keys referenced, ${enKeys.size} keys available)`)
 }
 
-const uniqueKeys = new Set(references.map((ref) => ref.key))
-console.log(`i18n coverage OK (${uniqueKeys.size} static keys referenced, ${enKeys.size} keys available)`)
+if (import.meta.main) main()
