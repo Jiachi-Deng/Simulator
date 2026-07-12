@@ -32,6 +32,7 @@ describe('no-inline-source-auth-check', () => {
   it('flags compound assignment to auth state', () => {
     expect(runRule('source.config.isAuthenticated += 1')).toHaveLength(1)
     expect(runRule('source.config.isAuthenticated ||= fallback')).toHaveLength(1)
+    expect(runRule('source.config.isAuthenticated++')).toHaveLength(1)
   })
 
   it('continues to flag direct auth-state reads', () => {

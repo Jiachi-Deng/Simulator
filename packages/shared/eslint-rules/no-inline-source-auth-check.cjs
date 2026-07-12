@@ -72,8 +72,7 @@ module.exports = {
           if (
             (node.parent.type === 'AssignmentExpression' &&
               node.parent.left === node &&
-              node.parent.operator === '=') ||
-            node.parent.type === 'UpdateExpression'
+              node.parent.operator === '=')
           ) {
             return
           }
