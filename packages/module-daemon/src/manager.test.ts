@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { chmod, mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { parseModuleManifest, type ModuleId, type ModuleManifest, type ModulePlatform } from '@simulator/module-contract'
+import { parseModuleManifest, type ModuleManifest, type ModulePlatform } from '@simulator/module-contract'
 import { ModuleDaemonManager } from './manager.ts'
 import { ModuleDaemonError, type ModuleDaemonSnapshot } from './types.ts'
 import { FakeClock, FakeHealthAdapter, FakeProcessAdapter } from './testing/fakes.ts'
@@ -301,6 +301,75 @@ describe('ModuleDaemonManager', () => {
     await settle()
     expect(restartHarness.manager.get(restartStarted.id)?.state).toBe('stopped')
     expect(restartHarness.processAdapter.processes).toHaveLength(1)
+  })
+
+  test('start during restart backoff joins the existing supervisor', async () => {
+    const root = await activatedRoot()
+    const { manager, processAdapter, clock } = harness({ restartBackoffMs: [50] })
+    const request = { manifest: manifest(), activatedRoot: root, platform: currentPlatform() }
+    const started = await manager.start(request)
+    processAdapter.processes[0]!.crash()
+    await waitFor(() => manager.get(started.id)?.state === 'crashed')
+
+    const restarted = manager.start(request)
+    await settle()
+    expect(processAdapter.processes).toHaveLength(1)
+    await clock.advance(50)
+    const recovered = await restarted
+    expect(recovered).toMatchObject({ state: 'healthy', restartCount: 1 })
+    expect(processAdapter.processes).toHaveLength(2)
+    await manager.stop(started.id)
+  })
+
+  test('throwing subscribers cannot alter daemon supervision', async () => {
+    const root = await activatedRoot()
+    const listenerErrors: unknown[] = []
+    const { manager, processAdapter } = harness({
+      onListenerError: (error) => listenerErrors.push(error),
+    })
+    manager.subscribe(() => {
+      throw new Error('listener failure')
+    })
+
+    const started = await manager.start({ manifest: manifest(), activatedRoot: root, platform: currentPlatform() })
+    expect(started.state).toBe('healthy')
+    expect(processAdapter.processes).toHaveLength(1)
+    expect(listenerErrors.length).toBeGreaterThan(0)
+    await manager.stop(started.id)
+  })
+
+  test('idle deadline aborts a pending health probe', async () => {
+    const root = await activatedRoot()
+    const { manager, health, clock } = harness({
+      healthIntervalMs: 5,
+      healthTimeoutMs: 100,
+      idleTimeoutMs: 20,
+    })
+    const started = await manager.start({ manifest: manifest(), activatedRoot: root, platform: currentPlatform() })
+    health.queuePendingProbe()
+    await clock.advance(5)
+    await waitFor(() => health.checks.length >= 2)
+    expect(health.checks.at(-1)?.timeoutMs).toBe(15)
+    await clock.advance(15)
+    await waitFor(() => manager.get(started.id)?.state === 'stopped')
+    expect(manager.get(started.id)?.diagnostic?.code).toBe('IDLE_TIMEOUT')
+  })
+
+  test('canonical root aliases deduplicate to one active process', async () => {
+    if (process.platform === 'win32') return
+    const root = await activatedRoot()
+    const aliasParent = await mkdtemp(join(tmpdir(), 'simulator-daemon-alias-'))
+    temporaryRoots.push(aliasParent)
+    const alias = join(aliasParent, 'activated')
+    await symlink(root, alias)
+    const { manager, processAdapter } = harness()
+    const moduleManifest = manifest()
+
+    const first = await manager.start({ manifest: moduleManifest, activatedRoot: root, platform: currentPlatform() })
+    const second = await manager.start({ manifest: moduleManifest, activatedRoot: alias, platform: currentPlatform() })
+    expect(second.pid).toBe(first.pid)
+    expect(processAdapter.processes).toHaveLength(1)
+    await manager.stop(first.id)
   })
 
   test('deduplicates concurrent starts for the same activated module', async () => {

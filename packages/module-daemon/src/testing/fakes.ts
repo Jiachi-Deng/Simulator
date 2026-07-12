@@ -171,12 +171,23 @@ export class FakeHealthAdapter implements HealthAdapter {
     if (!next) return this.defaultResult
     if (!('promise' in next)) return next
     if (signal?.aborted) throw abortError()
-    return await Promise.race([
-      next.promise,
-      new Promise<HealthProbeResult>((_, reject) => {
-        signal?.addEventListener('abort', () => reject(abortError()), { once: true })
-      }),
-    ])
+    return await new Promise<HealthProbeResult>((resolve, reject) => {
+      const onAbort = (): void => {
+        signal?.removeEventListener('abort', onAbort)
+        reject(abortError())
+      }
+      signal?.addEventListener('abort', onAbort, { once: true })
+      void next.promise.then(
+        (result) => {
+          signal?.removeEventListener('abort', onAbort)
+          resolve(result)
+        },
+        (error) => {
+          signal?.removeEventListener('abort', onAbort)
+          reject(error)
+        },
+      )
+    })
   }
 
   async releaseEndpoint(endpoint: LoopbackEndpoint): Promise<void> {

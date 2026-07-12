@@ -95,6 +95,6 @@ starting|healthy|degraded|crashed -> stopping -> stopped
 
 startup failure、unexpected exit 和 health threshold failure 共用有限 restart budget；backoff 取 bounded schedule 的最后一个值封顶，不会无限增长或无限 restart。budget 耗尽后稳定停在 `crashed`。`touch(id)` 更新活动时间，超过 idle timeout 会清理后进入 `stopped`，不消耗 restart budget。
 
-同一 activated version 的 concurrent start 会合并为一个 Promise；不同 root/version 不会覆盖 active process。explicit stop、health probe 中 stop、backoff 中 stop 和重复 stop 都是 race-safe/idempotent。`drain()` 原子地拒绝后续 start，并等待所有已登记 daemon 完成 process-tree cleanup，供 app quit 使用。
+同一 activated version 的 concurrent start 会合并为一个 Promise，canonical root alias 也会归并；restart backoff 中的 start 会等待原 supervisor 恢复，不会创建第二条 lifecycle。不同 root/version 不会覆盖 active process。explicit stop、health probe 中 stop、backoff 中 stop 和重复 stop 都是 race-safe/idempotent。`drain()` 原子地拒绝后续 start，并等待所有已登记 daemon 完成 process-tree cleanup，供 app quit 使用。状态 subscriber 的异常与 supervisor 隔离，可通过 `onListenerError` 上报。
 
-POSIX real process adapter 使用独立 process group，先向整组发送 `SIGTERM`，grace timeout 后向整组发送 `SIGKILL`；Windows 使用 `taskkill /T /F`。deterministic fake process/clock/health adapters 从 `@simulator/module-daemon/testing` 导出。真实本地 fixture 在 package test 中执行 20 次 start/health/stop，并逐轮确认 parent 与 descendant PID 都已退出。
+POSIX real process adapter 使用独立 process group，先向整组发送 `SIGTERM`，等待整组退出，grace timeout 后才发送 `SIGKILL`；Windows 使用有界等待且检查结果的 `taskkill /T /F`。deterministic fake process/clock/health adapters 从 `@simulator/module-daemon/testing` 导出。真实本地 fixture 在 package test 中执行 20 次 start/health/stop，并逐轮确认 parent 与 descendant PID 都已退出、descendant 的 graceful stop handler 已执行。

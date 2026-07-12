@@ -115,6 +115,7 @@ export interface ModuleDaemonManagerOptions {
   readonly idleTimeoutMs?: number
   readonly stopGraceMs?: number
   readonly baseEnvironment?: Readonly<Record<string, string>>
+  readonly onListenerError?: (error: unknown, snapshot: ModuleDaemonSnapshot) => void
 }
 
 export class ModuleDaemonError extends Error {

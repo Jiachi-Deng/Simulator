@@ -59,36 +59,71 @@ class RealModuleProcess implements ModuleProcess {
 
   private async stopTreeOnce(graceMs: number): Promise<void> {
     if (process.platform === 'win32') {
-      await new Promise<void>((resolve) => {
-        const killer = spawn('taskkill', ['/pid', String(this.pid), '/T', '/F'], {
-          shell: false,
-          stdio: 'ignore',
-          windowsHide: true,
-        })
-        killer.once('error', () => resolve())
-        killer.once('exit', () => resolve())
-      })
-      await this.exited
+      const taskkill = await Promise.race([
+        new Promise<{ exitCode?: number; error?: unknown }>((resolve) => {
+          const killer = spawn('taskkill', ['/pid', String(this.pid), '/T', '/F'], {
+            shell: false,
+            stdio: 'ignore',
+            windowsHide: true,
+          })
+          killer.once('error', (error) => resolve({ error }))
+          killer.once('exit', (exitCode) => resolve({ exitCode: exitCode ?? undefined }))
+        }),
+        new Promise<{ timeout: true }>((resolve) => setTimeout(() => resolve({ timeout: true }), graceMs)),
+      ])
+      if ('timeout' in taskkill) throw new Error('taskkill timed out while stopping module process tree')
+      if (taskkill.error || taskkill.exitCode !== 0) {
+        throw new Error(`taskkill failed while stopping module process tree (exitCode=${taskkill.exitCode ?? 'spawn-error'})`, { cause: taskkill.error })
+      }
+      const exited = await this.waitForLeaderExit(graceMs)
+      if (!exited) throw new Error('Module process leader did not exit after taskkill')
       return
     }
 
-    this.signalGroup('SIGTERM', false)
-    const exited = await Promise.race([
-      this.exited.then(() => true),
-      new Promise<false>((resolve) => setTimeout(() => resolve(false), graceMs)),
-    ])
-    // The leader may exit before descendants. Always signal the process group again.
-    this.signalGroup('SIGKILL', exited)
-    if (!exited) await this.exited
+    this.signalGroup('SIGTERM')
+    const groupExited = await this.waitForGroupExit(graceMs)
+    if (!groupExited) {
+      this.signalGroup('SIGKILL')
+      if (!await this.waitForGroupExit(graceMs)) {
+        throw new Error('Module process group did not exit after SIGKILL')
+      }
+    }
+    if (!await this.waitForLeaderExit(graceMs)) {
+      throw new Error('Module process leader exit event timed out')
+    }
   }
 
-  private signalGroup(signal: NodeJS.Signals, allowExitedLeaderRace: boolean): void {
+  private signalGroup(signal: NodeJS.Signals): void {
     try {
       process.kill(-this.pid, signal)
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code
-      if (code !== 'ESRCH' && !(allowExitedLeaderRace && code === 'EPERM')) throw error
+      if (code !== 'ESRCH') throw error
     }
+  }
+
+  private async waitForGroupExit(timeoutMs: number): Promise<boolean> {
+    const deadline = Date.now() + timeoutMs
+    while (this.groupExists() && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, Math.min(10, Math.max(1, deadline - Date.now()))))
+    }
+    return !this.groupExists()
+  }
+
+  private groupExists(): boolean {
+    try {
+      process.kill(-this.pid, 0)
+      return true
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+    }
+  }
+
+  private async waitForLeaderExit(timeoutMs: number): Promise<boolean> {
+    return await Promise.race([
+      this.exited.then(() => true),
+      new Promise<false>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+    ])
   }
 }
 

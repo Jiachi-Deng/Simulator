@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { chmod, copyFile, mkdir, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { chmod, copyFile, mkdir, mkdtemp, readFile, rm, unlink } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { parseModuleManifest, type ModuleManifest, type ModulePlatform } from '@simulator/module-contract'
@@ -57,6 +57,7 @@ describe('real local module daemon fixture', () => {
     await copyFile(join(import.meta.dir, 'testing/fixtures/daemon-fixture.ts'), executable)
     await chmod(executable, 0o755)
     const childPidFile = join(root, 'child.pid')
+    const childStopFile = join(root, 'child-stopped')
     const manager = new ModuleDaemonManager({
       process: new RealProcessAdapter(),
       clock: new RealClock(),
@@ -72,12 +73,16 @@ describe('real local module daemon fixture', () => {
       baseEnvironment: {
         PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
         SIMULATOR_FIXTURE_CHILD_PID_FILE: childPidFile,
+        SIMULATOR_FIXTURE_CHILD_STOP_FILE: childStopFile,
       },
     })
 
     const manifest = fixtureManifest()
     const endpoints = new Set<number>()
     for (let cycle = 0; cycle < 20; cycle += 1) {
+      await Promise.all([childPidFile, childStopFile].map((path) => unlink(path).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') throw error
+      })))
       const started = await manager.start({ manifest, activatedRoot: root, platform: currentPlatform() })
       expect(started.state).toBe('healthy')
       endpoints.add(started.endpoint!.port)
@@ -89,6 +94,7 @@ describe('real local module daemon fixture', () => {
       const stopped = await manager.stop(manifest.id)
       expect(stopped?.state).toBe('stopped')
       await Promise.all([waitForExit(parentPid), waitForExit(childPid)])
+      expect(await readFile(childStopFile, 'utf8')).toBe('graceful')
     }
 
     expect(endpoints.size).toBeGreaterThan(1)

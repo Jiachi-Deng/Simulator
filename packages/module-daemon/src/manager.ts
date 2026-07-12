@@ -44,7 +44,9 @@ interface DaemonRecord {
   lastActiveAt: number
   diagnostic?: ModuleDaemonDiagnostic
   readySettled: boolean
+  supervising: boolean
   stopRequested: boolean
+  readonly healthyWaiters: Set<Deferred<ModuleDaemonSnapshot>>
   lifecycle?: Promise<void>
   stopPromise?: Promise<ModuleDaemonSnapshot>
 }
@@ -53,10 +55,11 @@ type MonitorOutcome =
   | { readonly kind: 'crashed'; readonly code: ModuleDaemonDiagnosticCode; readonly message: string }
   | { readonly kind: 'idle' }
 
-type ReadinessRace =
+type ProbeRace =
   | { readonly kind: 'probe'; readonly result: HealthProbeResult }
   | { readonly kind: 'exit'; readonly exit: ProcessExit }
   | { readonly kind: 'timeout' }
+  | { readonly kind: 'error'; readonly error: unknown }
 
 function deferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void
@@ -113,15 +116,17 @@ export class ModuleDaemonManager {
       return Promise.reject(new ModuleDaemonError('MANAGER_DRAINING', 'Module daemon manager is draining'))
     }
 
-    const existing = this.records.get(request.manifest.id)
-    if (existing && (existing.state === 'starting' || existing.state === 'healthy' || existing.state === 'degraded')) {
-      if (existing.version !== request.manifest.version || existing.request.activatedRoot !== request.activatedRoot) {
-        return Promise.reject(new ModuleDaemonError('SPAWN_FAILED', 'A different activated version of this module is already active'))
-      }
-      return existing.ready.promise
-    }
-    if (existing?.state === 'stopping') {
-      return (existing.stopPromise ?? existing.lifecycle!).then(() => this.start(request))
+    const current = this.records.get(request.manifest.id)
+    if (current
+      && current.version === request.manifest.version
+      && current.request.activatedRoot === request.activatedRoot
+      && (current.state === 'starting'
+        || current.state === 'healthy'
+        || current.state === 'degraded'
+        || (current.state === 'crashed' && current.supervising))) {
+      if (current.state === 'healthy' || current.state === 'degraded') return Promise.resolve(this.snapshot(current))
+      if (!current.readySettled) return current.ready.promise
+      return this.waitForHealthy(current)
     }
 
     const pending = this.pendingStarts.get(request.manifest.id)
@@ -129,7 +134,7 @@ export class ModuleDaemonManager {
       const pendingRequest = this.pendingStartRequests.get(request.manifest.id)!
       if (pendingRequest.manifest.version !== request.manifest.version
         || pendingRequest.activatedRoot !== request.activatedRoot) {
-        return Promise.reject(new ModuleDaemonError('SPAWN_FAILED', 'A different activated version of this module is already starting'))
+        return pending.then(() => this.start(request), () => this.start(request))
       }
       return pending
     }
@@ -154,6 +159,22 @@ export class ModuleDaemonManager {
       throw new ModuleDaemonError('MANAGER_DRAINING', 'Module daemon manager is draining')
     }
 
+    const existing = this.records.get(request.manifest.id)
+    if (existing?.state === 'stopping') {
+      throw new ModuleDaemonError('STOP_REQUESTED', 'Module daemon is stopping')
+    }
+    if (existing && (existing.state === 'starting'
+      || existing.state === 'healthy'
+      || existing.state === 'degraded'
+      || (existing.state === 'crashed' && existing.supervising))) {
+      if (existing.version !== request.manifest.version || existing.activatedRoot !== resolved.activatedRoot) {
+        throw new ModuleDaemonError('SPAWN_FAILED', 'A different activated version of this module is already active')
+      }
+      if (existing.state === 'healthy' || existing.state === 'degraded') return this.snapshot(existing)
+      if (!existing.readySettled) return existing.ready.promise
+      return this.waitForHealthy(existing)
+    }
+
     const ready = deferred<ModuleDaemonSnapshot>()
     const record: DaemonRecord = {
       id: request.manifest.id,
@@ -167,7 +188,9 @@ export class ModuleDaemonManager {
       restartCount: 0,
       lastActiveAt: this.options.clock.now(),
       readySettled: false,
+      supervising: true,
       stopRequested: false,
+      healthyWaiters: new Set(),
     }
     this.records.set(record.id, record)
     this.emit(record)
@@ -264,12 +287,14 @@ export class ModuleDaemonManager {
         this.setDiagnostic(record, outcome.code, outcome.message)
         this.emit(record)
         if (record.restartCount >= this.restartLimit) {
+          record.supervising = false
           this.setDiagnostic(record, 'RESTART_BUDGET_EXHAUSTED', `Restart budget exhausted after ${record.restartCount} restart(s)`)
           this.emit(record)
           if (!record.readySettled) {
             record.readySettled = true
             record.ready.reject(new ModuleDaemonError('RESTART_BUDGET_EXHAUSTED', record.diagnostic!.message))
           }
+          this.rejectHealthyWaiters(record, new ModuleDaemonError('RESTART_BUDGET_EXHAUSTED', record.diagnostic!.message))
           return
         }
 
@@ -283,14 +308,19 @@ export class ModuleDaemonManager {
         record.ready.reject(error)
       }
     } finally {
-      await this.cleanupCurrent(record)
-      if (record.stopRequested) {
-        record.state = 'stopped'
-        if (!record.readySettled) {
-          record.readySettled = true
-          record.ready.reject(new ModuleDaemonError('STOP_REQUESTED', 'Module daemon stopped before becoming healthy'))
+      try {
+        await this.cleanupCurrent(record)
+        if (record.stopRequested) {
+          record.state = 'stopped'
+          if (!record.readySettled) {
+            record.readySettled = true
+            record.ready.reject(new ModuleDaemonError('STOP_REQUESTED', 'Module daemon stopped before becoming healthy'))
+          }
+          this.rejectHealthyWaiters(record, new ModuleDaemonError('STOP_REQUESTED', 'Module daemon stopped before becoming healthy'))
+          this.emit(record)
         }
-        this.emit(record)
+      } finally {
+        record.supervising = false
       }
     }
   }
@@ -338,6 +368,7 @@ export class ModuleDaemonManager {
       record.readySettled = true
       record.ready.resolve(this.snapshot(record))
     }
+    this.resolveHealthyWaiters(record)
     return this.monitor(record, record.process, endpoint)
   }
 
@@ -351,20 +382,20 @@ export class ModuleDaemonManager {
       const remaining = deadline - this.options.clock.now()
       if (remaining <= 0) throw new ModuleDaemonError('STARTUP_TIMEOUT', 'Module daemon readiness timed out')
 
-      const race = await Promise.race<ReadinessRace>([
-        this.options.health.check(endpoint, Math.min(this.healthTimeoutMs, remaining), record.controller.signal)
-          .then((result) => ({ kind: 'probe' as const, result })),
-        moduleProcess.exited.then((exit) => ({ kind: 'exit' as const, exit })),
-        this.options.clock.sleep(remaining, record.controller.signal).then(() => ({ kind: 'timeout' as const })),
-      ])
+      const race = await this.probe(
+        record,
+        moduleProcess,
+        endpoint,
+        Math.min(this.healthTimeoutMs, remaining),
+      )
       if (race.kind === 'exit') {
         throw new ModuleDaemonError('PROCESS_EXITED', this.exitMessage(race.exit, 'before readiness'))
       }
-      if (race.kind === 'timeout') {
+      if (race.kind === 'timeout' && this.options.clock.now() >= deadline) {
         throw new ModuleDaemonError('STARTUP_TIMEOUT', 'Module daemon readiness timed out')
       }
-      if (race.result.status === 'healthy') return
-      if (race.result.status === 'malformed') {
+      if (race.kind === 'probe' && race.result.status === 'healthy') return
+      if (race.kind === 'probe' && race.result.status === 'malformed') {
         throw new ModuleDaemonError('READINESS_MALFORMED', race.result.detail)
       }
       await this.options.clock.sleep(Math.min(this.healthIntervalMs, Math.max(0, deadline - this.options.clock.now())), record.controller.signal)
@@ -391,15 +422,26 @@ export class ModuleDaemonManager {
       }
       if (this.options.clock.now() - record.lastActiveAt >= this.idleTimeoutMs) return { kind: 'idle' }
 
-      const result = await Promise.race([
-        this.options.health.check(endpoint, this.healthTimeoutMs, record.controller.signal)
-          .then((probe) => ({ kind: 'probe' as const, probe })),
-        moduleProcess.exited.then((exit) => ({ kind: 'exit' as const, exit })),
-      ])
+      const probeBudget = Math.min(
+        this.healthTimeoutMs,
+        Math.max(1, this.idleTimeoutMs - (this.options.clock.now() - record.lastActiveAt)),
+      )
+      const result = await this.probe(record, moduleProcess, endpoint, probeBudget)
       if (result.kind === 'exit') {
         return { kind: 'crashed', code: 'PROCESS_EXITED', message: this.exitMessage(result.exit, 'during health check') }
       }
-      if (result.probe.status === 'healthy') {
+      if (result.kind === 'timeout' && this.options.clock.now() - record.lastActiveAt >= this.idleTimeoutMs) {
+        return { kind: 'idle' }
+      }
+      const probe = result.kind === 'probe'
+        ? result.result
+        : {
+            status: 'unhealthy' as const,
+            detail: result.kind === 'timeout'
+              ? 'Health probe timed out'
+              : 'Health probe failed',
+          }
+      if (probe.status === 'healthy') {
         unhealthyCount = 0
         if (record.state !== 'healthy') {
           record.state = 'healthy'
@@ -411,14 +453,14 @@ export class ModuleDaemonManager {
 
       unhealthyCount += 1
       record.state = 'degraded'
-      this.setDiagnostic(record, 'HEALTH_DEGRADED', result.probe.detail)
+      this.setDiagnostic(record, 'HEALTH_DEGRADED', probe.detail)
       this.emit(record)
       if (unhealthyCount >= this.unhealthyThreshold) {
-        const timedOut = result.probe.status === 'unhealthy' && /timed out/i.test(result.probe.detail)
+        const timedOut = probe.status === 'unhealthy' && /timed out/i.test(probe.detail)
         return {
           kind: 'crashed',
           code: timedOut ? 'HEALTH_TIMEOUT' : 'HEALTH_DEGRADED',
-          message: `Health failed ${unhealthyCount} consecutive time(s): ${result.probe.detail}`,
+          message: `Health failed ${unhealthyCount} consecutive time(s): ${probe.detail}`,
         }
       }
     }
@@ -432,6 +474,44 @@ export class ModuleDaemonManager {
     record.endpoint = undefined
     if (moduleProcess) await moduleProcess.stopTree(this.stopGraceMs)
     if (endpoint) await this.options.health.releaseEndpoint?.(endpoint)
+  }
+
+  private async probe(
+    record: DaemonRecord,
+    moduleProcess: ModuleProcess,
+    endpoint: LoopbackEndpoint,
+    timeoutMs: number,
+  ): Promise<ProbeRace> {
+    const probeController = new AbortController()
+    const signal = AbortSignal.any([record.controller.signal, probeController.signal])
+    const result = await Promise.race<ProbeRace>([
+      this.options.health.check(endpoint, timeoutMs, signal).then(
+        (health) => ({ kind: 'probe' as const, result: health }),
+        (error) => ({ kind: 'error' as const, error }),
+      ),
+      moduleProcess.exited.then((exit) => ({ kind: 'exit' as const, exit })),
+      this.options.clock.sleep(timeoutMs, signal).then(() => ({ kind: 'timeout' as const })),
+    ])
+    probeController.abort()
+    if (result.kind === 'error' && record.stopRequested) throw result.error
+    return result
+  }
+
+  private waitForHealthy(record: DaemonRecord): Promise<ModuleDaemonSnapshot> {
+    const waiter = deferred<ModuleDaemonSnapshot>()
+    record.healthyWaiters.add(waiter)
+    return waiter.promise
+  }
+
+  private resolveHealthyWaiters(record: DaemonRecord): void {
+    const snapshot = this.snapshot(record)
+    for (const waiter of record.healthyWaiters) waiter.resolve(snapshot)
+    record.healthyWaiters.clear()
+  }
+
+  private rejectHealthyWaiters(record: DaemonRecord, error: ModuleDaemonError): void {
+    for (const waiter of record.healthyWaiters) waiter.reject(error)
+    record.healthyWaiters.clear()
   }
 
   private setDiagnostic(record: DaemonRecord, code: ModuleDaemonDiagnosticCode, message: string): void {
@@ -457,7 +537,17 @@ export class ModuleDaemonManager {
 
   private emit(record: DaemonRecord): void {
     const snapshot = this.snapshot(record)
-    for (const listener of this.listeners) listener(snapshot)
+    for (const listener of this.listeners) {
+      try {
+        listener(snapshot)
+      } catch (error) {
+        try {
+          this.options.onListenerError?.(error, snapshot)
+        } catch {
+          // Diagnostics callbacks cannot participate in daemon supervision.
+        }
+      }
+    }
   }
 
   private exitMessage(exit: ProcessExit, phase: string): string {
