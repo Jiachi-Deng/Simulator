@@ -159,7 +159,7 @@
     "@sentry/electron": "^7.7.0",
     "@sentry/react": "^10.36.0",
     "@shikijs/cli": "^3.19.0",
-    "@tailwindcss/typography": "^0.5.19",
+    "@tailwindcss/typography": "^0.5.20",
     "@tiptap/extension-bubble-menu": "^3.20.0",
     "@tiptap/extension-file-handler": "^3.20.0",
     "@tiptap/extension-image": "^3.20.0",
