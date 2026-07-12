@@ -34,6 +34,12 @@ const child = Bun.spawn([runtime, '-e', childProgram], {
 })
 recordStatus(`child-spawned pid=${child.pid}`)
 
+const childReady = (async () => {
+  while (!await Bun.file(childPidFile).exists()) await Bun.sleep(1)
+  recordStatus('child-ready')
+})()
+let exitScheduled = false
+
 const server = Bun.serve({
   hostname: host,
   port,
@@ -41,16 +47,14 @@ const server = Bun.serve({
     const url = new URL(request.url)
     if (url.pathname !== '/health') return new Response('not found', { status: 404 })
     recordStatus('health-request')
-    if (exitAfterReady) setTimeout(() => process.exit(17), 10)
+    if (exitAfterReady && !exitScheduled) {
+      exitScheduled = true
+      void childReady.then(() => setTimeout(() => process.exit(17), 10))
+    }
     return Response.json({ status: 'healthy' })
   },
 })
 recordStatus('health-listening')
-
-void (async () => {
-  while (!await Bun.file(childPidFile).exists()) await Bun.sleep(1)
-  recordStatus('child-ready')
-})()
 
 function stop(): void {
   recordStatus('stopping')
