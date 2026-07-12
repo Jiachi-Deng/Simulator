@@ -10,9 +10,249 @@ updates:
     commit-message:
       prefix: "deps(bun)"
     groups:
-      bun-non-major:
+      agent-ai-unstable-patches:
         patterns:
-          - "*"
+          - "@anthropic-ai/*"
+          - "@earendil-works/*"
+          - "@github/copilot-sdk"
+          - "@sinclair/typebox"
+        update-types:
+          - "patch"
+      agent-ai-non-major:
+        patterns:
+          - "@anthropic-ai/*"
+          - "@earendil-works/*"
+          - "@github/copilot-sdk"
+          - "@modelcontextprotocol/sdk"
+          - "@sinclair/typebox"
+          - "openai"
+        exclude-patterns:
+          - "@anthropic-ai/*"
+          - "@earendil-works/*"
+          - "@github/copilot-sdk"
+          - "@sinclair/typebox"
+        update-types:
+          - "minor"
+          - "patch"
+      electron-non-major:
+        patterns:
+          - "@electron/*"
+          - "@sentry/electron"
+          - "electron"
+          - "electron-*"
+        update-types:
+          - "minor"
+          - "patch"
+      react-build-unstable-patches:
+        patterns:
+          - "@tailwindcss/typography"
+        update-types:
+          - "patch"
+      react-build-non-major:
+        patterns:
+          - "@tailwindcss/*"
+          - "@types/react"
+          - "@types/react-dom"
+          - "@vitejs/*"
+          - "@sentry/react"
+          - "@sentry/vite-plugin"
+          - "autoprefixer"
+          - "postcss"
+          - "react"
+          - "react-dom"
+          - "tailwindcss"
+          - "typescript"
+          - "vite"
+        exclude-patterns:
+          - "@tailwindcss/typography"
+        update-types:
+          - "minor"
+          - "patch"
+      ui-unstable-patches:
+        patterns:
+          - "@dnd-kit/dom"
+          - "@dnd-kit/helpers"
+          - "@paper-design/*"
+          - "@uiw/react-json-view"
+          - "class-variance-authority"
+          - "lucide-react"
+          - "next-themes"
+          - "react-simple-code-editor"
+        update-types:
+          - "patch"
+      ui-primitives-non-major:
+        patterns:
+          - "@radix-ui/*"
+          - "class-variance-authority"
+          - "clsx"
+          - "cmdk"
+          - "next-themes"
+          - "sonner"
+          - "tailwind-merge"
+          - "vaul"
+        exclude-patterns:
+          - "class-variance-authority"
+          - "next-themes"
+        update-types:
+          - "minor"
+          - "patch"
+      ui-interaction-non-major:
+        patterns:
+          - "@dnd-kit/*"
+          - "@tanstack/*"
+          - "jotai*"
+          - "motion"
+          - "react-day-picker"
+          - "react-devtools-core"
+          - "react-resizable-panels"
+          - "react-simple-code-editor"
+        exclude-patterns:
+          - "@dnd-kit/dom"
+          - "@dnd-kit/helpers"
+          - "react-simple-code-editor"
+        update-types:
+          - "minor"
+          - "patch"
+      ui-visual-non-major:
+        patterns:
+          - "@paper-design/*"
+          - "@uiw/*"
+          - "lucide-react"
+          - "qrcode.react"
+          - "react-colorful"
+        exclude-patterns:
+          - "@paper-design/*"
+          - "@uiw/react-json-view"
+          - "lucide-react"
+        update-types:
+          - "minor"
+          - "patch"
+      content-unstable-patches:
+        patterns:
+          - "@types/katex"
+          - "katex"
+          - "markitdown-js"
+          - "prosemirror-highlight"
+          - "tiptap-markdown"
+        update-types:
+          - "patch"
+      content-editor-non-major:
+        patterns:
+          - "@tiptap/*"
+          - "prosemirror-*"
+          - "tiptap-*"
+        exclude-patterns:
+          - "prosemirror-highlight"
+          - "tiptap-markdown"
+        update-types:
+          - "minor"
+          - "patch"
+      content-markdown-non-major:
+        patterns:
+          - "gray-matter"
+          - "linkify-it"
+          - "marked"
+          - "react-markdown"
+          - "rehype-*"
+          - "remark*"
+          - "strip-markdown"
+          - "turndown"
+          - "unified"
+          - "unist-util-*"
+        update-types:
+          - "minor"
+          - "patch"
+      content-rendering-non-major:
+        patterns:
+          - "@shikijs/*"
+          - "@types/katex"
+          - "@types/linkify-it"
+          - "beautiful-mermaid"
+          - "katex"
+          - "markitdown-js"
+          - "node-html-parser"
+          - "pdfjs-dist"
+          - "react-pdf"
+          - "shiki"
+        exclude-patterns:
+          - "@types/katex"
+          - "katex"
+          - "markitdown-js"
+        update-types:
+          - "minor"
+          - "patch"
+      native-runtime-unstable-patches:
+        patterns:
+          - "@img/sharp-darwin-*"
+          - "@img/sharp-linux-*"
+          - "sharp"
+        update-types:
+          - "patch"
+      backend-messaging-non-major:
+        patterns:
+          - "@aws-sdk/*"
+          - "@img/*"
+          - "@larksuiteoapi/*"
+          - "@whiskeysockets/*"
+          - "@types/ws"
+          - "grammy"
+          - "i18next*"
+          - "jose"
+          - "sharp"
+          - "undici"
+          - "ws"
+          - "zod*"
+        exclude-patterns:
+          - "@img/sharp-darwin-*"
+          - "@img/sharp-linux-*"
+          - "sharp"
+        update-types:
+          - "minor"
+          - "patch"
+      data-jobs-unstable-patches:
+        patterns:
+          - "bash-parser"
+        update-types:
+          - "patch"
+      data-jobs-non-major:
+        patterns:
+          - "@isaacs/ttlcache"
+          - "@leeoniya/ufuzzy"
+          - "bash-parser"
+          - "chrono-node"
+          - "croner"
+          - "date-fns"
+          - "filtrex"
+          - "glob"
+          - "incr-regex-package"
+          - "js-yaml"
+          - "semver"
+          - "shell-quote"
+          - "tar"
+          - "yaml"
+        exclude-patterns:
+          - "bash-parser"
+        update-types:
+          - "minor"
+          - "patch"
+      tooling-unstable-patches:
+        patterns:
+          - "esbuild"
+        update-types:
+          - "patch"
+      tooling-non-major:
+        patterns:
+          - "@rollup/*"
+          - "@types/*"
+          - "@typescript-eslint/*"
+          - "@vscode/*"
+          - "concurrently"
+          - "esbuild"
+          - "eslint*"
+          - "husky"
+        exclude-patterns:
+          - "@types/katex"
+          - "esbuild"
         update-types:
           - "minor"
           - "patch"
