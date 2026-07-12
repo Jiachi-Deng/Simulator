@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createServer, type RequestListener, type Server } from 'node:http'
-import { lstat, mkdir, mkdtemp, readFile, rm, stat, symlink, utimes, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { NodeFetchAdapter } from './node-fetch.ts'
@@ -54,11 +54,14 @@ describe('production filesystem cache', () => {
   it('recovers a bounded dead stale owner without deleting a replacement owner', async () => {
     const directory = await root()
     const leaseName = createHash('sha256').update('catalog').digest('hex')
-    const lock = join(directory, 'leases', `${leaseName}.lock`)
+    const lock = join(directory, 'leases', 'claims', `${leaseName}.lock`)
     await writeFile(join(directory, '.keep'), '')
     const cache = new NodeFilesystemModuleDownloaderCache(directory, { staleLeaseMs: 1, leasePollMs: 5, maxStaleRecoveries: 1, now: () => 10_000 })
+    await cache.readCatalog()
     await mkdir(lock, { recursive: true })
-    await writeFile(join(lock, 'owner.json'), JSON.stringify({ token: 'dead', pid: 999_999_999, acquiredAt: 0 }))
+    const token = '00000000-0000-4000-8000-000000000000'
+    await writeFile(join(lock, 'claim.json'), JSON.stringify({ token }))
+    await writeFile(join(directory, 'leases', 'owners', `${token}.json`), JSON.stringify({ token, pid: 999_999_999, acquiredAt: 0 }))
     const lease = await cache.acquireLease('catalog', new AbortController().signal)
     await lease.release()
     await expect(stat(lock)).rejects.toMatchObject({ code: 'ENOENT' })
@@ -66,7 +69,7 @@ describe('production filesystem cache', () => {
 
   it('recovers an ownerless lock left by a crash before owner metadata', async () => {
     const directory = await root(); const leaseName = createHash('sha256').update('catalog').digest('hex')
-    const lock = join(directory, 'leases', `${leaseName}.lock`); await mkdir(lock, { recursive: true }); await utimes(lock, 0, 0)
+    const lock = join(directory, 'leases', 'claims', `${leaseName}.lock`); await mkdir(lock, { recursive: true }); await utimes(lock, 0, 0)
     const cache = new NodeFilesystemModuleDownloaderCache(directory, { staleLeaseMs: 1, leasePollMs: 5, now: () => 10_000 })
     const lease = await cache.acquireLease('catalog', new AbortController().signal); await lease.release()
     await expect(stat(lock)).rejects.toMatchObject({ code: 'ENOENT' })
@@ -74,15 +77,22 @@ describe('production filesystem cache', () => {
 
   it('does not delete a replacement owner after a stale-read pathname ABA', async () => {
     const directory = await root(); const leaseName = createHash('sha256').update('catalog').digest('hex')
-    const lock = join(directory, 'leases', `${leaseName}.lock`); await mkdir(lock, { recursive: true })
-    await writeFile(join(lock, 'owner.json'), JSON.stringify({ token: 'dead', pid: 999_999_999, acquiredAt: 0 }))
-    const gate = join(directory, 'continue'); const fixture = join(import.meta.dir, 'testing', 'lease-aba-child.ts')
-    const recoverer = child(fixture, directory, gate); await recoverer.until('before-stale-rename')
+    const setup = new NodeFilesystemModuleDownloaderCache(directory); await setup.readCatalog()
+    const lock = join(directory, 'leases', 'claims', `${leaseName}.lock`); await mkdir(lock, { recursive: true })
+    const dead = '00000000-0000-4000-8000-000000000000'
+    await writeFile(join(lock, 'claim.json'), JSON.stringify({ token: dead }))
+    await writeFile(join(directory, 'leases', 'owners', `${dead}.json`), JSON.stringify({ token: dead, pid: 999_999_999, acquiredAt: 0 }))
+    const staleGate = join(directory, 'continue-stale'); const quarantineGate = join(directory, 'continue-quarantine'); const releaseGate = join(directory, 'release-replacement')
+    const fixture = join(import.meta.dir, 'testing', 'lease-aba-child.ts')
+    const recoverer = child(fixture, directory, staleGate, quarantineGate); await recoverer.until('before-stale-rename')
     await rm(lock, { recursive: true })
-    const replacementFixture = join(import.meta.dir, 'testing', 'lease-child.ts')
-    const replacement = child(replacementFixture, directory, 'catalog', '100'); await replacement.until('acquired:')
-    const replacementOwner = JSON.parse(await readFile(join(lock, 'owner.json'), 'utf8'))
-    await writeFile(gate, 'continue'); await replacement.done
+    const replacementFixture = join(import.meta.dir, 'testing', 'lease-release-child.ts')
+    const replacement = child(replacementFixture, directory, releaseGate); await replacement.until('acquired:')
+    const replacementClaim = JSON.parse(await readFile(join(lock, 'claim.json'), 'utf8'))
+    const replacementOwner = JSON.parse(await readFile(join(directory, 'leases', 'owners', `${replacementClaim.token}.json`), 'utf8'))
+    await writeFile(staleGate, 'continue'); await recoverer.until('replacement-quarantined')
+    await writeFile(releaseGate, 'release'); await replacement.done
+    await writeFile(quarantineGate, 'continue')
     await recoverer.done
     expect(recoverer.output()).toContain('recoverer-acquired')
     expect(replacementOwner.pid).not.toBe(process.pid)
@@ -104,6 +114,14 @@ describe('production filesystem cache', () => {
     expect(await recovery.readStagedCatalog()).toEqual(staged)
     expect(await recovery.publishCatalog(undefined)).toBe(true)
     expect(await recovery.readCatalog()).toEqual(staged)
+  })
+
+  it('binds publish to the exact immutable staged transaction identity and digest', async () => {
+    const directory = await root(); const cache = new NodeFilesystemModuleDownloaderCache(directory); await cache.stageCatalog(catalogRecord(1, 1))
+    const stagedDirectory = join(directory, 'catalog', 'staged'); const [stageName] = await readdirNames(stagedDirectory); const stagePath = join(stagedDirectory, stageName!)
+    const original = `${stagePath}.original`; await rename(stagePath, original); await writeFile(stagePath, JSON.stringify({ ...catalogRecord(1, 2), responseBytesBase64: 'Ag==' }))
+    await expect(cache.publishCatalog(undefined)).rejects.toThrow('identity or digest changed')
+    expect(await cache.readCatalog()).toBeUndefined()
   })
 
   it('fails closed when a cache top-level directory is a symlink', async () => {
@@ -141,15 +159,28 @@ describe('production filesystem cache', () => {
     const after = await lstat(destination); expect(after.ino).toBe(before.ino); expect(await readdirNames(destination)).toEqual([])
   })
 
+  it('fails closed for partial data and record leaf symlinks without touching targets', async () => {
+    for (const leaf of ['data.bin', 'record.json']) {
+      const directory = await root(); const outside = join(await root(), 'outside'); await writeFile(outside, 'safe')
+      const cache = new NodeFilesystemModuleDownloaderCache(directory); const bytes = Buffer.from('leaf'); const sha256 = createHash('sha256').update(bytes).digest('hex')
+      const partial = await cache.createPartial({ sha256, sourceUrl: 'https://example.test/a', expectedSize: bytes.length, updatedAt: 1 })
+      const leafPath = join(directory, 'partials', partial.id, leaf); await unlink(leafPath); await symlink(outside, leafPath)
+      await expect(cache.appendPartial(partial.id, bytes, 2)).rejects.toThrow()
+      await cache.removePartial(partial.id)
+      expect(await readFile(outside, 'utf8')).toBe('safe')
+    }
+  })
+
   it('keeps catalog envelope and trust state in one durable committed file', async () => {
     const directory = await root()
     const cache = new NodeFilesystemModuleDownloaderCache(directory)
     const record = { sourceUrl: 'https://example.test/catalog', responseBytes: new Uint8Array([1, 2]), expiresAt: '2030-01-01T00:00:00.000Z', trustState: { highestSequence: 1, latestIssuedAt: '2029-01-01T00:00:00.000Z' }, committedAt: 1 }
     await cache.stageCatalog(record)
     expect(await cache.publishCatalog(undefined)).toBe(true)
-    const wire = JSON.parse(await readFile(join(directory, 'catalog', 'committed.json'), 'utf8'))
-    expect(wire.responseBytesBase64).toBe('AQI=')
-    expect(wire.trustState).toEqual(record.trustState)
+    const generations = await readdirNames(join(directory, 'catalog', 'generations'))
+    expect(generations).toHaveLength(1)
+    const wire = JSON.parse(await readFile(join(directory, 'catalog', 'generations', generations[0]!), 'utf8'))
+    expect(wire.responseBytesBase64).toBe('AQI='); expect(wire.trustState).toEqual(record.trustState)
     expect(await cache.readStagedCatalog()).toBeUndefined()
   })
 
@@ -158,7 +189,7 @@ describe('production filesystem cache', () => {
       const directory = await root(); const baseline = new NodeFilesystemModuleDownloaderCache(directory); const first = catalogRecord(1, 1)
       await baseline.stageCatalog(first); expect(await baseline.publishCatalog(undefined)).toBe(true)
       let armed = false
-      const faulted = new NodeFilesystemModuleDownloaderCache(directory, { faultInjector(candidate, path) { if (armed && candidate === point && (path.includes('committed.json') || (candidate === 'directory-sync' && path.endsWith('catalog')))) throw new Error(`crash:${point}`) } })
+      const faulted = new NodeFilesystemModuleDownloaderCache(directory, { faultInjector(candidate, path) { if (armed && candidate === point && (path.includes('/generations/') || path.endsWith('current.json') || (candidate === 'directory-sync' && path.endsWith('generations')))) throw new Error(`crash:${point}`) } })
       const second = catalogRecord(2, 2); await faulted.stageCatalog(second); armed = true
       await expect(faulted.publishCatalog(first.trustState)).rejects.toThrow(`crash:${point}`)
       const recovered = await new NodeFilesystemModuleDownloaderCache(directory).readCatalog()
@@ -171,20 +202,20 @@ describe('production filesystem cache', () => {
   it('reports the platform durability protocol without claiming Windows directory fsync', async () => {
     const cache = new NodeFilesystemModuleDownloaderCache(await root())
     await cache.readCatalog()
-    expect(cache.durability).toBe(process.platform === 'win32' ? 'file-fsync-and-recovery-marker' : 'file-and-directory-fsync')
+    expect(cache.durability).toBe('immutable-generation-scan')
   })
 
   it('bounds startup pruning of stale staging and orphan partial files', async () => {
     const directory = await root()
-    const staging = join(directory, 'artifacts', '.dead.tmp')
-    const orphan = join(directory, 'partials', '00000000-0000-4000-8000-000000000000.bin')
-    await mkdir(staging, { recursive: true }); await mkdir(join(directory, 'partials'), { recursive: true }); await writeFile(orphan, 'x')
+    const staging = join(directory, 'artifacts', `${'a'.repeat(64)}.recover-dead`)
+    const orphan = join(directory, 'partials', '00000000-0000-4000-8000-000000000000')
+    await mkdir(staging, { recursive: true }); await mkdir(orphan, { recursive: true }); await writeFile(join(orphan, 'data.bin'), 'x')
     await utimes(staging, 0, 0); await utimes(orphan, 0, 0)
     const cache = new NodeFilesystemModuleDownloaderCache(directory, { staleLeaseMs: 1, maxStartupPrunes: 1, now: () => 10_000 })
     await cache.listPartials()
-    const survivors = await Promise.all([stat(staging).then(() => true, () => false), stat(orphan).then(() => true, () => false)])
-    expect(survivors.filter(Boolean)).toHaveLength(1)
+    expect(await stat(staging).then(() => true, () => false)).toBe(false)
   })
+
 })
 
 describe('native fetch adapter', () => {
