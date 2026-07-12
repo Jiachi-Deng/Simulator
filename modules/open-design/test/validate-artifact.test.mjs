@@ -127,6 +127,10 @@ test("rejects Unicode NFC and case-fold path collisions", () => {
     inventory.files.push(runtimeFile("web/static/Stra\u00dfe.js", { artifactKind: "web-static", component: "next-static", dependencyScope: "artifact" }));
     inventory.files.push(runtimeFile("web/static/STRASSE.js", { artifactKind: "web-static", component: "next-static", dependencyScope: "artifact" }));
   }), "DUPLICATE_PATH");
+  has(mutate(({ inventory }) => {
+    inventory.files.push(runtimeFile("web/static/\u1fb3.js", { artifactKind: "web-static", component: "next-static", dependencyScope: "artifact" }));
+    inventory.files.push(runtimeFile("web/static/\u03b1\u03b9.js", { artifactKind: "web-static", component: "next-static", dependencyScope: "artifact" }));
+  }), "DUPLICATE_PATH");
   has(mutate(({ inventory }) => inventory.files.push(runtimeFile("web/static/Cafe\u0301.js", { artifactKind: "web-static", component: "next-static", dependencyScope: "artifact" }))), "PATH_TRAVERSAL");
 });
 

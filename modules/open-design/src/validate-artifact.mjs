@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { caseFold } from "unicode-case-folding";
 
 const SHA40 = /^[0-9a-f]{40}$/;
 const textEncoder = new TextEncoder();
@@ -158,10 +159,7 @@ function validateSymlinkTarget(linkPath, target) {
 }
 
 function unicodeCaseFold(value) {
-  return value.toLocaleLowerCase("und")
-    .replaceAll("\u00df", "ss")
-    .replaceAll("\u03c2", "\u03c3")
-    .replaceAll("\u017f", "s");
+  return caseFold(value);
 }
 
 function isForbiddenPath(value, policy) {
