@@ -71,6 +71,18 @@ bun install
 bun run electron:start
 ```
 
+### Upstream Craft Service Reference
+
+The following commands are retained as compatibility examples for the upstream Craft Agents distribution. They install the upstream product, not Simulator:
+
+```bash
+curl -fsSL https://agents.craft.do/install-app.sh | bash
+```
+
+```powershell
+irm https://agents.craft.do/install-app.ps1 | iex
+```
+
 ## Features
 
 - **Multi-Session Inbox**: Desktop app with session management, status workflow, and flagging
