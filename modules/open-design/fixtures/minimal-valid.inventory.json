@@ -1,15 +1,13 @@
 {
   "schemaVersion": 1,
-  "source": {
-    "ref": "open-design-v0.14.1",
-    "commit": "2225647726d5387bb24e9539fdb577958b6d88c6"
-  },
+  "source": {"ref": "open-design-v0.14.1", "commit": "2225647726d5387bb24e9539fdb577958b6d88c6"},
+  "target": {"platform": "darwin", "arch": "arm64", "nodeAbi": "137", "libc": "none"},
   "files": [
-    {"path": "web/standalone/server.js", "kind": "runtime", "dependencyScope": "artifact"},
-    {"path": "runtime/daemon/dist/cli.js", "kind": "runtime", "dependencyScope": "production"},
-    {"path": "legal/LICENSE", "kind": "legal", "dependencyScope": "artifact"},
-    {"path": "legal/SBOM.spdx.json", "kind": "legal", "dependencyScope": "artifact"},
-    {"path": "provenance.json", "kind": "metadata", "dependencyScope": "artifact"},
-    {"path": "artifact-manifest.json", "kind": "metadata", "dependencyScope": "artifact"}
+    {"schemaVersion": 1, "path": "web/standalone/server.js", "type": "file", "artifactKind": "web-server", "component": "next-standalone", "dependencyScope": "artifact", "bytes": 100, "sha256": "1111111111111111111111111111111111111111111111111111111111111111"},
+    {"schemaVersion": 1, "path": "runtime/daemon/dist/cli.js", "type": "file", "artifactKind": "daemon-runtime", "component": "daemon", "dependencyScope": "production", "bytes": 100, "sha256": "2222222222222222222222222222222222222222222222222222222222222222"},
+    {"schemaVersion": 1, "path": "legal/LICENSE", "type": "file", "artifactKind": "legal", "component": "legal", "dependencyScope": "artifact", "bytes": 11358, "sha256": "3333333333333333333333333333333333333333333333333333333333333333", "mediaType": "text/plain", "schemaId": "apache-2.0-license-text"},
+    {"schemaVersion": 1, "path": "legal/SBOM.spdx.json", "type": "file", "artifactKind": "legal", "component": "legal", "dependencyScope": "artifact", "bytes": 100, "sha256": "4444444444444444444444444444444444444444444444444444444444444444", "mediaType": "application/spdx+json", "schemaId": "spdx-2.3", "contentSchemaVersion": "SPDX-2.3", "sourceCommit": "2225647726d5387bb24e9539fdb577958b6d88c6"},
+    {"schemaVersion": 1, "path": "provenance.json", "type": "file", "artifactKind": "metadata", "component": "metadata", "dependencyScope": "artifact", "bytes": 100, "sha256": "aaaf66a05ffe72910df188108425fcd798642dc49ca03761e97cb5994ef17ff5", "mediaType": "application/json", "schemaId": "open-design-provenance-v1", "contentSchemaVersion": 1, "sourceCommit": "2225647726d5387bb24e9539fdb577958b6d88c6"},
+    {"schemaVersion": 1, "path": "artifact-manifest.json", "type": "file", "artifactKind": "metadata", "component": "metadata", "dependencyScope": "artifact", "bytes": 100, "sha256": "d8cfa514f3f7d8f5fc0740a1237c7ff39f62537f648601d9504258ee8839f511", "mediaType": "application/json", "schemaId": "open-design-artifact-inventory-v1", "contentSchemaVersion": 1, "sourceCommit": "2225647726d5387bb24e9539fdb577958b6d88c6"}
   ]
 }

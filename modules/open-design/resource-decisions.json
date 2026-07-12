@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "policy": "Unknown or unreviewed rights are excluded from the artifact until a decision is explicitly changed to include with rightsStatus=cleared.",
+  "policy": "A decision authorizes only its exact normalized sourcePath and category. Unknown rights remain excluded or pending review.",
   "decisions": [
-    {"id": "templates-upstream", "category": "templates", "sourcePath": "design-templates/**", "status": "review", "rightsStatus": "pending", "license": null, "reason": "Each template has independent content and license material; no blanket inclusion decision."},
-    {"id": "fonts-upstream", "category": "fonts", "sourcePath": "**/*.{woff,woff2,ttf,otf}", "status": "review", "rightsStatus": "unknown", "license": null, "reason": "Font embedding and redistribution rights have not been inventoried."},
-    {"id": "images-upstream", "category": "images", "sourcePath": "**/*.{png,jpg,jpeg,gif,webp,avif,svg}", "status": "review", "rightsStatus": "unknown", "license": null, "reason": "Image authorship and redistribution rights require per-resource review."},
-    {"id": "plugins-upstream", "category": "plugins", "sourcePath": "plugins/**", "status": "exclude", "rightsStatus": "pending", "license": null, "reason": "Plugins are outside the minimum profile and may carry independent dependencies or licenses."},
-    {"id": "skills-upstream", "category": "skills", "sourcePath": "skills/**", "status": "exclude", "rightsStatus": "pending", "license": null, "reason": "Skills are outside the minimum profile and have per-skill license files."},
-    {"id": "native-runtime", "category": "native-binaries", "sourcePath": "runtime/**/*.{node,so,dylib,dll,exe}", "status": "review", "rightsStatus": "pending", "license": null, "reason": "Native runtime outputs require dependency license review plus exact ABI declarations."}
+    {"id": "templates-root", "category": "templates", "sourcePath": "design-templates", "status": "review", "rightsStatus": "pending", "license": null, "rightsEvidence": null, "reason": "Each template requires an exact per-resource decision."},
+    {"id": "fonts-unreviewed", "category": "fonts", "sourcePath": "unreviewed/fonts", "status": "review", "rightsStatus": "unknown", "license": null, "rightsEvidence": null, "reason": "Font redistribution rights are not inventoried."},
+    {"id": "images-unreviewed", "category": "images", "sourcePath": "unreviewed/images", "status": "review", "rightsStatus": "unknown", "license": null, "rightsEvidence": null, "reason": "Image redistribution rights are not inventoried."},
+    {"id": "plugins-root", "category": "plugins", "sourcePath": "plugins", "status": "exclude", "rightsStatus": "pending", "license": null, "rightsEvidence": null, "reason": "Plugins are outside the minimum profile."},
+    {"id": "skills-root", "category": "skills", "sourcePath": "skills", "status": "exclude", "rightsStatus": "pending", "license": null, "rightsEvidence": null, "reason": "Skills are outside the minimum profile."},
+    {"id": "native-unreviewed", "category": "native-binaries", "sourcePath": "unreviewed/native-binaries", "status": "review", "rightsStatus": "pending", "license": null, "rightsEvidence": null, "reason": "Native outputs require exact license evidence and target ABI declarations."}
   ]
 }
