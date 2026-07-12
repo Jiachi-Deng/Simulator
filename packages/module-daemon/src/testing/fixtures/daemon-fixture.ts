@@ -8,6 +8,7 @@ const childStopFile = process.env.SIMULATOR_FIXTURE_CHILD_STOP_FILE
 const runtime = process.env.SIMULATOR_FIXTURE_RUNTIME
 const statusFile = process.env.SIMULATOR_FIXTURE_STATUS_FILE
 const exitAfterReady = process.env.SIMULATOR_FIXTURE_EXIT_AFTER_READY === '1'
+const childReadyDelayMs = Number(process.env.SIMULATOR_FIXTURE_CHILD_READY_DELAY_MS ?? 0)
 
 if (host !== '127.0.0.1' || !Number.isSafeInteger(port) || !childPidFile || !childStopFile || !runtime) process.exit(64)
 
@@ -24,6 +25,7 @@ const childProgram = `
     writeFileSync(${JSON.stringify(childStopFile)}, 'graceful');
     process.exit(0);
   });
+  await Bun.sleep(${Number.isSafeInteger(childReadyDelayMs) && childReadyDelayMs >= 0 ? childReadyDelayMs : 0});
   writeFileSync(${JSON.stringify(childPidFile)}, String(process.pid));
   setInterval(() => {}, 1000);
 `
@@ -61,6 +63,7 @@ function stop(): void {
   server.stop(true)
   process.exit(0)
 }
+
 
 process.on('SIGTERM', stop)
 process.on('SIGINT', stop)

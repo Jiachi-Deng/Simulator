@@ -271,6 +271,35 @@ async function runLeaderFirst(
   })
 }
 
+async function runImmediateStopAfterHealth(
+  factory: KoffiWindowsJobProcessFactory,
+  bunExecutable: string,
+  systemRoot: string,
+): Promise<void> {
+  const { root, entrypoint } = await prepareFixture(bunExecutable, 'simulator-daemon-node-immediate-stop-')
+  const statusFile = join(root, 'fixture-status.log')
+  const manager = managerFor(factory, {
+    PATH: `${dirname(bunExecutable)};${join(systemRoot, 'System32')}`,
+    SystemRoot: systemRoot,
+    SIMULATOR_FIXTURE_CHILD_PID_FILE: join(root, 'child.pid'),
+    SIMULATOR_FIXTURE_CHILD_STOP_FILE: join(root, 'child-stopped'),
+    SIMULATOR_FIXTURE_CHILD_READY_DELAY_MS: '5000',
+    SIMULATOR_FIXTURE_RUNTIME: bunExecutable,
+    SIMULATOR_FIXTURE_STATUS_FILE: statusFile,
+  })
+  const manifest = fixtureManifest(entrypoint)
+  await drainAfter(manager, async () => {
+    const started = await manager.start({ manifest, activatedRoot: root, platform: windowsPlatform() })
+    const status = await readIfPresent(statusFile)
+    const childPid = Number(status.match(/child-spawned pid=(\d+)/)?.[1])
+    assert.ok(Number.isSafeInteger(childPid) && childPid > 0, `missing child pid in fixture status: ${status}`)
+    assert.equal(status.includes('child-ready'), false, 'fixture child became ready before immediate-stop assertion')
+    const stopped = await manager.stop(manifest.id)
+    assert.equal(stopped?.state, 'stopped')
+    await Promise.all([waitForExit(started.pid!), waitForExit(childPid)])
+  })
+}
+
 async function main(): Promise<void> {
   assert.equal(process.platform, 'win32', 'Windows native integration must run on Windows')
   const systemRoot = process.env.SystemRoot
@@ -281,10 +310,11 @@ async function main(): Promise<void> {
     await verifyJunctionContainment()
     factory = new KoffiWindowsJobProcessFactory()
     await runTwentyCycles(factory, bunExecutable, systemRoot)
+    await runImmediateStopAfterHealth(factory, bunExecutable, systemRoot)
     await runLeaderFirst(factory, bunExecutable, systemRoot)
     await factory.dispose()
     factory = undefined
-    console.log('Windows Node native integration passed: junction, 20 cycles, leader-first cleanup')
+    console.log('Windows Node native integration passed: junction, 20 cycles, immediate stop, leader-first cleanup')
   } finally {
     await factory?.dispose()
     await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
