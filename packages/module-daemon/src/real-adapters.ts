@@ -18,6 +18,11 @@ function abortError(): DOMException {
   return new DOMException('Operation aborted', 'AbortError')
 }
 
+export function loopbackHealthUrl(endpoint: LoopbackEndpoint): string {
+  const host = endpoint.host === '::1' ? '[::1]' : endpoint.host
+  return `http://${host}:${endpoint.port}/health`
+}
+
 export class RealClock implements ClockAdapter {
   now(): number {
     return Date.now()
@@ -55,8 +60,13 @@ class RealModuleProcess implements ModuleProcess {
   }
 
   stopTree(graceMs: number): Promise<void> {
-    this.stopPromise ??= this.stopTreeOnce(graceMs)
-    return this.stopPromise
+    if (this.stopPromise) return this.stopPromise
+    const attempt = this.stopTreeOnce(graceMs)
+    this.stopPromise = attempt
+    void attempt.catch(() => {
+      if (this.stopPromise === attempt) this.stopPromise = undefined
+    })
+    return attempt
   }
 
   private async stopTreeOnce(graceMs: number): Promise<void> {
@@ -177,7 +187,7 @@ export class LoopbackHttpHealthAdapter implements HealthAdapter {
     const timeout = AbortSignal.timeout(timeoutMs)
     const combined = signal ? AbortSignal.any([signal, timeout]) : timeout
     try {
-      const response = await fetch(`http://${endpoint.host}:${endpoint.port}/health`, {
+      const response = await fetch(loopbackHealthUrl(endpoint), {
         method: 'GET',
         headers: { accept: 'application/json' },
         redirect: 'error',

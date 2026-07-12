@@ -79,6 +79,7 @@ export class FakeModuleProcess implements ModuleProcess {
   stopCalls = 0
   private settled = false
   private resolveExit!: (exit: ProcessExit) => void
+  private readonly stopFailures: unknown[] = []
 
   constructor(readonly pid: number) {
     this.exited = new Promise((resolve) => {
@@ -92,8 +93,14 @@ export class FakeModuleProcess implements ModuleProcess {
     this.resolveExit({ exitCode, signal })
   }
 
+  failStopNext(error: unknown = new Error('Injected process tree cleanup failure')): void {
+    this.stopFailures.push(error)
+  }
+
   async stopTree(): Promise<void> {
     this.stopCalls += 1
+    const failure = this.stopFailures.shift()
+    if (failure) throw failure
     this.crash(null, 'SIGTERM')
   }
 }

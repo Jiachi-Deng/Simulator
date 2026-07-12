@@ -114,23 +114,29 @@ describe('real local module daemon fixture', () => {
     await manager.drain()
   }, 30_000)
 
-  test.skipIf(process.platform !== 'win32')('kills descendants after the Windows leader exits first', async () => {
+  test('kills descendants after the process-group leader exits first', async () => {
     const systemRoot = process.env.SystemRoot
-    if (!systemRoot) throw new Error('Windows integration requires SystemRoot')
-    const root = await mkdtemp(join(tmpdir(), 'simulator-daemon-win-crash-'))
+    if (process.platform === 'win32' && !systemRoot) throw new Error('Windows integration requires SystemRoot')
+    const root = await mkdtemp(join(tmpdir(), 'simulator-daemon-leader-crash-'))
     roots.push(root)
-    const entrypoint = 'bin/daemon-fixture.exe'
+    const entrypoint = process.platform === 'win32' ? 'bin/daemon-fixture.exe' : 'bin/daemon-fixture.ts'
     const executable = join(root, entrypoint)
     await mkdir(dirname(executable), { recursive: true })
-    const build = Bun.spawn([
-      process.execPath,
-      'build',
-      '--compile',
-      join(import.meta.dir, 'testing/fixtures/daemon-fixture.ts'),
-      '--outfile',
-      executable,
-    ], { stdout: 'inherit', stderr: 'inherit' })
-    expect(await build.exited).toBe(0)
+    const fixtureSource = join(import.meta.dir, 'testing/fixtures/daemon-fixture.ts')
+    if (process.platform === 'win32') {
+      const build = Bun.spawn([
+        process.execPath,
+        'build',
+        '--compile',
+        fixtureSource,
+        '--outfile',
+        executable,
+      ], { stdout: 'inherit', stderr: 'inherit' })
+      expect(await build.exited).toBe(0)
+    } else {
+      await copyFile(fixtureSource, executable)
+      await chmod(executable, 0o755)
+    }
     const childPidFile = join(root, 'child.pid')
     const manager = new ModuleDaemonManager({
       process: new RealProcessAdapter(),
@@ -144,8 +150,8 @@ describe('real local module daemon fixture', () => {
       idleTimeoutMs: 60_000,
       stopGraceMs: 2_000,
       baseEnvironment: {
-        PATH: dirname(process.execPath),
-        SystemRoot: systemRoot,
+        PATH: process.platform === 'win32' ? dirname(process.execPath) : `${dirname(process.execPath)}:/usr/bin:/bin`,
+        ...(systemRoot ? { SystemRoot: systemRoot } : {}),
         SIMULATOR_FIXTURE_CHILD_PID_FILE: childPidFile,
         SIMULATOR_FIXTURE_CHILD_STOP_FILE: join(root, 'child-stopped'),
         SIMULATOR_FIXTURE_RUNTIME: process.execPath,

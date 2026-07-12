@@ -172,20 +172,22 @@ class KoffiWindowsJobProcess implements ModuleProcess {
   }
 
   stopTree(graceMs: number): Promise<void> {
-    this.stopPromise ??= this.stopTreeOnce(graceMs)
-    return this.stopPromise
+    if (this.stopPromise) return this.stopPromise
+    const attempt = this.stopTreeOnce(graceMs)
+    this.stopPromise = attempt
+    void attempt.catch(() => {
+      if (this.stopPromise === attempt) this.stopPromise = undefined
+    })
+    return attempt
   }
 
   private async stopTreeOnce(graceMs: number): Promise<void> {
-    try {
-      if (!this.api.TerminateJobObject(this.job, 1)) throw win32Error(this.api, 'TerminateJobObject')
-      const deadline = Date.now() + graceMs
-      while (this.activeProcesses() > 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10))
-      if (this.activeProcesses() > 0) throw new Error('Windows Job Object did not drain before cleanup timeout')
-      await this.exited
-    } finally {
-      this.closeHandles()
-    }
+    if (!this.api.TerminateJobObject(this.job, 1)) throw win32Error(this.api, 'TerminateJobObject')
+    const deadline = Date.now() + graceMs
+    while (this.activeProcesses() > 0 && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10))
+    if (this.activeProcesses() > 0) throw new Error('Windows Job Object did not drain before cleanup timeout')
+    await this.exited
+    this.closeHandles()
   }
 
   private activeProcesses(): number {

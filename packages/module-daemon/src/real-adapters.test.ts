@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { ModuleProcess, ModuleSpawnRequest, ProcessExit, WindowsJobProcessFactory } from './types.ts'
-import { RealProcessAdapter } from './real-adapters.ts'
+import { loopbackHealthUrl, RealProcessAdapter } from './real-adapters.ts'
 import { createWindowsEnvironmentBlock } from './windows-job.ts'
 
 class StubProcess implements ModuleProcess {
@@ -40,5 +40,12 @@ describe('RealProcessAdapter Windows routing', () => {
   test('encodes a deterministic double-null-terminated UTF-16 environment block', () => {
     const block = createWindowsEnvironmentBlock({ ZED: 'last', alpha: 'first' })
     expect(block.toString('utf16le')).toBe('alpha=first\0ZED=last\0\0')
+  })
+})
+
+describe('LoopbackHttpHealthAdapter URL formatting', () => {
+  test('brackets an IPv6 loopback host', () => {
+    expect(loopbackHealthUrl({ host: '::1', port: 41_000 })).toBe('http://[::1]:41000/health')
+    expect(loopbackHealthUrl({ host: '127.0.0.1', port: 41_000 })).toBe('http://127.0.0.1:41000/health')
   })
 })

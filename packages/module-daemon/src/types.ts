@@ -1,4 +1,5 @@
 import type {
+  ModuleArtifact,
   ModuleId,
   ModuleManifest,
   ModulePlatform,
@@ -70,6 +71,13 @@ export interface HealthAdapter {
   releaseEndpoint?(endpoint: LoopbackEndpoint): Promise<void>
 }
 
+export interface ActivationAdapter {
+  resolveEntrypoint(
+    activatedRoot: string,
+    artifact: ModuleArtifact,
+  ): Promise<{ readonly activatedRoot: string; readonly executable: string }>
+}
+
 export interface StartModuleDaemonRequest {
   readonly manifest: ModuleManifest
   readonly activatedRoot: string
@@ -87,6 +95,7 @@ export type ModuleDaemonDiagnosticCode =
   | 'STARTUP_TIMEOUT'
   | 'READINESS_MALFORMED'
   | 'PROCESS_EXITED'
+  | 'PROCESS_CLEANUP_FAILED'
   | 'HEALTH_DEGRADED'
   | 'HEALTH_TIMEOUT'
   | 'RESTART_BUDGET_EXHAUSTED'
@@ -115,6 +124,7 @@ export interface ModuleDaemonManagerOptions {
   readonly process: ProcessAdapter
   readonly clock: ClockAdapter
   readonly health: HealthAdapter
+  readonly activation?: ActivationAdapter
   readonly startupTimeoutMs?: number
   readonly healthTimeoutMs?: number
   readonly healthIntervalMs?: number

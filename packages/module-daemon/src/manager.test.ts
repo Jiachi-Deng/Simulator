@@ -2,9 +2,9 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { chmod, mkdtemp, mkdir, realpath, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { parseModuleManifest, type ModuleManifest, type ModulePlatform } from '@simulator/module-contract'
+import { parseModuleManifest, type ModuleArtifact, type ModuleManifest, type ModulePlatform } from '@simulator/module-contract'
 import { ModuleDaemonManager } from './manager.ts'
-import { ModuleDaemonError, type ModuleDaemonSnapshot } from './types.ts'
+import { ModuleDaemonError, type ActivationAdapter, type ModuleDaemonSnapshot } from './types.ts'
 import { FakeClock, FakeHealthAdapter, FakeProcessAdapter } from './testing/fakes.ts'
 import { createMinimalEnvironment } from './safety.ts'
 
@@ -116,15 +116,18 @@ describe('ModuleDaemonManager', () => {
     expect(await manager.stop(started.id)).toMatchObject({ state: 'stopped' })
   })
 
-  test('rejects an entrypoint symlink that escapes the activated root', async () => {
-    if (process.platform === 'win32') return
+  test('rejects an entrypoint link that escapes the activated root', async () => {
     const root = await activatedRoot('bin/inside')
-    const outsideRoot = await activatedRoot('outside')
-    await symlink(join(outsideRoot, 'outside'), join(root, 'bin/escape'))
+    const outsideRoot = await activatedRoot('outside/daemon')
+    await symlink(
+      join(outsideRoot, 'outside'),
+      join(root, 'bin/escape'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    )
     const { manager } = harness()
 
     await expect(manager.start({
-      manifest: manifest('org.simulator.escape', 'bin/escape'),
+      manifest: manifest('org.simulator.escape', 'bin/escape/daemon'),
       activatedRoot: root,
       platform: currentPlatform(),
     })).rejects.toMatchObject({ code: 'ENTRYPOINT_OUTSIDE_ACTIVATED_ROOT' })
@@ -285,6 +288,107 @@ describe('ModuleDaemonManager', () => {
     expect(first?.state).toBe('stopped')
     await expect(starting).rejects.toMatchObject({ code: 'STOP_REQUESTED' })
     expect(processAdapter.processes[0]!.stopCalls).toBeGreaterThanOrEqual(1)
+  })
+
+  test('retains process ownership when explicit cleanup fails and retries stop', async () => {
+    const root = await activatedRoot()
+    const { manager, processAdapter } = harness()
+    const started = await manager.start({ manifest: manifest(), activatedRoot: root, platform: currentPlatform() })
+    const ownedProcess = processAdapter.processes[0]!
+    ownedProcess.failStopNext()
+
+    await expect(manager.stop(started.id)).rejects.toMatchObject({ code: 'PROCESS_CLEANUP_FAILED' })
+    expect(manager.get(started.id)).toMatchObject({
+      state: 'crashed',
+      pid: ownedProcess.pid,
+      diagnostic: { code: 'PROCESS_CLEANUP_FAILED' },
+    })
+    expect(ownedProcess.stopCalls).toBe(1)
+    await expect(manager.start({ manifest: manifest(), activatedRoot: root, platform: currentPlatform() }))
+      .rejects.toMatchObject({ code: 'PROCESS_CLEANUP_FAILED' })
+    expect(processAdapter.processes).toHaveLength(1)
+
+    await expect(manager.stop(started.id)).resolves.toMatchObject({ state: 'stopped' })
+    expect(manager.get(started.id)?.pid).toBeUndefined()
+    expect(ownedProcess.stopCalls).toBe(2)
+  })
+
+  test('does not restart after leader crash when tree cleanup fails and permits later retry', async () => {
+    const root = await activatedRoot()
+    const { manager, processAdapter, clock } = harness({ restartBackoffMs: [10] })
+    const started = await manager.start({ manifest: manifest(), activatedRoot: root, platform: currentPlatform() })
+    const ownedProcess = processAdapter.processes[0]!
+    ownedProcess.failStopNext()
+    ownedProcess.crash(17)
+
+    await waitFor(() => manager.get(started.id)?.diagnostic?.code === 'PROCESS_CLEANUP_FAILED')
+    expect(manager.get(started.id)).toMatchObject({ state: 'crashed', pid: ownedProcess.pid })
+    await clock.advance(10)
+    await settle()
+    expect(processAdapter.processes).toHaveLength(1)
+
+    ownedProcess.failStopNext()
+    await expect(manager.stop(started.id)).rejects.toMatchObject({ code: 'PROCESS_CLEANUP_FAILED' })
+    expect(manager.get(started.id)).toMatchObject({ state: 'crashed', pid: ownedProcess.pid })
+    await expect(manager.stop(started.id)).resolves.toMatchObject({ state: 'stopped' })
+    expect(manager.get(started.id)?.pid).toBeUndefined()
+    expect(ownedProcess.stopCalls).toBe(3)
+  })
+
+  test('cancels a pending start during activation resolution before spawn', async () => {
+    const root = await activatedRoot()
+    let releaseResolution!: () => void
+    let resolutionStarted!: () => void
+    const startedResolution = new Promise<void>((resolve) => { resolutionStarted = resolve })
+    const resolutionGate = new Promise<void>((resolve) => { releaseResolution = resolve })
+    const activation: ActivationAdapter = {
+      async resolveEntrypoint(activatedRoot: string, artifact: ModuleArtifact) {
+        resolutionStarted()
+        await resolutionGate
+        return {
+          activatedRoot: await realpath(activatedRoot),
+          executable: await realpath(join(activatedRoot, ...artifact.entrypoint.split('/'))),
+        }
+      },
+    }
+    const { manager, processAdapter } = harness({ activation })
+    const moduleManifest = manifest('org.simulator.slow-realpath')
+    const starting = manager.start({ manifest: moduleManifest, activatedRoot: root, platform: currentPlatform() })
+    await startedResolution
+    const stopping = manager.stop(moduleManifest.id)
+    releaseResolution()
+
+    await expect(stopping).resolves.toMatchObject({ state: 'stopped', diagnostic: { code: 'STOP_REQUESTED' } })
+    await expect(starting).rejects.toMatchObject({ code: 'STOP_REQUESTED' })
+    expect(processAdapter.requests).toHaveLength(0)
+  })
+
+  test('drain cancels a pending activation resolution before spawn', async () => {
+    const root = await activatedRoot()
+    let releaseResolution!: () => void
+    let resolutionStarted!: () => void
+    const startedResolution = new Promise<void>((resolve) => { resolutionStarted = resolve })
+    const resolutionGate = new Promise<void>((resolve) => { releaseResolution = resolve })
+    const activation: ActivationAdapter = {
+      async resolveEntrypoint(activatedRoot: string, artifact: ModuleArtifact) {
+        resolutionStarted()
+        await resolutionGate
+        return {
+          activatedRoot: await realpath(activatedRoot),
+          executable: await realpath(join(activatedRoot, ...artifact.entrypoint.split('/'))),
+        }
+      },
+    }
+    const { manager, processAdapter } = harness({ activation })
+    const moduleManifest = manifest('org.simulator.slow-drain')
+    const starting = manager.start({ manifest: moduleManifest, activatedRoot: root, platform: currentPlatform() })
+    await startedResolution
+    const draining = manager.drain()
+    releaseResolution()
+
+    await draining
+    await expect(starting).rejects.toMatchObject({ code: 'STOP_REQUESTED' })
+    expect(processAdapter.requests).toHaveLength(0)
   })
 
   test('stop during a health probe and restart backoff cannot launch a replacement', async () => {

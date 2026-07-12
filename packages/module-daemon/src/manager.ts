@@ -46,9 +46,19 @@ interface DaemonRecord {
   readySettled: boolean
   supervising: boolean
   stopRequested: boolean
+  cleanupFailed: boolean
+  cleanupFailureCount: number
+  cleanupError?: ModuleDaemonError
   readonly healthyWaiters: Set<Deferred<ModuleDaemonSnapshot>>
   lifecycle?: Promise<void>
   stopPromise?: Promise<ModuleDaemonSnapshot>
+}
+
+interface PendingStart {
+  readonly request: StartModuleDaemonRequest
+  readonly controller: AbortController
+  readonly promise: Promise<ModuleDaemonSnapshot>
+  stopPromise?: Promise<ModuleDaemonSnapshot | undefined>
 }
 
 type MonitorOutcome =
@@ -80,8 +90,7 @@ function positiveInteger(value: number, name: string, allowZero = false): number
 
 export class ModuleDaemonManager {
   private readonly records = new Map<ModuleId, DaemonRecord>()
-  private readonly pendingStarts = new Map<ModuleId, Promise<ModuleDaemonSnapshot>>()
-  private readonly pendingStartRequests = new Map<ModuleId, StartModuleDaemonRequest>()
+  private readonly pendingStarts = new Map<ModuleId, PendingStart>()
   private readonly listeners = new Set<(snapshot: ModuleDaemonSnapshot) => void>()
   private readonly startupTimeoutMs: number
   private readonly healthTimeoutMs: number
@@ -117,6 +126,12 @@ export class ModuleDaemonManager {
     }
 
     const current = this.records.get(request.manifest.id)
+    if (current?.cleanupFailed || (current?.process && !current.supervising && current.state === 'crashed')) {
+      return Promise.reject(new ModuleDaemonError(
+        'PROCESS_CLEANUP_FAILED',
+        'Previous module process ownership must be cleaned up before starting again',
+      ))
+    }
     if (current
       && current.version === request.manifest.version
       && current.request.activatedRoot === request.activatedRoot
@@ -131,35 +146,45 @@ export class ModuleDaemonManager {
 
     const pending = this.pendingStarts.get(request.manifest.id)
     if (pending) {
-      const pendingRequest = this.pendingStartRequests.get(request.manifest.id)!
+      const pendingRequest = pending.request
       if (pendingRequest.manifest.version !== request.manifest.version
         || pendingRequest.activatedRoot !== request.activatedRoot) {
-        return pending.then(() => this.start(request), () => this.start(request))
+        return pending.promise.then(() => this.start(request), () => this.start(request))
       }
-      return pending
+      return pending.promise
     }
 
-    const operation = this.startNew(request)
-    this.pendingStarts.set(request.manifest.id, operation)
-    this.pendingStartRequests.set(request.manifest.id, request)
+    const controller = new AbortController()
+    const operation = Promise.resolve().then(() => this.startNew(request, controller.signal))
+    const pendingStart: PendingStart = { request, controller, promise: operation }
+    this.pendingStarts.set(request.manifest.id, pendingStart)
     const clear = (): void => {
-      if (this.pendingStarts.get(request.manifest.id) === operation) {
+      if (this.pendingStarts.get(request.manifest.id) === pendingStart) {
         this.pendingStarts.delete(request.manifest.id)
-        this.pendingStartRequests.delete(request.manifest.id)
       }
     }
     void operation.then(clear, clear)
     return operation
   }
 
-  private async startNew(request: StartModuleDaemonRequest): Promise<ModuleDaemonSnapshot> {
+  private async startNew(request: StartModuleDaemonRequest, pendingSignal: AbortSignal): Promise<ModuleDaemonSnapshot> {
     const artifact = selectArtifact(request.manifest.artifacts, request.platform)
-    const resolved = await resolveActivatedEntrypoint(request.activatedRoot, artifact)
+    const resolved = await (this.options.activation?.resolveEntrypoint(request.activatedRoot, artifact)
+      ?? resolveActivatedEntrypoint(request.activatedRoot, artifact))
+    if (pendingSignal.aborted) {
+      throw new ModuleDaemonError('STOP_REQUESTED', 'Module daemon stopped before activation resolution completed')
+    }
     if (this.draining) {
       throw new ModuleDaemonError('MANAGER_DRAINING', 'Module daemon manager is draining')
     }
 
     const existing = this.records.get(request.manifest.id)
+    if (existing?.cleanupFailed || (existing?.process && !existing.supervising && existing.state === 'crashed')) {
+      throw new ModuleDaemonError(
+        'PROCESS_CLEANUP_FAILED',
+        'Previous module process ownership must be cleaned up before starting again',
+      )
+    }
     if (existing?.state === 'stopping') {
       throw new ModuleDaemonError('STOP_REQUESTED', 'Module daemon is stopping')
     }
@@ -190,6 +215,8 @@ export class ModuleDaemonManager {
       readySettled: false,
       supervising: true,
       stopRequested: false,
+      cleanupFailed: false,
+      cleanupFailureCount: 0,
       healthyWaiters: new Set(),
     }
     this.records.set(record.id, record)
@@ -203,13 +230,19 @@ export class ModuleDaemonManager {
     if (!record) {
       const pending = this.pendingStarts.get(id)
       if (!pending) return undefined
-      try {
-        await pending
-      } catch {
-        return this.records.get(id) ? this.stop(id) : undefined
-      }
-      record = this.records.get(id)
-      if (!record) return undefined
+      pending.controller.abort()
+      pending.stopPromise ??= pending.promise.then(
+        () => this.stop(id),
+        (error) => {
+          const active = this.records.get(id)
+          if (active) return this.stop(id)
+          if (error instanceof ModuleDaemonError && error.code !== 'STOP_REQUESTED' && error.code !== 'MANAGER_DRAINING') {
+            throw error
+          }
+          return this.pendingStoppedSnapshot(pending.request)
+        },
+      )
+      return pending.stopPromise
     }
     if (record.state === 'stopped') return this.snapshot(record)
     if (record.stopPromise) return record.stopPromise
@@ -219,19 +252,18 @@ export class ModuleDaemonManager {
     this.setDiagnostic(record, 'STOP_REQUESTED', 'Module daemon stop requested')
     record.controller.abort()
     this.emit(record)
-    record.stopPromise = (async () => {
-      await record.process?.stopTree(this.stopGraceMs)
-      await record.lifecycle
-      if (record.state !== 'crashed') record.state = 'stopped'
-      this.emit(record)
-      return this.snapshot(record)
-    })()
-    return record.stopPromise
+    const attempt = this.stopRecord(record)
+    record.stopPromise = attempt
+    void attempt.finally(() => {
+      if (record.stopPromise === attempt) record.stopPromise = undefined
+    }).catch(() => undefined)
+    return attempt
   }
 
   async drain(): Promise<void> {
     this.draining = true
-    this.drainPromise ??= Promise.all([...this.records.keys()].map((id) => this.stop(id))).then(() => undefined)
+    const ids = new Set([...this.records.keys(), ...this.pendingStarts.keys()])
+    this.drainPromise ??= Promise.all([...ids].map((id) => this.stop(id))).then(() => undefined)
     return this.drainPromise
   }
 
@@ -303,14 +335,17 @@ export class ModuleDaemonManager {
         await this.options.clock.sleep(backoff, record.controller.signal)
       }
     } catch (error) {
-      if (!record.stopRequested && !record.readySettled) {
+      if (!record.readySettled) {
         record.readySettled = true
         record.ready.reject(error)
       }
+      if (error instanceof ModuleDaemonError && error.code === 'PROCESS_CLEANUP_FAILED') {
+        this.rejectHealthyWaiters(record, error)
+      }
     } finally {
       try {
-        await this.cleanupCurrent(record)
-        if (record.stopRequested) {
+        if (!record.cleanupFailed) await this.cleanupCurrent(record)
+        if (record.stopRequested && !record.process && !record.cleanupFailed) {
           record.state = 'stopped'
           if (!record.readySettled) {
             record.readySettled = true
@@ -470,10 +505,52 @@ export class ModuleDaemonManager {
   private async cleanupCurrent(record: DaemonRecord): Promise<void> {
     const moduleProcess = record.process
     const endpoint = record.endpoint
-    record.process = undefined
-    record.endpoint = undefined
-    if (moduleProcess) await moduleProcess.stopTree(this.stopGraceMs)
-    if (endpoint) await this.options.health.releaseEndpoint?.(endpoint)
+    if (moduleProcess) {
+      try {
+        await moduleProcess.stopTree(this.stopGraceMs)
+      } catch (error) {
+        record.cleanupFailed = true
+        record.cleanupFailureCount += 1
+        record.state = 'crashed'
+        const message = `Unable to clean up module process tree for pid ${moduleProcess.pid}`
+        this.setDiagnostic(record, 'PROCESS_CLEANUP_FAILED', message)
+        this.emit(record)
+        record.cleanupError = new ModuleDaemonError('PROCESS_CLEANUP_FAILED', message, { cause: error })
+        throw record.cleanupError
+      }
+      if (record.process === moduleProcess) record.process = undefined
+      record.cleanupFailed = false
+      record.cleanupError = undefined
+    }
+    if (endpoint) {
+      await this.options.health.releaseEndpoint?.(endpoint)
+      if (record.endpoint === endpoint) record.endpoint = undefined
+    }
+  }
+
+  private async stopRecord(record: DaemonRecord): Promise<ModuleDaemonSnapshot> {
+    const cleanupFailuresBeforeStop = record.cleanupFailureCount
+    if (record.supervising) await record.lifecycle
+    if (record.cleanupFailureCount > cleanupFailuresBeforeStop) throw record.cleanupError
+    if (record.process || record.endpoint) await this.cleanupCurrent(record)
+    record.state = 'stopped'
+    this.emit(record)
+    return this.snapshot(record)
+  }
+
+  private pendingStoppedSnapshot(request: StartModuleDaemonRequest): ModuleDaemonSnapshot {
+    return Object.freeze({
+      id: request.manifest.id,
+      version: request.manifest.version,
+      state: 'stopped',
+      restartCount: 0,
+      diagnostic: Object.freeze({
+        code: 'STOP_REQUESTED',
+        message: 'Module daemon stopped before activation resolution completed',
+        at: this.options.clock.now(),
+        restartCount: 0,
+      }),
+    })
   }
 
   private async probe(
