@@ -52,7 +52,7 @@ export function generateSpdx(lockContent: string, inventoryContent: string, vers
         SPDXID: "SPDXRef-Package-Simulator",
         versionInfo: version,
         downloadLocation: `git+https://github.com/Jiachi-Deng/Simulator.git@${sourceSha}`,
-        filesAnalyzed: true,
+        filesAnalyzed: false,
         licenseConcluded: "NOASSERTION",
         licenseDeclared: "Apache-2.0",
         copyrightText: "NOASSERTION",
@@ -95,6 +95,7 @@ export function generateSpdx(lockContent: string, inventoryContent: string, vers
       SPDXID: `SPDXRef-File-${index + 1}`,
       checksums: [{ algorithm: "SHA256", checksumValue: file.sha256 }],
       licenseConcluded: "NOASSERTION",
+      licenseInfoInFiles: ["NOASSERTION"],
       copyrightText: "NOASSERTION",
     })),
     relationships: [
@@ -108,6 +109,11 @@ export function generateSpdx(lockContent: string, inventoryContent: string, vers
         relationshipType: "BUILD_DEPENDENCY_OF",
         relatedSpdxElement: "SPDXRef-Package-Simulator",
         comment: "Source-lock relationship only; this does not assert the package is present in the built artifact.",
+      })),
+      ...packages.map((_, index) => ({
+        spdxElementId: "SPDXRef-Package-SourceLock",
+        relationshipType: "CONTAINS",
+        relatedSpdxElement: `SPDXRef-BuildPackage-${index + 1}`,
       })),
     ],
   }
