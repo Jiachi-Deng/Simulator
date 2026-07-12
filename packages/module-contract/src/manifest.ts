@@ -16,6 +16,7 @@ import {
   type ModuleSha256,
   type ModuleVersion,
 } from './manifest-types.ts'
+import { valid as validSemver } from 'semver'
 
 type DataRecord = Record<string, unknown>
 
@@ -27,6 +28,7 @@ const ENTRYPOINT_SEGMENT_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
 const PLATFORM_SET = new Set<string>(MODULE_PLATFORMS)
 const CAPABILITY_SET = new Set<string>(MODULE_CAPABILITIES)
+const validatedManifests = new WeakSet<ModuleArtifact[] | object>()
 
 function freeze<T>(value: T): Readonly<T> {
   if (value && typeof value === 'object' && !Object.isFrozen(value)) {
@@ -255,7 +257,7 @@ export function parseModuleManifest(input: unknown): ModuleManifestParseResult {
     if (id !== undefined && !ID_PATTERN.test(id)) {
       errors.push(error('INVALID_ID', '/id', 'Module ID must be a lowercase dotted identifier'))
     }
-    if (version !== undefined && !VERSION_PATTERN.test(version)) {
+    if (version !== undefined && (!VERSION_PATTERN.test(version) || validSemver(version) === null)) {
       errors.push(error('INVALID_VERSION', '/version', 'Module version must be valid Semantic Versioning'))
     }
 
@@ -310,7 +312,7 @@ export function parseModuleManifest(input: unknown): ModuleManifestParseResult {
     }
 
     if (errors.length > 0 || !id || !version) return invalidResult(errors)
-    return freeze({
+    const result = freeze({
       ok: true as const,
       value: {
         schemaVersion: MODULE_MANIFEST_SCHEMA_VERSION,
@@ -320,7 +322,13 @@ export function parseModuleManifest(input: unknown): ModuleManifestParseResult {
         capabilities,
       },
     })
+    validatedManifests.add(result.value)
+    return result
   } catch {
     return invalidResult([error('UNREADABLE_INPUT', '', 'Module manifest could not be read as plain data')])
   }
+}
+
+export function isValidatedModuleManifest(input: unknown): input is import('./manifest-types.ts').ModuleManifest {
+  return typeof input === 'object' && input !== null && validatedManifests.has(input)
 }
