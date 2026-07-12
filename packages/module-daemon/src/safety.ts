@@ -71,12 +71,28 @@ export function createMinimalEnvironment(
     version: string
     endpoint: LoopbackEndpoint
   },
+  platform: NodeJS.Platform = process.platform,
 ): Readonly<Record<string, string>> {
   const environment: Record<string, string> = Object.create(null) as Record<string, string>
+  const reserved = new Set([
+    'SIMULATOR_MODULE_ID',
+    'SIMULATOR_MODULE_VERSION',
+    'SIMULATOR_MODULE_HEALTH_HOST',
+    'SIMULATOR_MODULE_HEALTH_PORT',
+  ])
+  const seen = new Set<string>()
   for (const [key, value] of Object.entries(baseEnvironment)) {
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || key.includes('\0') || value.includes('\0')) {
       throw new ModuleDaemonError('SPAWN_FAILED', 'Base environment contains an invalid entry')
     }
+    const identity = platform === 'win32' ? key.toUpperCase() : key
+    if (seen.has(identity)) {
+      throw new ModuleDaemonError('SPAWN_FAILED', 'Base environment contains a duplicate entry')
+    }
+    if (reserved.has(platform === 'win32' ? identity : key)) {
+      throw new ModuleDaemonError('SPAWN_FAILED', 'Base environment cannot override host-owned module values')
+    }
+    seen.add(identity)
     environment[key] = value
   }
   environment.SIMULATOR_MODULE_ID = values.id

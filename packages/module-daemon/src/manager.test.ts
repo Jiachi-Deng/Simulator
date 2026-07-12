@@ -6,6 +6,7 @@ import { parseModuleManifest, type ModuleManifest, type ModulePlatform } from '@
 import { ModuleDaemonManager } from './manager.ts'
 import { ModuleDaemonError, type ModuleDaemonSnapshot } from './types.ts'
 import { FakeClock, FakeHealthAdapter, FakeProcessAdapter } from './testing/fakes.ts'
+import { createMinimalEnvironment } from './safety.ts'
 
 const temporaryRoots: string[] = []
 
@@ -77,6 +78,20 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 describe('ModuleDaemonManager', () => {
+  test('reserves host-owned env and rejects Windows case-folded duplicates', () => {
+    const values = {
+      id: 'org.simulator.daemon',
+      version: '1.2.3',
+      endpoint: { host: '127.0.0.1' as const, port: 41_000 },
+    }
+    expect(() => createMinimalEnvironment({ simulator_module_id: 'shadow' }, values, 'win32'))
+      .toThrow('cannot override host-owned')
+    expect(() => createMinimalEnvironment({ Path: 'one', PATH: 'two' }, values, 'win32'))
+      .toThrow('duplicate entry')
+    expect(() => createMinimalEnvironment({ SIMULATOR_MODULE_ID: 'shadow' }, values, 'linux'))
+      .toThrow('cannot override host-owned')
+  })
+
   test('starts healthy with a contained entrypoint, minimal env, and shell disabled', async () => {
     const root = await activatedRoot()
     const { manager, processAdapter } = harness()
