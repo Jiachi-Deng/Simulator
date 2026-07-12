@@ -1,41 +1,31 @@
 {
   "schemaVersion": 1,
+  "sourceCommit": "109a1b94329fa4cdd82e984b5a40bfe8842b5e6f",
   "defaultDecision": "excluded",
   "decisions": [
     {
-      "id": "upstream-apache-source",
-      "kind": "source",
+      "id": "pkg:generic/openscience-embedded-web@1.3.4",
       "decision": "included",
       "license": "Apache-2.0",
-      "scope": "compiled OpenScience object form at the exact source pin"
+      "rationale": "Embedded web capability built from the exact OpenScience source pin"
     },
     {
-      "id": "embedded-web-dependencies",
-      "kind": "software",
-      "decision": "conditional",
-      "license": "SBOM-and-notices-required",
-      "scope": "only components resolved by the locked build and enumerated in SBOM"
-    },
-    {
-      "id": "rdkit-capability",
-      "kind": "software",
-      "decision": "conditional",
-      "license": "SBOM-and-notices-required",
-      "scope": "embedded RDKit capability only; datasets and external assets excluded"
+      "id": "pkg:generic/rdkit@2025.03.3",
+      "decision": "included",
+      "license": "BSD-3-Clause",
+      "rationale": "RDKit capability; exact resolved component must be present in SBOM and notices"
     },
     {
       "id": "scientific-data-apis",
-      "kind": "api",
       "decision": "excluded",
       "license": "unknown-or-source-specific",
-      "scope": "all third-party scientific APIs until separately reviewed"
+      "rationale": "All third-party scientific APIs require separate review"
     },
     {
       "id": "remote-assets-and-models",
-      "kind": "asset",
       "decision": "excluded",
       "license": "unknown",
-      "scope": "runtime-downloaded models, datasets, fonts, media, and code"
+      "rationale": "Runtime-downloaded models, datasets, fonts, media, and code are excluded"
     }
   ]
 }

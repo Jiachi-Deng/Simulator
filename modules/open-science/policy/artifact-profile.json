@@ -15,7 +15,12 @@
     "THIRD_PARTY_NOTICES",
     "sbom.cdx.json",
     "checksums.txt",
-    "runtime-policy.json"
+    "runtime-policy.json",
+    "provenance.json",
+    "third-party-decisions.json",
+    "models-dev-api.json",
+    "build-attestation.json",
+    "runtime-conformance.json"
   ],
   "inventoryLimits": {
     "maxFileBytes": 268435456,

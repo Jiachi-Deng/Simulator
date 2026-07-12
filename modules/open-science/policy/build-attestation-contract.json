@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "predicateType": "https://slsa.dev/provenance/v1",
+  "requiredBindings": [
+    "binarySha256",
+    "sourceRepository",
+    "sourceRef",
+    "sourceCommit",
+    "bunVersion",
+    "modelsDevApiSha256",
+    "networkDisabled"
+  ],
+  "trustPolicy": {
+    "default": "deny",
+    "acceptedProductionVerification": ["GitHub artifact attestation", "Sigstore", "SLSA provenance"],
+    "plainJsonTrusted": false
+  }
+}

@@ -7,7 +7,9 @@
     "sourceDate": "2026-07-11T07:22:21Z",
     "releasePublishedAt": "2026-07-11T07:26:40Z",
     "license": "Apache-2.0",
-    "noticeRequired": true
+    "noticeRequired": true,
+    "licenseSha256": "d8ac5e917b2099e5cbe2999f297b56e2cc946e545f39aebc1e1aa91dd5cb0e9f",
+    "noticeSha256": "7632b32824f48bc3d5f0654cfa2370c1821fc0086349f1d331c9d27b8d66e960"
   },
   "toolchain": {
     "bun": "1.3.5",
@@ -20,6 +22,17 @@
       "sha256Required": true,
       "networkFetchForbidden": true
     }
+  },
+  "attestation": {
+    "required": true,
+    "trustedVerifierRequired": true,
+    "predicateType": "https://slsa.dev/provenance/v1",
+    "networkDisabledBuild": true
+  },
+  "runtimeConformance": {
+    "required": true,
+    "trustedVerifierRequired": true,
+    "binaryDigestBindingRequired": true
   },
   "upstreamEvidence": {
     "release": "https://github.com/synthetic-sciences/openscience/releases/tag/v1.3.4",
