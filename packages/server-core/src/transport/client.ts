@@ -98,8 +98,6 @@ export interface WsRpcClientOptions {
   clientCapabilities?: string[]
   /** Runtime mode — local embedded or remote thin-client connection. */
   mode?: TransportMode
-  /** Accept self-signed TLS certificates for wss:// connections. Default: false. Only works in Node.js (main process). */
-  tlsRejectUnauthorized?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -146,7 +144,6 @@ export class WsRpcClient implements RpcClient {
   private readonly autoReconnect: boolean
   private readonly connectTimeout: number
   private readonly mode: TransportMode
-  private readonly tlsRejectUnauthorized: boolean
 
   constructor(url: string, opts?: WsRpcClientOptions) {
     this.url = url
@@ -159,7 +156,6 @@ export class WsRpcClient implements RpcClient {
     this.autoReconnect = opts?.autoReconnect ?? true
     this.connectTimeout = opts?.connectTimeout ?? 10_000
     this.mode = opts?.mode ?? this.inferMode(url)
-    this.tlsRejectUnauthorized = opts?.tlsRejectUnauthorized ?? true
 
     this.connectionState = {
       mode: this.mode,
@@ -322,26 +318,8 @@ export class WsRpcClient implements RpcClient {
   // Connection lifecycle
   // -------------------------------------------------------------------------
 
-  /**
-   * Create a WebSocket instance. In Node.js (main process), uses the `ws` library
-   * to support TLS options (e.g. rejectUnauthorized for self-signed certs).
-   * In the renderer (browser), falls back to the global WebSocket.
-   */
+  /** Create a WebSocket using the runtime's default TLS verification. */
   private createWebSocket(url: string): WebSocket {
-    const needsTlsOptions = url.startsWith('wss://') && !this.tlsRejectUnauthorized
-
-    if (needsTlsOptions && typeof process !== 'undefined' && process.versions?.node) {
-      // Node.js / Electron main process — use `ws` library for TLS options
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { WebSocket: WsWebSocket } = require('ws') as typeof import('ws')
-        return new WsWebSocket(url, { rejectUnauthorized: false }) as unknown as WebSocket
-      } catch {
-        // Fallback if ws not available
-        return new WebSocket(url)
-      }
-    }
-
     return new WebSocket(url)
   }
 
@@ -378,6 +356,18 @@ export class WsRpcClient implements RpcClient {
       try { oldWs.close() } catch { /* best effort */ }
     }
 
+    const policyError = this.getConnectionPolicyError()
+    if (policyError) {
+      this.connectError = policyError
+      this.setConnectionState({
+        status: 'failed',
+        lastError: this.toErrorState(policyError),
+        attempt: this.reconnectAttempt,
+      })
+      this.failReady(policyError)
+      return
+    }
+
     this.connectTimer = setTimeout(() => {
       if (!this.connected) {
         const err = this.createConnectionError('timeout', `Connection timeout after ${this.connectTimeout}ms`, 'HANDSHAKE_TIMEOUT')
@@ -392,7 +382,24 @@ export class WsRpcClient implements RpcClient {
       }
     }, this.connectTimeout)
 
-    const ws = this.createWebSocket(this.url)
+    let ws: WebSocket
+    try {
+      ws = this.createWebSocket(this.url)
+    } catch {
+      if (this.connectTimer) {
+        clearTimeout(this.connectTimer)
+        this.connectTimer = null
+      }
+      const err = this.createConnectionError('network', 'WebSocket connection setup failed', 'WS_CREATE_FAILED')
+      this.connectError = err
+      this.setConnectionState({
+        status: 'failed',
+        lastError: this.toErrorState(err),
+        attempt: this.reconnectAttempt,
+      })
+      this.failReady(err)
+      return
+    }
     this.ws = ws
 
     ws.onopen = () => {
@@ -435,7 +442,7 @@ export class WsRpcClient implements RpcClient {
           || ('error' in event && event.error?.message)
           || undefined
         const message = detail
-          ? `WebSocket error: ${detail}`
+          ? `WebSocket error: ${this.redactToken(detail)}`
           : 'WebSocket error during connection setup'
         const err = this.createConnectionError('network', message, 'WS_ERROR')
         this.connectError = err
@@ -589,7 +596,7 @@ export class WsRpcClient implements RpcClient {
         // No pending request — connection is about to close.
         if (envelope.error?.message) {
           const kind = this.classifyErrorKindFromCode(envelope.error.code)
-          const err = this.createConnectionError(kind, envelope.error.message, envelope.error.code)
+          const err = this.createConnectionError(kind, this.redactToken(envelope.error.message), envelope.error.code)
           this.connectError = err
           this.setConnectionState({
             status: 'failed',
@@ -907,10 +914,38 @@ export class WsRpcClient implements RpcClient {
   // -------------------------------------------------------------------------
 
   private inferMode(url: string): TransportMode {
-    if (url.startsWith('ws://127.0.0.1') || url.startsWith('ws://localhost')) {
-      return 'local'
+    try {
+      const parsed = new URL(url)
+      if (parsed.protocol === 'ws:' && this.isLoopbackHostname(parsed.hostname)) return 'local'
+    } catch {
+      // Invalid URLs are rejected by the connection policy in connect().
     }
     return 'remote'
+  }
+
+  private getConnectionPolicyError(): Error | null {
+    let parsed: URL
+    try {
+      parsed = new URL(this.url)
+    } catch {
+      return this.createConnectionError('protocol', 'Invalid WebSocket server URL', 'INVALID_WEBSOCKET_URL')
+    }
+
+    if (parsed.protocol === 'wss:') return null
+    if (parsed.protocol === 'ws:' && this.isLoopbackHostname(parsed.hostname)) return null
+
+    const message = parsed.protocol === 'ws:'
+      ? 'Unencrypted WebSocket connections are restricted to loopback hosts; use wss:// for remote servers'
+      : 'WebSocket server URL must use wss://, or ws:// for a loopback host'
+    return this.createConnectionError('protocol', message, 'INSECURE_WEBSOCKET_URL')
+  }
+
+  private isLoopbackHostname(hostname: string): boolean {
+    return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+  }
+
+  private redactToken(message: string): string {
+    return this.token ? message.split(this.token).join('[REDACTED]') : message
   }
 
   private setConnectionState(
