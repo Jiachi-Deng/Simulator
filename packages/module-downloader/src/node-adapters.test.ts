@@ -216,6 +216,25 @@ describe('production filesystem cache', () => {
     expect(await stat(staging).then(() => true, () => false)).toBe(false)
   })
 
+  it('recovers after real child termination at lease, artifact, and catalog protocol checkpoints', async () => {
+    const fixture = join(import.meta.dir, 'testing', 'crash-child.ts')
+    for (const mode of ['lease-owner', 'lease-mkdir', 'lease-claim', 'lease-quarantine']) {
+      const directory = await root(); await killAtCheckpoint(fixture, directory, mode)
+      await new Promise((resolve) => setTimeout(resolve, 5))
+      const cache = new NodeFilesystemModuleDownloaderCache(directory, { staleLeaseMs: 1, leasePollMs: 5 }); const lease = await cache.acquireLease('catalog', new AbortController().signal); await lease.release()
+    }
+    {
+      const directory = await root(); await killAtCheckpoint(fixture, directory, 'artifact'); await new Promise((resolve) => setTimeout(resolve, 5))
+      const cache = new NodeFilesystemModuleDownloaderCache(directory, { staleLeaseMs: 1, leasePollMs: 5 }); const bytes = Buffer.from('crash artifact'); const sha256 = createHash('sha256').update(bytes).digest('hex')
+      const partial = await cache.createPartial({ sha256, sourceUrl: 'https://example.test/a', expectedSize: bytes.length, updatedAt: 4 }); await cache.appendPartial(partial.id, bytes, 5)
+      expect(await cache.publishPartial(partial.id, { sha256, size: bytes.length, committedAt: 6 })).toBe('published')
+    }
+    for (const mode of ['catalog-generation', 'catalog-rename']) {
+      const directory = await root(); await killAtCheckpoint(fixture, directory, mode)
+      expect((await new NodeFilesystemModuleDownloaderCache(directory).readCatalog())?.trustState.highestSequence).toBe(2)
+    }
+  })
+
 })
 
 describe('native fetch adapter', () => {
@@ -278,3 +297,9 @@ function child(fixture: string, ...args: string[]) {
 }
 function catalogRecord(sequence: number, marker: number) { return { sourceUrl: `https://example.test/catalog-${marker}`, responseBytes: new Uint8Array([marker]), expiresAt: '2030-01-01T00:00:00.000Z', trustState: { highestSequence: sequence, latestIssuedAt: '2029-01-01T00:00:00.000Z' }, committedAt: marker } }
 async function readdirNames(path: string): Promise<string[]> { return (await import('node:fs/promises')).readdir(path).then((names) => names.sort()) }
+async function killAtCheckpoint(fixture: string, directory: string, mode: string): Promise<void> {
+  const process = spawn('bun', [fixture, directory, mode], { stdio: ['ignore', 'pipe', 'pipe'] }); let output = ''
+  process.stdout.on('data', (data) => { output += String(data) }); process.stderr.on('data', (data) => { output += String(data) })
+  while (!output.includes('checkpoint:')) { if (process.exitCode !== null) throw new Error(`crash child exited early: ${output}`); await new Promise((resolve) => setTimeout(resolve, 5)) }
+  process.kill('SIGKILL'); await new Promise<void>((resolve) => process.on('exit', () => resolve()))
+}
