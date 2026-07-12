@@ -119,4 +119,30 @@ describe("package script target inventory", () => {
       { scriptName: "shell", target: "scripts/missing.sh" },
     ])
   })
+
+  test("binds each script target to its command segment working directory", () => {
+    manifest(join(fixtureRoot, "package.json"), {
+      name: "root",
+      version: "1.0.0",
+      scripts: {
+        segmented:
+          "cd dir-a && node scripts/task.js; cd ../dir-b && node scripts/task.js",
+        nested: "bash -c 'cd dir-a && node scripts/nested.js'",
+      },
+    })
+    write(join(fixtureRoot, "dir-a", "scripts", "task.js"), "export {}\n")
+    write(join(fixtureRoot, "dir-a", "scripts", "nested.js"), "export {}\n")
+    mkdirSync(join(fixtureRoot, "dir-b"), { recursive: true })
+    mkdirSync(join(fixtureRoot, "apps"), { recursive: true })
+    mkdirSync(join(fixtureRoot, "packages"), { recursive: true })
+
+    expect(findMissingScriptTargets(fixtureRoot)).toEqual([
+      {
+        manifestPath: "package.json",
+        packageName: "root",
+        scriptName: "segmented",
+        target: "scripts/task.js",
+      },
+    ])
+  })
 })

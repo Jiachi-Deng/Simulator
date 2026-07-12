@@ -15,6 +15,11 @@ export interface MissingScriptTarget {
   target: string
 }
 
+interface ScriptInvocation {
+  cwd: string
+  target: string
+}
+
 const SCRIPT_EXTENSION = /\.(?:ts|js|mjs|cjs|sh|ps1)$/
 const SCRIPT_RUNNERS = new Set(["bun", "bash", "sh", "node"])
 
@@ -22,7 +27,20 @@ function isScriptTarget(token: string | undefined): token is string {
   return token !== undefined && SCRIPT_EXTENSION.test(token)
 }
 
-function addRunnerTarget(runner: string, args: string[], targets: Set<string>): void {
+function addInvocation(
+  invocations: ScriptInvocation[],
+  cwd: string,
+  target: string | undefined,
+): void {
+  if (isScriptTarget(target)) invocations.push({ cwd, target })
+}
+
+function addRunnerInvocations(
+  runner: string,
+  args: string[],
+  cwd: string,
+  invocations: ScriptInvocation[],
+): void {
   let index = 0
 
   if (runner === "bun" && args[index] === "run") index += 1
@@ -36,52 +54,67 @@ function addRunnerTarget(runner: string, args: string[], targets: Set<string>): 
       if (argument === "-c" || (/^-[^-]+$/.test(argument) && argument.includes("c"))) {
         const command = args[index + 1]
         if (command) {
-          for (const target of directScriptTargets(command)) targets.add(target)
+          invocations.push(...scriptInvocations(command, cwd))
         }
         return
       }
     }
 
-    if (isScriptTarget(argument)) targets.add(argument)
+    addInvocation(invocations, cwd, argument)
     index += 1
   }
 }
 
-function addCommandTargets(tokens: string[], targets: Set<string>): void {
+function addCommandInvocations(
+  tokens: string[],
+  cwd: string,
+  invocations: ScriptInvocation[],
+): string {
+  if (tokens[0] === "cd" && tokens[1] && !tokens[1].startsWith("-")) {
+    return resolve(cwd, tokens[1])
+  }
+
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]!
     if ((token.startsWith("./") || token.startsWith("../")) && isScriptTarget(token)) {
-      targets.add(token)
+      addInvocation(invocations, cwd, token)
       continue
     }
 
     if (token === "--config" || token.toLowerCase() === "-file") {
-      const target = tokens[index + 1]
-      if (isScriptTarget(target)) targets.add(target)
+      addInvocation(invocations, cwd, tokens[index + 1])
       continue
     }
 
     if (SCRIPT_RUNNERS.has(token)) {
-      addRunnerTarget(token, tokens.slice(index + 1), targets)
+      addRunnerInvocations(token, tokens.slice(index + 1), cwd, invocations)
     }
   }
+
+  return cwd
+}
+
+function scriptInvocations(command: string, initialCwd: string): ScriptInvocation[] {
+  const invocations: ScriptInvocation[] = []
+  let cwd = initialCwd
+  let commandTokens: string[] = []
+
+  const flush = () => {
+    cwd = addCommandInvocations(commandTokens, cwd, invocations)
+    commandTokens = []
+  }
+
+  for (const token of parse(command, () => "")) {
+    if (typeof token === "string") commandTokens.push(token)
+    else flush()
+  }
+  flush()
+
+  return invocations
 }
 
 export function directScriptTargets(command: string): string[] {
-  const targets = new Set<string>()
-  let commandTokens: string[] = []
-
-  for (const token of parse(command, () => "")) {
-    if (typeof token === "string") {
-      commandTokens.push(token)
-    } else {
-      addCommandTargets(commandTokens, targets)
-      commandTokens = []
-    }
-  }
-  addCommandTargets(commandTokens, targets)
-
-  return [...targets].sort()
+  return [...new Set(scriptInvocations(command, ".").map(({ target }) => target))].sort()
 }
 
 export function findMissingScriptTargets(rootDir: string): MissingScriptTarget[] {
@@ -92,17 +125,9 @@ export function findMissingScriptTargets(rootDir: string): MissingScriptTarget[]
     for (const [scriptName, command] of Object.entries(manifest.scripts ?? {}).sort(([a], [b]) =>
       a.localeCompare(b),
     )) {
-      const commandDirectories = [...command.matchAll(/(?:^|[;&|]\s*)cd\s+([\w./-]+)/g)].map(
-        (match) => resolve(dirname(manifestPath), match[1]!),
-      )
-      for (const target of directScriptTargets(command)) {
-        const candidateDirectories = [dirname(manifestPath), rootDir, ...commandDirectories]
-        if (
-          !candidateDirectories.some((directory) => {
-            const candidate = resolve(directory, target)
-            return existsSync(candidate) && statSync(candidate).isFile()
-          })
-        ) {
+      for (const { cwd, target } of scriptInvocations(command, dirname(manifestPath))) {
+        const candidate = resolve(cwd, target)
+        if (!existsSync(candidate) || !statSync(candidate).isFile()) {
           missing.push({
             manifestPath: relative(rootDir, manifestPath),
             packageName: manifest.name ?? "<unnamed>",
