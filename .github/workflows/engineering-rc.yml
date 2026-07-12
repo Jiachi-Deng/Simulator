@@ -16,6 +16,7 @@ permissions:
   contents: read
   id-token: write
   attestations: write
+  artifact-metadata: write
 
 concurrency:
   group: engineering-rc-${{ inputs.version }}-${{ inputs.source_sha }}
@@ -30,6 +31,7 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RC_VERSION: ${{ inputs.version }}
       SOURCE_SHA: ${{ inputs.source_sha }}
+      SIMULATOR_UPDATES_DISABLED: "1"
 
     steps:
       - name: Checkout exact source SHA
@@ -74,6 +76,11 @@ jobs:
       - name: Run existing Electron build
         run: bun run electron:build
 
+      # Dependency: the updater-disable implementation must propagate this
+      # environment contract to SimulatorUpdatesDisabled=true in Info.plist.
+      - name: Require updates-disabled build mode
+        run: bun scripts/release/updates-disabled.ts
+
       - name: Build unsigned arm64 DMG and ZIP
         run: |
           test "$(uname -m)" = "arm64"
@@ -83,26 +90,49 @@ jobs:
         shell: bash
         run: scripts/release/verify-and-bundle-macos.sh "$RC_VERSION" apps/electron/release engineering-rc-bundle
 
-      - name: Generate deterministic minimal SPDX SBOM
+      - name: Generate packaged-file SPDX SBOM
         shell: bash
         run: |
           set -euo pipefail
           CREATED=$(git show -s --format=%cI "$SOURCE_SHA")
-          bun scripts/release/generate-spdx.ts bun.lock engineering-rc-bundle/sbom.spdx.json "$RC_VERSION" "$SOURCE_SHA" "$CREATED"
+          bun scripts/release/generate-spdx.ts bun.lock engineering-rc-bundle/packaged-files.sha256 engineering-rc-bundle/sbom.spdx.json "$RC_VERSION" "$SOURCE_SHA" "$CREATED"
           cp "apps/electron/resources/release-notes/$RC_VERSION.md" engineering-rc-bundle/RELEASE_NOTES.md
           cp engineering-rc-validation.json engineering-rc-bundle/rc-validation.json
           printf '{\n  "schemaVersion": 1,\n  "version": "%s",\n  "sourceSha": "%s",\n  "signed": false,\n  "channel": "engineering-rc"\n}\n' \
             "$RC_VERSION" "$SOURCE_SHA" > engineering-rc-bundle/bundle-metadata.json
           bun scripts/release/verify-bundle-policy.ts engineering-rc-bundle
-          (
-            cd engineering-rc-bundle
-            find . -maxdepth 1 -type f ! -name SHA256SUMS -print | LC_ALL=C sort | sed 's#^./##' | xargs shasum -a 256 > SHA256SUMS
-          )
 
-      - name: Attest engineering RC bundle
+      - name: Attest DMG and ZIP with SPDX SBOM
+        id: attest_sbom
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.0.0
         with:
-          subject-path: engineering-rc-bundle/*
+          subject-path: |
+            engineering-rc-bundle/Simulator-arm64.dmg
+            engineering-rc-bundle/Simulator-arm64.zip
+          sbom-path: engineering-rc-bundle/sbom.spdx.json
+
+      - name: Attest DMG and ZIP build provenance
+        id: attest_provenance
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.0.0
+        with:
+          subject-path: |
+            engineering-rc-bundle/Simulator-arm64.dmg
+            engineering-rc-bundle/Simulator-arm64.zip
+
+      - name: Save attestation bundles and finalize checksums
+        env:
+          SBOM_ATTESTATION_BUNDLE: ${{ steps.attest_sbom.outputs.bundle-path }}
+          PROVENANCE_ATTESTATION_BUNDLE: ${{ steps.attest_provenance.outputs.bundle-path }}
+        run: |
+          set -euo pipefail
+          mkdir -p engineering-rc-bundle/attestations
+          cp "$SBOM_ATTESTATION_BUNDLE" engineering-rc-bundle/attestations/sbom.sigstore.json
+          cp "$PROVENANCE_ATTESTATION_BUNDLE" engineering-rc-bundle/attestations/provenance.sigstore.json
+          bun scripts/release/verify-bundle-policy.ts engineering-rc-bundle
+          (
+            cd engineering-rc-bundle
+            find . -type f ! -name SHA256SUMS -print | LC_ALL=C sort | sed 's#^./##' | xargs shasum -a 256 > SHA256SUMS
+          )
 
       - name: Upload engineering RC bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
