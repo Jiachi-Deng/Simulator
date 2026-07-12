@@ -15,6 +15,7 @@ import {
 } from './filesystem.ts'
 import {
   DEFAULT_INSTALL_LIMITS,
+  DEFAULT_STALE_STAGING_AGE_MS,
   ModuleInstallerError,
   SimulatedInstallerCrash,
   type InstalledModuleState,
@@ -34,7 +35,9 @@ const JOURNAL_SCHEMA_VERSION = 1
 const MODULE_ID_PATTERN = /^(?=.{3,128}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/
 const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
 const SHA256_PATTERN = /^[a-f0-9]{64}$/
-const TRANSACTION_ID_PATTERN = /^[a-f0-9-]{36}$/
+const TRANSACTION_ID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/
+const STAGING_OWNERSHIP_SCHEMA_VERSION = 1
+const STAGING_OWNERSHIP_FILE = 'ownership.json'
 
 interface StateFile {
   readonly schemaVersion: 1
@@ -65,6 +68,13 @@ interface ModulePaths {
   readonly recoveringJournal: string
 }
 
+interface StagingOwnershipFile {
+  readonly schemaVersion: 1
+  readonly transactionId: string
+  readonly moduleId: string
+  readonly createdAtMs: number
+}
+
 function emptyState(): StateFile {
   return { schemaVersion: STATE_SCHEMA_VERSION, activeVersion: null, lastKnownGoodVersion: null }
 }
@@ -87,6 +97,26 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 function validVersion(value: unknown): value is string {
   return typeof value === 'string' && value.length <= 256 && VERSION_PATTERN.test(value)
+}
+
+function parseStagingOwnership(value: unknown, expectedTransactionId: string): StagingOwnershipFile | undefined {
+  if (!isPlainObject(value)
+    || value.schemaVersion !== STAGING_OWNERSHIP_SCHEMA_VERSION
+    || value.transactionId !== expectedTransactionId
+    || typeof value.moduleId !== 'string'
+    || !MODULE_ID_PATTERN.test(value.moduleId)
+    || typeof value.createdAtMs !== 'number'
+    || !Number.isSafeInteger(value.createdAtMs)
+    || value.createdAtMs < 0
+    || Object.keys(value).sort().join(',') !== 'createdAtMs,moduleId,schemaVersion,transactionId') {
+    return undefined
+  }
+  return {
+    schemaVersion: STAGING_OWNERSHIP_SCHEMA_VERSION,
+    transactionId: value.transactionId,
+    moduleId: value.moduleId,
+    createdAtMs: value.createdAtMs,
+  }
 }
 
 function parseState(value: unknown): StateFile {
@@ -179,6 +209,7 @@ export class ModuleInstaller {
   readonly #usageGuard: ModuleInstallerOptions['usageGuard']
   readonly #busy = new Set<string>()
   #rootReady = false
+  #maintenanceActive = false
 
   constructor(moduleRoot: string, options: ModuleInstallerOptions = {}) {
     if (typeof moduleRoot !== 'string' || moduleRoot.length === 0 || moduleRoot.includes('\0')) {
@@ -218,6 +249,14 @@ export class ModuleInstaller {
       try {
         this.#abortIfRequested(request.signal)
         await mkdir(staging, { mode: 0o700 })
+        const ownership: StagingOwnershipFile = {
+          schemaVersion: STAGING_OWNERSHIP_SCHEMA_VERSION,
+          transactionId,
+          moduleId: descriptor.moduleId,
+          createdAtMs: Date.now(),
+        }
+        await atomicWriteJson(join(staging, STAGING_OWNERSHIP_FILE), ownership)
+        await fsyncDirectory(join(this.#root, '.module-installer', 'staging'))
         await mkdir(payload, { mode: 0o700 })
         const archiveSha256 = await copyAndHashArchive(request.archivePath, archive, this.#limits, request.signal, report)
         if (archiveSha256 !== descriptor.archiveSha256) {
@@ -313,6 +352,7 @@ export class ModuleInstaller {
           }
         } else {
           await rm(staging, { recursive: true, force: true }).catch(() => undefined)
+          await fsyncDirectory(join(this.#root, '.module-installer', 'staging')).catch(() => undefined)
         }
         if (error instanceof ModuleInstallerError) throw error
         throw new ModuleInstallerError('FILESYSTEM_ERROR', error instanceof Error ? error.message : String(error), error)
@@ -453,15 +493,49 @@ export class ModuleInstaller {
   }
 
   async recoverAll(): Promise<void> {
-    await this.#ensureRoot()
-    const modulesDirectory = join(this.#root, 'modules')
-    const entries = await readdir(modulesDirectory, { withFileTypes: true })
-    for (const entry of entries) {
-      if (!entry.isDirectory() || !MODULE_ID_PATTERN.test(entry.name)) {
-        throw new ModuleInstallerError('JOURNAL_INVALID', `Unexpected entry in module root: ${JSON.stringify(entry.name)}`)
-      }
-      await this.recover(entry.name as ModuleId)
+    if (this.#maintenanceActive || this.#busy.size > 0) {
+      throw new ModuleInstallerError('BUSY', 'Cannot run global recovery while module mutations are active')
     }
+    this.#maintenanceActive = true
+    try {
+      await this.#ensureRoot()
+      const modulesDirectory = join(this.#root, 'modules')
+      const entries = await readdir(modulesDirectory, { withFileTypes: true })
+      for (const entry of entries) {
+        if (!entry.isDirectory() || !MODULE_ID_PATTERN.test(entry.name)) {
+          throw new ModuleInstallerError('JOURNAL_INVALID', `Unexpected entry in module root: ${JSON.stringify(entry.name)}`)
+        }
+        await this.#recoverModule(entry.name as ModuleId)
+      }
+      await this.#cleanupStaleStaging()
+    } finally {
+      this.#maintenanceActive = false
+    }
+  }
+
+  async #cleanupStaleStaging(): Promise<void> {
+    const stagingRoot = join(this.#root, '.module-installer', 'staging')
+    const now = Date.now()
+    let removed = false
+    for (const entry of await readdir(stagingRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !TRANSACTION_ID_PATTERN.test(entry.name)) continue
+      const staging = this.#stagingPath(entry.name)
+      let ownership: StagingOwnershipFile | undefined
+      try {
+        ownership = parseStagingOwnership(
+          await this.#readSmallJson(join(staging, STAGING_OWNERSHIP_FILE)),
+          entry.name,
+        )
+      } catch {
+        continue
+      }
+      if (!ownership || ownership.createdAtMs > now || now - ownership.createdAtMs < DEFAULT_STALE_STAGING_AGE_MS) continue
+      const paths = this.#modulePaths(ownership.moduleId as ModuleId)
+      if (await pathExists(paths.journal) || await pathExists(paths.recoveringJournal) || await pathExists(paths.journalClaim)) continue
+      await rm(staging, { recursive: true, force: true })
+      removed = true
+    }
+    if (removed) await fsyncDirectory(stagingRoot)
   }
 
   async #recoverModule(moduleId: ModuleId, resumeInterrupted = false): Promise<void> {
@@ -588,8 +662,8 @@ export class ModuleInstaller {
   }
 
   async #readSmallJson(path: string): Promise<unknown> {
-    const info = await stat(path)
-    if (!info.isFile() || info.size > 64 * 1024) throw new ModuleInstallerError('JOURNAL_INVALID', 'Installer metadata file is invalid')
+    const info = await lstat(path)
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 64 * 1024) throw new ModuleInstallerError('JOURNAL_INVALID', 'Installer metadata file is invalid')
     try {
       return JSON.parse(await readFile(path, 'utf8')) as unknown
     } catch (error) {
@@ -659,7 +733,7 @@ export class ModuleInstaller {
   }
 
   async #exclusive<T>(moduleId: ModuleId, operation: () => Promise<T>): Promise<T> {
-    if (this.#busy.has(moduleId)) throw new ModuleInstallerError('BUSY', `Another operation is active for ${moduleId}`)
+    if (this.#maintenanceActive || this.#busy.has(moduleId)) throw new ModuleInstallerError('BUSY', `Another operation is active for ${moduleId}`)
     this.#busy.add(moduleId)
     try {
       return await operation()

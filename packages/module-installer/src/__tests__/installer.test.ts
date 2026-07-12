@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync, gunzipSync } from 'node:zlib'
@@ -309,6 +309,20 @@ describe('malicious archive matrix', () => {
     await expect(installer.install({ descriptor: descriptor(source.archive, entries), archivePath: source.path })).rejects.toMatchObject({ code: 'ARCHIVE_LIMIT_EXCEEDED' })
   })
 
+  for (const type of ['X', 'N'] as const) {
+    it(`enforces cumulative ${type} metadata bytes in the raw pre-scan`, async () => {
+      const root = await tempRoot()
+      const entries = [
+        { path: `${type}-metadata-1`, type, content: '123456' },
+        { path: `${type}-metadata-2`, type, content: 'abcdef' },
+        ...VALID_ENTRIES,
+      ] as const satisfies readonly TarFixtureEntry[]
+      const source = await artifactAt(root, entries)
+      const installer = new ModuleInstaller(join(root, 'modules-root'), { limits: { maxMetadataBytes: 10 } })
+      await expect(installer.install({ descriptor: descriptor(source.archive, entries), archivePath: source.path })).rejects.toMatchObject({ code: 'ARCHIVE_LIMIT_EXCEEDED' })
+    })
+  }
+
   it('rejects a high-ratio gzip tar bomb before extraction', async () => {
     const root = await tempRoot()
     const entries = [
@@ -324,6 +338,75 @@ describe('malicious archive matrix', () => {
 })
 
 describe('transaction fault injection and recovery', () => {
+  for (const point of ['after-archive-copy', 'after-archive-inspection', 'after-extraction'] as const) {
+    it(`quarantines fresh staging and recoverAll removes it only after the stale threshold following ${point}`, async () => {
+      const root = await tempRoot()
+      const source = await artifactAt(root)
+      const moduleRoot = join(root, 'modules-root')
+      const crashing = new ModuleInstaller(moduleRoot, {
+        faultInjector(candidate) {
+          if (candidate === point) throw new SimulatedInstallerCrash(candidate)
+        },
+      })
+      await expect(crashing.install({ descriptor: descriptor(source.archive, VALID_ENTRIES), archivePath: source.path })).rejects.toBeInstanceOf(SimulatedInstallerCrash)
+
+      const stagingRoot = join(moduleRoot, '.module-installer', 'staging')
+      const stagingEntries = await readdir(stagingRoot)
+      expect(stagingEntries).toHaveLength(1)
+      const staging = join(stagingRoot, stagingEntries[0]!)
+      const ownershipPath = join(staging, 'ownership.json')
+      const ownership = JSON.parse(await readFile(ownershipPath, 'utf8')) as Record<string, unknown>
+      expect(ownership).toMatchObject({ moduleId: MODULE_ID, transactionId: stagingEntries[0] })
+
+      const recovery = new ModuleInstaller(moduleRoot)
+      await recovery.recoverAll()
+      expect(await exists(staging)).toBe(true)
+
+      await writeFile(ownershipPath, `${JSON.stringify({ ...ownership, createdAtMs: 0 })}\n`)
+      await recovery.recoverAll()
+      expect(await exists(staging)).toBe(false)
+      expect((await recovery.getState(MODULE_ID)).activeVersion).toBeNull()
+    })
+  }
+
+  it('does not run stale staging cleanup while this installer has an active mutation', async () => {
+    const root = await tempRoot()
+    const source = await artifactAt(root)
+    const moduleRoot = join(root, 'modules-root')
+    let release!: () => void
+    let reached!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const paused = new Promise<void>((resolve) => { reached = resolve })
+    const installer = new ModuleInstaller(moduleRoot, {
+      async faultInjector(point) {
+        if (point === 'after-archive-copy') {
+          reached()
+          await gate
+        }
+      },
+    })
+    const installing = installer.install({ descriptor: descriptor(source.archive, VALID_ENTRIES), archivePath: source.path })
+    await paused
+    try {
+      await expect(installer.recoverAll()).rejects.toMatchObject({ code: 'BUSY' })
+    } finally {
+      release()
+    }
+    await installing
+  })
+
+  it('keeps malformed staging ownership markers quarantined', async () => {
+    const root = await tempRoot()
+    const moduleRoot = join(root, 'modules-root')
+    const installer = new ModuleInstaller(moduleRoot)
+    await installer.getState(MODULE_ID)
+    const staging = join(moduleRoot, '.module-installer', 'staging', '00000000-0000-4000-8000-000000000000')
+    await mkdir(staging)
+    await writeFile(join(staging, 'ownership.json'), '{"createdAtMs":0,"transactionId":"../../escape"}\n')
+    await installer.recoverAll()
+    expect(await exists(staging)).toBe(true)
+  })
+
   it('uses an exclusive filesystem journal across installer instances', async () => {
     const root = await tempRoot()
     const source = await artifactAt(root)

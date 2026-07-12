@@ -65,7 +65,7 @@ uninstalled -> installed -> running -> stopped -> running
 
 archive 必须只有一个名为 `module/` 的顶层目录，安装后的版本目录直接包含其内容。entry 只允许 regular file 和 directory；symlink、hardlink、device、FIFO、contiguous/sparse 等特殊类型全部拒绝。v1 path contract 刻意限制为与 Module entrypoint 相同的 safe ASCII segment grammar，即每段必须匹配 `[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?`。同时拒绝 absolute path、drive/UNC、反斜线、colon、control character、`.`/`..`、Windows device name、duplicate 和 ASCII case-fold collision。Unicode path 一律 fail closed，避免声称跨 filesystem/platform 提供并不存在的 full Unicode casefold 等价性。
 
-installer 先用 `O_NOFOLLOW` 打开本地 regular file，复制到 caller root 内唯一的 `0700` staging 并计算 archive hash。只有 hash 匹配后才流式预扫描 raw 512-byte tar headers，验证 checksum、canonical octal size 与双 zero-block 结束标记，并对所有 headers（包括 PAX local/global 与 GNU long-name metadata）执行统一总数限制；metadata payload 另执行累计 byte limit，base-256 size fail closed。之后才运行两遍 `tar`：第一遍只读检查 metadata、entry count、单文件/总大小、depth、path 和 executable policy，第二遍提取到空 staging，并要求观察到完全相同的 entry metadata。raw pre-scan 与 `tar` 都提前执行 decompression-ratio 上限。落盘后再用 `lstat` 遍历全树，拒绝 link/special file，并逐文件计算 SHA-256。
+installer 先在 caller root 内建立唯一的 `0700` staging，并在任何 archive 工作前 durable 写入严格的 `ownership.json`；随后用 `O_NOFOLLOW` 打开本地 regular file，复制到 staging 并计算 archive hash。只有 hash 匹配后才流式预扫描 raw 512-byte tar headers，验证 checksum、canonical octal size 与双 zero-block 结束标记，并对所有 headers 执行统一总数限制。node-tar 识别的 `g/x/X/L/K/N` metadata payload 全部计入累计 byte limit，base-256 size fail closed。之后才运行两遍 `tar`：第一遍只读检查 metadata、entry count、单文件/总大小、depth、path 和 executable policy，第二遍提取到空 staging，并要求观察到完全相同的 entry metadata。raw pre-scan 与 `tar` 都提前执行 decompression-ratio 上限。落盘后再用 `lstat` 遍历全树，拒绝 link/special file，并逐文件计算 SHA-256。
 
 extracted manifest hash 的 canonical input 按 UTF-8 path byte order 全局排序，每条记录以 LF 结尾：
 
@@ -82,7 +82,7 @@ F\t<JSON path>\t<size>\t<executable 0|1>\t<lowercase sha256>
 
 首次 journal publish 先写唯一 temporary file、`fsync` file，再以 `transaction.claim/` 的原子 directory create 取得排他发布权，随后 rename 为完整 `transaction.json` 并 `fsync` module directory。普通 write、ENOSPC 或 publish error 会清理 temporary、claim 与已发布 journal，不会留下永久 `BUSY`；claim 前的 crash temporary file 作为无权威 quarantine 保留且不阻塞重试。claim 后的 crash 只有在 host 确认 publisher 已停止后才可用 `recoverInterrupted()` 清除或继续。后续 crash recovery 先把完整 journal 原子 rename 为固定的 `transaction.recovering.json` 取得唯一恢复权，再根据 durable state 判断 rollback 未提交 publish，或完成已经提交的 activation。存在 pending journal 时普通操作返回 `BUSY`；host 启动时应先调用 `recoverAll()`，或针对已知 Module 调用 `recover()`。普通 recovery 看到 claim 或已有 recovering journal 也返回 `BUSY`；只有 host 已确认前一 owner 已停止时，才可显式调用 `recoverInterrupted()`。malformed journal 保留在 recovering 位置并 fail closed，不跟随 journal 中的任意 path。
 
-cancel 只在 state commit 前生效；失败或取消会恢复旧 active/LKG 并清理 staging。state rename 一旦 durable，即视为成功提交，即使随后的 journal cleanup 被中断，recovery 也会保留新 active。
+cancel 只在 state commit 前生效；失败或取消会恢复旧 active/LKG 并清理 staging。pre-journal crash 产生的 staging 没有 transaction journal authority：`recoverAll()` 在完成 journal recovery 后，只清理 UUID 与 ownership marker 严格匹配、marker 至少 24 小时、且对应 Module 不存在 journal/recovering journal/claim 的 stale staging。fresh、future-dated、malformed 或未知 entry 保持 quarantine；同实例 active mutation 会使 `recoverAll()` 返回 `BUSY`。该 bounded-age policy 不替代跨进程 locking，host 必须在停止该 root 的其他 installer owner 后于 startup 调用。state rename 一旦 durable，即视为成功提交，即使随后的 journal cleanup 被中断，recovery 也会保留新 active。
 
 ### Archive dependency baseline
 

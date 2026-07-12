@@ -1,6 +1,7 @@
 export { ModuleInstaller } from './installer.ts'
 export {
   DEFAULT_INSTALL_LIMITS,
+  DEFAULT_STALE_STAGING_AGE_MS,
   ModuleInstallerError,
   SimulatedInstallerCrash,
   type InstalledModuleState,

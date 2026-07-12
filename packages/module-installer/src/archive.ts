@@ -13,7 +13,7 @@ const WINDOWS_DEVICE = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i
 const DRIVE_OR_UNC = /^(?:[A-Za-z]:|[/\\]{2})/
 const SAFE_PATH_SEGMENT = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
 const TAR_BLOCK_SIZE = 512
-const TAR_METADATA_TYPES = new Set(['g', 'x', 'L', 'K'])
+const TAR_METADATA_TYPES = new Set(['g', 'x', 'X', 'L', 'K', 'N'])
 
 export interface ArchiveEntryPlan {
   readonly archivePath: string

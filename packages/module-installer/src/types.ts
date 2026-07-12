@@ -18,6 +18,8 @@ export const DEFAULT_INSTALL_LIMITS = Object.freeze({
   maxDecompressionRatio: 200,
 })
 
+export const DEFAULT_STALE_STAGING_AGE_MS = 24 * 60 * 60 * 1_000
+
 export interface InstallLimits {
   readonly maxArchiveBytes: number
   readonly maxEntries: number
