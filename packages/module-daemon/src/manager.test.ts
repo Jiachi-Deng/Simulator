@@ -447,6 +447,56 @@ describe('ModuleDaemonManager', () => {
     expect(manager.get(moduleId)?.state).toBe('stopped')
   })
 
+  test('publishes the stop gate before a stopping subscriber can reenter start or stop', async () => {
+    const root = await activatedRoot()
+    let releaseSecondResolution!: () => void
+    const secondResolutionGate = new Promise<void>((resolve) => { releaseSecondResolution = resolve })
+    let resolutionCalls = 0
+    const activation: ActivationAdapter = {
+      async resolveEntrypoint(activatedRoot: string, artifact: ModuleArtifact) {
+        resolutionCalls += 1
+        if (resolutionCalls === 2) await secondResolutionGate
+        return {
+          activatedRoot: await realpath(activatedRoot),
+          executable: await realpath(join(activatedRoot, ...artifact.entrypoint.split('/'))),
+        }
+      },
+    }
+    const { manager, processAdapter } = harness({ activation })
+    const id = manifest('org.simulator.reentrant-stop').id
+    const request = (version: string) => ({
+      manifest: manifest(id, 'bin/daemon', version),
+      activatedRoot: root,
+      platform: currentPlatform(),
+    })
+    await manager.start(request('1.0.0'))
+    let reentrantStart: Promise<ModuleDaemonSnapshot> | undefined
+    let reentrantStop: Promise<ModuleDaemonSnapshot | undefined> | undefined
+    manager.subscribe((snapshot) => {
+      if (snapshot.id === id && snapshot.state === 'stopping' && !reentrantStart) {
+        reentrantStart = manager.start(request('2.0.0'))
+        reentrantStop = manager.stop(id)
+      }
+    })
+
+    const stopping = manager.stop(id)
+    const stopped = await stopping
+    await expect(reentrantStart!).rejects.toMatchObject({ code: 'STOP_REQUESTED' })
+    expect(reentrantStop).toBe(stopping)
+    await expect(reentrantStop!).resolves.toEqual(stopped)
+    expect(resolutionCalls).toBe(1)
+    expect(processAdapter.processes).toHaveLength(1)
+
+    const restarted = manager.start(request('2.0.0'))
+    await settle()
+    expect(resolutionCalls).toBe(2)
+    expect(processAdapter.processes).toHaveLength(1)
+    releaseSecondResolution()
+    await expect(restarted).resolves.toMatchObject({ state: 'healthy', version: '2.0.0' })
+    expect(processAdapter.processes).toHaveLength(2)
+    await manager.stop(id)
+  })
+
   test('drain cancels a pending activation resolution before spawn', async () => {
     const root = await activatedRoot()
     let releaseResolution!: () => void
@@ -510,6 +560,34 @@ describe('ModuleDaemonManager', () => {
     expect(processAdapter.requests).toHaveLength(0)
     expect(manager.get(moduleId)?.state).toBe('stopped')
     await expect(manager.start(requests[2]!)).rejects.toMatchObject({ code: 'MANAGER_DRAINING' })
+  })
+
+  test('publishes draining before a stopping subscriber can reenter start', async () => {
+    const root = await activatedRoot()
+    const { manager, processAdapter } = harness()
+    const id = manifest('org.simulator.reentrant-drain').id
+    const firstRequest = {
+      manifest: manifest(id, 'bin/daemon', '1.0.0'),
+      activatedRoot: root,
+      platform: currentPlatform(),
+    }
+    const secondRequest = {
+      manifest: manifest(id, 'bin/daemon', '2.0.0'),
+      activatedRoot: root,
+      platform: currentPlatform(),
+    }
+    await manager.start(firstRequest)
+    let reentrantStart: Promise<ModuleDaemonSnapshot> | undefined
+    manager.subscribe((snapshot) => {
+      if (snapshot.id === id && snapshot.state === 'stopping' && !reentrantStart) {
+        reentrantStart = manager.start(secondRequest)
+      }
+    })
+
+    await manager.drain()
+    await expect(reentrantStart!).rejects.toMatchObject({ code: 'MANAGER_DRAINING' })
+    expect(processAdapter.processes).toHaveLength(1)
+    expect(manager.get(id)?.state).toBe('stopped')
   })
 
   test('stop during a health probe and restart backoff cannot launch a replacement', async () => {

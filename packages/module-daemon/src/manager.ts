@@ -277,15 +277,17 @@ export class ModuleDaemonManager {
     return ready.promise
   }
 
-  async stop(id: ModuleId): Promise<ModuleDaemonSnapshot | undefined> {
+  stop(id: ModuleId): Promise<ModuleDaemonSnapshot | undefined> {
     const existingStop = this.moduleStops.get(id)
     if (existingStop) return existingStop
-    const operation = this.stopGeneration(id)
-    this.moduleStops.set(id, operation)
-    void operation.finally(() => {
-      if (this.moduleStops.get(id) === operation) this.moduleStops.delete(id)
+    const gate = deferred<ModuleDaemonSnapshot | undefined>()
+    this.moduleStops.set(id, gate.promise)
+    const operation = Promise.resolve().then(() => this.stopGeneration(id))
+    void operation.then(gate.resolve, gate.reject)
+    void gate.promise.finally(() => {
+      if (this.moduleStops.get(id) === gate.promise) this.moduleStops.delete(id)
     }).catch(() => undefined)
-    return operation
+    return gate.promise
   }
 
   private async stopGeneration(id: ModuleId): Promise<ModuleDaemonSnapshot | undefined> {
