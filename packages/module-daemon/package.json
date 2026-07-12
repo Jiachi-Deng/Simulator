@@ -1,0 +1,28 @@
+{
+  "name": "@simulator/module-daemon",
+  "version": "0.11.1",
+  "license": "Apache-2.0",
+  "description": "Host-neutral supervisor for optional Simulator module daemons",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing/index.ts"
+  },
+  "scripts": {
+    "test": "bun test src",
+    "test:integration": "bun test src/real-adapters.integration.test.ts",
+    "test:windows-native": "bun run build:windows-native-integration && node dist/windows-native-integration.mjs",
+    "typecheck": "tsc --noEmit",
+    "build": "bun build src/index.ts src/testing/index.ts --outdir dist --target bun --splitting --external @simulator/module-contract --external koffi",
+    "build:windows-native-integration": "bun build src/testing/windows-native-integration.ts --outfile dist/windows-native-integration.mjs --target node --external koffi"
+  },
+  "dependencies": {
+    "@simulator/module-contract": "workspace:*",
+    "koffi": "^3.1.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2"
+  }
+}
