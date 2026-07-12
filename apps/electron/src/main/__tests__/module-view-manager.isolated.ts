@@ -178,6 +178,7 @@ describe('ModuleViewManager', () => {
     expect(dedicatedSession.setDisplayMediaRequestHandler).toHaveBeenCalledTimes(1)
     expect(dedicatedSession.on).toHaveBeenCalledWith('will-download', expect.any(Function))
     expect(dedicatedSession.webRequest.onBeforeRequest).toHaveBeenCalledTimes(1)
+    expect(dedicatedSession.webRequest.onBeforeRequest.mock.calls[0][0]).toEqual({ urls: ['<all_urls>'] })
 
     manager.dispose()
   })
@@ -259,11 +260,25 @@ describe('ModuleViewManager', () => {
     const localCallback = mock((_result: unknown) => {})
     requestHandler({ url: `${origin}/app.js` }, localCallback)
     expect(localCallback).toHaveBeenCalledWith({ cancel: false })
+    const localWebSocketCallback = mock((_result: unknown) => {})
+    requestHandler({ url: 'ws://127.0.0.1:43117/socket' }, localWebSocketCallback)
+    expect(localWebSocketCallback).toHaveBeenCalledWith({ cancel: false })
+    for (const deniedUrl of [
+      'ws://127.0.0.1:43118/socket',
+      'ws://localhost:43117/socket',
+      'wss://127.0.0.1:43117/socket',
+      'file:///tmp/module.html',
+      'data:text/plain,blocked',
+    ]) {
+      const callback = mock((_result: unknown) => {})
+      requestHandler({ url: deniedUrl }, callback)
+      expect(callback).toHaveBeenCalledWith({ cancel: true })
+    }
     expect(failures.some((failure) => failure.code === 'NAVIGATION_BLOCKED')).toBe(true)
     manager.dispose()
   })
 
-  it('routes valid messages by sender and blocks forged identities, subframes, and oversized payloads', async () => {
+  it('routes valid messages by sender and blocks forged identities, null/subframes, destroyed senders, and oversized payloads', async () => {
     const messages: any[] = []
     const failures: any[] = []
     const manager = new ModuleViewManager({
@@ -285,8 +300,13 @@ describe('ModuleViewManager', () => {
 
     emitIpc(view, { ...envelope, viewInstanceId: 'view-2' })
     emitIpc(view, envelope, {})
+    emitIpc(view, envelope, null)
+    view.webContents.isDestroyed.mockImplementationOnce(() => true)
+    emitIpc(view, envelope)
     emitIpc(view, { ...envelope, payload: 'x'.repeat(17 * 1024) })
     expect(failures.map((failure) => failure.code)).toEqual([
+      'CROSS_TALK_BLOCKED',
+      'CROSS_TALK_BLOCKED',
       'CROSS_TALK_BLOCKED',
       'CROSS_TALK_BLOCKED',
       'PAYLOAD_LIMIT_EXCEEDED',
@@ -312,10 +332,21 @@ describe('ModuleViewManager', () => {
     manager.dispose()
   })
 
-  it('reports renderer crashes and recreates only the crashed view', async () => {
+  it('quarantines renderer crashes before callback and recreates only the unavailable view', async () => {
     const failures: any[] = []
-    const manager = new ModuleViewManager({ onFailure: (failure) => failures.push(failure) })
-    await manager.attach(attachOptions())
+    const hostWindow = createHostWindow()
+    let manager: InstanceType<typeof ModuleViewManager>
+    manager = new ModuleViewManager({
+      onFailure: (failure) => {
+        const view = createdViews[0]
+        expect(view.setVisible).toHaveBeenLastCalledWith(false)
+        expect(view.setBounds).toHaveBeenLastCalledWith({ x: 0, y: 0, width: 0, height: 0 })
+        expect(hostWindow.contentView.removeChildView).toHaveBeenCalledWith(view)
+        expect(manager.get(identity)).toMatchObject({ attached: false, visible: false })
+        failures.push(failure)
+      },
+    })
+    await manager.attach(attachOptions(hostWindow))
     const crashedView = createdViews[0]
 
     crashedView.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 139 })
@@ -328,7 +359,49 @@ describe('ModuleViewManager', () => {
     expect(recreated.webContentsId).toBe(replacement.webContents.id)
     expect(crashedView.webContents.close).toHaveBeenCalledWith({ waitForBeforeUnload: false })
     expect(replacement.webContents.loadURL).toHaveBeenCalledWith(`${origin}/index.html`)
+    expect(hostWindow.contentView.addChildView).toHaveBeenLastCalledWith(replacement)
+    expect(recreated.attached).toBe(true)
     await expect(manager.recreate(identity)).rejects.toMatchObject({ code: 'VIEW_NOT_CRASHED' })
+    manager.dispose()
+  })
+
+  it('quarantines preload failure before callback and requires explicit recreate', async () => {
+    const hostWindow = createHostWindow()
+    const failures: any[] = []
+    let manager: InstanceType<typeof ModuleViewManager>
+    manager = new ModuleViewManager({
+      onFailure: (failure) => {
+        const view = createdViews[0]
+        expect(view.setVisible).toHaveBeenLastCalledWith(false)
+        expect(view.setBounds).toHaveBeenLastCalledWith({ x: 0, y: 0, width: 0, height: 0 })
+        expect(hostWindow.contentView.removeChildView).toHaveBeenCalledWith(view)
+        expect(manager.get(identity)).toMatchObject({ state: 'failed', attached: false, visible: false })
+        failures.push(failure)
+      },
+    })
+    await manager.attach(attachOptions(hostWindow))
+    const failedView = createdViews[0]
+
+    failedView.webContents.emit('preload-error', {}, '/tmp/module-view-preload.cjs', new Error('broken preload'))
+    expect(failures.at(-1)).toMatchObject({ code: 'PRELOAD_FAILED', ...identity })
+    const envelope = {
+      version: 1,
+      direction: 'module-to-host',
+      ...identity,
+      type: 'message',
+      payload: { shouldNotArrive: true },
+    }
+    emitIpc(failedView, envelope)
+    expect(failures).toHaveLength(1)
+    expect(() => manager.show(identity)).not.toThrow()
+    expect(() => manager.resize(identity, { x: 4, y: 4, width: 320, height: 240 })).not.toThrow()
+    expect(failedView.setVisible).toHaveBeenLastCalledWith(false)
+    expect(failedView.setBounds).toHaveBeenLastCalledWith({ x: 0, y: 0, width: 0, height: 0 })
+    expect(() => manager.reattach(identity)).toThrow(ModuleViewManagerError)
+
+    const recreated = await manager.recreate(identity)
+    expect(recreated).toMatchObject({ state: 'loading', attached: true, visible: true })
+    expect(createdViews[1].setBounds).toHaveBeenCalledWith({ x: 4, y: 4, width: 320, height: 240 })
     manager.dispose()
   })
 })

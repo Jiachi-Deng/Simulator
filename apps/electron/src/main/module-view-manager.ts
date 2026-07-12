@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import {
   WebContentsView,
@@ -25,6 +25,7 @@ import {
 
 const MAX_VIEW_EDGE = 32_768
 const MAX_ALLOWED_ORIGINS = 8
+const QUARANTINED_VIEW_BOUNDS = Object.freeze({ x: 0, y: 0, width: 0, height: 0 })
 
 export type ModuleViewFailureCode =
   | 'CROSS_TALK_BLOCKED'
@@ -67,7 +68,7 @@ export interface ModuleViewSnapshot extends ModuleViewIdentity {
   readonly rect: Rectangle
   readonly attached: boolean
   readonly visible: boolean
-  readonly state: 'loading' | 'ready' | 'crashed'
+  readonly state: 'loading' | 'ready' | 'crashed' | 'failed'
 }
 
 interface ModuleViewRecord extends ModuleViewIdentity {
@@ -78,7 +79,9 @@ interface ModuleViewRecord extends ModuleViewIdentity {
   view: WebContentsView
   rect: Rectangle
   attached: boolean
+  reattachAfterRecreate: boolean
   visible: boolean
+  restoreVisibleAfterRecreate: boolean
   state: ModuleViewSnapshot['state']
   onMessage?: ModuleViewAttachOptions['onMessage']
   onFailure?: ModuleViewAttachOptions['onFailure']
@@ -180,7 +183,14 @@ function resolveRect(hostWindow: BrowserWindow, rect: Rectangle | 'full-content'
 
 function isAllowedRequest(urlString: string, allowedOrigins: readonly string[]): boolean {
   try {
-    return allowedOrigins.includes(new URL(urlString).origin)
+    const requestUrl = new URL(urlString)
+    if (requestUrl.protocol === 'http:') return allowedOrigins.includes(requestUrl.origin)
+    if (requestUrl.protocol !== 'ws:') return false
+
+    return allowedOrigins.some((origin) => {
+      const allowedUrl = new URL(origin)
+      return requestUrl.hostname === allowedUrl.hostname && requestUrl.port === allowedUrl.port
+    })
   } catch {
     return false
   }
@@ -191,6 +201,8 @@ function createPartition(identity: ModuleViewIdentity): string {
     .update(identity.moduleId)
     .update('\u0000')
     .update(identity.viewInstanceId)
+    .update('\u0000')
+    .update(randomUUID())
     .digest('hex')
     .slice(0, 24)
   return `module-view-${digest}`
@@ -241,7 +253,9 @@ export class ModuleViewManager {
       view,
       rect,
       attached: true,
+      reattachAfterRecreate: false,
       visible,
+      restoreVisibleAfterRecreate: false,
       state: 'loading',
       onMessage: options.onMessage,
       onFailure: options.onFailure,
@@ -280,6 +294,9 @@ export class ModuleViewManager {
 
   reattach(identity: ModuleViewIdentity, hostWindow?: BrowserWindow): ModuleViewSnapshot {
     const record = this.requireRecord(identity)
+    if (record.state === 'crashed' || record.state === 'failed') {
+      throw new ModuleViewManagerError('INVALID_ARGUMENT', 'Unavailable module views require explicit recreation')
+    }
     if (record.attached) return this.snapshot(record)
     if (hostWindow) {
       if (hostWindow.isDestroyed()) {
@@ -300,12 +317,16 @@ export class ModuleViewManager {
   resize(identity: ModuleViewIdentity, rect: Rectangle | 'full-content'): ModuleViewSnapshot {
     const record = this.requireRecord(identity)
     record.rect = resolveRect(record.hostWindow, rect)
-    record.view.setBounds(record.rect)
+    if (record.state !== 'crashed' && record.state !== 'failed') record.view.setBounds(record.rect)
     return this.snapshot(record)
   }
 
   hide(identity: ModuleViewIdentity): ModuleViewSnapshot {
     const record = this.requireRecord(identity)
+    if (record.state === 'crashed' || record.state === 'failed') {
+      record.restoreVisibleAfterRecreate = false
+      return this.snapshot(record)
+    }
     record.visible = false
     record.view.setVisible(false)
     return this.snapshot(record)
@@ -313,6 +334,10 @@ export class ModuleViewManager {
 
   show(identity: ModuleViewIdentity): ModuleViewSnapshot {
     const record = this.requireRecord(identity)
+    if (record.state === 'crashed' || record.state === 'failed') {
+      record.restoreVisibleAfterRecreate = true
+      return this.snapshot(record)
+    }
     record.visible = true
     record.view.setVisible(true)
     return this.snapshot(record)
@@ -320,7 +345,7 @@ export class ModuleViewManager {
 
   send(identity: ModuleViewIdentity, payload: unknown): void {
     const record = this.requireRecord(identity)
-    if (record.state === 'crashed' || record.view.webContents.isDestroyed()) {
+    if (record.state === 'crashed' || record.state === 'failed' || record.view.webContents.isDestroyed()) {
       throw new ModuleViewManagerError('INVALID_ARGUMENT', 'Cannot send to an unavailable module view')
     }
     const envelope = createModuleViewMessageEnvelope(
@@ -337,33 +362,38 @@ export class ModuleViewManager {
 
   async recreate(identity: ModuleViewIdentity): Promise<ModuleViewSnapshot> {
     const record = this.requireRecord(identity)
-    if (record.state !== 'crashed') {
-      throw new ModuleViewManagerError('VIEW_NOT_CRASHED', 'Only crashed module views can be recreated')
+    if (record.state !== 'crashed' && record.state !== 'failed') {
+      throw new ModuleViewManagerError('VIEW_NOT_CRASHED', 'Only unavailable module views can be recreated')
     }
 
     const oldView = record.view
-    const wasAttached = record.attached
-    if (wasAttached && !record.hostWindow.isDestroyed()) {
+    const shouldReattach = record.reattachAfterRecreate
+    if (record.attached && !record.hostWindow.isDestroyed()) {
       record.hostWindow.contentView.removeChildView(oldView)
     }
     this.keyByWebContentsId.delete(oldView.webContents.id)
     if (!oldView.webContents.isDestroyed()) oldView.webContents.close({ waitForBeforeUnload: false })
 
     const replacement = this.createView(record, record.partition)
+    const replacementVisible = record.restoreVisibleAfterRecreate
     record.view = replacement
     record.state = 'loading'
+    record.reattachAfterRecreate = false
+    record.visible = replacementVisible
+    record.restoreVisibleAfterRecreate = false
     this.keyByWebContentsId.set(replacement.webContents.id, keyOf(record))
     this.bindViewEvents(record)
     replacement.setBounds(record.rect)
-    replacement.setVisible(record.visible)
-    if (wasAttached && !record.hostWindow.isDestroyed()) {
+    replacement.setVisible(replacementVisible)
+    if (shouldReattach && !record.hostWindow.isDestroyed()) {
       record.hostWindow.contentView.addChildView(replacement)
+      record.attached = true
     }
 
     try {
       await replacement.webContents.loadURL(record.frontendUrl)
     } catch (error) {
-      record.state = 'crashed'
+      this.quarantine(record, 'failed', replacement.webContents)
       this.reportFailure(record, 'LOAD_FAILED', 'Recreated module frontend failed to load', {
         error: error instanceof Error ? error.message : String(error),
       })
@@ -454,7 +484,7 @@ export class ModuleViewManager {
       event.preventDefault()
       item.cancel()
     })
-    moduleSession.webRequest.onBeforeRequest({ urls: ['*://*/*'] }, (details, callback) => {
+    moduleSession.webRequest.onBeforeRequest({ urls: ['<all_urls>'] }, (details, callback) => {
       callback({ cancel: !isAllowedRequest(details.url, allowedOrigins) })
     })
   }
@@ -490,14 +520,14 @@ export class ModuleViewManager {
       })
     })
     webContents.on('preload-error', (_event, preloadPath, error) => {
+      if (!this.quarantine(record, 'failed', webContents)) return
       this.reportFailure(record, 'PRELOAD_FAILED', 'Module view preload failed', {
         preloadPath,
         error: error.message,
       })
     })
     webContents.on('render-process-gone', (_event, details: RenderProcessGoneDetails) => {
-      if (this.records.get(keyOf(record)) !== record || record.view.webContents !== webContents) return
-      record.state = 'crashed'
+      if (!this.quarantine(record, 'crashed', webContents)) return
       this.reportFailure(record, 'RENDERER_GONE', 'Module frontend renderer exited', {
         reason: details.reason,
         exitCode: details.exitCode,
@@ -513,9 +543,10 @@ export class ModuleViewManager {
     if (!key) return
     const record = this.records.get(key)
     if (!record || record.view.webContents !== event.sender) return
+    if (record.state === 'crashed' || record.state === 'failed') return
 
-    if (event.senderFrame && event.senderFrame !== event.sender.mainFrame) {
-      this.reportFailure(record, 'CROSS_TALK_BLOCKED', 'Module view IPC from a subframe was blocked')
+    if (event.sender.isDestroyed() || event.senderFrame !== event.sender.mainFrame) {
+      this.reportFailure(record, 'CROSS_TALK_BLOCKED', 'Module view IPC without the live bound main frame was blocked')
       return
     }
 
@@ -550,6 +581,33 @@ export class ModuleViewManager {
     this.reportFailure(record, 'RENDERER_REPORTED_FAILURE', envelope.error.message, {
       rendererCode: envelope.error.code,
     })
+  }
+
+  private quarantine(
+    record: ModuleViewRecord,
+    state: 'crashed' | 'failed',
+    expectedWebContents: Electron.WebContents,
+  ): boolean {
+    if (
+      this.records.get(keyOf(record)) !== record
+      || record.view.webContents !== expectedWebContents
+      || record.state === 'crashed'
+      || record.state === 'failed'
+    ) {
+      return false
+    }
+
+    record.state = state
+    record.reattachAfterRecreate = record.attached
+    record.restoreVisibleAfterRecreate = record.visible
+    record.visible = false
+    record.view.setVisible(false)
+    record.view.setBounds(QUARANTINED_VIEW_BOUNDS)
+    if (record.attached && !record.hostWindow.isDestroyed()) {
+      record.hostWindow.contentView.removeChildView(record.view)
+    }
+    record.attached = false
+    return true
   }
 
   private reportFailure(

@@ -9,10 +9,60 @@
     <main id="status">waiting</main>
     <script>
       const moduleView = window.simulatorModuleView
-      moduleView.onMessage((message) => {
+      const probeWebSocket = (url, expectedMessage) => new Promise((resolve) => {
+        const socket = new WebSocket(url)
+        const timeout = setTimeout(() => {
+          socket.close()
+          resolve(false)
+        }, 2000)
+        socket.addEventListener('open', () => socket.send('module-view-ws-probe'))
+        socket.addEventListener('message', (event) => {
+          clearTimeout(timeout)
+          socket.close()
+          resolve(event.data === expectedMessage)
+        })
+        socket.addEventListener('error', () => {
+          clearTimeout(timeout)
+          resolve(expectedMessage === null)
+        })
+      })
+
+      moduleView.onMessage(async (message) => {
         if (message?.type !== 'smoke-ping') return
         document.getElementById('status').textContent = 'ready'
-        moduleView.send({ type: 'smoke-pong', nonce: message.nonce })
+        const cookieWasEmpty = document.cookie === ''
+        document.cookie = `moduleView=${encodeURIComponent(moduleView.viewInstanceId)}; SameSite=Strict`
+        const cookieBoundToView = document.cookie === `moduleView=${encodeURIComponent(moduleView.viewInstanceId)}`
+
+        const cache = await caches.open('module-view-smoke-v1')
+        const cacheKey = new Request(`${location.origin}/partition-cache-key`)
+        const existingCache = await cache.match(cacheKey)
+        const cacheWasEmpty = existingCache === undefined
+        if (cacheWasEmpty) {
+          await cache.put(cacheKey, new Response(moduleView.viewInstanceId))
+        }
+        const cacheToken = await (await cache.match(cacheKey)).text()
+
+        const allowedWebSocket = await probeWebSocket(
+          `ws://${location.hostname}:${location.port}/socket`,
+          'module-view-ws-ok',
+        )
+        const deniedPort = new URLSearchParams(location.search).get('deniedWsPort')
+        const blockedWebSocket = await probeWebSocket(
+          `ws://${location.hostname}:${deniedPort}/socket`,
+          null,
+        )
+
+        moduleView.send({
+          type: 'smoke-pong',
+          nonce: message.nonce,
+          cookieWasEmpty,
+          cookieBoundToView,
+          cacheWasEmpty,
+          cacheToken,
+          allowedWebSocket,
+          blockedWebSocket,
+        })
       })
     </script>
   </body>

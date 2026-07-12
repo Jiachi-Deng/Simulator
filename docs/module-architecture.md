@@ -125,17 +125,17 @@ Persisted state schema、plain-data shape、manifest、Module identity、version
 
 ### View 与 Session Isolation
 
-每个 `(moduleId, viewInstanceId)` 对应一个独立 `WebContentsView` 和非持久化 session partition。view 强制使用最小 preload、`nodeIntegration: false`、`contextIsolation: true`、`sandbox: true`、`webSecurity: true` 和 `webviewTag: false`；packaged build 同时关闭 DevTools。session 对 permissions、device permissions、display capture 和 downloads 全部 fail closed，network request 只能访问 attach 时显式给出的 canonical loopback HTTP origin。
+每次首次 attach 都创建一个独立 `WebContentsView` 和唯一的非持久化 session partition；同一 view 的显式 recreate 复用该 partition，但 destroy 后重新 attach 不复用旧 handler、cookie 或 cache。view 强制使用最小 preload、`nodeIntegration: false`、`contextIsolation: true`、`sandbox: true`、`webSecurity: true` 和 `webviewTag: false`；packaged build 同时关闭 DevTools。session 对 permissions、device permissions、display capture 和 downloads 全部 fail closed。
 
-frontend URL 只能使用带显式 port 的 `127.0.0.1`、`[::1]` 或 `localhost` HTTP origin。popup、离开 allowlist 的 main-frame redirect/navigation、subframe navigation 和 external resource request 均被拒绝，不转交 `shell.openExternal`。这条边界只允许 Module 自己的本地 frontend，不是通用 browser surface。
+frontend URL 只能使用带显式 port 的 `127.0.0.1`、`[::1]` 或 `localhost` HTTP origin。`webRequest` 使用 `<all_urls>` 覆盖 HTTP、WebSocket 和其他 request scheme：HTTP 只允许完整 canonical origin，`ws:` 只允许相同 hostname 与显式 port；`wss:`、其他 host/port 和其他 scheme 默认拒绝。popup、离开 allowlist 的 main-frame redirect/navigation、subframe navigation 和 external resource request 均被拒绝，不转交 `shell.openExternal`。这条边界只允许 Module 自己的本地 frontend，不是通用 browser surface。
 
-manager 提供 attach、detach/reattach、resize、full-content rect、hide/show、send、destroy 和 crash 后显式 recreate。renderer crash、preload/load failure、被拒绝的 navigation 以及 transport violation 都通过结构化 failure 回传 host；manager 不自动重启 daemon 或激活其他 Module。
+manager 提供 attach、detach/reattach、resize、full-content rect、hide/show、send、destroy 和失效后的显式 recreate。renderer crash 或 preload failure 会在调用 host failure callback 前同步进入 quarantine：隐藏 view、设置 zero bounds、从 parent native view tree 移除并停止接受旧 sender IPC，因此旧 view 不再参与 hit testing；只有 `recreate()` 会创建 replacement 并按失效前 attach 状态恢复。manager 不自动重启 daemon 或激活其他 Module。
 
 ### Narrow IPC Envelope
 
 专用 preload 只向页面暴露 frozen `window.simulatorModuleView`：固定 identity、transport version、`send(payload)` 和 `onMessage(listener)`。它不暴露 `ipcRenderer`、filesystem、process、shell、network credential 或通用 Electron API。
 
-双向 IPC envelope 固定为 version 1，并同时携带 direction、`moduleId` 和 `viewInstanceId`。identity 由 main process 通过 `additionalArguments` 绑定；main process 还把 envelope 与实际 sender `webContents.id`、main frame 和 manager record 交叉校验，preload 对 host-to-module envelope 再做反向校验，因此伪造其他 view identity 或 subframe send 不能产生 cross-talk。
+双向 IPC envelope 固定为 version 1，并同时携带 direction、`moduleId` 和 `viewInstanceId`。identity 由 main process 通过 `additionalArguments` 绑定；main process 还把 envelope 与实际 live sender `webContents.id`、非 null main frame 和 manager record 交叉校验，preload 对 host-to-module envelope 再做反向校验，因此 destroyed sender、null sender frame、subframe 或伪造其他 view identity 都不能产生 cross-talk。
 
 payload 只允许 finite JSON-like plain data，并限制 envelope bytes、单字符串 bytes、depth、node count、array length、object key count 和 key bytes；unknown field、accessor、symbol、sparse/custom array、cycle、non-finite number 和 future version 一律拒绝。preload 在页面 listener 注册前最多缓存 16 条已验证 host message，超过上限即向 host 报告 failure。
 
@@ -155,4 +155,4 @@ packaged macOS smoke：
 cd apps/electron && bun scripts/module-view-smoke.ts --app release/mac-arm64/Simulator.app
 ```
 
-smoke 启动临时 loopback server 和隐藏 host window，通过真实 preload 完成 `ready -> smoke-ping -> smoke-pong`，并验证进程是否按预期运行于 source 或 packaged mode。
+smoke 启动临时 loopback HTTP/WebSocket server 和隐藏 host window，通过真实 preload 完成双实例 `ready -> smoke-ping -> smoke-pong`。它验证 cookie 与 Cache Storage partition isolation、同 host/port local WebSocket 可用、另一 port WebSocket 在到达 server 前被拒绝、renderer crash 后 host hit testing 恢复，以及只有显式 recreate 才重新 attach；同时确认进程按预期运行于 source 或 packaged mode。

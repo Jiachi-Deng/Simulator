@@ -14,20 +14,45 @@ const fixturePath = join(electronRoot, 'test', 'fixtures', 'module-view', 'fake-
 const fixture = readFileSync(fixturePath)
 const temporaryDirectory = mkdtempSync(join(tmpdir(), 'simulator-module-view-smoke-'))
 const resultPath = join(temporaryDirectory, 'result.json')
+let deniedWebSocketUpgradeCount = 0
 
 const server = Bun.serve({
   hostname: '127.0.0.1',
   port: 0,
-  fetch(request) {
+  fetch(request, server) {
     const url = new URL(request.url)
+    if (url.pathname === '/socket') {
+      if (server.upgrade(request)) return
+      return new Response('Upgrade required', { status: 426 })
+    }
     if (url.pathname !== '/index.html') return new Response('Not found', { status: 404 })
     return new Response(fixture, {
       headers: {
         'content-type': 'text/html; charset=utf-8',
         'cache-control': 'no-store',
-        'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'",
+        'content-security-policy': "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src ws://127.0.0.1:*",
       },
     })
+  },
+  websocket: {
+    message(socket, message) {
+      if (String(message) === 'module-view-ws-probe') socket.send('module-view-ws-ok')
+    },
+  },
+})
+
+const deniedWebSocketServer = Bun.serve({
+  hostname: '127.0.0.1',
+  port: 0,
+  fetch(request, server) {
+    deniedWebSocketUpgradeCount += 1
+    if (server.upgrade(request)) return
+    return new Response('Upgrade required', { status: 426 })
+  },
+  websocket: {
+    message(socket) {
+      socket.send('denied-server-was-reached')
+    },
   },
 })
 
@@ -44,7 +69,7 @@ const executable = packagedApp
 const applicationArguments = packagedApp ? [] : [electronRoot]
 if (!existsSync(executable)) throw new Error(`Electron executable not found: ${executable}`)
 
-const frontendUrl = `http://127.0.0.1:${server.port}/index.html`
+const frontendUrl = `http://127.0.0.1:${server.port}/index.html?deniedWsPort=${deniedWebSocketServer.port}`
 const processHandle = Bun.spawn([
   executable,
   ...applicationArguments,
@@ -57,7 +82,7 @@ const processHandle = Bun.spawn([
   stderr: 'pipe',
 })
 
-const timeout = setTimeout(() => processHandle.kill(), 25_000)
+const timeout = setTimeout(() => processHandle.kill(), 40_000)
 const [exitCode, stdout, stderr] = await Promise.all([
   processHandle.exited,
   new Response(processHandle.stdout).text(),
@@ -65,6 +90,7 @@ const [exitCode, stdout, stderr] = await Promise.all([
 ])
 clearTimeout(timeout)
 server.stop(true)
+deniedWebSocketServer.stop(true)
 
 try {
   if (!existsSync(resultPath)) {
@@ -79,6 +105,9 @@ try {
   }
   if (!packagedApp && result.packaged !== false) {
     throw new Error(`Expected source smoke but app reported packaged=${String(result.packaged)}`)
+  }
+  if (deniedWebSocketUpgradeCount !== 0) {
+    throw new Error(`Denied WebSocket server received ${deniedWebSocketUpgradeCount} request(s)`)
   }
   console.log(`Module view smoke passed (${packagedApp ? 'packaged' : 'source'}): ${JSON.stringify(result)}`)
 } finally {
