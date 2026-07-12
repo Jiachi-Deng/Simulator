@@ -15,8 +15,8 @@ permissions:
   contents: read
 
 jobs:
-  static-and-smoke:
-    name: Static and smoke checks
+  validation:
+    name: Validation
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -82,3 +82,24 @@ jobs:
 
       - name: Build web UI
         run: bun run webui:build
+
+  static-and-smoke:
+    name: Static and smoke checks
+    needs:
+      - validation
+      - build
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Require validation and build
+        env:
+          VALIDATION_RESULT: ${{ needs.validation.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          if [[ "$VALIDATION_RESULT" != "success" || "$BUILD_RESULT" != "success" ]]; then
+            echo "Validation result: $VALIDATION_RESULT"
+            echo "Build result: $BUILD_RESULT"
+            exit 1
+          fi
