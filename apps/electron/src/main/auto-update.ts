@@ -28,6 +28,7 @@ import {
 import { readJsonFileSync } from '@craft-agent/shared/utils/files'
 import { RPC_CHANNELS, type UpdateInfo } from '../shared/types'
 import type { EventSink } from '@craft-agent/server-core/transport'
+import { AUTO_UPDATES_DISABLED } from './update-policy'
 
 // Platform detection
 const PLATFORM = platform()
@@ -125,10 +126,10 @@ function broadcastDownloadProgress(progress: number): void {
 // ─── Configure electron-updater ───────────────────────────────────────────────
 
 // Auto-download updates in the background after detection
-autoUpdater.autoDownload = true
+autoUpdater.autoDownload = !AUTO_UPDATES_DISABLED
 
 // Install on app quit (if update is downloaded but user hasn't clicked "Restart")
-autoUpdater.autoInstallOnAppQuit = true
+autoUpdater.autoInstallOnAppQuit = !AUTO_UPDATES_DISABLED
 
 // Use the logger for electron-updater internal logging
 autoUpdater.logger = {
@@ -327,6 +328,10 @@ function checkForExistingDownload(): { exists: boolean; version?: string } {
  * @param options.autoDownload - If false, only checks without downloading (for manual "Check Now")
  */
 export async function checkForUpdates(options: CheckOptions = {}): Promise<UpdateInfo> {
+  if (AUTO_UPDATES_DISABLED) {
+    autoUpdateLog.info('Update check skipped: disabled by build policy')
+    return getUpdateInfo()
+  }
   const { autoDownload = true } = options
 
   // Temporarily override autoDownload for this check if needed
@@ -382,6 +387,9 @@ export async function checkForUpdates(options: CheckOptions = {}): Promise<Updat
  * Then relaunches the app automatically.
  */
 export async function installUpdate(): Promise<void> {
+  if (AUTO_UPDATES_DISABLED) {
+    throw new Error('Updates are disabled for this build')
+  }
   if (updateInfo.downloadState !== 'ready') {
     throw new Error('No update ready to install')
   }
@@ -444,6 +452,10 @@ export interface UpdateOnLaunchResult {
  * - Auto-downloads if update available
  */
 export async function checkForUpdatesOnLaunch(): Promise<UpdateOnLaunchResult> {
+  if (AUTO_UPDATES_DISABLED) {
+    autoUpdateLog.info('Launch update check skipped: disabled by build policy')
+    return { action: 'skipped', reason: 'build-policy' }
+  }
   autoUpdateLog.info('Checking for updates on launch...')
 
   const info = await checkForUpdates({ autoDownload: true })
