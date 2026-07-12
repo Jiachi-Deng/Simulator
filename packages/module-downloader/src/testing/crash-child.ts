@@ -9,6 +9,7 @@ let armed = false
 const target = new Map<string, NodeCacheCheckpoint>([
   ['lease-owner', 'lease-owner-published'], ['lease-mkdir', 'lease-candidate-created'], ['lease-claim', 'lease-claim-published'],
   ['lease-quarantine', 'lease-quarantined'], ['artifact', 'artifact-destination-created'],
+  ['partial-data', 'partial-data-created'], ['catalog-mid-write', 'catalog-generation-mid-write'],
   ['catalog-generation', 'catalog-generation-written'], ['catalog-rename', 'catalog-pointer-renamed'],
 ]).get(mode)
 if (!target) throw new Error(`Unknown crash mode: ${mode}`)
@@ -32,11 +33,12 @@ if (mode === 'lease-quarantine') {
 if (mode.startsWith('lease-')) {
   armed = true; await cache.acquireLease('catalog', new AbortController().signal
   )
-} else if (mode === 'artifact') {
+} else if (mode === 'artifact' || mode === 'partial-data') {
   const bytes = Buffer.from('crash artifact'); const sha256 = createHash('sha256').update(bytes).digest('hex')
+  if (mode === 'partial-data') armed = true
   const partial = await cache.createPartial({ sha256, sourceUrl: 'https://example.test/a', expectedSize: bytes.length, updatedAt: 1 })
-  await cache.appendPartial(partial.id, bytes, 2); armed = true
-  await cache.publishPartial(partial.id, { sha256, size: bytes.length, committedAt: 3 })
+  if (mode === 'partial-data') throw new Error('partial checkpoint should have paused before createPartial returned')
+  await cache.appendPartial(partial.id, bytes, 2); armed = true; await cache.publishPartial(partial.id, { sha256, size: bytes.length, committedAt: 3 })
 } else {
   await cache.stageCatalog(catalog(1)); await cache.publishCatalog(undefined)
   await cache.stageCatalog(catalog(2)); armed = true; await cache.publishCatalog({ highestSequence: 1, latestIssuedAt: '2029-01-01T00:00:00.000Z' })
