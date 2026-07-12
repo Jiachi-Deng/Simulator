@@ -6,6 +6,11 @@
 import { spawn } from "bun";
 import { existsSync, readFileSync, statSync, mkdirSync } from "fs";
 import { join } from "path";
+import {
+  EMBEDDED_BUILD_VARIABLES,
+  embeddedBuildValue,
+  isPublicBuild,
+} from "./build-environment";
 
 const ROOT_DIR = join(import.meta.dir, "..");
 const DIST_DIR = join(ROOT_DIR, "apps/electron/dist");
@@ -23,6 +28,10 @@ const WA_WORKER_OUTPUT = join(WA_WORKER_DIR, "dist/worker.cjs");
 
 // Load .env file if it exists
 function loadEnvFile(): void {
+  if (isPublicBuild()) {
+    return;
+  }
+
   const envPath = join(ROOT_DIR, ".env");
   if (existsSync(envPath)) {
     const content = readFileSync(envPath, "utf-8");
@@ -50,17 +59,8 @@ function loadEnvFile(): void {
 // NOTE: Google OAuth credentials are NOT baked into the build - users provide their own
 // via source config. See README_FOR_OSS.md for setup instructions.
 function getBuildDefines(): string[] {
-  const definedVars = [
-    "SLACK_OAUTH_CLIENT_ID",
-    "SLACK_OAUTH_CLIENT_SECRET",
-    "MICROSOFT_OAUTH_CLIENT_ID",
-    "MICROSOFT_OAUTH_CLIENT_SECRET",
-    "SENTRY_ELECTRON_INGEST_URL",
-    "CRAFT_DEV_RUNTIME",
-  ];
-
-  return definedVars.map((varName) => {
-    const value = process.env[varName] || "";
+  return EMBEDDED_BUILD_VARIABLES.map((varName) => {
+    const value = embeddedBuildValue(varName);
     return `--define:process.env.${varName}="${value}"`;
   });
 }

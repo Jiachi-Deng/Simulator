@@ -18,46 +18,23 @@ require_path() {
     fi
 }
 
-# Sync secrets from 1Password if CLI is available
-if command -v op &> /dev/null; then
-    echo "1Password CLI detected, syncing secrets..."
-    cd "$ROOT_DIR"
-    if bun run sync-secrets 2>/dev/null; then
-        echo "Secrets synced from 1Password"
-    else
-        echo "Warning: Failed to sync secrets from 1Password (continuing with existing .env if present)"
-    fi
-fi
-
-# Load environment variables from .env
-if [ -f "$ROOT_DIR/.env" ]; then
-    set -a
-    source "$ROOT_DIR/.env"
-    set +a
-fi
-
 # Parse arguments
 ARCH="arm64"
-UPLOAD=false
-UPLOAD_LATEST=false
-UPLOAD_SCRIPT=false
+UNSIGNED=false
 
 show_help() {
     cat << EOF
-Usage: build-dmg.sh [arm64|x64] [--upload] [--latest] [--script]
+Usage: build-dmg.sh [arm64|x64] [--unsigned]
 
 Arguments:
   arm64|x64    Target architecture (default: arm64)
-  --upload     Upload DMG to S3 after building
-  --latest     Also update electron/latest (requires --upload)
-  --script     Also upload install-app.sh (requires --upload)
+  --unsigned   Disable code-signing identity discovery for a local artifact
 
 Environment variables (from .env or environment):
   APPLE_SIGNING_IDENTITY    - Code signing identity
   APPLE_ID                  - Apple ID for notarization
   APPLE_TEAM_ID             - Apple Team ID
   APPLE_APP_SPECIFIC_PASSWORD - App-specific password
-  S3_VERSIONS_BUCKET_*      - S3 credentials (for --upload)
 EOF
     exit 0
 }
@@ -65,9 +42,7 @@ EOF
 while [[ $# -gt 0 ]]; do
     case $1 in
         arm64|x64)     ARCH="$1"; shift ;;
-        --upload)      UPLOAD=true; shift ;;
-        --latest)      UPLOAD_LATEST=true; shift ;;
-        --script)      UPLOAD_SCRIPT=true; shift ;;
+        --unsigned)    UNSIGNED=true; shift ;;
         -h|--help)     show_help ;;
         *)
             echo "Unknown option: $1"
@@ -78,11 +53,11 @@ while [[ $# -gt 0 ]]; do
 done
 
 # Configuration
-BUN_VERSION="bun-v1.3.9"  # Pinned version for reproducible builds
+BUN_VERSION="bun-v1.3.10"  # Keep aligned with the public CI toolchain.
 
 echo "=== Building Craft Agents DMG (${ARCH}) using electron-builder ==="
-if [ "$UPLOAD" = true ]; then
-    echo "Will upload to S3 after build"
+if [ "$UNSIGNED" = true ]; then
+    echo "Code signing identity discovery is disabled for this local artifact."
 fi
 
 # 1. Clean previous build artifacts
@@ -95,7 +70,7 @@ rm -rf "$ELECTRON_DIR/release"
 # 2. Install dependencies
 echo "Installing dependencies..."
 cd "$ROOT_DIR"
-bun install
+bun install --frozen-lockfile
 
 # 3. Download Bun binary with checksum verification
 echo "Downloading Bun ${BUN_VERSION} for darwin-${ARCH}..."
@@ -145,7 +120,7 @@ cp -r "$SDK_SOURCE" "$ELECTRON_DIR/node_modules/@anthropic-ai/"
 SDK_BIN_PKG="claude-agent-sdk-darwin-${ARCH}"
 SDK_BIN_SOURCE="$ROOT_DIR/node_modules/@anthropic-ai/${SDK_BIN_PKG}"
 if [ ! -d "$SDK_BIN_SOURCE" ]; then
-    echo "Cross-arch build: ${SDK_BIN_PKG} not in node_modules — fetching from npm..."
+    echo "Cross-arch build: ${SDK_BIN_PKG} not in node_modules — fetching the locked version from npm..."
     SDK_VERSION=$(node -p "require('$ROOT_DIR/package.json').dependencies['@anthropic-ai/claude-agent-sdk']" | tr -d '"')
     PKG_TMP=$(mktemp -d)
     trap "rm -rf $PKG_TMP" RETURN
@@ -153,6 +128,23 @@ if [ ! -d "$SDK_BIN_SOURCE" ]; then
         cd "$PKG_TMP"
         npm pack "@anthropic-ai/${SDK_BIN_PKG}@${SDK_VERSION}" >/dev/null
         TARBALL=$(ls anthropic-ai-*.tgz | head -1)
+        EXPECTED_INTEGRITY=$(node -e '
+          const fs = require("fs");
+          const [lockPath, packageName] = process.argv.slice(1);
+          const lock = fs.readFileSync(lockPath, "utf8");
+          const escaped = packageName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+          const match = lock.match(new RegExp(`"${escaped}": \\[.*?"(sha512-[^"]+)"\\]`));
+          if (!match) process.exit(1);
+          process.stdout.write(match[1]);
+        ' "$ROOT_DIR/bun.lock" "@anthropic-ai/${SDK_BIN_PKG}") || {
+          echo "ERROR: No integrity entry for @anthropic-ai/${SDK_BIN_PKG} in bun.lock"
+          exit 1
+        }
+        ACTUAL_INTEGRITY="sha512-$(openssl dgst -sha512 -binary "$TARBALL" | openssl base64 -A)"
+        if [ "$ACTUAL_INTEGRITY" != "$EXPECTED_INTEGRITY" ]; then
+            echo "ERROR: Integrity mismatch for @anthropic-ai/${SDK_BIN_PKG}@${SDK_VERSION}"
+            exit 1
+        fi
         tar -xzf "$TARBALL"
     )
     mkdir -p "$SDK_BIN_SOURCE"
@@ -208,20 +200,28 @@ done
 # 6. Build Electron app
 echo "Building Electron app..."
 cd "$ROOT_DIR"
-bun run electron:build
+if [ "$UNSIGNED" = true ]; then
+    SIMULATOR_PUBLIC_BUILD=1 bun run electron:build
+else
+    bun run electron:build
+fi
 
 # 7. Package with electron-builder
 echo "Packaging app with electron-builder..."
 cd "$ELECTRON_DIR"
 
 # Set up environment for electron-builder
-export CSC_IDENTITY_AUTO_DISCOVERY=true
+if [ "$UNSIGNED" = true ]; then
+    export CSC_IDENTITY_AUTO_DISCOVERY=false
+else
+    export CSC_IDENTITY_AUTO_DISCOVERY=true
+fi
 
 # Build electron-builder arguments
 BUILDER_ARGS="--mac --${ARCH}"
 
 # Add code signing if identity is available
-if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
+if [ "$UNSIGNED" = false ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
     # Strip "Developer ID Application: " prefix if present (electron-builder adds it automatically)
     CSC_NAME_CLEAN="${APPLE_SIGNING_IDENTITY#Developer ID Application: }"
     echo "Using signing identity: $CSC_NAME_CLEAN"
@@ -229,7 +229,7 @@ if [ -n "$APPLE_SIGNING_IDENTITY" ]; then
 fi
 
 # Add notarization if all credentials are available
-if [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ]; then
+if [ "$UNSIGNED" = false ] && [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [ -n "$APPLE_APP_SPECIFIC_PASSWORD" ]; then
     echo "Notarization enabled"
     export APPLE_ID="$APPLE_ID"
     export APPLE_TEAM_ID="$APPLE_TEAM_ID"
@@ -260,40 +260,3 @@ echo ""
 echo "=== Build Complete ==="
 echo "DMG: $ELECTRON_DIR/release/${DMG_NAME}"
 echo "Size: $(du -h "$ELECTRON_DIR/release/${DMG_NAME}" | cut -f1)"
-
-# 9. Create manifest.json for upload script
-# Read version from package.json
-ELECTRON_VERSION=$(cat "$ELECTRON_DIR/package.json" | grep '"version"' | head -1 | sed 's/.*"version": *"\([^"]*\)".*/\1/')
-echo "Creating manifest.json (version: $ELECTRON_VERSION)..."
-mkdir -p "$ROOT_DIR/.build/upload"
-echo "{\"version\": \"$ELECTRON_VERSION\"}" > "$ROOT_DIR/.build/upload/manifest.json"
-
-# 10. Upload to S3 (if --upload flag is set)
-if [ "$UPLOAD" = true ]; then
-    echo ""
-    echo "=== Uploading to S3 ==="
-
-    # Check for S3 credentials
-    if [ -z "$S3_VERSIONS_BUCKET_ENDPOINT" ] || [ -z "$S3_VERSIONS_BUCKET_ACCESS_KEY_ID" ] || [ -z "$S3_VERSIONS_BUCKET_SECRET_ACCESS_KEY" ]; then
-        cat << EOF
-ERROR: Missing S3 credentials. Set these environment variables:
-  S3_VERSIONS_BUCKET_ENDPOINT
-  S3_VERSIONS_BUCKET_ACCESS_KEY_ID
-  S3_VERSIONS_BUCKET_SECRET_ACCESS_KEY
-
-You can add them to .env or export them directly.
-EOF
-        exit 1
-    fi
-
-    # Build upload flags
-    UPLOAD_FLAGS="--electron"
-    [ "$UPLOAD_LATEST" = true ] && UPLOAD_FLAGS="$UPLOAD_FLAGS --latest"
-    [ "$UPLOAD_SCRIPT" = true ] && UPLOAD_FLAGS="$UPLOAD_FLAGS --script"
-
-    cd "$ROOT_DIR"
-    bun run scripts/upload.ts $UPLOAD_FLAGS
-
-    echo ""
-    echo "=== Upload Complete ==="
-fi
