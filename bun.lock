@@ -284,6 +284,17 @@
         "typescript": "^5.8.2",
       },
     },
+    "packages/module-release-trust": {
+      "name": "@simulator/module-release-trust",
+      "version": "0.11.1",
+      "dependencies": {
+        "@simulator/module-contract": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^25.0.8",
+        "typescript": "^5.8.2",
+      },
+    },
     "packages/pi-agent-server": {
       "name": "@craft-agent/pi-agent-server",
       "version": "0.11.1",
@@ -1303,6 +1314,7 @@
 
     "@simulator/module-contract": ["@simulator/module-contract@workspace:packages/module-contract"],
 
+    "@simulator/module-release-trust": ["@simulator/module-release-trust@workspace:packages/module-release-trust"],
     "@simulator/module-registry": ["@simulator/module-registry@workspace:packages/module-registry"],
 
     "@sinclair/typebox": ["@sinclair/typebox@0.34.48", "", {}, "sha512-kKJTNuK3AQOrgjjotVxMrCn1sUJwM76wMszfq1kdU4uYVJjvEWuFQ6HgvLt4Xz3fSmZlTOxJ/Ie13KnIcWQXFA=="],
