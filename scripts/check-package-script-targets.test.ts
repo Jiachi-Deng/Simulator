@@ -179,4 +179,19 @@ describe("package script target inventory", () => {
 
     expect(findMissingScriptTargets(fixtureRoot)).toEqual([])
   })
+
+  test("fails closed when a conditional or pipeline controls cd execution", () => {
+    expect(() => directScriptTargets("printf x | cd dir-a; node scripts/pipeline.js")).toThrow(
+      "Ambiguous conditional package-script cd after: |",
+    )
+    expect(() =>
+      directScriptTargets("cd dir-a || cd dir-b; node scripts/fallback.js"),
+    ).toThrow("Ambiguous conditional package-script cd after: ||")
+    expect(() => directScriptTargets("true || cd dir-a; node scripts/skipped.js")).toThrow(
+      "Ambiguous conditional package-script cd after: ||",
+    )
+    expect(() => directScriptTargets("false && cd dir-a; node scripts/skipped.js")).toThrow(
+      "Ambiguous conditional package-script cd after: &&",
+    )
+  })
 })

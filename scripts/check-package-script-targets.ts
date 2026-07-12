@@ -99,8 +99,20 @@ function scriptInvocations(command: string, initialCwd: string): ScriptInvocatio
   let cwd = initialCwd
   let commandTokens: string[] = []
   const cwdStack: string[] = []
+  let previousOperator: string | undefined
 
   const flush = (operator?: string) => {
+    const conditionalCdIsChained =
+      previousOperator === "&&" && (operator === "&&" || operator === undefined)
+    if (
+      commandTokens[0] === "cd" &&
+      previousOperator !== undefined &&
+      previousOperator !== ";" &&
+      previousOperator !== "(" &&
+      !conditionalCdIsChained
+    ) {
+      throw new Error(`Ambiguous conditional package-script cd after: ${previousOperator}`)
+    }
     const result = addCommandInvocations(commandTokens, cwd, invocations)
     if (
       result.changedDirectory &&
@@ -109,6 +121,7 @@ function scriptInvocations(command: string, initialCwd: string): ScriptInvocatio
       cwd = result.cwd
     }
     commandTokens = []
+    previousOperator = operator
   }
 
   for (const token of parse(command, () => "")) {
@@ -117,6 +130,7 @@ function scriptInvocations(command: string, initialCwd: string): ScriptInvocatio
       if (token.op === "(") {
         flush(token.op)
         cwdStack.push(cwd)
+        previousOperator = undefined
         continue
       }
       if (token.op === ")") {
@@ -124,6 +138,7 @@ function scriptInvocations(command: string, initialCwd: string): ScriptInvocatio
         const parentCwd = cwdStack.pop()
         if (parentCwd === undefined) throw new Error("Unbalanced package-script subshell")
         cwd = parentCwd
+        previousOperator = ")"
         continue
       }
       flush(token.op)
