@@ -54,3 +54,36 @@ uninstalled -> installed -> running -> stopped -> running
 ```
 
 非法 transition 不改变 state 或 transition history。`health` 不改变状态，仅在 `running` 时返回 `healthy`。该 fixture 用于验证 contract 和后续 registry；它不是 production module runtime。
+
+## 第二切片：Filesystem Module Installer
+
+`@simulator/module-installer` 是 Issue #60 的 filesystem-only 安装边界。调用方提供已经建立信任的 `VerifiedArtifactDescriptor` 和本地 archive path；installer 会重新验证 descriptor 与 `ModuleManifest` 的一致性、compressed archive SHA-256 和 extracted manifest SHA-256。它不下载文件、不验证 catalog/signature、不启动进程，也不依赖 Electron、daemon、领域 Module 或 Proma。
+
+### Production archive format
+
+当前唯一 production 格式是 `tar.gz`。artifact URL 必须以 `.tar.gz` 结尾，本地文件必须有 gzip magic；zip、plain tar、brotli 和 zstd 均 fail closed。此限制是有意的，避免在第一版同时维护两套高风险 extraction surface。
+
+archive 必须只有一个名为 `module/` 的顶层目录，安装后的版本目录直接包含其内容。entry 只允许 regular file 和 directory；symlink、hardlink、device、FIFO、contiguous/sparse 等特殊类型全部拒绝。path 必须是 canonical POSIX relative path，并额外拒绝 absolute path、drive/UNC、反斜线、colon、control character、`.`/`..`、Windows device name、尾随 dot/space、duplicate 以及 NFKC + casefold collision。
+
+installer 先用 `O_NOFOLLOW` 打开本地 regular file，复制到 caller root 内唯一的 `0700` staging 并计算 archive hash；只有 hash 匹配后才运行两遍 `tar`。第一遍只读检查 metadata、entry count、单文件/总大小、depth、path 和 executable policy，第二遍提取到空 staging，并要求观察到完全相同的 entry metadata。落盘后再用 `lstat` 遍历全树，拒绝 link/special file，并逐文件计算 SHA-256。
+
+extracted manifest hash 的 canonical input 按 UTF-8 path byte order 全局排序，每条记录以 LF 结尾：
+
+```text
+D\t<JSON path>
+F\t<JSON path>\t<size>\t<executable 0|1>\t<lowercase sha256>
+```
+
+只有 manifest 声明的 entrypoint 可以带 executable bit；entrypoint 必须是 executable regular file。默认限制为 128 MiB compressed archive、4096 entries、64 MiB 单文件、512 MiB extracted total、512 UTF-8 bytes path、32 层 depth、256 KiB metadata 和 200:1 decompression ratio，调用方只能用正的 safe integer 覆盖。
+
+### Activation and recovery
+
+每个 Module 使用不可变 `versions/<version>/` 目录和一个小型 `state.json`。staged payload 与 version 目录位于同一 caller root/filesystem，publish 使用 directory rename；active/LKG 切换使用同目录 temporary file fsync + rename。更新成功后，旧 active 成为 LKG；rollback 原子交换 active/LKG；uninstall 拒绝 active、LKG 和调用方声明为 in-use 的版本。
+
+mutation 前使用 `O_EXCL` 创建 `transaction.json`，因此不同 installer instance 不能覆盖对方 journal。crash recovery 先把它原子 rename 为固定的 `transaction.recovering.json` 取得唯一恢复权，再根据 durable state 判断 rollback 未提交 publish，或完成已经提交的 activation。存在 pending journal 时普通操作返回 `BUSY`；host 启动时应先调用 `recoverAll()`，或针对已知 Module 调用 `recover()`。普通 recovery 看到已有 recovering journal 也返回 `BUSY`，避免两个实例并发恢复；只有 host 已确认前一 recovery owner 已停止时，才可显式调用 `recoverInterrupted()`。malformed journal 保留在 recovering 位置并 fail closed，不跟随 journal 中的任意 path。
+
+cancel 只在 state commit 前生效；失败或取消会恢复旧 active/LKG 并清理 staging。state rename 一旦 durable，即视为成功提交，即使随后的 journal cleanup 被中断，recovery 也会保留新 active。
+
+### Archive dependency baseline
+
+实现复用仓库已有 `node-tar`，不调用 shell。2026-07-12 审计发现原 lockfile 的 `tar@7.5.2` 受 `GHSA-34x7-hfp2-rc4v`、`GHSA-8qq5-rm4j-mr97`、`GHSA-83g3-92jg-28cx`、`GHSA-qffp-2rhf-9h96`、`GHSA-9ppj-qmqm-q256`、`GHSA-vmf3-w455-68vh` 和 `GHSA-r6q2-hw4h-h46w` 影响，因此直接依赖与 lockfile 提升到 `tar@7.5.20`。installer 仍不把 library 默认防护当成唯一边界：双遍验证、禁 link、落盘复核和 limits 都由 package 自己执行。
