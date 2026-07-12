@@ -6,7 +6,7 @@ import { Sun, Moon, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 
 /**
- * CraftAgentLogo - The Craft Agent "C" logo
+ * CraftAgentLogo - The Simulator "C" logo
  */
 function CraftAgentLogo({ className }: { className?: string }) {
   return (
@@ -38,11 +38,12 @@ export function Header({ hasSession, sessionTitle, isDark, onToggleTheme, onClea
   const { t } = useTranslation()
   return (
     <header className="shrink-0 grid grid-cols-[auto_1fr_auto] items-center px-4 py-3">
-      {/* Logo - links to main site */}
+      {/* The retained upstream logo links to the Craft-hosted sharing service. */}
       <a
         href="https://agents.craft.do"
         className="hover:opacity-80 transition-opacity"
-        title="Craft Agent"
+        title="Craft upstream sharing service"
+        aria-label="Craft upstream sharing service"
       >
         <CraftAgentLogo className="w-6 h-6 text-[#9570BE]" />
       </a>

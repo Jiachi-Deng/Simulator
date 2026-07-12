@@ -3,7 +3,7 @@ import { describe, it, expect, mock, beforeEach } from 'bun:test'
 // Stub the preferences module so we can toggle `getCoAuthorPreference` per test
 // without touching disk. `formatPreferencesForPrompt` is stubbed to '' because
 // it's unrelated to the behavior under test here.
-let mockIncludeCoAuthoredBy = true
+let mockIncludeCoAuthoredBy = false
 mock.module('../../config/preferences.ts', () => ({
   getCoAuthorPreference: () => mockIncludeCoAuthoredBy,
   formatPreferencesForPrompt: () => '',
@@ -40,7 +40,7 @@ describe('system prompt guidance', () => {
 
 describe('includeCoAuthoredBy handling', () => {
   beforeEach(() => {
-    mockIncludeCoAuthoredBy = true
+    mockIncludeCoAuthoredBy = false
   })
 
   it('includes the Git Conventions block when the arg is explicitly true', () => {
@@ -86,7 +86,7 @@ describe('includeCoAuthoredBy handling', () => {
       '/tmp/workspace',
       '/tmp/workspace',
       undefined,
-      'Craft Agents Backend'
+      'Simulator Backend'
       // 7th arg omitted — must not regress to `true` default
     )
 
@@ -94,7 +94,7 @@ describe('includeCoAuthoredBy handling', () => {
     expect(prompt).not.toContain(CO_AUTHOR_TRAILER)
   })
 
-  it('falls back to getCoAuthorPreference() === true when the arg is omitted and the user has not opted out', () => {
+  it('allows the persisted preference to opt in when the arg is omitted', () => {
     mockIncludeCoAuthoredBy = true
 
     const prompt = getSystemPrompt(

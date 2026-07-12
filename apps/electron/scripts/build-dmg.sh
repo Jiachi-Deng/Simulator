@@ -71,7 +71,7 @@ fi
 # Configuration
 BUN_VERSION="bun-v1.3.10"  # Keep aligned with the public CI toolchain.
 
-echo "=== Building Craft Agents DMG (${ARCH}) using electron-builder ==="
+echo "=== Building Simulator DMG (${ARCH}) using electron-builder ==="
 if [ "$UNSIGNED" = true ]; then
     echo "Code signing identity discovery is disabled for this local artifact."
 fi
@@ -261,8 +261,8 @@ fi
 npx electron-builder $BUILDER_ARGS
 
 # 8. Verify the DMG was built
-# electron-builder.yml uses artifactName to output: Craft-Agents-${arch}.dmg
-DMG_NAME="Craft-Agents-${ARCH}.dmg"
+# electron-builder.yml uses artifactName to output: Simulator-${arch}.dmg
+DMG_NAME="Simulator-${ARCH}.dmg"
 DMG_PATH="$ELECTRON_DIR/release/$DMG_NAME"
 
 if [ ! -f "$DMG_PATH" ]; then

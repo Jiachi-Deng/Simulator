@@ -43,6 +43,37 @@ function writeRawPrefs(prefsFile: string, contents: Record<string, unknown>) {
 }
 
 describe('preferences.uiLanguage', () => {
+  describe('getCoAuthorPreference', () => {
+    it('defaults to false when no preference exists', () => {
+      const { configDir } = setupDir();
+      try {
+        const r = runScript(configDir, `
+          import { getCoAuthorPreference } from '${PREFS_MODULE}';
+          console.log(JSON.stringify({ value: getCoAuthorPreference() }));
+        `);
+        expect(r.exitCode).toBe(0);
+        expect(JSON.parse(r.stdout)).toEqual({ value: false });
+      } finally {
+        rmSync(configDir, { recursive: true, force: true });
+      }
+    });
+
+    it('only enables the trailer after an explicit opt in', () => {
+      const { configDir, prefsFile } = setupDir();
+      try {
+        writeRawPrefs(prefsFile, { includeCoAuthoredBy: true });
+        const r = runScript(configDir, `
+          import { getCoAuthorPreference } from '${PREFS_MODULE}';
+          console.log(JSON.stringify({ value: getCoAuthorPreference() }));
+        `);
+        expect(r.exitCode).toBe(0);
+        expect(JSON.parse(r.stdout)).toEqual({ value: true });
+      } finally {
+        rmSync(configDir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('getPersistedUiLanguage', () => {
     it('returns undefined when the file does not exist', () => {
       const { configDir } = setupDir();

@@ -2,7 +2,15 @@
   "name": "craft-agent",
   "version": "0.11.1",
   "license": "Apache-2.0",
-  "description": "Claude Code-like agent for Craft documents",
+  "description": "Simulator desktop agent workspace",
+  "homepage": "https://github.com/Jiachi-Deng/Simulator#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jiachi-Deng/Simulator.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Jiachi-Deng/Simulator/issues"
+  },
   "type": "module",
   "private": true,
   "trustedDependencies": [
@@ -37,7 +45,7 @@
     "test:shared:models-pi": "cd packages/shared && bun test tests/models-pi.test.ts",
     "test:shared:config": "cd packages/shared && bun test src/config/__tests__/llm-connections.test.ts src/config/__tests__/storage-migrations.test.ts src/config/__tests__/storage-startup-migration.test.ts src/config/__tests__/default-thinking-level.test.ts",
     "test:shared:all": "bun run test:shared:llm-connections && bun run test:shared:models-pi && bun run test:shared:config",
-    "test:ci-scripts": "bun test scripts/check-i18n-coverage.test.ts scripts/renderer-security-baseline.test.ts scripts/check-version.test.ts scripts/check-package-script-targets.test.ts scripts/build-environment.test.ts",
+    "test:ci-scripts": "bun test scripts/check-i18n-coverage.test.ts scripts/renderer-security-baseline.test.ts scripts/branding-craft-reference-allowlist.test.ts scripts/check-version.test.ts scripts/check-package-script-targets.test.ts scripts/build-environment.test.ts",
     "test:doc-tools": "python3 -m unittest apps.electron.resources.scripts.tests.test_pdf_tool_smoke apps.electron.resources.scripts.tests.test_xlsx_tool_smoke apps.electron.resources.scripts.tests.test_docx_tool_smoke apps.electron.resources.scripts.tests.test_pptx_tool_smoke apps.electron.resources.scripts.tests.test_img_tool_smoke apps.electron.resources.scripts.tests.test_ical_tool_smoke apps.electron.resources.scripts.tests.test_doc_diff_smoke apps.electron.resources.scripts.tests.test_markitdown_smoke",
     "validate:dev": "bun run typecheck:all && bun run test:shared:all && bun run test:ci-scripts && bun run test:doc-tools",
     "validate:ci": "bun run validate:dev && bun run check-version && bun run check:scripts && bun run lint && bun run lint:i18n:parity && bun run lint:i18n:sorted && bun run lint:i18n:coverage",
@@ -50,6 +58,7 @@
     "lint:i18n:sorted": "bun scripts/sort-locales.ts --check",
     "lint:ipc-sends": "bash scripts/check-raw-sends.sh",
     "lint:tool-name-checks": "bash scripts/check-task-tool-checks.sh",
+    "lint:branding": "bun test scripts/branding-craft-reference-allowlist.test.ts",
     "lint": "bun run lint:ipc-sends && bun run lint:tool-name-checks && bun run lint:electron && bun run lint:shared && bun run lint:ui",
     "link": "bun link",
     "electron:clean": "bun run scripts/electron-clean.ts",
