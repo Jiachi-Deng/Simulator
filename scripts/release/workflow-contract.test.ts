@@ -6,7 +6,8 @@ const workflow = readFileSync(join(import.meta.dir, "../../.github/workflows/eng
 
 describe("engineering RC workflow contract", () => {
   test("requires updates-disabled mode before packaging and propagates the marker", () => {
-    expect(workflow).toContain('SIMULATOR_UPDATES_DISABLED: "1"')
+    expect(workflow).toContain('SIMULATOR_DISABLE_UPDATES: "1"')
+    expect(workflow).not.toContain("SIMULATOR_UPDATES_DISABLED")
     expect(workflow.indexOf("bun scripts/release/updates-disabled.ts")).toBeLessThan(
       workflow.indexOf("bun run electron:dist:unsigned:mac:arm64"),
     )

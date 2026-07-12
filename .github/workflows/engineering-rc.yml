@@ -31,7 +31,7 @@ jobs:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RC_VERSION: ${{ inputs.version }}
       SOURCE_SHA: ${{ inputs.source_sha }}
-      SIMULATOR_UPDATES_DISABLED: "1"
+      SIMULATOR_DISABLE_UPDATES: "1"
 
     steps:
       - name: Checkout exact source SHA
@@ -76,8 +76,6 @@ jobs:
       - name: Run existing Electron build
         run: bun run electron:build
 
-      # Dependency: the updater-disable implementation must propagate this
-      # environment contract to SimulatorUpdatesDisabled=true in Info.plist.
       - name: Require updates-disabled build mode
         run: bun scripts/release/updates-disabled.ts
 
