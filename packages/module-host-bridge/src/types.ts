@@ -31,6 +31,7 @@ export interface RequestEnvelope {
   turnId: string
   method: CapabilityKind
   capabilityToken: string
+  nonce: string
   payload: JsonObject
 }
 
@@ -38,6 +39,7 @@ export interface ResponseEnvelope {
   schemaVersion: typeof SCHEMA_VERSION
   type: 'response'
   requestId: string
+  replayed: boolean
   ok: boolean
   result?: JsonObject
   error?: BridgeError
@@ -63,8 +65,13 @@ export const BRIDGE_ERROR_CODES = [
   'CAPABILITY_SCOPE_MISMATCH',
   'PATH_DENIED',
   'REPLAY_MISMATCH',
+  'REPLAY_CAPACITY',
   'APPROVAL_NOT_FOUND',
   'APPROVAL_NOT_PENDING',
+  'CREDENTIAL_DENIED',
+  'URL_DENIED',
+  'EXECUTION_RECEIPT_NOT_FOUND',
+  'EXECUTION_RECEIPT_STATE',
 ] as const
 
 export type BridgeErrorCode = (typeof BRIDGE_ERROR_CODES)[number]
@@ -81,6 +88,8 @@ export interface ContractLimits {
   maxStringLength: number
   maxObjectKeys: number
   maxAuditEvents: number
+  maxAuditQueue: number
+  auditSinkTimeoutMs: number
   maxReplayEntries: number
 }
 
@@ -91,6 +100,8 @@ export const DEFAULT_LIMITS: ContractLimits = Object.freeze({
   maxStringLength: 8_192,
   maxObjectKeys: 64,
   maxAuditEvents: 512,
+  maxAuditQueue: 256,
+  auditSinkTimeoutMs: 250,
   maxReplayEntries: 1_024,
 })
 
@@ -114,6 +125,34 @@ export interface PathResolution {
 export interface PathAuthority {
   resolve(untrustedPath: string): Promise<PathResolution>
   isEqualOrWithin(candidateRealPath: string, rootRealPath: string): boolean
+}
+
+export const PATH_OPERATIONS = ['read', 'write', 'create', 'delete', 'enumerate'] as const
+export type PathOperation = (typeof PATH_OPERATIONS)[number]
+
+export interface TrustedTransportContext {
+  ownerId: string
+  moduleId: string
+  processId: string
+}
+
+export interface CredentialAuthority {
+  validate(input: {
+    opaqueHandle: string
+    ownerId: string
+    moduleId: string
+    processId: string
+    operation: string
+  }): boolean | Promise<boolean>
+}
+
+export interface URLAuthority {
+  authorize(input: {
+    kind: 'external.open' | 'oauth.launch'
+    url: string
+    moduleId: string
+    processId: string
+  }): { authorized: boolean; normalizedUrl?: string } | Promise<{ authorized: boolean; normalizedUrl?: string }>
 }
 
 export interface AuditSink {
@@ -155,6 +194,23 @@ export interface CapabilityGrant {
   maxUses: number
 }
 
+export const EXECUTION_RECEIPT_STATUSES = ['authorized', 'executing', 'committed', 'failed'] as const
+export type ExecutionReceiptStatus = (typeof EXECUTION_RECEIPT_STATUSES)[number]
+
+export interface ExecutionReceipt {
+  receiptId: string
+  requestId: string
+  moduleId: string
+  processId: string
+  method: CapabilityKind
+  status: ExecutionReceiptStatus
+}
+
+export interface ExecutionClaim {
+  acquired: boolean
+  receipt: ExecutionReceipt
+}
+
 export const AUDIT_EVENT_KINDS = [
   'capability.issued',
   'capability.used',
@@ -164,6 +220,10 @@ export const AUDIT_EVENT_KINDS = [
   'approval.resolved',
   'approval.cancelled',
   'approval.timed_out',
+  'request.malformed',
+  'execution.started',
+  'execution.committed',
+  'execution.failed',
 ] as const
 
 export type AuditEventKind = (typeof AUDIT_EVENT_KINDS)[number]
@@ -180,6 +240,8 @@ export interface BridgeDependencies {
   entropy: EntropySource
   hasher: TokenHasher
   paths: PathAuthority
+  credentials: CredentialAuthority
+  urls: URLAuthority
   audit: AuditSink
   approvals: TrustedApprovalResolver
   forbiddenRoots: {

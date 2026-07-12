@@ -3,6 +3,7 @@ import {
   CAPABILITY_KINDS,
   AUDIT_EVENT_KINDS,
   BRIDGE_ERROR_CODES,
+  PATH_OPERATIONS,
   SCHEMA_VERSION,
   type AuditEventKind,
   type BridgeErrorCode,
@@ -17,13 +18,34 @@ import {
 const methods = new Set<string>(CAPABILITY_KINDS)
 const errorCodes = new Set<string>(BRIDGE_ERROR_CODES)
 const auditEvents = new Set<string>(AUDIT_EVENT_KINDS)
+const pathOperations = new Set<string>(PATH_OPERATIONS)
+
+export function parseRawRequest(input: string | Uint8Array, limits: ContractLimits): RequestEnvelope {
+  const bytes = typeof input === 'string' ? new TextEncoder().encode(input) : input
+  if (bytes.byteLength > limits.maxBytes) throw new ContractValidationError('Raw request byte limit exceeded')
+
+  let source: string
+  try {
+    source = typeof input === 'string' ? input : new TextDecoder('utf-8', { fatal: true }).decode(input)
+  } catch {
+    throw new ContractValidationError('Raw request must be valid UTF-8')
+  }
+
+  let value: unknown
+  try {
+    value = JSON.parse(source)
+  } catch {
+    throw new ContractValidationError('Raw request must be valid JSON')
+  }
+  return parseRequestEnvelope(value, limits)
+}
 
 export function parseRequestEnvelope(input: unknown, limits: ContractLimits): RequestEnvelope {
   assertPlainJson(input, limits)
   if (input === null || Array.isArray(input) || typeof input !== 'object') throw new ContractValidationError('Request must be an object')
   const value = input as JsonObject
   assertExactKeys(value, [
-    'schemaVersion', 'type', 'requestId', 'moduleId', 'processId', 'sessionId', 'turnId', 'method', 'capabilityToken', 'payload',
+    'schemaVersion', 'type', 'requestId', 'moduleId', 'processId', 'sessionId', 'turnId', 'method', 'capabilityToken', 'nonce', 'payload',
   ])
   const version = requireNumber(value, 'schemaVersion')
   if (version !== SCHEMA_VERSION) throw new ContractValidationError(`Unsupported schema version: ${version}`)
@@ -44,20 +66,23 @@ export function parseRequestEnvelope(input: unknown, limits: ContractLimits): Re
     turnId: requireString(value, 'turnId'),
     method: method as CapabilityKind,
     capabilityToken: requireString(value, 'capabilityToken', 128),
+    nonce: requireString(value, 'nonce', 512),
     payload: value.payload as JsonObject,
   }
 }
 
 export function parseResponseEnvelope(input: unknown, limits: ContractLimits): ResponseEnvelope {
   const value = requireObject(input, limits, 'Response')
-  assertExactKeys(value, ['schemaVersion', 'type', 'requestId', 'ok'], ['result', 'error'])
+  assertExactKeys(value, ['schemaVersion', 'type', 'requestId', 'replayed', 'ok'], ['result', 'error'])
   assertVersionAndType(value, 'response')
   const requestId = requireString(value, 'requestId')
+  if (typeof value.replayed !== 'boolean') throw new ContractValidationError('Response replayed must be a boolean')
+  const replayed = value.replayed
   if (typeof value.ok !== 'boolean') throw new ContractValidationError('Response ok must be a boolean')
   if (value.ok) {
     if (value.error !== undefined) throw new ContractValidationError('Successful response cannot contain error')
     const result = requireNestedObject(value, 'result')
-    return { schemaVersion: SCHEMA_VERSION, type: 'response', requestId, ok: true, result }
+    return { schemaVersion: SCHEMA_VERSION, type: 'response', requestId, replayed, ok: true, result }
   }
   if (value.result !== undefined) throw new ContractValidationError('Failed response cannot contain result')
   const error = requireNestedObject(value, 'error')
@@ -68,6 +93,7 @@ export function parseResponseEnvelope(input: unknown, limits: ContractLimits): R
     schemaVersion: SCHEMA_VERSION,
     type: 'response',
     requestId,
+    replayed,
     ok: false,
     error: { code: code as BridgeErrorCode, message: requireString(error, 'message', 1_024) },
   }
@@ -118,7 +144,7 @@ export function validateMethodPayload(method: CapabilityKind, payload: JsonObjec
     case 'path.authorize':
       assertExactKeys(payload, ['path', 'operations'])
       requireString(payload, 'path', 4_096)
-      requireStringArray(payload, 'operations')
+      validatePathOperations(requireStringArray(payload, 'operations'))
       return
     case 'file.export':
       assertExactKeys(payload, ['sourcePath', 'suggestedName'])
@@ -159,5 +185,13 @@ export function validateMethodPayload(method: CapabilityKind, payload: JsonObjec
       requireString(payload, 'mediaType', 256)
       requireString(payload, 'displayName', 512)
       return
+  }
+}
+
+function validatePathOperations(operations: string[]): void {
+  if (operations.length === 0) throw new ContractValidationError('Path operations must be non-empty')
+  if (new Set(operations).size !== operations.length) throw new ContractValidationError('Path operations must be unique')
+  if (operations.some(operation => !pathOperations.has(operation))) {
+    throw new ContractValidationError('Path operations contain an unsupported operation')
   }
 }

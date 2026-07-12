@@ -2,12 +2,14 @@ import type {
   ApprovalResolution,
   AuditSink,
   Clock,
+  CredentialAuthority,
   EntropySource,
   EventEnvelope,
   PathAuthority,
   PathResolution,
   TokenHasher,
   TrustedApprovalResolver,
+  URLAuthority,
 } from '../types.ts'
 
 export class FakeClock implements Clock {
@@ -47,8 +49,13 @@ export class FakeTokenHasher implements TokenHasher {
 export class FakePathAuthority implements PathAuthority {
   readonly resolutions = new Map<string, PathResolution>()
 
+  constructor(private readonly options: { caseSensitive?: boolean } = {}) {}
+
   map(input: string, canonicalPath: string, realPath = canonicalPath): this {
-    this.resolutions.set(input, { canonicalPath: normalize(canonicalPath), realPath: normalize(realPath) })
+    this.resolutions.set(input, {
+      canonicalPath: normalize(canonicalPath),
+      realPath: normalize(realPath),
+    })
     return this
   }
 
@@ -60,9 +67,55 @@ export class FakePathAuthority implements PathAuthority {
   }
 
   isEqualOrWithin(candidateRealPath: string, rootRealPath: string): boolean {
-    const candidate = normalize(candidateRealPath)
-    const root = normalize(rootRealPath)
+    const fold = (value: string) => this.options.caseSensitive === false ? value.toLocaleLowerCase('en-US') : value
+    const candidate = fold(normalize(candidateRealPath))
+    const root = fold(normalize(rootRealPath))
     return candidate === root || candidate.startsWith(root === '/' ? '/' : `${root}/`)
+  }
+}
+
+interface FakeCredentialGrant {
+  opaqueHandle: string
+  ownerId: string
+  moduleId: string
+  processId: string
+  operation: string
+}
+
+export class FakeCredentialAuthority implements CredentialAuthority {
+  readonly grants: FakeCredentialGrant[] = []
+
+  allow(grant: FakeCredentialGrant): this {
+    this.grants.push({ ...grant })
+    return this
+  }
+
+  validate(input: FakeCredentialGrant): boolean {
+    return this.grants.some(grant => Object.keys(grant).every(key => (
+      grant[key as keyof FakeCredentialGrant] === input[key as keyof FakeCredentialGrant]
+    )))
+  }
+}
+
+export class FakeURLAuthority implements URLAuthority {
+  readonly allowedSchemes = new Set(['https:'])
+  readonly allowedOrigins = new Set<string>()
+
+  allowOrigin(origin: string): this {
+    this.allowedOrigins.add(new URL(origin).origin)
+    return this
+  }
+
+  authorize(input: Parameters<URLAuthority['authorize']>[0]): { authorized: boolean; normalizedUrl?: string } {
+    let url: URL
+    try {
+      url = new URL(input.url)
+    } catch {
+      return { authorized: false }
+    }
+    if (!this.allowedSchemes.has(url.protocol)) return { authorized: false }
+    if (this.allowedOrigins.size > 0 && !this.allowedOrigins.has(url.origin)) return { authorized: false }
+    return { authorized: true, normalizedUrl: url.href }
   }
 }
 
@@ -106,12 +159,18 @@ export class FakeApprovalResolver implements TrustedApprovalResolver {
 }
 
 function normalize(path: string): string {
-  const rooted = path.startsWith('/') ? path : `/${path}`
+  const slashed = path.replaceAll('\\', '/')
+  const drive = /^([A-Za-z]):(?:\/|$)/.exec(slashed)
+  const unc = slashed.startsWith('//')
+  const prefix = drive ? `${drive[1]!.toUpperCase()}:` : unc ? '//' : '/'
+  const remainder = drive ? slashed.slice(2) : unc ? slashed.slice(2) : slashed
   const parts: string[] = []
-  for (const part of rooted.split('/')) {
+  for (const part of remainder.split('/')) {
     if (!part || part === '.') continue
     if (part === '..') parts.pop()
     else parts.push(part)
   }
+  if (prefix === '//') return `//${parts.join('/')}`
+  if (prefix.endsWith(':')) return `${prefix}/${parts.join('/')}`
   return `/${parts.join('/')}`
 }

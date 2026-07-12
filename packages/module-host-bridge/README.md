@@ -9,21 +9,25 @@ module renderer 与 module process 均按不可信输入处理。攻击者可能
 bridge 采用以下 fail-closed 约束：
 
 - request、response、event 都携带 `schemaVersion` 与固定 envelope 字段；未知 version、字段、method、error code、event kind 会被拒绝。
-- 仅接受 plain JSON，并限制 UTF-8 bytes、深度、node 数、单个 string、object keys、audit history 与 replay entries。
+- transport 应调用 `handleRaw()`；它在 `JSON.parse` 前依次限制原始 bytes、验证 UTF-8，再进入 plain JSON 的深度、node 数、单个 string 与 object keys 限制。`handle()` 是仅供 host 内部已解析对象使用的 trusted-object API，不应直接暴露给 IPC/HTTP/WebSocket 输入。
 - capability token 必须来自注入的 cryptographically secure `EntropySource`，固定为 256-bit opaque token；内部只保存注入式 `TokenHasher` 的 hash。生产 adapter 必须使用抗碰撞的 cryptographic hash，testing fake 不可用于生产。
-- capability 绑定 `moduleId`、`processId`、workspace canonical/real root、allowed methods、expiry、`maxUses` 与 nonce。所有消费在 bridge 内串行提交，单次 token 的并发请求最多一个成功。
-- renderer path 从不直接参与授权判断。`PathAuthority` 必须由 trusted host 实现 canonicalization、realpath 与 path containment；bridge 使用 realpath 检查 workspace 边界，并拒绝 filesystem root、host data root 与 module data root。
-- replay identity 覆盖 method、module、process、session、turn、token、request 与 payload。相同 identity 返回缓存 response；相同 request id 的其他 identity 被拒绝。
-- credential contract 只接收 opaque `credentialHandle`、operation 与 operation arguments，不提供 secret value 或 credential inventory。audit 与 snapshot 不记录 handle、arguments、token、nonce、path 或 approval prompt。
+- capability descriptor kind 必须与唯一的 `allowedMethods` 项严格相同。capability 绑定 trusted transport 提供的 `moduleId`/`processId`、workspace canonical/real root、expiry、`maxUses` 与 request 必须回传的 nonce。envelope 自报 module/process identity 会被 `TrustedTransportContext` 覆盖。
+- renderer path 从不直接参与授权判断。`PathAuthority` 必须由 trusted host 实现 canonicalization、realpath 与 path containment；bridge 使用 realpath 检查 workspace 边界，并拒绝 filesystem root、host data root 与 module data root。成功响应同时返回 authority 给出的 `canonicalPath` 与 `realPath`，两者不可互相替代。
+- production `PathAuthority` 必须明确实现 Windows drive/UNC、目标平台 case sensitivity、nonexistent leaf、symlink ancestor 与 TOCTOU contract。testing fake 只提供 deterministic contract modeling，不能替代 production filesystem primitives。
+- replay identity 覆盖 method、trusted module/process、session、turn、token、nonce、request 与 payload。返回 replay 前会重新检查 expiry、revoke 与 process generation；response 用 `replayed` 明示结果。replay store 到达上限后 fail-closed，不淘汰已授权 identity。非 approval 授权创建 `authorized -> executing -> committed|failed` execution receipt，adapter 只有成功 claim `authorized` receipt 后才能执行 side effect。
+- credential contract 只接收 opaque `credentialHandle`、operation 与 operation arguments，不提供 secret value 或 credential inventory。注入的 `CredentialAuthority` 必须同时验证 handle owner、module、process 与 operation。audit 与 snapshot 不记录 handle、arguments、token、nonce、path 或 approval prompt。
+- `external.open` 与 `oauth.launch` 必须经过注入的 `URLAuthority` scheme/origin policy，只把 authority 返回的 normalized URL 交给 host adapter。
 - approval 绑定 module/process/session/turn/request。module 只能创建请求，不能提交 decision；只有注入的 `TrustedApprovalResolver` 可以完成。cancel、timeout 或 process restart 后到达的 resolver 结果会被忽略。
-- 支持 module、process、all 与 crash/restart revoke；audit 是 bounded、结构化且经过最小化处理的 event stream。
+- module、process、all 与 crash/restart revoke 会同步取消关联 pending approvals；late resolver 结果不能恢复为 approved。audit history 与 forwarding queue 都有界，sink 有 timeout、failure isolation 和独立 drain，不参与全局 policy tail。
 
 `host-agent.opaque` 是预留的 versioned opaque descriptor。本版本默认返回 `UNSUPPORTED_CAPABILITY`，不会把未知内容转交给 host。
 
 ## 公开入口
 
 - `ModuleHostBridge.grant()`：由 trusted host 签发 capability。
-- `ModuleHostBridge.handle()`：解析 request、执行 policy，并返回授权结果；它不执行真实 host side effect。
+- `ModuleHostBridge.handleRaw()`：面向 untrusted transport bytes 的入口；先做 raw limits 再解析。
+- `ModuleHostBridge.handle()`：仅供 trusted host 内部对象调用，仍执行严格 schema policy；它不执行真实 host side effect。
+- `claimExecution()`、`completeExecution()`：由 trusted host adapter 原子 claim/提交 execution receipt，防止 replay 重复 side effect。
 - `revokeModule()`、`revokeProcess()`、`revokeAll()`、`restartProcess()`、`sweepExpired()`：管理 lifecycle。
 - `parseRequestEnvelope()`、`parseResponseEnvelope()`、`parseEventEnvelope()`：严格 contract parser。
 - `@simulator/module-host-bridge/testing`：fake clock、entropy、path authority、audit sink 与 approval resolver。

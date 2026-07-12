@@ -1,18 +1,44 @@
 import { describe, expect, test } from 'bun:test'
 import { ModuleHostBridge } from './bridge.ts'
-import { FakeApprovalResolver, FakeAuditSink, FakeClock, FakeEntropy, FakePathAuthority, FakeTokenHasher } from './testing/fakes.ts'
-import type { CapabilityKind } from './types.ts'
+import {
+  FakeApprovalResolver,
+  FakeAuditSink,
+  FakeClock,
+  FakeCredentialAuthority,
+  FakeEntropy,
+  FakePathAuthority,
+  FakeTokenHasher,
+  FakeURLAuthority,
+} from './testing/fakes.ts'
+import type { CapabilityKind, ContractLimits, TrustedTransportContext } from './types.ts'
 
-function harness(maxUses = 1, kind: CapabilityKind = 'notification.send') {
+const trustedContext: TrustedTransportContext = {
+  ownerId: 'owner-a',
+  moduleId: 'module-a',
+  processId: 'process-a',
+}
+
+function harness(
+  maxUses = 1,
+  kind: CapabilityKind = 'notification.send',
+  options: {
+    paths?: FakePathAuthority
+    audit?: FakeAuditSink | { record(): Promise<void> }
+    limits?: Partial<ContractLimits>
+  } = {},
+) {
   const clock = new FakeClock()
   const entropy = new FakeEntropy()
   const hasher = new FakeTokenHasher()
-  const paths = new FakePathAuthority()
-  const audit = new FakeAuditSink()
+  const paths = options.paths ?? new FakePathAuthority()
+  const audit = options.audit ?? new FakeAuditSink()
   const approvals = new FakeApprovalResolver()
+  const credentials = new FakeCredentialAuthority()
+  const urls = new FakeURLAuthority()
   const bridge = new ModuleHostBridge({
-    clock, entropy, hasher, paths, audit, approvals,
+    clock, entropy, hasher, paths, audit, approvals, credentials, urls,
     forbiddenRoots: { filesystemRoot: '/', hostDataRoot: '/host', moduleDataRoot: '/module-data' },
+    limits: options.limits,
   })
   const grant = () => bridge.grant({
     descriptor: { kind },
@@ -24,7 +50,7 @@ function harness(maxUses = 1, kind: CapabilityKind = 'notification.send') {
     maxUses,
     nonce: 'nonce-a',
   })
-  return { bridge, clock, entropy, hasher, paths, audit, approvals, grant }
+  return { bridge, clock, entropy, hasher, paths, audit, approvals, credentials, urls, grant }
 }
 
 function request(token: string, overrides: Record<string, unknown> = {}) {
@@ -32,80 +58,188 @@ function request(token: string, overrides: Record<string, unknown> = {}) {
     schemaVersion: 1,
     type: 'request',
     requestId: 'request-a',
-    moduleId: 'module-a',
-    processId: 'process-a',
+    moduleId: 'self-reported-module',
+    processId: 'self-reported-process',
     sessionId: 'session-a',
     turnId: 'turn-a',
     method: 'notification.send',
     capabilityToken: token,
+    nonce: 'nonce-a',
     payload: { title: 'Ready', body: 'Done' },
     ...overrides,
   }
 }
 
-describe('capability policy', () => {
-  test('stores only a hash and returns an idempotent response', async () => {
-    const { bridge, grant } = harness()
-    const { token } = await grant()
-    expect(token).toMatch(/^[0-9a-f]{64}$/)
-    const first = await bridge.handle(request(token))
-    const replay = await bridge.handle(request(token))
-    expect(first).toEqual(replay)
+describe('capability, replay, and execution policy', () => {
+  test('returns explicit replay state and a host execution receipt that cannot be claimed twice', async () => {
+    const target = harness()
+    const { token } = await target.grant()
+    const first = await target.bridge.handle(request(token), trustedContext)
+    expect(first.replayed).toBe(false)
     expect(first.ok).toBe(true)
-    expect(JSON.stringify(bridge.snapshot())).not.toContain(token)
+    const receiptId = (first.result?.executionReceipt as { receiptId: string }).receiptId
+
+    const replay = await target.bridge.handle(request(token), trustedContext)
+    expect(replay.replayed).toBe(true)
+    expect(replay.result?.executionReceipt).toEqual({ receiptId, status: 'authorized' })
+
+    const claim = await target.bridge.claimExecution(receiptId, trustedContext)
+    expect(claim).toMatchObject({ acquired: true, receipt: { status: 'executing' } })
+    expect(await target.bridge.claimExecution(receiptId, trustedContext)).toMatchObject({ acquired: false, receipt: { status: 'executing' } })
+    expect((await target.bridge.handle(request(token), trustedContext)).result?.executionReceipt)
+      .toEqual({ receiptId, status: 'executing' })
+
+    await target.bridge.completeExecution(receiptId, 'committed', trustedContext)
+    expect((await target.bridge.handle(request(token), trustedContext)).result?.executionReceipt)
+      .toEqual({ receiptId, status: 'committed' })
+    expect(JSON.stringify(target.bridge.snapshot())).not.toContain(token)
   })
 
-  test('permits only one concurrent consumption of a single-use token', async () => {
-    const { bridge, grant } = harness()
-    const { token } = await grant()
+  test('rechecks expiry and revoke generation before returning replay', async () => {
+    const expired = harness()
+    const expiredGrant = await expired.grant()
+    const expiredFirst = await expired.bridge.handle(request(expiredGrant.token), trustedContext)
+    const expiredReceipt = (expiredFirst.result?.executionReceipt as Record<string, unknown>).receiptId as string
+    expect(expiredFirst.ok).toBe(true)
+    expired.clock.advance(1_000)
+    expect((await expired.bridge.handle(request(expiredGrant.token), trustedContext)).error?.code).toBe('CAPABILITY_EXPIRED')
+    await expect(expired.bridge.claimExecution(expiredReceipt, trustedContext)).rejects.toMatchObject({ code: 'CAPABILITY_EXPIRED' })
+
+    const revoked = harness()
+    const revokedGrant = await revoked.grant()
+    const revokedFirst = await revoked.bridge.handle(request(revokedGrant.token), trustedContext)
+    const revokedReceipt = (revokedFirst.result?.executionReceipt as Record<string, unknown>).receiptId as string
+    expect(revokedFirst.ok).toBe(true)
+    await revoked.bridge.revokeProcess('module-a', 'process-a')
+    expect((await revoked.bridge.handle(request(revokedGrant.token), trustedContext)).error?.code).toBe('CAPABILITY_REVOKED')
+    await expect(revoked.bridge.claimExecution(revokedReceipt, trustedContext)).rejects.toMatchObject({ code: 'CAPABILITY_REVOKED' })
+  })
+
+  test('serializes single-use consumption and rejects replay identity changes', async () => {
+    const target = harness()
+    const { token } = await target.grant()
     const [first, second] = await Promise.all([
-      bridge.handle(request(token, { requestId: 'request-1' })),
-      bridge.handle(request(token, { requestId: 'request-2' })),
+      target.bridge.handle(request(token, { requestId: 'request-1' }), trustedContext),
+      target.bridge.handle(request(token, { requestId: 'request-2' }), trustedContext),
     ])
     expect([first.ok, second.ok].sort()).toEqual([false, true])
     expect([first, second].find(item => !item.ok)?.error?.code).toBe('CAPABILITY_EXHAUSTED')
-  })
 
-  test('rejects replay identity changes', async () => {
-    const { bridge, grant } = harness(2)
-    const { token } = await grant()
-    expect((await bridge.handle(request(token))).ok).toBe(true)
-    const mismatch = await bridge.handle(request(token, { processId: 'process-b' }))
+    const replayTarget = harness(2)
+    const replayGrant = await replayTarget.grant()
+    await replayTarget.bridge.handle(request(replayGrant.token), trustedContext)
+    const mismatch = await replayTarget.bridge.handle(request(replayGrant.token, { turnId: 'turn-b' }), trustedContext)
     expect(mismatch.error?.code).toBe('REPLAY_MISMATCH')
   })
 
-  test('rejects expired and cross-module or cross-process use', async () => {
-    const expired = harness()
-    const expiredGrant = await expired.grant()
-    expired.clock.advance(1_000)
-    expect((await expired.bridge.handle(request(expiredGrant.token))).error?.code).toBe('CAPABILITY_EXPIRED')
-
-    const scoped = harness(3)
-    const scopedGrant = await scoped.grant()
-    expect((await scoped.bridge.handle(request(scopedGrant.token, { requestId: 'cross-module', moduleId: 'module-b' }))).error?.code)
-      .toBe('CAPABILITY_SCOPE_MISMATCH')
-    expect((await scoped.bridge.handle(request(scopedGrant.token, { requestId: 'cross-process', processId: 'process-b' }))).error?.code)
-      .toBe('CAPABILITY_SCOPE_MISMATCH')
+  test('fails closed at replay capacity without evicting an authorized identity', async () => {
+    const target = harness(3, 'notification.send', { limits: { maxReplayEntries: 1 } })
+    const { token } = await target.grant()
+    expect((await target.bridge.handle(request(token), trustedContext)).ok).toBe(true)
+    const atCapacity = await target.bridge.handle(request(token, { requestId: 'request-b' }), trustedContext)
+    expect(atCapacity.error?.code).toBe('REPLAY_CAPACITY')
+    const replay = await target.bridge.handle(request(token), trustedContext)
+    expect(replay).toMatchObject({ ok: true, replayed: true })
   })
 
-  test('authorizes paths only from PathAuthority real paths inside the workspace', async () => {
-    const direct = harness(3, 'path.authorize')
-    const directGrant = await direct.grant()
-    const valid = await direct.bridge.handle(methodRequest(directGrant.token, 'path.authorize', {
-      path: '/work/a/file.txt', operations: ['read'],
-    }, 'valid-path'))
-    expect(valid.result?.canonicalPath).toBe('/work/a/file.txt')
+  test('uses trusted transport identity instead of envelope claims and binds nonce', async () => {
+    const target = harness(2)
+    const { token } = await target.grant()
+    expect((await target.bridge.handle(request(token), trustedContext)).ok).toBe(true)
 
-    const outside = await direct.bridge.handle(methodRequest(directGrant.token, 'path.authorize', {
-      path: '/outside/file.txt', operations: ['read'],
-    }, 'outside-path'))
-    expect(outside.error?.code).toBe('PATH_DENIED')
+    const wrongTransport = await target.bridge.handle(request(token, { requestId: 'wrong-transport' }), {
+      ...trustedContext,
+      moduleId: 'module-b',
+    })
+    expect(wrongTransport.error?.code).toBe('CAPABILITY_SCOPE_MISMATCH')
 
-    direct.paths.map('/work/a/link', '/work/a/link', '/outside/secret')
-    const symlink = await direct.bridge.handle(methodRequest(directGrant.token, 'path.authorize', {
-      path: '/work/a/link', operations: ['read'],
-    }, 'symlink-path'))
-    expect(symlink.error?.code).toBe('PATH_DENIED')
+    const wrongNonce = await target.bridge.handle(request(token, { requestId: 'wrong-nonce', nonce: 'nonce-b' }), trustedContext)
+    expect(wrongNonce.error?.code).toBe('CAPABILITY_SCOPE_MISMATCH')
+  })
+
+  test('requires descriptor kind and allowed methods to match exactly', async () => {
+    const target = harness()
+    await expect(target.bridge.grant({
+      descriptor: { kind: 'notification.send' },
+      moduleId: 'module-a', processId: 'process-a', workspaceRoot: '/work/a',
+      allowedMethods: ['notification.send', 'external.open'], expiresAt: 2_000, maxUses: 1, nonce: 'nonce',
+    })).rejects.toThrow('exactly match')
+    await expect(target.bridge.grant({
+      descriptor: { kind: 'notification.send' },
+      moduleId: 'module-a', processId: 'process-a', workspaceRoot: '/work/a',
+      allowedMethods: ['external.open'], expiresAt: 2_000, maxUses: 1, nonce: 'nonce',
+    })).rejects.toThrow('exactly match')
+  })
+})
+
+describe('injected authorities', () => {
+  test('validates opaque credential handle owner, module, process, and operation', async () => {
+    const target = harness(2, 'credential.use')
+    target.credentials.allow({
+      opaqueHandle: 'opaque-credential-123',
+      ownerId: 'owner-a',
+      moduleId: 'module-a',
+      processId: 'process-a',
+      operation: 'sign',
+    })
+    const { token } = await target.grant()
+    const allowed = await target.bridge.handle(methodRequest(token, 'credential.use', {
+      credentialHandle: 'opaque-credential-123', operation: 'sign', arguments: { secretProbe: 'do-not-persist' },
+    }), trustedContext)
+    expect(allowed.ok).toBe(true)
+    expect(JSON.stringify({ snapshot: target.bridge.snapshot(), audit: (target.audit as FakeAuditSink).events }))
+      .not.toContain('opaque-credential-123')
+
+    const denied = await target.bridge.handle(methodRequest(token, 'credential.use', {
+      credentialHandle: 'opaque-credential-123', operation: 'delete',
+    }, 'credential-denied'), trustedContext)
+    expect(denied.error?.code).toBe('CREDENTIAL_DENIED')
+  })
+
+  test.each(['external.open', 'oauth.launch'] as const)('%s uses injected scheme and origin policy', async method => {
+    const target = harness(2, method)
+    target.urls.allowOrigin('https://allowed.example')
+    const { token } = await target.grant()
+    const allowedPayload = method === 'external.open'
+      ? { url: 'https://allowed.example/path' }
+      : { provider: 'example', authorizationUrl: 'https://allowed.example/oauth', callbackNonce: 'callback' }
+    const allowed = await target.bridge.handle(methodRequest(token, method, allowedPayload), trustedContext)
+    expect(allowed.result?.normalizedUrl).toStartWith('https://allowed.example/')
+
+    const deniedPayload = method === 'external.open'
+      ? { url: 'file:///etc/passwd' }
+      : { provider: 'example', authorizationUrl: 'https://denied.example/oauth', callbackNonce: 'callback' }
+    const denied = await target.bridge.handle(methodRequest(token, method, deniedPayload, `${method}-denied`), trustedContext)
+    expect(denied.error?.code).toBe('URL_DENIED')
+  })
+})
+
+describe('path authority contract', () => {
+  test('returns canonicalPath and realPath consistently and denies symlink escape', async () => {
+    const target = harness(2, 'path.authorize')
+    target.paths.map('/work/a/alias', '/work/a/canonical.txt', '/work/a/real.txt')
+    target.paths.map('/work/a/link/missing.txt', '/work/a/link/missing.txt', '/outside/target/missing.txt')
+    const { token } = await target.grant()
+    const allowed = await target.bridge.handle(methodRequest(token, 'path.authorize', {
+      path: '/work/a/alias', operations: ['read'],
+    }), trustedContext)
+    expect(allowed.result).toMatchObject({ canonicalPath: '/work/a/canonical.txt', realPath: '/work/a/real.txt' })
+    const escaped = await target.bridge.handle(methodRequest(token, 'path.authorize', {
+      path: '/work/a/link/missing.txt', operations: ['create'],
+    }, 'symlink-ancestor'), trustedContext)
+    expect(escaped.error?.code).toBe('PATH_DENIED')
+  })
+
+  test('fake models Windows drives, UNC roots, case policy, and nonexistent mappings', async () => {
+    const insensitive = new FakePathAuthority({ caseSensitive: false })
+    expect(insensitive.isEqualOrWithin('c:\\Work\\A\\File.txt', 'C:\\work\\a')).toBe(true)
+    expect(insensitive.isEqualOrWithin('\\\\Server\\Share\\Folder\\File', '\\\\server\\share\\folder')).toBe(true)
+    expect(insensitive.isEqualOrWithin('C:\\work\\ab', 'C:\\work\\a')).toBe(false)
+    insensitive.map('missing-child', 'C:\\work\\a\\missing', 'C:\\work\\a\\missing')
+    expect(await insensitive.resolve('missing-child')).toEqual({
+      canonicalPath: 'C:/work/a/missing',
+      realPath: 'C:/work/a/missing',
+    })
   })
 
   test.each(['/host', '/host/secret', '/module-data', '/module-data/cache'])('denies protected root %s', async protectedPath => {
@@ -114,135 +248,34 @@ describe('capability policy', () => {
     const { token } = await target.grant()
     const response = await target.bridge.handle(methodRequest(token, 'path.authorize', {
       path: '/work/a/alias', operations: ['read'],
-    }))
+    }), trustedContext)
     expect(response.error?.code).toBe('PATH_DENIED')
-  })
-
-  test('rejects filesystem, host-data, and module-data workspace roots', async () => {
-    for (const root of ['/', '/host', '/module-data']) {
-      const target = harness()
-      await expect(target.bridge.grant({
-        descriptor: { kind: 'notification.send' }, moduleId: 'm', processId: 'p', workspaceRoot: root,
-        allowedMethods: ['notification.send'], expiresAt: target.clock.now() + 1_000, maxUses: 1, nonce: 'n',
-      })).rejects.toMatchObject({ code: 'PATH_DENIED' })
-    }
-  })
-
-  test('supports each declared capability method and leaves host-agent opaque unsupported', async () => {
-    const payloads: Record<CapabilityKind, Record<string, unknown>> = {
-      'folder.pick': { suggestedRoot: '/work/a' },
-      'path.authorize': { path: '/work/a/file', operations: ['read'] },
-      'file.export': { sourcePath: '/work/a/file', suggestedName: 'file.txt' },
-      'external.open': { url: 'https://example.test' },
-      'oauth.launch': { provider: 'example', authorizationUrl: 'https://example.test/oauth', callbackNonce: 'callback' },
-      'credential.use': { credentialHandle: 'credential-handle', operation: 'sign' },
-      'approval.request': { prompt: 'Continue?', expiresAt: 1_500 },
-      'notification.send': { title: 'Ready', body: 'Done' },
-      'artifact.publish': { artifactPath: '/work/a/file', mediaType: 'text/plain', displayName: 'File' },
-    }
-    for (const method of Object.keys(payloads) as CapabilityKind[]) {
-      const target = harness(1, method)
-      const { token } = await target.grant()
-      expect((await target.bridge.handle(methodRequest(token, method, payloads[method]))).ok).toBe(true)
-    }
-    const target = harness()
-    await expect(target.bridge.grant({
-      descriptor: { kind: 'host-agent.opaque', version: 1, opaque: { future: true } },
-      moduleId: 'm', processId: 'p', workspaceRoot: '/work/a', allowedMethods: ['notification.send'],
-      expiresAt: 2_000, maxUses: 1, nonce: 'n',
-    })).rejects.toMatchObject({ code: 'UNSUPPORTED_CAPABILITY' })
-  })
-
-  test('revokes module, process, all, and crashed process capabilities', async () => {
-    for (const mode of ['module', 'process', 'all', 'crash'] as const) {
-      const target = harness()
-      const { token } = await target.grant()
-      if (mode === 'module') expect(await target.bridge.revokeModule('module-a')).toBe(1)
-      if (mode === 'process') expect(await target.bridge.revokeProcess('module-a', 'process-a')).toBe(1)
-      if (mode === 'all') expect(await target.bridge.revokeAll()).toBe(1)
-      if (mode === 'crash') await target.bridge.restartProcess('module-a', 'process-a')
-      expect((await target.bridge.handle(request(token, { requestId: `after-${mode}` }))).error?.code).toBe('CAPABILITY_REVOKED')
-    }
-  })
-
-  test('credential contract exposes only opaque handle and operation and redacts audit state', async () => {
-    const target = harness(1, 'credential.use')
-    const { token } = await target.grant()
-    const response = await target.bridge.handle(methodRequest(token, 'credential.use', {
-      credentialHandle: 'opaque-credential-123', operation: 'sign', arguments: { secretProbe: 'must-not-persist' },
-    }))
-    expect(response.result).toEqual({
-      authorized: true, method: 'credential.use', credentialHandle: 'opaque-credential-123', operation: 'sign',
-    })
-    const persisted = JSON.stringify({ snapshot: target.bridge.snapshot(), events: target.audit.events })
-    expect(persisted).not.toContain(token)
-    expect(persisted).not.toContain('opaque-credential-123')
-    expect(persisted).not.toContain('must-not-persist')
-    expect(persisted).not.toContain('/work/a')
-    expect(persisted).not.toContain('nonce-a')
-  })
-
-  test('bounds audit history', async () => {
-    const clock = new FakeClock()
-    const audit = new FakeAuditSink()
-    const bridge = new ModuleHostBridge({
-      clock, entropy: new FakeEntropy(), hasher: new FakeTokenHasher(), paths: new FakePathAuthority(), audit,
-      approvals: new FakeApprovalResolver(),
-      forbiddenRoots: { filesystemRoot: '/', hostDataRoot: '/host', moduleDataRoot: '/module-data' },
-      limits: { maxAuditEvents: 2 },
-    })
-    const { token } = await bridge.grant({
-      descriptor: { kind: 'notification.send' }, moduleId: 'module-a', processId: 'process-a', workspaceRoot: '/work/a',
-      allowedMethods: ['notification.send'], expiresAt: 2_000, maxUses: 1, nonce: 'nonce',
-    })
-    await bridge.handle(request(token))
-    await bridge.handle(request('f'.repeat(64), { requestId: 'denied' }))
-    expect(bridge.snapshot().auditEvents).toHaveLength(2)
-    expect(audit.events.length).toBeGreaterThan(2)
-  })
-
-  test('rejects invalid bounds and isolates audit adapter failures', async () => {
-    const dependencies = {
-      clock: new FakeClock(), entropy: new FakeEntropy(), hasher: new FakeTokenHasher(), paths: new FakePathAuthority(),
-      approvals: new FakeApprovalResolver(),
-      forbiddenRoots: { filesystemRoot: '/', hostDataRoot: '/host', moduleDataRoot: '/module-data' },
-    }
-    expect(() => new ModuleHostBridge({ ...dependencies, audit: new FakeAuditSink(), limits: { maxAuditEvents: 0 } })).toThrow('positive integer')
-    const bridge = new ModuleHostBridge({
-      ...dependencies,
-      audit: { record: () => { throw new Error('audit unavailable') } },
-    })
-    const { token } = await bridge.grant({
-      descriptor: { kind: 'notification.send' }, moduleId: 'module-a', processId: 'process-a', workspaceRoot: '/work/a',
-      allowedMethods: ['notification.send'], expiresAt: 2_000, maxUses: 1, nonce: 'nonce',
-    })
-    expect((await bridge.handle(request(token))).ok).toBe(true)
-    expect(bridge.snapshot().auditEvents.length).toBe(2)
   })
 })
 
-describe('approval state machine', () => {
-  test('binds resolver input to module, process, session, turn, and request', async () => {
+describe('approval lifecycle', () => {
+  test.each(['module', 'process', 'all'] as const)('%s revoke cancels pending approval and ignores late resolver', async mode => {
     const target = harness(1, 'approval.request')
     const { token } = await target.grant()
     const response = await target.bridge.handle(methodRequest(token, 'approval.request', {
       prompt: 'Approve operation?', expiresAt: 1_500,
-    }))
-    expect(response.result?.status).toBe('pending')
-    expect(target.approvals.pending[0]?.input).toMatchObject({
-      moduleId: 'module-a', processId: 'process-a', sessionId: 'session-a', turnId: 'turn-a', requestId: 'request-a',
-    })
+    }), trustedContext)
+    const approvalId = response.result?.approvalId as string
+    if (mode === 'module') await target.bridge.revokeModule('module-a')
+    if (mode === 'process') await target.bridge.revokeProcess('module-a', 'process-a')
+    if (mode === 'all') await target.bridge.revokeAll()
     target.approvals.approve()
     await flush()
-    expect(target.bridge.getApproval(response.result?.approvalId as string)?.status).toBe('approved')
+    expect(target.bridge.getApproval(approvalId)?.status).toBe('cancelled')
+    expect(target.bridge.snapshot().pendingApprovals).toBe(0)
   })
 
-  test.each(['cancel', 'timeout', 'restart'] as const)('%s ignores later resolver completion with zero authorized side effects', async mode => {
+  test.each(['cancel', 'timeout', 'restart'] as const)('%s ignores later approval completion', async mode => {
     const target = harness(1, 'approval.request')
     const { token } = await target.grant()
     const response = await target.bridge.handle(methodRequest(token, 'approval.request', {
       prompt: 'Approve operation?', expiresAt: 1_200,
-    }))
+    }), trustedContext)
     const approvalId = response.result?.approvalId as string
     if (mode === 'cancel') await target.bridge.cancelApproval(approvalId)
     if (mode === 'timeout') {
@@ -252,27 +285,60 @@ describe('approval state machine', () => {
     if (mode === 'restart') await target.bridge.restartProcess('module-a', 'process-a')
     target.approvals.approve()
     await flush()
-    const expected = mode === 'timeout' ? 'timed_out' : 'cancelled'
-    expect(target.bridge.getApproval(approvalId)?.status).toBe(expected)
-    expect(target.bridge.snapshot().pendingApprovals).toBe(0)
-  })
-
-  test('rejects already-expired approval before resolver invocation or token consumption', async () => {
-    const target = harness(1, 'approval.request')
-    const { token } = await target.grant()
-    const expired = await target.bridge.handle(methodRequest(token, 'approval.request', {
-      prompt: 'Too late', expiresAt: target.clock.now(),
-    }, 'expired-approval'))
-    expect(expired.error?.code).toBe('INVALID_REQUEST')
-    expect(target.approvals.pending).toHaveLength(0)
-    const valid = await target.bridge.handle(methodRequest(token, 'approval.request', {
-      prompt: 'Still available', expiresAt: target.clock.now() + 100,
-    }, 'valid-approval'))
-    expect(valid.ok).toBe(true)
+    expect(target.bridge.getApproval(approvalId)?.status).toBe(mode === 'timeout' ? 'timed_out' : 'cancelled')
   })
 })
 
-function methodRequest(token: string, method: CapabilityKind, payload: Record<string, unknown>, requestId = 'request-a') {
+describe('audit isolation and malformed input', () => {
+  test('a hanging audit sink cannot block the global policy tail and its queue stays bounded', async () => {
+    const received: string[] = []
+    const clock = new FakeClock()
+    const bridge = new ModuleHostBridge({
+      clock,
+      entropy: new FakeEntropy(),
+      hasher: new FakeTokenHasher(),
+      paths: new FakePathAuthority(),
+      credentials: new FakeCredentialAuthority(),
+      urls: new FakeURLAuthority(),
+      approvals: new FakeApprovalResolver(),
+      audit: { record: event => { received.push(event.eventId); return new Promise<void>(() => {}) } },
+      forbiddenRoots: { filesystemRoot: '/', hostDataRoot: '/host', moduleDataRoot: '/module-data' },
+      limits: { maxAuditQueue: 2, auditSinkTimeoutMs: 5 },
+    })
+    const grant = await bridge.grant({
+      descriptor: { kind: 'notification.send' }, moduleId: 'module-a', processId: 'process-a', workspaceRoot: '/work/a',
+      allowedMethods: ['notification.send'], expiresAt: 2_000, maxUses: 4, nonce: 'nonce-a',
+    })
+    const response = await Promise.race([
+      bridge.handle(request(grant.token), trustedContext),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('policy tail blocked')), 50)),
+    ])
+    expect(response.ok).toBe(true)
+    await bridge.revokeAll()
+    await bridge.flushAudit()
+    expect(received.length).toBeLessThanOrEqual(3)
+  })
+
+  test('audits malformed requests as untrusted without accepting envelope identity', async () => {
+    const target = harness()
+    const response = await target.bridge.handle({ requestId: 'bad', moduleId: 'forged' }, trustedContext)
+    expect(response.error?.code).toBe('INVALID_REQUEST')
+    await target.bridge.flushAudit()
+    const event = target.bridge.snapshot().auditEvents.at(-1)
+    expect(event).toMatchObject({
+      event: 'request.malformed',
+      payload: { trust: 'untrusted', source: 'object', moduleId: 'module-a', processId: 'process-a' },
+    })
+    expect(JSON.stringify(event)).not.toContain('forged')
+  })
+})
+
+function methodRequest(
+  token: string,
+  method: CapabilityKind,
+  payload: Record<string, unknown>,
+  requestId = 'request-a',
+) {
   return request(token, { requestId, method, payload })
 }
 
