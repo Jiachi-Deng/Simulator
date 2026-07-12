@@ -429,7 +429,7 @@ app.whenReady().then(async () => {
     const isHeadless = !!process.env.CRAFT_HEADLESS
 
     if (isClientOnly) {
-      mainLog.info(`Client-only mode: CRAFT_SERVER_URL=${process.env.CRAFT_SERVER_URL} (server initialization skipped)`)
+      mainLog.info('Client-only mode enabled (server initialization skipped)')
     }
 
     // Initialize notification service (always — triggered by server push events)
@@ -812,7 +812,7 @@ app.whenReady().then(async () => {
         console.log(`[Transfer] Export complete: ${bundle.session?.messages?.length ?? 0} messages, ${bundle.files?.length ?? 0} files`)
 
         const { url, token, remoteWorkspaceId } = targetWorkspace.remoteServer
-        console.log(`[Transfer] Connecting to target remote server: ${url}`)
+        console.log('[Transfer] Connecting to target remote server')
         const { client, error } = await connectToRemote(url, token, remoteWorkspaceId)
         if (!client) throw new Error(error ?? 'Connection failed to target remote server')
         console.log('[Transfer] Connected to target remote server')

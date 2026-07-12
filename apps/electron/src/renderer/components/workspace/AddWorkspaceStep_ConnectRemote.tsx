@@ -217,12 +217,15 @@ export function AddWorkspaceStep_ConnectRemote({
             <Input
               value={serverUrl}
               onChange={(e) => setServerUrl(e.target.value)}
-              placeholder="ws://192.168.1.100:9100"
+              placeholder="wss://server.example.com:9100"
               disabled={isCreating}
               autoFocus
               className="border-0 bg-transparent shadow-none font-mono text-sm"
             />
           </div>
+          <p className="text-xs text-muted-foreground">
+            Use wss:// for remote servers. ws:// is allowed only for localhost, 127.0.0.1, or ::1.
+          </p>
         </div>
 
         {/* Token */}
