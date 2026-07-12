@@ -1,4 +1,7 @@
 import { describe, it, expect, afterEach } from 'bun:test'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { resolve } from 'node:path'
 import { CliRpcClient } from './client.ts'
 import {
   serializeEnvelope,
@@ -19,7 +22,7 @@ interface MockServer {
 }
 
 function createMockServer(opts?: {
-  rejectAuth?: boolean
+  handshakeError?: { message: string; data?: unknown }
   noAck?: boolean
   tls?: { cert: string; key: string }
 }): MockServer {
@@ -40,11 +43,11 @@ function createMockServer(opts?: {
         lastMsg = envelope
 
         if (envelope.type === 'handshake') {
-          if (opts?.rejectAuth) {
+          if (opts?.handshakeError) {
             const error: MessageEnvelope = {
               id: envelope.id,
               type: 'error',
-              error: { code: 'AUTH_FAILED', message: 'Invalid token' },
+              error: { code: 'AUTH_FAILED', ...opts.handshakeError },
             }
             ws.send(serializeEnvelope(error))
             ws.close()
@@ -97,7 +100,7 @@ function createMockServer(opts?: {
   }
 }
 
-function createErrorServer(): MockServer {
+function createErrorServer(errorMessage: string, errorData?: unknown): MockServer {
   let lastMsg: MessageEnvelope | null = null
   const clients = new Set<any>()
 
@@ -130,7 +133,7 @@ function createErrorServer(): MockServer {
             id: envelope.id,
             type: 'response',
             channel: envelope.channel,
-            error: { code: 'HANDLER_ERROR', message: 'test error' },
+            error: { code: 'HANDLER_ERROR', message: errorMessage, data: errorData },
           }
           ws.send(serializeEnvelope(response))
         }
@@ -169,6 +172,21 @@ afterEach(() => {
 })
 
 describe('CliRpcClient', () => {
+  it.each([
+    'wss://user@example.com:3000/socket',
+    'ws://user@localhost:3000/socket',
+    'ws://example.com:3000',
+    'ws://127.0.0.2:3000',
+    'http://localhost:3000',
+    'not a URL',
+  ])('rejects URLs disallowed by the shared WebSocket policy: %s', async (url) => {
+    const client = new CliRpcClient(url)
+    await expect(client.connect()).rejects.toMatchObject({
+      code: expect.stringMatching(/^(INVALID|INSECURE|WEBSOCKET_URL_USERINFO_NOT_ALLOWED)/),
+    })
+    client.destroy()
+  })
+
   it('connects and completes handshake', async () => {
     server = createMockServer()
     const client = new CliRpcClient(server.url, { token: 'test-token' })
@@ -190,9 +208,41 @@ describe('CliRpcClient', () => {
   })
 
   it('rejects on auth failure', async () => {
-    server = createMockServer({ rejectAuth: true })
+    server = createMockServer({ handshakeError: { message: 'Invalid token' } })
     const client = new CliRpcClient(server.url, { token: 'bad-token' })
     await expect(client.connect()).rejects.toThrow('Invalid token')
+    client.destroy()
+  })
+
+  it('redacts literal, encoded, and double-encoded tokens in handshake errors', async () => {
+    const token = 'PoC token/with?reserved=value'
+    const encoded = encodeURIComponent(token).replaceAll('%2F', '%2f').replaceAll('%3F', '%3f')
+    const doubleEncoded = encodeURIComponent(encoded)
+    const mutableData = { token, encoded, doubleEncoded }
+    server = createMockServer({
+      handshakeError: {
+        message: `Rejected ${token} / ${encoded} / ${doubleEncoded}`,
+        data: mutableData,
+      },
+    })
+    const client = new CliRpcClient(server.url, { token })
+
+    let error: (Error & { code?: string; data?: unknown }) | undefined
+    try {
+      await client.connect()
+    } catch (cause) {
+      error = cause as Error & { code?: string; data?: unknown }
+    }
+    mutableData.token = 'mutated-after-response'
+
+    expect(error).toMatchObject({
+      message: 'Rejected [REDACTED] / [REDACTED] / [REDACTED]',
+      code: 'AUTH_FAILED',
+    })
+    expect(error).not.toHaveProperty('data')
+    expect(JSON.stringify(error)).not.toContain(token)
+    expect(JSON.stringify(error)).not.toContain(encoded)
+    expect(JSON.stringify(error)).not.toContain(doubleEncoded)
     client.destroy()
   })
 
@@ -223,10 +273,29 @@ describe('CliRpcClient', () => {
   })
 
   it('invoke rejects on server error', async () => {
-    server = createErrorServer()
-    const client = new CliRpcClient(server.url)
+    const secret = 'PoC rpc/secret?value=yes'
+    const encoded = encodeURIComponent(secret).replaceAll('%2F', '%2f').replaceAll('%3F', '%3f')
+    const doubleEncoded = encodeURIComponent(encoded)
+    const mutableData = { token: secret, nested: { value: doubleEncoded } }
+    server = createErrorServer(`Failed ${secret} / ${encoded} / ${doubleEncoded}`, mutableData)
+    const client = new CliRpcClient(server.url, { token: secret })
     await client.connect()
-    await expect(client.invoke('system:versions')).rejects.toThrow('test error')
+    let error: (Error & { code?: string; data?: unknown }) | undefined
+    try {
+      await client.invoke('system:versions')
+    } catch (cause) {
+      error = cause as Error & { code?: string; data?: unknown }
+    }
+    mutableData.nested.value = 'mutated-after-response'
+    expect(error).toMatchObject({
+      message: 'Failed [REDACTED] / [REDACTED] / [REDACTED]',
+      code: 'HANDLER_ERROR',
+    })
+    expect(error).not.toHaveProperty('data')
+    expect(JSON.stringify(error)).not.toContain(secret)
+    expect(JSON.stringify(error)).not.toContain(encoded)
+    expect(JSON.stringify(error)).not.toContain(doubleEncoded)
+    expect(JSON.stringify(error)).not.toContain('mutated-after-response')
     client.destroy()
   })
 
@@ -356,30 +425,43 @@ describe('CliRpcClient', () => {
     await expect(client.invoke('system:homeDir')).rejects.toThrow('Not connected')
   })
 
-  it('connects over wss:// with TLS', async () => {
+  const tlsIt = hasTlsTooling() ? it : it.skip
+  tlsIt('generates a Bun-readable RSA development certificate with every loopback SAN (requires sh + openssl)', () => {
     const tls = generateSelfSignedCert()
-    if (!tls) {
-      // openssl not available — skip TLS test
-      console.log('  (skipped: openssl not available)')
-      return
-    }
+    const inspection = Bun.spawnSync({
+      cmd: ['openssl', 'x509', '-noout', '-text'],
+      stdin: Buffer.from(tls.cert),
+      stderr: 'pipe',
+    })
+    expect(inspection.exitCode, inspection.stderr.toString()).toBe(0)
+
+    const text = inspection.stdout.toString()
+    expect(text).toContain('Public Key Algorithm: rsaEncryption')
+    expect(text).toContain('DNS:localhost')
+    expect(text).toContain('IP Address:127.0.0.1')
+    expect(text).toMatch(/IP Address:(?:0:){7}1/)
+
+    expect(() => Bun.serve({
+      port: 0,
+      tls,
+      fetch: () => new Response('ok'),
+    }).stop(true)).not.toThrow()
+  })
+
+  tlsIt('rejects an untrusted WSS certificate, then connects with the same explicit CA (requires sh + openssl)', async () => {
+    const tls = generateSelfSignedCert()
     server = createMockServer({ tls })
 
-    const prev = process.env.NODE_TLS_REJECT_UNAUTHORIZED
-    process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0'
-    try {
-      const client = new CliRpcClient(server.url)
-      const clientId = await client.connect()
-      expect(clientId).toBe('test-client-001')
-      expect(server.url.startsWith('wss://')).toBe(true)
-      client.destroy()
-    } finally {
-      if (prev === undefined) {
-        delete process.env.NODE_TLS_REJECT_UNAUTHORIZED
-      } else {
-        process.env.NODE_TLS_REJECT_UNAUTHORIZED = prev
-      }
-    }
+    const untrustedClient = new CliRpcClient(server.url, { connectTimeout: 2_000 })
+    await expect(untrustedClient.connect()).rejects.toThrow('WebSocket connection error')
+    expect(server.lastMessage()).toBeNull()
+    untrustedClient.destroy()
+
+    const trustedClient = new CliRpcClient(server.url, { tlsCa: tls.cert, connectTimeout: 2_000 })
+    const clientId = await trustedClient.connect()
+    expect(clientId).toBe('test-client-001')
+    expect(server.lastMessage()?.type).toBe('handshake')
+    trustedClient.destroy()
   })
 })
 
@@ -387,23 +469,24 @@ describe('CliRpcClient', () => {
 // TLS cert helper — generates a real self-signed cert via openssl
 // ---------------------------------------------------------------------------
 
-function generateSelfSignedCert(): { cert: string; key: string } | null {
+function generateSelfSignedCert(): { cert: string; key: string } {
+  const outputDir = mkdtempSync(resolve(tmpdir(), 'craft-cli-tls-'))
   try {
     const keyResult = Bun.spawnSync({
-      cmd: ['openssl', 'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
-        '-keyout', '/dev/stdout', '-out', '/dev/stdout',
-        '-days', '1', '-nodes', '-subj', '/CN=localhost', '-batch'],
+      cmd: ['sh', resolve(import.meta.dir, '../../../scripts/generate-dev-cert.sh'), outputDir],
       stderr: 'pipe',
     })
-    if (keyResult.exitCode !== 0) return null
-
-    const pem = keyResult.stdout.toString()
-    const certMatch = pem.match(/(-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----)/)
-    const keyMatch = pem.match(/(-----BEGIN (?:EC )?PRIVATE KEY-----[\s\S]+?-----END (?:EC )?PRIVATE KEY-----)/)
-    if (!certMatch || !keyMatch) return null
-
-    return { cert: certMatch[1], key: keyMatch[1] }
-  } catch {
-    return null
+    expect(keyResult.exitCode, keyResult.stderr.toString()).toBe(0)
+    return {
+      cert: readFileSync(resolve(outputDir, 'cert.pem'), 'utf8'),
+      key: readFileSync(resolve(outputDir, 'key.pem'), 'utf8'),
+    }
+  } finally {
+    rmSync(outputDir, { recursive: true, force: true })
   }
+}
+
+function hasTlsTooling(): boolean {
+  return Bun.spawnSync({ cmd: ['openssl', 'version'], stdout: 'ignore', stderr: 'ignore' }).exitCode === 0
+    && Bun.spawnSync({ cmd: ['sh', '-c', 'exit 0'], stdout: 'ignore', stderr: 'ignore' }).exitCode === 0
 }

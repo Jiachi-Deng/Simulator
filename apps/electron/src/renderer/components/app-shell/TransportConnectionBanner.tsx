@@ -72,8 +72,7 @@ function getFailureReason(state: TransportConnectionState): string {
   }
 
   if (state.lastClose?.code != null) {
-    const reason = state.lastClose.reason ? i18n.t('transport.wsClosedReason', { reason: state.lastClose.reason }) : ''
-    return i18n.t('transport.wsClosedWithCode', { code: state.lastClose.code, reason })
+    return i18n.t('transport.wsClosedWithCode', { code: state.lastClose.code, reason: '' })
   }
 
   return i18n.t('transport.waitingForConnection')

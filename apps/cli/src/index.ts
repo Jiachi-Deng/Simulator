@@ -7,6 +7,7 @@
  * messages with real-time streaming, and validating server health.
  */
 
+import { readFileSync } from 'node:fs'
 import { resolve } from 'path'
 import { CliRpcClient } from './client.ts'
 
@@ -726,6 +727,7 @@ async function cmdValidate(args: CliArgs): Promise<void> {
       token: args.token || undefined,
       requestTimeout: validateArgs.timeout,
       connectTimeout: validateArgs.timeout,
+      tlsCa: args.tlsCa ? readFileSync(args.tlsCa, 'utf8') : undefined,
     })
   } else {
     server = await spawnLocalServer(validateArgs, { quiet: !args.verbose })
@@ -1961,11 +1963,6 @@ Examples:
 export async function main(argv: string[] = process.argv): Promise<void> {
   const args = parseArgs(argv)
 
-  // Set custom CA before any WS connections
-  if (args.tlsCa) {
-    process.env.NODE_EXTRA_CA_CERTS = args.tlsCa
-  }
-
   if (args.command === 'help' || args.command === '') {
     printHelp()
     return
@@ -2000,6 +1997,7 @@ export async function main(argv: string[] = process.argv): Promise<void> {
     workspaceId: args.workspace,
     requestTimeout: args.timeout,
     connectTimeout: args.timeout,
+    tlsCa: args.tlsCa ? readFileSync(args.tlsCa, 'utf8') : undefined,
   })
 
   try {

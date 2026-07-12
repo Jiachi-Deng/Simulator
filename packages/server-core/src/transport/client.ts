@@ -19,6 +19,8 @@ import {
 } from '@craft-agent/shared/protocol'
 import type { RpcClient } from './types'
 import { serializeEnvelope, deserializeEnvelope } from './codec'
+import { evaluateWebSocketUrl } from './websocket-url-policy'
+import { redactSecret } from './secret-redaction'
 
 // ---------------------------------------------------------------------------
 // Pending request state
@@ -60,7 +62,6 @@ export interface TransportConnectionError {
 
 export interface TransportCloseInfo {
   code?: number
-  reason?: string
   wasClean?: boolean
 }
 
@@ -98,8 +99,6 @@ export interface WsRpcClientOptions {
   clientCapabilities?: string[]
   /** Runtime mode — local embedded or remote thin-client connection. */
   mode?: TransportMode
-  /** Accept self-signed TLS certificates for wss:// connections. Default: false. Only works in Node.js (main process). */
-  tlsRejectUnauthorized?: boolean
 }
 
 // ---------------------------------------------------------------------------
@@ -137,6 +136,7 @@ export class WsRpcClient implements RpcClient {
   private serverChannels: Set<string> | null = null
 
   private readonly url: string
+  private readonly stateUrl: string
   private readonly workspaceId: string | undefined
   private readonly webContentsId: number | undefined
   private readonly token: string | undefined
@@ -146,25 +146,26 @@ export class WsRpcClient implements RpcClient {
   private readonly autoReconnect: boolean
   private readonly connectTimeout: number
   private readonly mode: TransportMode
-  private readonly tlsRejectUnauthorized: boolean
+  private readonly urlPolicy: ReturnType<typeof evaluateWebSocketUrl>
 
   constructor(url: string, opts?: WsRpcClientOptions) {
     this.url = url
+    this.urlPolicy = evaluateWebSocketUrl(url)
     this.workspaceId = opts?.workspaceId
     this.webContentsId = opts?.webContentsId
     this.token = opts?.token
+    this.stateUrl = redactSecret(this.urlPolicy.diagnosticUrl, this.token)
     this.clientCapabilities = opts?.clientCapabilities ?? []
     this.requestTimeout = opts?.requestTimeout ?? REQUEST_TIMEOUT_MS
     this.maxReconnectDelay = opts?.maxReconnectDelay ?? 30_000
     this.autoReconnect = opts?.autoReconnect ?? true
     this.connectTimeout = opts?.connectTimeout ?? 10_000
     this.mode = opts?.mode ?? this.inferMode(url)
-    this.tlsRejectUnauthorized = opts?.tlsRejectUnauthorized ?? true
 
     this.connectionState = {
       mode: this.mode,
       status: 'idle',
-      url: this.url,
+      url: this.stateUrl,
       attempt: 0,
       updatedAt: Date.now(),
     }
@@ -322,26 +323,8 @@ export class WsRpcClient implements RpcClient {
   // Connection lifecycle
   // -------------------------------------------------------------------------
 
-  /**
-   * Create a WebSocket instance. In Node.js (main process), uses the `ws` library
-   * to support TLS options (e.g. rejectUnauthorized for self-signed certs).
-   * In the renderer (browser), falls back to the global WebSocket.
-   */
+  /** Create a WebSocket using the runtime's default TLS verification. */
   private createWebSocket(url: string): WebSocket {
-    const needsTlsOptions = url.startsWith('wss://') && !this.tlsRejectUnauthorized
-
-    if (needsTlsOptions && typeof process !== 'undefined' && process.versions?.node) {
-      // Node.js / Electron main process — use `ws` library for TLS options
-      try {
-        // eslint-disable-next-line @typescript-eslint/no-require-imports
-        const { WebSocket: WsWebSocket } = require('ws') as typeof import('ws')
-        return new WsWebSocket(url, { rejectUnauthorized: false }) as unknown as WebSocket
-      } catch {
-        // Fallback if ws not available
-        return new WebSocket(url)
-      }
-    }
-
     return new WebSocket(url)
   }
 
@@ -378,6 +361,18 @@ export class WsRpcClient implements RpcClient {
       try { oldWs.close() } catch { /* best effort */ }
     }
 
+    const policyError = this.getConnectionPolicyError()
+    if (policyError) {
+      this.connectError = policyError
+      this.setConnectionState({
+        status: 'failed',
+        lastError: this.toErrorState(policyError),
+        attempt: this.reconnectAttempt,
+      })
+      this.failReady(policyError)
+      return
+    }
+
     this.connectTimer = setTimeout(() => {
       if (!this.connected) {
         const err = this.createConnectionError('timeout', `Connection timeout after ${this.connectTimeout}ms`, 'HANDSHAKE_TIMEOUT')
@@ -392,7 +387,24 @@ export class WsRpcClient implements RpcClient {
       }
     }, this.connectTimeout)
 
-    const ws = this.createWebSocket(this.url)
+    let ws: WebSocket
+    try {
+      ws = this.createWebSocket(this.url)
+    } catch {
+      if (this.connectTimer) {
+        clearTimeout(this.connectTimer)
+        this.connectTimer = null
+      }
+      const err = this.createConnectionError('network', 'WebSocket connection setup failed', 'WS_CREATE_FAILED')
+      this.connectError = err
+      this.setConnectionState({
+        status: 'failed',
+        lastError: this.toErrorState(err),
+        attempt: this.reconnectAttempt,
+      })
+      this.failReady(err)
+      return
+    }
     this.ws = ws
 
     ws.onopen = () => {
@@ -435,7 +447,7 @@ export class WsRpcClient implements RpcClient {
           || ('error' in event && event.error?.message)
           || undefined
         const message = detail
-          ? `WebSocket error: ${detail}`
+          ? `WebSocket error: ${redactSecret(detail, this.token)}`
           : 'WebSocket error during connection setup'
         const err = this.createConnectionError('network', message, 'WS_ERROR')
         this.connectError = err
@@ -573,9 +585,8 @@ export class WsRpcClient implements RpcClient {
           this.pending.delete(envelope.id)
           clearTimeout(req.timeout)
           if (envelope.error) {
-            const err = new Error(envelope.error.message)
+            const err = new Error(redactSecret(envelope.error.message, this.token))
             ;(err as any).code = envelope.error.code
-            ;(err as any).data = envelope.error.data
             req.reject(err)
           } else {
             req.resolve(envelope.result)
@@ -728,7 +739,6 @@ export class WsRpcClient implements RpcClient {
     const closeInfo: TransportCloseInfo | undefined = closeEvent
       ? {
           code: Number.isFinite(closeEvent.code) ? closeEvent.code : undefined,
-          reason: closeEvent.reason || undefined,
           wasClean: closeEvent.wasClean,
         }
       : undefined
@@ -738,7 +748,7 @@ export class WsRpcClient implements RpcClient {
       if (closeKind !== 'unknown') {
         this.connectError = this.createConnectionError(
           closeKind,
-          closeInfo.reason || `Connection closed (${closeInfo.code})`,
+          `Connection closed (${closeInfo.code})`,
           `WS_CLOSE_${closeInfo.code}`,
         )
       }
@@ -907,10 +917,16 @@ export class WsRpcClient implements RpcClient {
   // -------------------------------------------------------------------------
 
   private inferMode(url: string): TransportMode {
-    if (url.startsWith('ws://127.0.0.1') || url.startsWith('ws://localhost')) {
-      return 'local'
-    }
+    const policy = evaluateWebSocketUrl(url)
+    if (!policy.error && policy.diagnosticUrl.startsWith('ws://') && policy.isLoopback) return 'local'
     return 'remote'
+  }
+
+  private getConnectionPolicyError(): Error | null {
+    const violation = this.urlPolicy.error
+    return violation
+      ? this.createConnectionError('protocol', violation.message, violation.code)
+      : null
   }
 
   private setConnectionState(
@@ -920,7 +936,7 @@ export class WsRpcClient implements RpcClient {
       ...this.connectionState,
       ...partial,
       mode: this.mode,
-      url: this.url,
+      url: this.stateUrl,
       updatedAt: Date.now(),
     }
 
@@ -935,7 +951,7 @@ export class WsRpcClient implements RpcClient {
   }
 
   private createConnectionError(kind: TransportConnectionErrorKind, message: string, code?: string): Error {
-    const err = new Error(message)
+    const err = new Error(redactSecret(message, this.token))
     ;(err as any).kind = kind
     if (code) (err as any).code = code
     return err
@@ -948,7 +964,7 @@ export class WsRpcClient implements RpcClient {
 
     return {
       kind,
-      message: err.message,
+      message: redactSecret(err.message, this.token),
       code,
     }
   }

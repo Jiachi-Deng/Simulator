@@ -111,6 +111,29 @@ if (tlsCertPath || tlsKeyPath) {
   }
 }
 
+// Fail before creating any listener when a standalone inbound bind would send
+// tokens over cleartext. The only exception is an explicit command-line opt-in.
+const rpcHost = process.env.CRAFT_RPC_HOST ?? '127.0.0.1'
+const isLocalBind = rpcHost === '127.0.0.1' || rpcHost === 'localhost' || rpcHost === '::1'
+if (!isLocalBind && !tls) {
+  if (process.argv.includes('--allow-insecure-bind')) {
+    console.warn(
+      '\n⚠️  WARNING: Server is configured for a network address without TLS.\n' +
+      '   Authentication tokens will be sent in cleartext.\n' +
+      '   Set CRAFT_RPC_TLS_CERT and CRAFT_RPC_TLS_KEY to enable wss://.\n'
+    )
+  } else {
+    console.error(
+      '\n❌  Refusing to bind to a network address without TLS.\n' +
+      '   Authentication tokens would be sent in cleartext.\n\n' +
+      '   Options:\n' +
+      '     1. Set CRAFT_RPC_TLS_CERT and CRAFT_RPC_TLS_KEY to enable wss://\n' +
+      '     2. Pass --allow-insecure-bind to override (NOT recommended for production)\n'
+    )
+    process.exit(1)
+  }
+}
+
 // Web UI configuration
 const webuiDir = process.env.CRAFT_WEBUI_DIR || undefined
 const webuiEnabled = webuiDir && existsSync(webuiDir)
@@ -315,29 +338,6 @@ console.log(`CRAFT_SERVER_URL=${instance.protocol}://${instance.host}:${instance
 console.log(`CRAFT_SERVER_TOKEN=${instance.token}`)
 if (webuiHandler) {
   console.log(`CRAFT_WEBUI_URL=${serverProto}://0.0.0.0:${instance.port}`)
-}
-
-// Block binding to a non-localhost address without TLS — tokens would be sent in cleartext.
-// Override with --allow-insecure-bind for explicitly trusted networks.
-const isLocalBind = instance.host === '127.0.0.1' || instance.host === 'localhost' || instance.host === '::1'
-if (!isLocalBind && instance.protocol === 'ws') {
-  if (process.argv.includes('--allow-insecure-bind')) {
-    console.warn(
-      '\n⚠️  WARNING: Server is listening on a network address without TLS.\n' +
-      '   Authentication tokens will be sent in cleartext.\n' +
-      '   Set CRAFT_RPC_TLS_CERT and CRAFT_RPC_TLS_KEY to enable wss://.\n'
-    )
-  } else {
-    console.error(
-      '\n❌  Refusing to bind to a network address without TLS.\n' +
-      '   Authentication tokens would be sent in cleartext.\n\n' +
-      '   Options:\n' +
-      '     1. Set CRAFT_RPC_TLS_CERT and CRAFT_RPC_TLS_KEY to enable wss://\n' +
-      '     2. Pass --allow-insecure-bind to override (NOT recommended for production)\n'
-    )
-    await instance.stop()
-    process.exit(1)
-  }
 }
 
 const shutdown = async () => {

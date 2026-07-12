@@ -12,6 +12,8 @@ import {
 import {
   serializeEnvelope,
   deserializeEnvelope,
+  evaluateWebSocketUrl,
+  redactSecret,
 } from '@craft-agent/server-core/transport'
 
 // ---------------------------------------------------------------------------
@@ -29,6 +31,8 @@ export interface CliClientOptions {
   workspaceId?: string
   requestTimeout?: number
   connectTimeout?: number
+  /** PEM-encoded CA certificate trusted for this client only. */
+  tlsCa?: string
 }
 
 // ---------------------------------------------------------------------------
@@ -48,6 +52,7 @@ export class CliRpcClient {
   private readonly workspaceId: string | undefined
   private readonly requestTimeout: number
   private readonly connectTimeout: number
+  private readonly tlsCa: string | undefined
 
   constructor(url: string, opts?: CliClientOptions) {
     this.url = url
@@ -55,11 +60,19 @@ export class CliRpcClient {
     this.workspaceId = opts?.workspaceId
     this.requestTimeout = opts?.requestTimeout ?? 10_000
     this.connectTimeout = opts?.connectTimeout ?? 10_000
+    this.tlsCa = opts?.tlsCa
   }
 
   /** Connect to the server and complete the handshake. Returns the assigned clientId. */
   async connect(): Promise<string> {
     if (this._destroyed) throw new Error('Client destroyed')
+
+    const policy = evaluateWebSocketUrl(this.url)
+    if (policy.error) {
+      const error = new Error(policy.error.message)
+      ;(error as Error & { code?: string }).code = policy.error.code
+      throw error
+    }
 
     return new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -67,7 +80,7 @@ export class CliRpcClient {
         this.ws?.close()
       }, this.connectTimeout)
 
-      this.ws = new WebSocket(this.url)
+      this.ws = new WebSocket(this.url, this.tlsCa ? { tls: { ca: this.tlsCa } } : undefined)
 
       this.ws.onopen = () => {
         const handshake: MessageEnvelope = {
@@ -100,7 +113,7 @@ export class CliRpcClient {
           resolve(this._clientId!)
         } else if (envelope.type === 'error') {
           clearTimeout(timer)
-          const err = new Error(envelope.error?.message ?? 'Connection rejected')
+          const err = new Error(redactSecret(envelope.error?.message ?? 'Connection rejected', this.token))
           ;(err as any).code = envelope.error?.code
           reject(err)
         }
@@ -208,9 +221,8 @@ export class CliRpcClient {
           this.pending.delete(envelope.id)
           clearTimeout(req.timeout)
           if (envelope.error) {
-            const err = new Error(envelope.error.message)
+            const err = new Error(redactSecret(envelope.error.message, this.token))
             ;(err as any).code = envelope.error.code
-            ;(err as any).data = envelope.error.data
             req.reject(err)
           } else {
             req.resolve(envelope.result)

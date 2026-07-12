@@ -66,17 +66,6 @@ if (isClientOnly) {
   const wsUrl = process.env.CRAFT_SERVER_URL!
   const wsToken = process.env.CRAFT_SERVER_TOKEN ?? ''
 
-  // Block unencrypted ws:// to non-localhost servers — tokens would be sent in cleartext
-  const parsed = new URL(wsUrl)
-  const isLocalhost = parsed.hostname === 'localhost' || parsed.hostname === '127.0.0.1' || parsed.hostname === '::1'
-  if (parsed.protocol === 'ws:' && !isLocalhost) {
-    throw new Error(
-      `Refusing to connect to remote server over unencrypted ws://. ` +
-      `Use wss:// (TLS) for non-localhost connections. ` +
-      `Set CRAFT_RPC_TLS_CERT/KEY on the server to enable TLS.`
-    )
-  }
-
   // Workspace ID is optional — if missing, renderer shows a workspace picker
   const workspaceId = process.env.CRAFT_WORKSPACE_ID || ipcRenderer.sendSync('__get-workspace-id') || undefined
 
@@ -122,7 +111,6 @@ if (isClientOnly) {
       autoReconnect: true,
       mode: 'remote',
       clientCapabilities: [...LOCAL_CLIENT_CAPABILITIES],
-      tlsRejectUnauthorized: false,
     })
     initialWorkspaceClient.connect()
   } else {
@@ -146,7 +134,6 @@ if (isClientOnly) {
       autoReconnect: true,
       mode: 'remote',
       clientCapabilities: [...LOCAL_CLIENT_CAPABILITIES],
-      tlsRejectUnauthorized: false,
     })
   })
 
@@ -205,8 +192,7 @@ function formatTransportReason(state: TransportConnectionState): string {
   }
 
   if (state.lastClose?.code != null) {
-    const reason = state.lastClose.reason ? ` (${state.lastClose.reason})` : ''
-    return `close ${state.lastClose.code}${reason}`
+    return `close ${state.lastClose.code}`
   }
 
   return 'no additional details'

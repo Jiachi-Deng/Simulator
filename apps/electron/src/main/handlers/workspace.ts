@@ -24,7 +24,6 @@ export async function connectToRemote(url: string, token: string, workspaceId?: 
     token,
     workspaceId,
     autoReconnect: false,
-    tlsRejectUnauthorized: false,
   })
 
   const connected = await new Promise<boolean>((resolve) => {

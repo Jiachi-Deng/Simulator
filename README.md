@@ -160,14 +160,18 @@ Craft Agents can run as a headless server on a remote machine (e.g., a Linux VPS
 From the monorepo root:
 
 ```bash
-# Generate a token and start the server
-CRAFT_SERVER_TOKEN=$(openssl rand -hex 32) bun run packages/server/src/index.ts
+# Remote servers require TLS. Use a trusted certificate or terminate TLS at a reverse proxy.
+CRAFT_SERVER_TOKEN=$(openssl rand -hex 32) \
+CRAFT_RPC_HOST=0.0.0.0 \
+CRAFT_RPC_TLS_CERT=/path/to/fullchain.pem \
+CRAFT_RPC_TLS_KEY=/path/to/privkey.pem \
+bun run packages/server/src/index.ts
 ```
 
 The server prints the connection details on startup:
 
 ```
-CRAFT_SERVER_URL=ws://203.0.113.5:9100
+CRAFT_SERVER_URL=wss://203.0.113.5:9100
 CRAFT_SERVER_TOKEN=<generated-token>
 ```
 
@@ -182,6 +186,7 @@ CRAFT_SERVER_URL=wss://203.0.113.5:9100 CRAFT_SERVER_TOKEN=<token> bun run elect
 ```
 
 In thin-client mode, the desktop app renders the UI but all session logic, tool execution, and LLM calls run on the remote server.
+Remote hosts must use `wss://`. Plain `ws://` is accepted only for loopback hosts (`localhost`, `127.0.0.1`, or `::1`).
 
 ### Environment Variables
 
@@ -195,16 +200,20 @@ In thin-client mode, the desktop app renders the UI but all session logic, tool 
 | `CRAFT_RPC_TLS_CA` | No | — | Path to PEM CA chain file (optional, for client cert verification) |
 | `CRAFT_DEBUG` | No | `false` | Enable debug logging |
 
-### TLS (Recommended for Remote Access)
+### TLS (Required for Remote Access)
 
-When exposing the server over the network, TLS encrypts the WebSocket connection (`wss://` instead of `ws://`).
+When exposing the server over the network, TLS encrypts the WebSocket connection (`wss://`). Plain `ws://` is restricted to loopback development connections.
 
 **Generate a self-signed certificate (development/testing):**
 
 ```bash
 ./scripts/generate-dev-cert.sh
-# Creates certs/cert.pem and certs/key.pem (valid 365 days)
+# Creates an RSA cert/key pair in certs/ (valid 365 days)
 ```
+
+The generated certificate contains SANs for `localhost`, `127.0.0.1`, and `::1`. It is intended only for loopback development; use a certificate matching the real DNS name for remote access.
+
+The desktop app uses standard certificate verification and rejects an untrusted self-signed certificate. Install the development certificate in the client system trust store for testing, or trust it for one CLI connection with `craft-cli --tls-ca certs/cert.pem`.
 
 **Start the server with TLS:**
 
@@ -227,17 +236,6 @@ docker run -d \
   -p 9100:9100 \
   -e CRAFT_SERVER_TOKEN=<token> \
   -e CRAFT_RPC_HOST=0.0.0.0 \
-  -v craft-data:/root/.craft-agent \
-  craft-agents-server
-```
-
-To enable TLS in Docker, mount your certificates and set the env vars:
-
-```bash
-docker run -d \
-  -p 9100:9100 \
-  -e CRAFT_SERVER_TOKEN=<token> \
-  -e CRAFT_RPC_HOST=0.0.0.0 \
   -e CRAFT_RPC_TLS_CERT=/certs/cert.pem \
   -e CRAFT_RPC_TLS_KEY=/certs/key.pem \
   -v ./certs:/certs:ro \
@@ -245,9 +243,11 @@ docker run -d \
   craft-agents-server
 ```
 
+The certificate must match the hostname clients use. A non-loopback Docker bind without TLS fails closed unless the container command explicitly passes `--allow-insecure-bind`; that opt-in is intended only for trusted development networks.
+
 ## CLI Client
 
-A terminal client that connects to a running Craft Agent server over WebSocket (`ws://` or `wss://`). Use it for scripting, CI/CD pipelines, server validation, or when you prefer the command line.
+A terminal client that connects to a running Craft Agent server over WebSocket. Use `wss://` for remote servers; `ws://` is only for loopback development connections. Use it for scripting, CI/CD pipelines, server validation, or when you prefer the command line.
 
 ### Installation
 
@@ -272,7 +272,7 @@ export CRAFT_SERVER_TOKEN=<your-token>
 craft-cli --url ws://127.0.0.1:9100 --token <token> ping
 ```
 
-For TLS connections (`wss://`), use `--tls-ca <path>` for self-signed certificates.
+For TLS connections (`wss://`), use `--tls-ca <path>` to trust a self-signed certificate for that CLI connection. This does not disable certificate or hostname verification.
 
 ### Commands
 
