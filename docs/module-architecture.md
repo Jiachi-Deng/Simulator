@@ -159,6 +159,36 @@ trusted key 由唯一 `keyId`、public key、`activeFrom`、可选 `activeUntil`
 catalog lifetime 最多 24 小时。当前时间必须位于 catalog issuance/expiry window，调用方可提供最多 5 分钟的 non-negative `clockSkewMs`；clock skew 不延迟 key revocation。options、trusted key entry、state 都按 unknown plain-data input 验证，null、accessor、proxy、sparse/oversized key set 返回结构化 diagnostic 而不执行 getter 或抛出异常。
 
 调用方必须原子持久化 `highestSequence` 和 `latestIssuedAt`；初始 state 为 `{ highestSequence: 0 }`，第一次成功后两者必须成对存在。sequence 小于或等于 high-water mark 时返回 `ROLLBACK_DETECTED`，`issuedAt` 未严格推进时返回 `BACKDATED_CATALOG`，因此 backdated catalog 不能用超高 sequence 污染 rollback state。package 自身不通过 filesystem 隐式持久化。所有失败均返回固定 `code`、阶段 `stage`、RFC 6901 风格 `path`、稳定 `message` 和适用时的 `keyId`。
+
+## Verified Catalog / Artifact Downloader
+
+`@simulator/module-downloader` 负责把不可信 HTTPS 响应转换成经过验证、可原子发布的 catalog 与 artifact cache 记录。package 依赖 `@simulator/module-release-trust`，但 network、clock 和 cache 都由调用方通过 adapter 注入；它不包含 installer、archive extraction、Electron、daemon、process、UI 或真实领域 Module。
+
+### Catalog Wire 与原子信任状态
+
+catalog endpoint 返回严格 JSON envelope，字段固定为 `schemaVersion`、`keyId`、canonical padded base64 `catalogBytes` 和 `signature`。下载器对完整响应设置 timeout 和 byte 上限，保存收到的 envelope 原字节，decode 后把原始 `catalogBytes` 与 signature 交给 `verifyModuleReleaseCatalog`。它不会 parse catalog 后重新序列化为另一组待验证 bytes。
+
+verified catalog、ETag、expiry 和 verifier 返回的 monotonic trust state 先作为完整 staged record 写入，再由 cache adapter 原子 publish。所有使用同一 backing store 的 adapter 实例必须共享 `catalog` lease；publish 还必须以先前 committed trust state 执行 CAS，使错误的 lease 实现也不能让 stale verifier result 覆盖更高 high-water mark。启动恢复会重新 decode 和验签 staged 原字节，并核对 staged expiry/trust metadata；只有完整匹配且 CAS 成功才 publish，损坏或不可信 stage 会被丢弃。若 crash 发生在 publish 后、stage 清理前，恢复通过 byte 与 trust-state equality 识别已提交事务并只清理 stage。
+
+`304 Not Modified` 仅在同一 catalog URL 存在重新验签成功且按注入 clock 尚未过期的 exact cached response 时接受。无 cache、cache 损坏、key 已失效或 catalog 已过期时，`304` fail closed。fresh `200` 必须通过当前 committed high-water mark 验证，防止 rollback/backdating。
+
+### HTTPS 与 Redirect Policy
+
+初始 catalog URL、artifact manifest URL、每个 fetch adapter 报告的最终 URL和每个 redirect target 都必须是 canonical HTTPS URL，且不能含 credentials 或 fragment。fetch adapter 必须使用 manual redirect；若 adapter 隐式跟随，下载器拒绝响应。redirect 仅允许保持初始 origin，限制 hop 数，跨 origin、降级协议或 malformed `Location` 均 fail closed。
+
+fetch response 明确携带 `dispose()` ownership contract。redirect intermediate response 由 redirect loop dispose；交给 catalog/artifact caller 的最终 response 无论正常完成、`304`、non-2xx、declared oversize、invalid Range、body error、timeout 或 cancellation，都在 `finally` 中 exactly-once dispose。body iterator 不需要自行响应 `AbortSignal`；下载器把每次 `next()` 与 timeout/cancel signal race，并把 iterator error 映射为 retryable `NETWORK_ERROR`、timeout 映射为 retryable `TIMEOUT`。
+
+### Artifact Streaming、Resume 与并发
+
+artifact 使用 verified catalog 中的 SHA-256 和平台 byte size作为发布条件。下载过程中逐 chunk 写 unique partial、检查累计 size、验证 `Content-Length`，完成后从 cache adapter 重新流式读取 partial 计算 SHA-256；size 与 hash 都匹配后才能原子 publish。hash mismatch 会删除 poisoned partial。
+
+续传是可选优化：只有 partial 的 URL、hash、expected size 全匹配并持有 strong ETag 时，才发送 `Range` 与 `If-Range`。服务端必须返回 `206`、精确 `Content-Range`、相同 strong ETag 和正确剩余 `Content-Length`；任一不匹配都会删除 partial，并按 retry policy 从 byte zero 重试。weak/no validator partial 不会续传。启动时按注入 clock 清理超过 age policy 的 stale partial。
+
+同一 downloader 实例内，相同 hash 的并发请求共享一个 flight；所有使用同一 backing store 的 downloader/cache adapter 实例还必须共享 `artifact:<sha256>` lease，因此第二实例等待后只读取第一个 winner，不会并发删除或发布同一 partial。artifact publish 是 compare-absent 原子操作，CAS loser 读取并校验 winner。URL 或 expected size 冲突不会在实例内合并。
+
+每个 caller 独立接收 progress 和 cancellation，pre-aborted request 在 initialization、flight、lease 和 fetch 前失败；只有最后一个 subscriber 取消才终止共享 transfer。progress 使用整个 flight 的 byte high-water mark，Range fallback 或 retry 从 byte zero 开始时不会倒退。retry 只处理 timeout、network、明确 retryable HTTP status 和可安全重启的 Range/size 中断，backoff 由注入 clock 执行。terminal failure 删除当前 partial；初始化与每次下载都按 age 和 per-artifact count 上限清理 partial，并在 artifact lease 内只保留 newest safe-resume candidate。
+
+测试用 `FilesystemModuleDownloaderCache` 使用 temp directory、atomic file/directory rename 和跨 adapter 实例 lease 模拟接近 filesystem 的事务语义；它只用于 adapter conformance，不是 production cache adapter。
 ## Deterministic Module Registry
 
 `@simulator/module-registry` 是可选 Module 的 runtime-neutral metadata source of truth。它依赖 `@simulator/module-contract` 和仓库已有的 `semver`，不依赖 filesystem、network、archive、process、Electron、React 或任何领域 Module。内置 Agent workspace 不读取该 registry，因此 optional-module state 为空、损坏或不兼容时不会阻塞 Agent。
@@ -197,3 +227,41 @@ previous committed -> stage complete next state -> publish committed -> clear st
 Registry mutation 先 copy-on-write 构造 next state，再交给 persistence commit；只有 commit 成功后才发布新的内存 state。测试 adapter 可以在 stage 后、publish 前 deterministic interrupt。重启时 registry 忽略 staged state，只恢复 previous committed snapshot，并报告 `RECOVERY_INTERRUPTED_COMMIT`。
 
 Persisted state schema、plain-data shape、manifest、Module identity、version uniqueness、host range 与 active/LKG references 会在恢复时重新验证。任一 corrupt/conflicting state 都 fail safe 为 empty optional-module registry，并只报告 `CORRUPT_PERSISTED_STATE`。`RegistryCrashRecoveryFixture` 同时持有独立且 immutable 的 built-in Agent availability state，用于证明 registry corruption 和 interrupted commit 不会传播到内置 Agent。
+
+## 第四切片：Electron Module View Transport
+
+`ModuleViewManager` 是 optional Module local frontend 与 Simulator host 之间的 Electron-only UI 边界。它使用 Electron 39 的 `WebContentsView`，不依赖或连接 Installer、Downloader、Daemon、Registry activation 或任何真实领域 Module。实现依据 Simulator Issue #64 的公开行为要求 clean-room 完成；设计和实现不读取、不引用、不复制 Proma 源码或 generated output。
+
+### View 与 Session Isolation
+
+每次首次 attach 都创建一个独立 `WebContentsView` 和唯一的非持久化 session partition；同一 view 的显式 recreate 复用该 partition，但 destroy 后重新 attach 不复用旧 handler、cookie 或 cache。view 强制使用最小 preload、`nodeIntegration: false`、`contextIsolation: true`、`sandbox: true`、`webSecurity: true` 和 `webviewTag: false`；packaged build 同时关闭 DevTools。session 对 permissions、device permissions、display capture 和 downloads 全部 fail closed。
+
+frontend URL 只能使用带显式 port 的 `127.0.0.1`、`[::1]` 或 `localhost` HTTP origin。`webRequest` 使用 `<all_urls>` 覆盖 HTTP、WebSocket 和其他 request scheme：HTTP 只允许完整 canonical origin，`ws:` 只允许相同 hostname 与显式 port；`wss:`、其他 host/port 和其他 scheme 默认拒绝。popup、离开 allowlist 的 main-frame redirect/navigation、subframe navigation 和 external resource request 均被拒绝，不转交 `shell.openExternal`。这条边界只允许 Module 自己的本地 frontend，不是通用 browser surface。
+
+manager 提供 attach、detach/reattach、resize、full-content rect、hide/show、send、destroy 和失效后的显式 recreate。renderer crash 或 preload failure 会在调用 host failure callback 前同步进入 quarantine：隐藏 view、设置 zero bounds、从 parent native view tree 移除并停止接受旧 sender IPC，因此旧 view 不再参与 hit testing；只有 `recreate()` 会创建 replacement 并按失效前 attach 状态恢复。manager 不自动重启 daemon 或激活其他 Module。
+
+### Narrow IPC Envelope
+
+专用 preload 只向页面暴露 frozen `window.simulatorModuleView`：固定 identity、transport version、`send(payload)` 和 `onMessage(listener)`。它不暴露 `ipcRenderer`、filesystem、process、shell、network credential 或通用 Electron API。
+
+双向 IPC envelope 固定为 version 1，并同时携带 direction、`moduleId` 和 `viewInstanceId`。identity 由 main process 通过 `additionalArguments` 绑定；main process 还把 envelope 与实际 live sender `webContents.id`、非 null main frame 和 manager record 交叉校验，preload 对 host-to-module envelope 再做反向校验，因此 destroyed sender、null sender frame、subframe 或伪造其他 view identity 都不能产生 cross-talk。
+
+payload 只允许 finite JSON-like plain data，并限制 envelope bytes、单字符串 bytes、depth、node count、array length、object key count 和 key bytes；unknown field、accessor、symbol、sparse/custom array、cycle、non-finite number 和 future version 一律拒绝。preload 在页面 listener 注册前最多缓存 16 条已验证 host message，超过上限即向 host 报告 failure。
+
+### Build 与 Smoke
+
+`module-view-preload.cjs` 是 Electron preload build 和 asset validation 的 required output，随 `dist/**/*` 进入 package。fake frontend fixture 只存在于测试目录，不进入 app package。
+
+源码 smoke：
+
+```bash
+cd apps/electron && bun run smoke:module-view
+```
+
+packaged macOS smoke：
+
+```bash
+cd apps/electron && bun scripts/module-view-smoke.ts --app release/mac-arm64/Simulator.app
+```
+
+smoke 启动临时 loopback HTTP/WebSocket server 和隐藏 host window，通过真实 preload 完成双实例 `ready -> smoke-ping -> smoke-pong`。它验证 cookie 与 Cache Storage partition isolation、同 host/port local WebSocket 可用、另一 port WebSocket 在到达 server 前被拒绝、renderer crash 后 host hit testing 恢复，以及只有显式 recreate 才重新 attach；同时确认进程按预期运行于 source 或 packaged mode。
