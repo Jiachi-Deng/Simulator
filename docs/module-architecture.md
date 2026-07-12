@@ -55,7 +55,39 @@ uninstalled -> installed -> running -> stopped -> running
 
 非法 transition 不改变 state 或 transition history。`health` 不改变状态，仅在 `running` 时返回 `healthy`。该 fixture 用于验证 contract 和后续 registry；它不是 production module runtime。
 
-## 第三切片：Module Release Trust
+## Filesystem Module Installer
+
+`@simulator/module-installer` 是 Issue #60 的 filesystem-only 安装边界。调用方提供已经建立信任的 `VerifiedArtifactDescriptor` 和本地 archive path；installer 会重新验证 descriptor 与 `ModuleManifest` 的一致性、compressed archive SHA-256 和 extracted manifest SHA-256。它不下载文件、不验证 catalog/signature、不启动进程，也不依赖 Electron、daemon、领域 Module 或 Proma。
+
+### Production archive format
+
+当前唯一 production 格式是 `tar.gz`。artifact URL 必须以 `.tar.gz` 结尾，本地文件必须有 gzip magic；zip、plain tar、brotli 和 zstd 均 fail closed。此限制是有意的，避免在第一版同时维护两套高风险 extraction surface。
+
+archive 必须只有一个名为 `module/` 的顶层目录，安装后的版本目录直接包含其内容。entry 只允许 regular file 和 directory；symlink、hardlink、device、FIFO、contiguous/sparse 等特殊类型全部拒绝。v1 path contract 刻意限制为与 Module entrypoint 相同的 safe ASCII segment grammar，即每段必须匹配 `[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?`。同时拒绝 absolute path、drive/UNC、反斜线、colon、control character、`.`/`..`、Windows device name、duplicate 和 ASCII case-fold collision。Unicode path 一律 fail closed，避免声称跨 filesystem/platform 提供并不存在的 full Unicode casefold 等价性。
+
+installer 先在 caller root 内建立唯一的 `0700` staging，并在任何 archive 工作前 durable 写入严格的 `ownership.json`；随后用 `O_NOFOLLOW` 打开本地 regular file，复制到 staging 并计算 archive hash。只有 hash 匹配后才流式预扫描 raw 512-byte tar headers，验证 checksum、canonical octal size 与双 zero-block 结束标记，并对所有 headers 执行统一总数限制。node-tar 识别的 `g/x/X/L/K/N` metadata payload 全部计入累计 byte limit，base-256 size fail closed。之后才运行两遍 `tar`：第一遍只读检查 metadata、entry count、单文件/总大小、depth、path 和 executable policy，第二遍提取到空 staging，并要求观察到完全相同的 entry metadata。raw pre-scan 与 `tar` 都提前执行 decompression-ratio 上限。落盘后再用 `lstat` 遍历全树，拒绝 link/special file，并逐文件计算 SHA-256。
+
+extracted manifest hash 的 canonical input 按 UTF-8 path byte order 全局排序，每条记录以 LF 结尾：
+
+```text
+D\t<JSON path>
+F\t<JSON path>\t<size>\t<executable 0|1>\t<lowercase sha256>
+```
+
+只有 manifest 声明的 entrypoint 可以带 executable bit；archive 中的 entrypoint 必须是带 owner execute bit 的 regular file。extract 后 directory 与 entrypoint mode 统一规范为 `0700`，其他 regular file 统一规范为 `0600`，随后用 `lstat` 与 `X_OK` 再次验证 entrypoint。默认限制为 128 MiB compressed archive、4096 raw headers、64 MiB 单文件、512 MiB extracted total、512 UTF-8 bytes path、32 层 depth、256 KiB metadata 和 200:1 decompression ratio，调用方只能用正的 safe integer 覆盖。
+
+### Activation and recovery
+
+每个 Module 使用不可变 `versions/<version>/` 目录和一个小型 `state.json`。staged payload 与 version 目录位于同一 caller root/filesystem，publish 使用 directory rename；active/LKG 切换使用同目录 temporary file fsync + rename。更新成功后，旧 active 成为 LKG；rollback 原子交换 active/LKG。uninstall 拒绝 active、LKG 和 authoritative usage lease 报告为 in-use 的版本；缺少 `ModuleUsageGuard` 时直接返回 `USAGE_GUARD_REQUIRED`。host/daemon 的 `runExclusive()` 必须阻止新 runtime reference，直到 usage check 与 version-to-trash rename 完成；installer 不接受调用方瞬时 `Set` 快照作为 authority。
+
+首次 journal publish 先写唯一 temporary file、`fsync` file，再以 `transaction.claim/` 的原子 directory create 取得排他发布权，随后 rename 为完整 `transaction.json` 并 `fsync` module directory。普通 write、ENOSPC 或 publish error 会清理 temporary、claim 与已发布 journal，不会留下永久 `BUSY`；claim 前的 crash temporary file 作为无权威 quarantine 保留且不阻塞重试。claim 后的 crash 只有在 host 确认 publisher 已停止后才可用 `recoverInterrupted()` 清除或继续。后续 crash recovery 先把完整 journal 原子 rename 为固定的 `transaction.recovering.json` 取得唯一恢复权，再根据 durable state 判断 rollback 未提交 publish，或完成已经提交的 activation。存在 pending journal 时普通操作返回 `BUSY`；host 启动时应先调用 `recoverAll()`，或针对已知 Module 调用 `recover()`。普通 recovery 看到 claim 或已有 recovering journal 也返回 `BUSY`；只有 host 已确认前一 owner 已停止时，才可显式调用 `recoverInterrupted()`。malformed journal 保留在 recovering 位置并 fail closed，不跟随 journal 中的任意 path。
+
+cancel 只在 state commit 前生效；失败或取消会恢复旧 active/LKG 并清理 staging。pre-journal crash 产生的 staging 没有 transaction journal authority：`recoverAll()` 在完成 journal recovery 后，只清理 UUID 与 ownership marker 严格匹配、marker 至少 24 小时、且对应 Module 不存在 journal/recovering journal/claim 的 stale staging。fresh、future-dated、malformed 或未知 entry 保持 quarantine；同实例 active mutation 会使 `recoverAll()` 返回 `BUSY`。该 bounded-age policy 不替代跨进程 locking，host 必须在停止该 root 的其他 installer owner 后于 startup 调用。state rename 一旦 durable，即视为成功提交，即使随后的 journal cleanup 被中断，recovery 也会保留新 active。
+
+### Archive dependency baseline
+
+实现复用仓库已有 `node-tar`，不调用 shell。2026-07-12 审计发现原 lockfile 的 `tar@7.5.2` 受 `GHSA-34x7-hfp2-rc4v`、`GHSA-8qq5-rm4j-mr97`、`GHSA-83g3-92jg-28cx`、`GHSA-qffp-2rhf-9h96`、`GHSA-9ppj-qmqm-q256`、`GHSA-vmf3-w455-68vh` 和 `GHSA-r6q2-hw4h-h46w` 影响，因此直接依赖与 lockfile 提升到 `tar@7.5.20`。installer 仍不把 library 默认防护当成唯一边界：双遍验证、禁 link、落盘复核和 limits 都由 package 自己执行。
+## Module Release Trust
 
 `@simulator/module-release-trust` 是 runtime-neutral 的 signed catalog 验证边界。它只使用调用方提供的 envelope、trusted public key set、当前时间和 monotonic sequence high-water mark；不包含 network、filesystem、downloader、Electron 或 process 能力，也不保存私钥、seed 或持久状态。
 
@@ -80,7 +112,7 @@ trusted key 由唯一 `keyId`、public key、`activeFrom`、可选 `activeUntil`
 catalog lifetime 最多 24 小时。当前时间必须位于 catalog issuance/expiry window，调用方可提供最多 5 分钟的 non-negative `clockSkewMs`；clock skew 不延迟 key revocation。options、trusted key entry、state 都按 unknown plain-data input 验证，null、accessor、proxy、sparse/oversized key set 返回结构化 diagnostic 而不执行 getter 或抛出异常。
 
 调用方必须原子持久化 `highestSequence` 和 `latestIssuedAt`；初始 state 为 `{ highestSequence: 0 }`，第一次成功后两者必须成对存在。sequence 小于或等于 high-water mark 时返回 `ROLLBACK_DETECTED`，`issuedAt` 未严格推进时返回 `BACKDATED_CATALOG`，因此 backdated catalog 不能用超高 sequence 污染 rollback state。package 自身不通过 filesystem 隐式持久化。所有失败均返回固定 `code`、阶段 `stage`、RFC 6901 风格 `path`、稳定 `message` 和适用时的 `keyId`。
-## 第二切片：Deterministic Module Registry
+## Deterministic Module Registry
 
 `@simulator/module-registry` 是可选 Module 的 runtime-neutral metadata source of truth。它依赖 `@simulator/module-contract` 和仓库已有的 `semver`，不依赖 filesystem、network、archive、process、Electron、React 或任何领域 Module。内置 Agent workspace 不读取该 registry，因此 optional-module state 为空、损坏或不兼容时不会阻塞 Agent。
 
