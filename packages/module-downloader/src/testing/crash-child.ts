@@ -8,7 +8,8 @@ if (!root || !mode) throw new Error('Expected root and crash mode')
 let armed = false
 const target = new Map<string, NodeCacheCheckpoint>([
   ['lease-owner', 'lease-owner-published'], ['lease-mkdir', 'lease-candidate-created'], ['lease-claim', 'lease-claim-published'],
-  ['lease-quarantine', 'lease-quarantined'], ['artifact', 'artifact-destination-created'],
+  ['lease-quarantine', 'lease-quarantined'], ['artifact-owner', 'artifact-owner-published'],
+  ['artifact-claim', 'artifact-claim-published'], ['artifact', 'artifact-destination-created'],
   ['partial-data', 'partial-data-created'], ['catalog-mid-write', 'catalog-generation-mid-write'],
   ['catalog-generation', 'catalog-generation-written'], ['catalog-rename', 'catalog-pointer-renamed'],
 ]).get(mode)
@@ -33,7 +34,7 @@ if (mode === 'lease-quarantine') {
 if (mode.startsWith('lease-')) {
   armed = true; await cache.acquireLease('catalog', new AbortController().signal
   )
-} else if (mode === 'artifact' || mode === 'partial-data') {
+} else if (mode.startsWith('artifact') || mode === 'partial-data') {
   const bytes = Buffer.from('crash artifact'); const sha256 = createHash('sha256').update(bytes).digest('hex')
   if (mode === 'partial-data') armed = true
   const partial = await cache.createPartial({ sha256, sourceUrl: 'https://example.test/a', expectedSize: bytes.length, updatedAt: 1 })

@@ -239,6 +239,30 @@ describe('production filesystem cache', () => {
     expect(await stat(staging).then(() => true, () => false)).toBe(false)
   })
 
+  it('bounds startup pruning of stale unreferenced artifact owners', async () => {
+    const directory = await root(); const initial = new NodeFilesystemModuleDownloaderCache(directory); await initial.readCatalog()
+    const owners = join(directory, 'artifacts', 'owners')
+    for (const token of ['00000000-0000-4000-8000-000000000001', '00000000-0000-4000-8000-000000000002']) {
+      await writeFile(join(owners, `${token}.json`), JSON.stringify({ token, pid: 999_999_999, processInstanceId: token, acquiredAt: 0 }))
+    }
+    const cache = new NodeFilesystemModuleDownloaderCache(directory, { staleLeaseMs: 1, maxStartupPrunes: 1, now: () => 10_000 })
+    await cache.readCatalog()
+    expect(await readdirNames(owners)).toHaveLength(1)
+  })
+
+  it('fails closed on artifact owner and claim leaf symlinks during startup', async () => {
+    for (const leaf of ['owner', 'claim']) {
+      const directory = await root(); const initial = new NodeFilesystemModuleDownloaderCache(directory); await initial.readCatalog()
+      const outside = join(await root(), 'outside'); await writeFile(outside, '{}')
+      const path = leaf === 'owner'
+        ? join(directory, 'artifacts', 'owners', '00000000-0000-4000-8000-000000000000.json')
+        : join(directory, 'artifacts', 'claims', `${'a'.repeat(64)}.claim`)
+      await symlink(outside, path)
+      await expect(new NodeFilesystemModuleDownloaderCache(directory).readCatalog()).rejects.toThrow(`Unsafe artifact ${leaf}`)
+      expect(await readFile(outside, 'utf8')).toBe('{}')
+    }
+  })
+
   it('recovers after real child termination at lease, artifact, and catalog protocol checkpoints', async () => {
     const fixture = join(import.meta.dir, 'testing', 'crash-child.ts')
     for (const mode of ['lease-owner', 'lease-mkdir', 'lease-claim', 'lease-quarantine']) {
@@ -246,11 +270,12 @@ describe('production filesystem cache', () => {
       await new Promise((resolve) => setTimeout(resolve, 5))
       const cache = new NodeFilesystemModuleDownloaderCache(directory, { staleLeaseMs: 1, leasePollMs: 5 }); const lease = await cache.acquireLease('catalog', new AbortController().signal); await lease.release()
     }
-    {
-      const directory = await root(); await killAtCheckpoint(fixture, directory, 'artifact'); await new Promise((resolve) => setTimeout(resolve, 5))
+    for (const mode of ['artifact-owner', 'artifact-claim', 'artifact']) {
+      const directory = await root(); await killAtCheckpoint(fixture, directory, mode); await new Promise((resolve) => setTimeout(resolve, 5))
       const cache = new NodeFilesystemModuleDownloaderCache(directory, { staleLeaseMs: 1, leasePollMs: 5 }); const bytes = Buffer.from('crash artifact'); const sha256 = createHash('sha256').update(bytes).digest('hex')
       const partial = await cache.createPartial({ sha256, sourceUrl: 'https://example.test/a', expectedSize: bytes.length, updatedAt: 4 }); await cache.appendPartial(partial.id, bytes, 5)
       expect(await cache.publishPartial(partial.id, { sha256, size: bytes.length, committedAt: 6 })).toBe('published')
+      expect(await readdirNames(join(directory, 'artifacts', 'owners'))).toEqual([])
     }
     {
       const directory = await root(); await killAtCheckpoint(fixture, directory, 'partial-data'); await new Promise((resolve) => setTimeout(resolve, 5))
@@ -266,6 +291,34 @@ describe('production filesystem cache', () => {
     for (const mode of ['catalog-generation', 'catalog-rename']) {
       const directory = await root(); await killAtCheckpoint(fixture, directory, mode)
       expect((await new NodeFilesystemModuleDownloaderCache(directory).readCatalog())?.trustState.highestSequence).toBe(2)
+    }
+  })
+
+  it('treats catalog generation hard-link EEXIST as success only for the same digest', async () => {
+    for (const sameDigest of [true, false]) {
+      const directory = await root(); let raced = false; const record = catalogRecord(1, 1)
+      const { responseBytes, ...rest } = record
+      const winnerBytes = Buffer.from(JSON.stringify({ ...rest, responseBytesBase64: Buffer.from(responseBytes).toString('base64') }))
+      const cache = new NodeFilesystemModuleDownloaderCache(directory, { faultInjector: async (point, path) => {
+        if (point !== 'rename' || !path.includes('/catalog/generations/') || raced) return
+        raced = true
+        await writeFile(path, sameDigest ? winnerBytes : Buffer.from('different winner'))
+      } })
+      await cache.stageCatalog(record)
+      if (sameDigest) expect(await cache.publishCatalog(undefined)).toBe(true)
+      else await expect(cache.publishCatalog(undefined)).rejects.toMatchObject({ code: 'EEXIST' })
+    }
+  })
+
+  it('does not accumulate artifact owner inodes on repeated already-present publication', async () => {
+    const directory = await root(); const cache = new NodeFilesystemModuleDownloaderCache(directory)
+    const bytes = Buffer.from('already present'); const sha256 = createHash('sha256').update(bytes).digest('hex'); const record = { sha256, size: bytes.length, committedAt: 3 }
+    const first = await cache.createPartial({ sha256, sourceUrl: 'https://example.test/a', expectedSize: bytes.length, updatedAt: 1 }); await cache.appendPartial(first.id, bytes, 2)
+    expect(await cache.publishPartial(first.id, record)).toBe('published')
+    for (let index = 0; index < 3; index += 1) {
+      const partial = await cache.createPartial({ sha256, sourceUrl: 'https://example.test/a', expectedSize: bytes.length, updatedAt: 4 + index }); await cache.appendPartial(partial.id, bytes, 5 + index)
+      expect(await cache.publishPartial(partial.id, record)).toBe('already-present')
+      expect(await readdirNames(join(directory, 'artifacts', 'owners'))).toEqual([])
     }
   })
 

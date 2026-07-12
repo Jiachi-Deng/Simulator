@@ -221,40 +221,48 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     await this.#ready; validateHash(artifact.sha256); await this.#assertSafeTree('artifacts')
     const partial = await this.#requiredPartial(id)
     if (partial.sha256 !== artifact.sha256 || partial.bytesWritten !== artifact.size || await hashFile(this.#partialData(id), this.root) !== artifact.sha256) throw new Error('Partial verification failed')
+    const existing = await this.readArtifact(artifact.sha256)
+    if (existing) { if (existing.size !== artifact.size) throw new Error('Artifact CAS winner differs'); await this.removePartial(id); return 'already-present' }
     const destination = join(this.root, 'artifacts', artifact.sha256); const owner = await this.#newOwner()
     const ownerPath = join(this.root, 'artifacts', 'owners', `${owner.token}.json`)
-    await this.#immutableJson(ownerPath, owner); await this.#checkpoint('artifact-owner-published', ownerPath)
     const claim = join(this.root, 'artifacts', 'claims', `${artifact.sha256}.claim`)
-    let waits = 0
-    while (true) {
-      try { await link(ownerPath, claim); await this.#syncDirectory(dirname(claim)); break }
-      catch (cause) {
-        if (!hasCode(cause, 'EEXIST')) throw cause
-        const winner = await this.readArtifact(artifact.sha256)
-        if (winner) { if (winner.size !== artifact.size) throw new Error('Artifact CAS winner differs'); await this.removePartial(id); return 'already-present' }
-        if (await this.#recoverArtifactClaim(claim, destination)) continue
-        if (waits++ >= this.#maxRecoveries) throw new Error('Artifact CAS claim belongs to a live or unverifiable owner')
-        await sleep(this.#pollMs, new AbortController().signal)
-      }
-    }
-    await this.#checkpoint('artifact-claim-published', claim)
-    let destinationCreated = false
+    let ownsClaim = false
+    await this.#immutableJson(ownerPath, owner)
     try {
-      try { await mkdir(destination, { mode: OWNER_MODE }); destinationCreated = true }
-      catch (cause) { if (hasCode(cause, 'EEXIST')) throw new Error('Artifact CAS destination exists after claim publication', { cause }); throw cause }
-      await this.#checkpoint('artifact-destination-created', destination)
-      await this.#immutableJson(join(destination, 'owner.json'), owner)
-      await copyVerified(this.#partialData(id), join(destination, 'artifact.bin'), this.root)
-      await this.#immutableJson(join(destination, 'record.json'), artifact)
-      await this.#immutableBytes(join(destination, 'committed'), Buffer.from(artifact.sha256))
-      const published = await this.readArtifact(artifact.sha256)
-      if (!published || published.size !== artifact.size) throw new Error('Artifact read-back verification failed')
-      await this.removePartial(id)
-      return 'published'
-    } catch (cause) {
-      if (destinationCreated && !await exists(join(destination, 'committed'))) await rm(destination, { recursive: true, force: true }).catch(() => undefined)
-      await this.#releaseArtifactClaim(claim, owner.token)
-      throw cause
+      await this.#checkpoint('artifact-owner-published', ownerPath)
+      let waits = 0
+      while (true) {
+        try { await link(ownerPath, claim); ownsClaim = true; await this.#syncDirectory(dirname(claim)); break }
+        catch (cause) {
+          if (!hasCode(cause, 'EEXIST')) throw cause
+          const winner = await this.readArtifact(artifact.sha256)
+          if (winner) { if (winner.size !== artifact.size) throw new Error('Artifact CAS winner differs'); await this.removePartial(id); return 'already-present' }
+          if (await this.#recoverArtifactClaim(claim, destination)) continue
+          if (waits++ >= this.#maxRecoveries) throw new Error('Artifact CAS claim belongs to a live or unverifiable owner')
+          await sleep(this.#pollMs, new AbortController().signal)
+        }
+      }
+      await this.#checkpoint('artifact-claim-published', claim)
+      let destinationCreated = false
+      try {
+        try { await mkdir(destination, { mode: OWNER_MODE }); destinationCreated = true }
+        catch (cause) { if (hasCode(cause, 'EEXIST')) throw new Error('Artifact CAS destination exists after claim publication', { cause }); throw cause }
+        await this.#checkpoint('artifact-destination-created', destination)
+        await this.#immutableJson(join(destination, 'owner.json'), owner)
+        await copyVerified(this.#partialData(id), join(destination, 'artifact.bin'), this.root)
+        await this.#immutableJson(join(destination, 'record.json'), artifact)
+        await this.#immutableBytes(join(destination, 'committed'), Buffer.from(artifact.sha256))
+        const published = await this.readArtifact(artifact.sha256)
+        if (!published || published.size !== artifact.size) throw new Error('Artifact read-back verification failed')
+        await this.removePartial(id)
+        return 'published'
+      } catch (cause) {
+        if (destinationCreated && !await exists(join(destination, 'committed'))) await rm(destination, { recursive: true, force: true }).catch(() => undefined)
+        throw cause
+      }
+    } finally {
+      if (ownsClaim) await this.#releaseArtifactClaim(claim, owner.token)
+      await safeRemoveFile(ownerPath, this.root)
     }
   }
 
@@ -360,6 +368,16 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     const claims = join(this.root, 'leases', 'claims')
     const bases = new Set((await directoryNames(claims)).map((name) => name.match(/^([a-f0-9]{64})\.(?:lock|recover-)/)?.[1]).filter((v): v is string => Boolean(v)))
     for (const name of bases) { if (!remaining--) return; await this.#reconcileLease(join(claims, name)) }
+    const artifactClaims = join(this.root, 'artifacts', 'claims')
+    for (const name of await directoryNames(artifactClaims)) {
+      if (!remaining) return
+      const match = name.match(/^([a-f0-9]{64})\.claim$/)
+      if (!match) continue
+      const claim = join(artifactClaims, name); const info = await lstat(claim)
+      if (!info.isFile() || info.isSymbolicLink()) throw new Error('Unsafe artifact claim')
+      const recovered = await this.#recoverArtifactClaim(claim, join(this.root, 'artifacts', match[1]!))
+      if (recovered || !await exists(claim)) remaining -= 1
+    }
     for (const name of await directoryNames(join(this.root, 'artifacts'))) {
       if (!remaining) return
       const path = join(this.root, 'artifacts', name)
@@ -372,6 +390,17 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
         const owner = await safeReadJson<OwnerRecord>(join(path, 'owner.json'), this.root).catch(() => undefined)
         if (owner && await this.#ownerRecordRecoverable(owner)) { await rm(path, { recursive: true, force: true }); remaining -= 1 }
       }
+    }
+    const artifactOwners = join(this.root, 'artifacts', 'owners')
+    for (const name of await directoryNames(artifactOwners)) {
+      if (!remaining) return
+      if (!/^([a-f0-9-]{36})\.json$/.test(name)) continue
+      const path = join(artifactOwners, name); const info = await lstat(path)
+      if (!info.isFile() || info.isSymbolicLink()) throw new Error('Unsafe artifact owner')
+      if (info.nlink > 1) continue
+      const owner = await safeReadJson<OwnerRecord>(path, this.root).catch(() => undefined)
+      const recoverable = owner ? await this.#ownerRecordRecoverable(owner) : this.#now() - info.mtimeMs > this.#staleMs
+      if (recoverable) { await safeRemoveFile(path, this.root); remaining -= 1 }
     }
     for (const id of (await directoryNames(join(this.root, 'partials'))).filter((name) => UUID.test(name))) {
       if (!remaining) return
