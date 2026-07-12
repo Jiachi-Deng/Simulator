@@ -27,6 +27,8 @@
 
 validator 不访问文件系统中的 artifact，也不跟随 symlink；若 inventory 声明 `type: "symlink"`，它只校验 `symlinkTarget` metadata 不逃逸 artifact root。实际打包器未来仍必须使用安全的文件遍历并禁止 TOCTOU/symlink 替换。
 
+所有输入会在运行时通过严格 schema，未知字段和未知 enum 会 fail closed。每个 inventory file 都有独立 `schemaVersion`、size 和 SHA-256。required legal/metadata 文件必须是正确 kind 的 regular file；provenance digest 绑定 canonical JSON 内容，manifest digest 则绑定“将 `artifact-manifest.json` 自身 `sha256` 置为 64 个 `0` 后”的 canonical inventory，避免自引用循环。SPDX SBOM 还必须绑定固定 media type、schema version 和 source commit。
+
 ## 本地验证
 
 ```sh
