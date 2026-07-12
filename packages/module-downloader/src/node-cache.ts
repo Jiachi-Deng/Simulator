@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
+import { execFile } from 'node:child_process'
 import { constants, createReadStream } from 'node:fs'
 import {
-  chmod, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, stat, writeFile,
+  chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm,
 } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { ModuleReleaseTrustState } from '@simulator/module-release-trust'
@@ -15,11 +16,13 @@ const FILE_MODE = 0o600
 const HASH = /^[a-f0-9]{64}$/
 const UUID = /^[a-f0-9-]{36}$/
 const TOP_LEVEL = ['catalog', 'artifacts', 'partials', 'leases'] as const
+const PROCESS_INSTANCE_ID = randomUUID()
 
 export type NodeCacheFaultPoint = 'temp-write' | 'file-sync' | 'rename' | 'directory-sync' | 'cleanup'
 export type NodeCacheCheckpoint =
   | 'lease-owner-published' | 'lease-candidate-created' | 'lease-claim-published' | 'lease-stale-observed' | 'lease-quarantined'
-  | 'artifact-destination-created' | 'catalog-generation-written' | 'catalog-pointer-renamed'
+  | 'artifact-owner-published' | 'artifact-claim-published' | 'artifact-destination-created'
+  | 'partial-data-created' | 'catalog-generation-mid-write' | 'catalog-generation-written' | 'catalog-pointer-renamed'
 
 export interface NodeFilesystemCacheOptions {
   readonly staleLeaseMs?: number
@@ -29,9 +32,10 @@ export interface NodeFilesystemCacheOptions {
   readonly now?: () => number
   readonly faultInjector?: (point: NodeCacheFaultPoint, path: string) => void | Promise<void>
   readonly checkpoint?: (point: NodeCacheCheckpoint, path: string) => void | Promise<void>
+  readonly processIdentity?: (pid: number) => Promise<string | undefined>
 }
 
-interface OwnerRecord { readonly token: string; readonly pid: number; readonly acquiredAt: number }
+interface OwnerRecord { readonly token: string; readonly pid: number; readonly processInstanceId: string; readonly processStartIdentity?: string; readonly acquiredAt: number }
 interface CatalogWire extends Omit<CachedCatalogRecord, 'responseBytes'> { readonly responseBytesBase64: string }
 interface CatalogTransaction { readonly id: string; readonly digest: string; readonly path: string }
 
@@ -45,6 +49,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   readonly #now: () => number
   readonly #fault?: NodeFilesystemCacheOptions['faultInjector']
   readonly #checkpointHook?: NodeFilesystemCacheOptions['checkpoint']
+  readonly #processIdentity: (pid: number) => Promise<string | undefined>
   readonly #ready: Promise<void>
   #stage?: CatalogTransaction
 
@@ -57,6 +62,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     this.#now = options.now ?? Date.now
     this.#fault = options.faultInjector
     this.#checkpointHook = options.checkpoint
+    this.#processIdentity = options.processIdentity ?? processStartIdentity
     this.#ready = this.#initialize(positive(options.maxStartupPrunes, 64, 'maxStartupPrunes'))
   }
 
@@ -69,7 +75,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
       if (signal.aborted) throw signal.reason
       const state = await this.#reconcileLease(base)
       if (state === 'blocked') { await sleep(this.#pollMs, signal); continue }
-      const owner: OwnerRecord = { token: randomUUID(), pid: process.pid, acquiredAt: this.#now() }
+      const owner = await this.#newOwner()
       const ownerPath = this.#leaseOwner(owner.token)
       await this.#immutableJson(ownerPath, owner)
       await this.#checkpoint('lease-owner-published', ownerPath)
@@ -133,10 +139,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
       const current = await this.#scanCatalogGenerations()
       if (!sameTrustState(current?.record.trustState, expectedState)) return false
       const generation = join(this.root, 'catalog', 'generations', `${String(staged.record.trustState.highestSequence).padStart(16, '0')}.${exact.digest}.json`)
-      try { await this.#immutableBytes(generation, staged.bytes) }
-      catch (cause) {
-        if (!hasCode(cause, 'EEXIST') || sha256(await safeReadFile(generation, this.root)) !== exact.digest) throw cause
-      }
+      await this.#publishGeneration(generation, staged.bytes, exact.digest)
       await this.#checkpoint('catalog-generation-written', generation)
       const pointer = join(this.root, 'catalog', 'current.json')
       await this.#atomicJson(pointer, { generation: generation.slice(dirname(generation).length + 1), digest: exact.digest }, 'catalog')
@@ -178,8 +181,9 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   async createPartial(record: Omit<ArtifactPartialRecord, 'id' | 'bytesWritten'>): Promise<ArtifactPartialRecord> {
     await this.#ready; validateHash(record.sha256); await this.#assertSafeTree('partials')
     const id = randomUUID(); const directory = this.#partialDirectory(id); const value = { ...record, id, bytesWritten: 0 }
-    await mkdir(directory, { mode: OWNER_MODE })
+    await mkdir(directory, { mode: OWNER_MODE }); await this.#immutableJson(join(directory, 'owner.json'), await this.#newOwner())
     await this.#immutableBytes(this.#partialData(id), new Uint8Array())
+    await this.#checkpoint('partial-data-created', directory)
     await this.#atomicJson(this.#partialRecord(id), value, 'partials')
     return value
   }
@@ -217,22 +221,27 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     await this.#ready; validateHash(artifact.sha256); await this.#assertSafeTree('artifacts')
     const partial = await this.#requiredPartial(id)
     if (partial.sha256 !== artifact.sha256 || partial.bytesWritten !== artifact.size || await hashFile(this.#partialData(id), this.root) !== artifact.sha256) throw new Error('Partial verification failed')
-    const destination = join(this.root, 'artifacts', artifact.sha256)
+    const destination = join(this.root, 'artifacts', artifact.sha256); const owner = await this.#newOwner()
+    const ownerPath = join(this.root, 'artifacts', 'owners', `${owner.token}.json`)
+    await this.#immutableJson(ownerPath, owner); await this.#checkpoint('artifact-owner-published', ownerPath)
+    const claim = join(this.root, 'artifacts', 'claims', `${artifact.sha256}.claim`)
     let waits = 0
     while (true) {
-      try { await mkdir(destination, { mode: OWNER_MODE }) }
+      try { await link(ownerPath, claim); await this.#syncDirectory(dirname(claim)); break }
       catch (cause) {
         if (!hasCode(cause, 'EEXIST')) throw cause
         const winner = await this.readArtifact(artifact.sha256)
         if (winner) { if (winner.size !== artifact.size) throw new Error('Artifact CAS winner differs'); await this.removePartial(id); return 'already-present' }
-        if (await this.#recoverIncompleteArtifact(destination)) continue
-        if (waits++ >= this.#maxRecoveries) throw new Error('Artifact CAS destination exists with a live or fresh incomplete owner')
-        await sleep(this.#pollMs, new AbortController().signal); continue
+        if (await this.#recoverArtifactClaim(claim, destination)) continue
+        if (waits++ >= this.#maxRecoveries) throw new Error('Artifact CAS claim belongs to a live or unverifiable owner')
+        await sleep(this.#pollMs, new AbortController().signal)
       }
-      break
     }
-    const owner: OwnerRecord = { token: randomUUID(), pid: process.pid, acquiredAt: this.#now() }
+    await this.#checkpoint('artifact-claim-published', claim)
+    let destinationCreated = false
     try {
+      try { await mkdir(destination, { mode: OWNER_MODE }); destinationCreated = true }
+      catch (cause) { if (hasCode(cause, 'EEXIST')) throw new Error('Artifact CAS destination exists after claim publication', { cause }); throw cause }
       await this.#checkpoint('artifact-destination-created', destination)
       await this.#immutableJson(join(destination, 'owner.json'), owner)
       await copyVerified(this.#partialData(id), join(destination, 'artifact.bin'), this.root)
@@ -243,7 +252,8 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
       await this.removePartial(id)
       return 'published'
     } catch (cause) {
-      if (!await exists(join(destination, 'committed'))) await rm(destination, { recursive: true, force: true }).catch(() => undefined)
+      if (destinationCreated && !await exists(join(destination, 'committed'))) await rm(destination, { recursive: true, force: true }).catch(() => undefined)
+      await this.#releaseArtifactClaim(claim, owner.token)
       throw cause
     }
   }
@@ -254,6 +264,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     for (const path of [
       join(this.root, 'catalog', 'staged'), join(this.root, 'catalog', 'generations'),
       join(this.root, 'leases', 'owners'), join(this.root, 'leases', 'claims'),
+      join(this.root, 'artifacts', 'owners'), join(this.root, 'artifacts', 'claims'),
     ]) await this.#ensureDirectory(path)
     await this.#recoverStartup(limit)
   }
@@ -297,7 +308,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   async #ownerDeadOrStale(token: string, fallback: string): Promise<boolean> {
     const owner = await safeReadJson<OwnerRecord>(this.#leaseOwner(token), this.root).catch(() => undefined)
     if (!owner) return this.#now() - (await lstat(fallback)).mtimeMs > this.#staleMs
-    return this.#now() - owner.acquiredAt > this.#staleMs && !isLivePid(owner.pid)
+    return this.#ownerRecordRecoverable(owner)
   }
   async #releaseOwner(base: string, token: string): Promise<void> {
     try { await this.#immutableBytes(this.#leaseReleased(token), Buffer.from(token)) } catch (cause) { if (!hasCode(cause, 'EEXIST')) throw cause }
@@ -313,24 +324,39 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   #leaseOwner(token: string): string { validateId(token); return join(this.root, 'leases', 'owners', `${token}.json`) }
   #leaseReleased(token: string): string { validateId(token); return join(this.root, 'leases', 'owners', `${token}.released`) }
 
-  async #recoverIncompleteArtifact(destination: string): Promise<boolean> {
-    const info = await lstat(destination)
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Unsafe artifact destination')
-    if (await exists(join(destination, 'committed'))) return false
-    const owner = await safeReadJson<OwnerRecord>(join(destination, 'owner.json'), this.root).catch(() => undefined)
-    if (owner && (this.#now() - owner.acquiredAt <= this.#staleMs || isLivePid(owner.pid))) return false
-    if (!owner && this.#now() - info.mtimeMs <= this.#staleMs) return false
-    const quarantine = `${destination}.recover-${randomUUID()}`
-    try { await this.#rename(destination, quarantine) } catch (cause) { if (hasCode(cause, 'ENOENT')) return true; throw cause }
-    if (await exists(join(quarantine, 'committed'))) {
-      if (!await exists(destination)) await this.#rename(quarantine, destination)
-      return false
+  async #recoverArtifactClaim(claim: string, destination: string): Promise<boolean> {
+    const owner = await safeReadJson<OwnerRecord>(claim, this.root).catch(() => undefined)
+    if (!owner || !await this.#ownerRecordRecoverable(owner)) return false
+    const quarantine = `${claim}.recover-${randomUUID()}`
+    try { await this.#rename(claim, quarantine) } catch (cause) { if (hasCode(cause, 'ENOENT')) return true; throw cause }
+    const moved = await safeReadJson<OwnerRecord>(quarantine, this.root).catch(() => undefined)
+    if (!moved || !await this.#ownerRecordRecoverable(moved)) { if (!await exists(claim)) await this.#rename(quarantine, claim); return false }
+    await safeRemoveFile(quarantine, this.root)
+    const info = await lstat(destination).catch(() => undefined)
+    if (info) {
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Unsafe artifact destination')
+      if (await exists(join(destination, 'committed'))) return false
+      await rm(destination, { recursive: true, force: true })
     }
-    await rm(quarantine, { recursive: true, force: true }); return true
+    return true
+  }
+  async #releaseArtifactClaim(claim: string, token: string): Promise<void> {
+    const owner = await safeReadJson<OwnerRecord>(claim, this.root).catch(() => undefined)
+    if (owner?.token !== token) return
+    const quarantine = `${claim}.released-${token}`
+    try { await this.#rename(claim, quarantine) } catch (cause) { if (hasCode(cause, 'ENOENT')) return; throw cause }
+    await safeRemoveFile(quarantine, this.root)
   }
 
   async #recoverStartup(limit: number): Promise<void> {
     let remaining = limit
+    for (const name of await directoryNames(join(this.root, 'catalog', 'generations'))) {
+      if (!remaining) return
+      if (!name.endsWith('.generation.tmp')) continue
+      const path = join(this.root, 'catalog', 'generations', name); const info = await lstat(path)
+      if (!info.isFile() || info.isSymbolicLink()) throw new Error('Unsafe catalog generation temp')
+      if (this.#now() - info.mtimeMs > this.#staleMs) { await safeRemoveFile(path, this.root); remaining -= 1 }
+    }
     const claims = join(this.root, 'leases', 'claims')
     const bases = new Set((await directoryNames(claims)).map((name) => name.match(/^([a-f0-9]{64})\.(?:lock|recover-)/)?.[1]).filter((v): v is string => Boolean(v)))
     for (const name of bases) { if (!remaining--) return; await this.#reconcileLease(join(claims, name)) }
@@ -342,7 +368,19 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
         else await rm(path, { recursive: true, force: true })
         remaining -= 1; continue
       }
-      if (HASH.test(name) && await this.#recoverIncompleteArtifact(path)) remaining -= 1
+      if (HASH.test(name) && !await exists(join(path, 'committed'))) {
+        const owner = await safeReadJson<OwnerRecord>(join(path, 'owner.json'), this.root).catch(() => undefined)
+        if (owner && await this.#ownerRecordRecoverable(owner)) { await rm(path, { recursive: true, force: true }); remaining -= 1 }
+      }
+    }
+    for (const id of (await directoryNames(join(this.root, 'partials'))).filter((name) => UUID.test(name))) {
+      if (!remaining) return
+      const directory = join(this.root, 'partials', id); const info = await lstat(directory)
+      if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Unsafe partial directory')
+      if (await exists(join(directory, 'record.json'))) continue
+      const owner = await safeReadJson<OwnerRecord>(join(directory, 'owner.json'), this.root).catch(() => undefined)
+      const recoverable = owner ? await this.#ownerRecordRecoverable(owner) : this.#now() - info.mtimeMs > this.#staleMs
+      if (recoverable) { const quarantine = `${directory}.recover-${randomUUID()}`; await this.#rename(directory, quarantine); await rm(quarantine, { recursive: true, force: true }); remaining -= 1 }
     }
   }
 
@@ -361,6 +399,34 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   }
   async #readTransaction(tx: CatalogTransaction): Promise<{ record: CachedCatalogRecord; bytes: Buffer } | undefined> {
     try { const bytes = await safeReadFile(tx.path, this.root); if (sha256(bytes) !== tx.digest) return undefined; const record = fromCatalogWire(JSON.parse(bytes.toString('utf8')) as CatalogWire); return record ? { record, bytes } : undefined } catch { return undefined }
+  }
+
+  async #publishGeneration(path: string, bytes: Buffer, digest: string): Promise<void> {
+    const temp = join(dirname(path), `.${randomUUID()}.generation.tmp`)
+    await this.#faultAt('temp-write', temp)
+    const handle = await open(temp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, FILE_MODE)
+    try {
+      const midpoint = Math.max(1, Math.floor(bytes.byteLength / 2)); await handle.write(bytes.subarray(0, midpoint))
+      await this.#checkpoint('catalog-generation-mid-write', temp)
+      await handle.write(bytes.subarray(midpoint)); await this.#faultAt('file-sync', temp); await handle.sync()
+    } finally { await handle.close() }
+    try {
+      if (sha256(await safeReadFile(temp, this.root)) !== digest) throw new Error('Catalog generation temp verification failed')
+      try { await this.#faultAt('rename', path); await link(temp, path); await this.#syncDirectory(dirname(path)) }
+      catch (cause) { if (!hasCode(cause, 'EEXIST') || sha256(await safeReadFile(path, this.root)) !== digest) throw cause }
+    } finally { await safeRemoveFile(temp, this.root).catch(() => undefined); await this.#faultAt('cleanup', path) }
+  }
+
+  async #newOwner(): Promise<OwnerRecord> {
+    const processStartIdentity = await this.#processIdentity(process.pid)
+    return { token: randomUUID(), pid: process.pid, processInstanceId: PROCESS_INSTANCE_ID, ...(processStartIdentity ? { processStartIdentity } : {}), acquiredAt: this.#now() }
+  }
+  async #ownerRecordRecoverable(owner: OwnerRecord): Promise<boolean> {
+    if (this.#now() - owner.acquiredAt <= this.#staleMs) return false
+    if (!isLivePid(owner.pid)) return true
+    if (!owner.processStartIdentity) return false
+    const current = await this.#processIdentity(owner.pid)
+    return current !== undefined && current !== owner.processStartIdentity
   }
 
   #partialDirectory(id: string): string { validateId(id); return join(this.root, 'partials', id) }
@@ -423,3 +489,22 @@ async function hashFile(path: string, root: string): Promise<string> { const han
 async function claimToken(path: string, root: string): Promise<string | undefined> { const value = await safeReadJson<{ token?: string }>(join(path, 'claim.json'), root).catch(() => undefined); return value?.token && UUID.test(value.token) ? value.token : undefined }
 async function copyVerified(source: string, destination: string, root: string): Promise<void> { const input = await safeOpen(source, constants.O_RDONLY, root); const output = await open(destination, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, FILE_MODE); try { for await (const chunk of input.createReadStream({ autoClose: false })) await output.write(chunk as Buffer); await output.sync() } finally { await Promise.all([input.close(), output.close()]) } }
 function sleep(ms: number, signal: AbortSignal): Promise<void> { return new Promise((resolveSleep, reject) => { const timer = setTimeout(done, ms); const abort = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); reject(signal.reason) }; function done() { signal.removeEventListener('abort', abort); resolveSleep() } signal.addEventListener('abort', abort, { once: true }) }) }
+
+async function processStartIdentity(pid: number): Promise<string | undefined> {
+  try {
+    if (process.platform === 'linux') {
+      const stat = await readFile(`/proc/${pid}/stat`, 'utf8'); const end = stat.lastIndexOf(')'); const fields = stat.slice(end + 2).split(' ')
+      return fields[19] ? `linux:${fields[19]}` : undefined
+    }
+    if (process.platform === 'win32') {
+      const output = await execFileOutput('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid}).StartTime.ToUniversalTime().Ticks`])
+      return output ? `windows:${output}` : undefined
+    }
+    const output = await execFileOutput('ps', ['-o', 'lstart=', '-p', String(pid)])
+    return output ? `${process.platform}:${output}` : undefined
+  } catch { return undefined }
+}
+
+function execFileOutput(file: string, args: string[]): Promise<string> {
+  return new Promise((resolveOutput, reject) => execFile(file, args, { encoding: 'utf8' }, (error, stdout) => error ? reject(error) : resolveOutput(stdout.trim())))
+}
