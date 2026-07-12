@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simulator.local/schemas/open-design-resource-decisions.schema.json",
+  "title": "OpenDesign artifact resource decisions",
+  "type": "object",
+  "required": ["schemaVersion", "decisions"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "decisions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "category", "sourcePath", "status", "rightsStatus", "reason"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "category": {"enum": ["templates", "fonts", "images", "plugins", "skills", "native-binaries"]},
+          "sourcePath": {"type": "string", "minLength": 1},
+          "status": {"enum": ["include", "exclude", "review"]},
+          "rightsStatus": {"enum": ["cleared", "pending", "unknown", "not-applicable"]},
+          "license": {"type": ["string", "null"]},
+          "reason": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,58 @@
+{
+  "schemaVersion": 1,
+  "profile": "next-standalone-plus-daemon-runtime",
+  "description": "Minimum headless OpenDesign profile. It deliberately excludes the upstream Electron desktop and packaged applications.",
+  "allowedPathPrefixes": [
+    "web/standalone/",
+    "web/static/",
+    "web/public/",
+    "runtime/daemon/",
+    "runtime/packages/",
+    "legal/"
+  ],
+  "allowedExactPaths": [
+    "artifact-manifest.json",
+    "provenance.json"
+  ],
+  "requiredFiles": [
+    "legal/LICENSE",
+    "legal/SBOM.spdx.json",
+    "provenance.json",
+    "artifact-manifest.json"
+  ],
+  "forbiddenPathSegments": [
+    ".git",
+    ".next/cache",
+    ".pnpm-store",
+    "coverage",
+    "test",
+    "tests",
+    "__tests__",
+    "installer",
+    "installers",
+    "updater",
+    "updaters",
+    "electron",
+    "electron-winstaller"
+  ],
+  "forbiddenBasenamePatterns": [
+    "*.test.*",
+    "*.spec.*",
+    "electron-builder.*"
+  ],
+  "allowedDependencyScopes": ["production", "artifact"],
+  "resourceCategories": [
+    "templates",
+    "fonts",
+    "images",
+    "plugins",
+    "skills",
+    "native-binaries"
+  ],
+  "resourceExtensions": {
+    "fonts": [".woff", ".woff2", ".ttf", ".otf"],
+    "images": [".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg"]
+  },
+  "nativeBinaryExtensions": [".node", ".so", ".dylib", ".dll", ".exe"],
+  "requiredNativeAbiFields": ["platform", "arch", "nodeAbi", "libc"]
+}

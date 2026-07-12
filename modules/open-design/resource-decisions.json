@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "policy": "Unknown or unreviewed rights are excluded from the artifact until a decision is explicitly changed to include with rightsStatus=cleared.",
+  "decisions": [
+    {"id": "templates-upstream", "category": "templates", "sourcePath": "design-templates/**", "status": "review", "rightsStatus": "pending", "license": null, "reason": "Each template has independent content and license material; no blanket inclusion decision."},
+    {"id": "fonts-upstream", "category": "fonts", "sourcePath": "**/*.{woff,woff2,ttf,otf}", "status": "review", "rightsStatus": "unknown", "license": null, "reason": "Font embedding and redistribution rights have not been inventoried."},
+    {"id": "images-upstream", "category": "images", "sourcePath": "**/*.{png,jpg,jpeg,gif,webp,avif,svg}", "status": "review", "rightsStatus": "unknown", "license": null, "reason": "Image authorship and redistribution rights require per-resource review."},
+    {"id": "plugins-upstream", "category": "plugins", "sourcePath": "plugins/**", "status": "exclude", "rightsStatus": "pending", "license": null, "reason": "Plugins are outside the minimum profile and may carry independent dependencies or licenses."},
+    {"id": "skills-upstream", "category": "skills", "sourcePath": "skills/**", "status": "exclude", "rightsStatus": "pending", "license": null, "reason": "Skills are outside the minimum profile and have per-skill license files."},
+    {"id": "native-runtime", "category": "native-binaries", "sourcePath": "runtime/**/*.{node,so,dylib,dll,exe}", "status": "review", "rightsStatus": "pending", "license": null, "reason": "Native runtime outputs require dependency license review plus exact ABI declarations."}
+  ]
+}
