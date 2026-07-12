@@ -63,6 +63,20 @@ function noteContentLines(content: string): string[] {
     .filter((line) => line && !line.startsWith("<!--"))
 }
 
+function hasExactVersionHeading(content: string, version: string): boolean {
+  const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+  const token = new RegExp(`(^|[^0-9A-Za-z.-])${escaped}($|[^0-9A-Za-z.-])`)
+  return content.split(/\r?\n/).some((line) => /^#{1,6}\s+\S/.test(line) && token.test(line))
+}
+
+function validReleaseNoteBullets(content: string): string[] {
+  return content
+    .split(/\r?\n/)
+    .map((line) => line.match(/^\s*(?:[-+*]|\d+\.)\s+(.+?)\s*$/)?.[1] ?? "")
+    .filter((text) => /[\p{L}\p{N}]/u.test(text))
+    .filter((text) => !/^This file accumulates release notes/i.test(text))
+}
+
 function nextNotePayload(content: string): string[] {
   return noteContentLines(content).filter(
     (line) => !RELEASE_NOTE_TEMPLATE_LINES.has(line) && !line.startsWith("This file accumulates "),
@@ -98,11 +112,12 @@ export function validateEngineeringRc(input: ValidationInput): ValidationResult 
   })
 
   const notePath = join(rootDir, "apps/electron/resources/release-notes", `${version}.md`)
-  const noteLines = existsSync(notePath) ? noteContentLines(readFileSync(notePath, "utf8")) : []
+  const noteContent = existsSync(notePath) ? readFileSync(notePath, "utf8") : ""
+  const noteBullets = validReleaseNoteBullets(noteContent)
   add({
     id: "release-note.versioned",
-    ok: noteLines.some((line) => !line.startsWith("#")),
-    message: "The versioned release note must exist and contain non-heading content.",
+    ok: hasExactVersionHeading(noteContent, version) && noteBullets.length > 0,
+    message: "The versioned release note must have a heading containing the exact version and at least one substantive Markdown bullet.",
   })
 
   const nextPath = join(rootDir, "apps/electron/resources/release-notes/next.md")

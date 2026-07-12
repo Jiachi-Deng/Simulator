@@ -16,7 +16,7 @@ function write(path: string, content: string): void {
 function fixture(): void {
   write("package.json", JSON.stringify({ name: "root", version }))
   write("apps/electron/package.json", JSON.stringify({ name: "desktop", version }))
-  write(`apps/electron/resources/release-notes/${version}.md`, "# Release\n\n- Shippable change.\n")
+  write(`apps/electron/resources/release-notes/${version}.md`, `# Simulator ${version}\n\n- Shippable change.\n`)
   write("apps/electron/resources/release-notes/next.md", "# Pending Release Notes\n\nThis file accumulates release notes for the next unreleased version.\n\n## Features\n\n## Improvements\n\n## Bug Fixes\n\n## Breaking Changes\n")
 }
 
@@ -57,6 +57,22 @@ describe("engineering RC contract", () => {
   test("rejects empty versioned notes", () => {
     fixture()
     write(`apps/electron/resources/release-notes/${version}.md`, "# Release\n")
+    expect(failedIds(validate())).toContain("release-note.versioned")
+  })
+
+  test("rejects a release note heading without the exact version", () => {
+    fixture()
+    write(`apps/electron/resources/release-notes/${version}.md`, "# Simulator 1.2.3-rc.40\n\n- Shippable change.\n")
+    expect(failedIds(validate())).toContain("release-note.versioned")
+  })
+
+  test.each([
+    `# Simulator ${version}\n\n---\n`,
+    `# Simulator ${version}\n\n- ---\n`,
+    `# Simulator ${version}\n\n- This file accumulates release notes for the next unreleased version.\n`,
+  ])("rejects separators or template prose as release note content", (content) => {
+    fixture()
+    write(`apps/electron/resources/release-notes/${version}.md`, content)
     expect(failedIds(validate())).toContain("release-note.versioned")
   })
 
