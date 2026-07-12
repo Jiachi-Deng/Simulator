@@ -200,6 +200,25 @@ describe('capability policy', () => {
     expect(bridge.snapshot().auditEvents).toHaveLength(2)
     expect(audit.events.length).toBeGreaterThan(2)
   })
+
+  test('rejects invalid bounds and isolates audit adapter failures', async () => {
+    const dependencies = {
+      clock: new FakeClock(), entropy: new FakeEntropy(), hasher: new FakeTokenHasher(), paths: new FakePathAuthority(),
+      approvals: new FakeApprovalResolver(),
+      forbiddenRoots: { filesystemRoot: '/', hostDataRoot: '/host', moduleDataRoot: '/module-data' },
+    }
+    expect(() => new ModuleHostBridge({ ...dependencies, audit: new FakeAuditSink(), limits: { maxAuditEvents: 0 } })).toThrow('positive integer')
+    const bridge = new ModuleHostBridge({
+      ...dependencies,
+      audit: { record: () => { throw new Error('audit unavailable') } },
+    })
+    const { token } = await bridge.grant({
+      descriptor: { kind: 'notification.send' }, moduleId: 'module-a', processId: 'process-a', workspaceRoot: '/work/a',
+      allowedMethods: ['notification.send'], expiresAt: 2_000, maxUses: 1, nonce: 'nonce',
+    })
+    expect((await bridge.handle(request(token))).ok).toBe(true)
+    expect(bridge.snapshot().auditEvents.length).toBe(2)
+  })
 })
 
 describe('approval state machine', () => {

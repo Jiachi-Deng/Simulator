@@ -71,6 +71,9 @@ export class ModuleHostBridge {
   constructor(dependencies: BridgeDependencies) {
     this.#deps = dependencies
     this.#limits = Object.freeze({ ...DEFAULT_LIMITS, ...dependencies.limits })
+    for (const [name, value] of Object.entries(this.#limits)) {
+      if (!Number.isSafeInteger(value) || value < 1) throw new ContractValidationError(`Limit ${name} must be a positive integer`)
+    }
   }
 
   grant(input: CapabilityGrantRequest): Promise<CapabilityGrant> {
@@ -394,7 +397,11 @@ export class ModuleHostBridge {
     }
     if (this.#auditEvents.length >= this.#limits.maxAuditEvents) this.#auditEvents.shift()
     this.#auditEvents.push(envelope)
-    await this.#deps.audit.record(structuredClone(envelope))
+    try {
+      await this.#deps.audit.record(structuredClone(envelope))
+    } catch {
+      // External audit forwarding cannot roll back an already committed policy transition.
+    }
   }
 
   #exclusive<T>(operation: () => T | Promise<T>): Promise<T> {
