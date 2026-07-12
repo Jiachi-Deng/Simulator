@@ -37,6 +37,7 @@
     "test:module-registry": "cd packages/module-registry && bun test",
     "typecheck:module-contract": "cd packages/module-contract && bun run typecheck",
     "test:module-daemon": "cd packages/module-daemon && bun test",
+    "test:module-daemon:windows-native": "cd packages/module-daemon && bun run test:windows-native",
     "typecheck:module-daemon": "cd packages/module-daemon && bun run typecheck",
     "build:module-daemon": "cd packages/module-daemon && bun run build",
     "test:module-release-trust": "cd packages/module-release-trust && bun test",

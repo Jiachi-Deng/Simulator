@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import type { ModuleProcess, ModuleSpawnRequest, ProcessExit, WindowsJobProcessFactory } from './types.ts'
 import { loopbackHealthUrl, RealProcessAdapter } from './real-adapters.ts'
-import { createWindowsEnvironmentBlock } from './windows-job.ts'
+import { createWindowsEnvironmentBlock } from './windows-environment.ts'
 
 class StubProcess implements ModuleProcess {
   readonly pid = 77

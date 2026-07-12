@@ -48,7 +48,7 @@ async function waitForExit(pid: number): Promise<void> {
   expect(processExists(pid)).toBe(false)
 }
 
-describe('real local module daemon fixture', () => {
+describe.skipIf(process.platform === 'win32')('real local module daemon fixture', () => {
   test('runs 20 start/stop cycles without parent or descendant orphans', async () => {
     const root = await mkdtemp(join(tmpdir(), 'simulator-daemon-real-'))
     roots.push(root)

@@ -1,11 +1,14 @@
 import koffi from 'koffi'
-import type { TypeObject } from 'koffi'
+import type { LibraryHandle, TypeObject } from 'koffi'
 import type {
   ModuleProcess,
   ModuleSpawnRequest,
   ProcessExit,
   WindowsJobProcessFactory,
 } from './types.ts'
+import { createWindowsEnvironmentBlock } from './windows-environment.ts'
+
+export { createWindowsEnvironmentBlock } from './windows-environment.ts'
 
 const CREATE_SUSPENDED = 0x0000_0004
 const CREATE_UNICODE_ENVIRONMENT = 0x0000_0400
@@ -18,6 +21,7 @@ const WAIT_TIMEOUT = 258
 const RESUME_THREAD_FAILED = 0xffff_ffff
 
 interface Win32Api {
+  readonly library: LibraryHandle
   readonly STARTUPINFO: TypeObject
   readonly EXTENDED_LIMIT_INFORMATION: TypeObject
   readonly BASIC_ACCOUNTING_INFORMATION: TypeObject
@@ -115,6 +119,7 @@ function createWin32Api(): Win32Api {
   })
 
   cachedWin32Api = {
+    library: kernel32,
     STARTUPINFO,
     EXTENDED_LIMIT_INFORMATION,
     BASIC_ACCOUNTING_INFORMATION,
@@ -148,13 +153,6 @@ function win32Error(api: Win32Api, operation: string): Error {
   return new Error(`${operation} failed with Win32 error ${api.GetLastError()}`)
 }
 
-export function createWindowsEnvironmentBlock(environment: Readonly<Record<string, string>>): Buffer {
-  const entries = Object.entries(environment)
-    .sort(([left], [right]) => left.localeCompare(right, 'en', { sensitivity: 'base' }))
-    .map(([key, value]) => `${key}=${value}`)
-  return Buffer.from(`${entries.join('\0')}\0\0`, 'utf16le')
-}
-
 class KoffiWindowsJobProcess implements ModuleProcess {
   readonly pid: number
   readonly exited: Promise<ProcessExit>
@@ -166,6 +164,7 @@ class KoffiWindowsJobProcess implements ModuleProcess {
     private readonly job: unknown,
     private readonly processHandle: unknown,
     pid: number,
+    private readonly onClose: (process: KoffiWindowsJobProcess) => void,
   ) {
     this.pid = pid
     this.exited = this.pollForExit()
@@ -220,13 +219,18 @@ class KoffiWindowsJobProcess implements ModuleProcess {
     this.closed = true
     this.api.CloseHandle(this.processHandle)
     this.api.CloseHandle(this.job)
+    this.onClose(this)
   }
 }
 
 export class KoffiWindowsJobProcessFactory implements WindowsJobProcessFactory {
   private readonly api = createWin32Api()
+  private readonly processes = new Set<KoffiWindowsJobProcess>()
+  private disposed = false
+  private disposing = false
 
   async spawn(request: ModuleSpawnRequest): Promise<ModuleProcess> {
+    if (this.disposed || this.disposing) throw new Error('Windows Job Object process factory is disposing or disposed')
     const job = this.api.CreateJobObjectW(null, null)
     if (!job) throw win32Error(this.api, 'CreateJobObjectW')
 
@@ -270,13 +274,36 @@ export class KoffiWindowsJobProcessFactory implements WindowsJobProcessFactory {
         throw win32Error(this.api, 'ResumeThread')
       }
       this.api.CloseHandle(processInfo.hThread)
-      return new KoffiWindowsJobProcess(this.api, job, processInfo.hProcess, processInfo.dwProcessId)
+      const moduleProcess = new KoffiWindowsJobProcess(
+        this.api,
+        job,
+        processInfo.hProcess,
+        processInfo.dwProcessId,
+        (closed) => this.processes.delete(closed),
+      )
+      this.processes.add(moduleProcess)
+      return moduleProcess
     } catch (error) {
       if (processInfo?.hProcess) this.api.TerminateProcess(processInfo.hProcess, 1)
       if (processInfo?.hThread) this.api.CloseHandle(processInfo.hThread)
       if (processInfo?.hProcess) this.api.CloseHandle(processInfo.hProcess)
       this.api.CloseHandle(job)
       throw error
+    }
+  }
+
+  async dispose(graceMs = 2_000): Promise<void> {
+    if (this.disposed) return
+    if (this.disposing) throw new Error('Windows Job Object process factory disposal is already in progress')
+    this.disposing = true
+    try {
+      await Promise.all([...this.processes].map((moduleProcess) => moduleProcess.stopTree(graceMs)))
+      if (this.processes.size !== 0) throw new Error('Windows Job Object handles remain active during factory disposal')
+      this.api.library.unload()
+      if (cachedWin32Api === this.api) cachedWin32Api = undefined
+      this.disposed = true
+    } finally {
+      this.disposing = false
     }
   }
 }
