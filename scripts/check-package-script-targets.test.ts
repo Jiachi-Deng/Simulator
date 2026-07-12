@@ -38,6 +38,22 @@ describe("package script target inventory", () => {
     ])
   })
 
+  test("skips runner options before script targets", () => {
+    expect(
+      directScriptTargets(
+        "bash -e scripts/missing.sh && node --enable-source-maps scripts/missing.js",
+      ),
+    ).toEqual(["scripts/missing.js", "scripts/missing.sh"])
+  })
+
+  test("recursively extracts sh -c commands without treating the command as a file", () => {
+    expect(
+      directScriptTargets(
+        "bash -c 'node --enable-source-maps scripts/nested.js' && sh -c 'bash -e scripts/nested.sh'",
+      ),
+    ).toEqual(["scripts/nested.js", "scripts/nested.sh"])
+  })
+
   test("does not accept a directory in place of a script file", () => {
     manifest(join(fixtureRoot, "package.json"), {
       name: "root",
@@ -68,6 +84,29 @@ describe("package script target inventory", () => {
         scriptName: "broken",
         target: "scripts/missing.sh",
       },
+    ])
+  })
+
+  test("reports missing targets behind runner options and shell -c", () => {
+    manifest(join(fixtureRoot, "package.json"), {
+      name: "root",
+      version: "1.0.0",
+      scripts: {
+        shell: "bash -e scripts/missing.sh",
+        node: "node --enable-source-maps scripts/missing.js",
+        nested: "bash -c 'node scripts/nested-missing.js'",
+      },
+    })
+    mkdirSync(join(fixtureRoot, "apps"), { recursive: true })
+    mkdirSync(join(fixtureRoot, "packages"), { recursive: true })
+
+    expect(findMissingScriptTargets(fixtureRoot).map(({ scriptName, target }) => ({
+      scriptName,
+      target,
+    }))).toEqual([
+      { scriptName: "nested", target: "scripts/nested-missing.js" },
+      { scriptName: "node", target: "scripts/missing.js" },
+      { scriptName: "shell", target: "scripts/missing.sh" },
     ])
   })
 })

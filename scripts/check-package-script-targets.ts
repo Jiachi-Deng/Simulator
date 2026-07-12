@@ -17,31 +17,117 @@ export interface MissingScriptTarget {
 
 const SCRIPT_EXTENSION = /\.(?:ts|js|mjs|cjs|sh|ps1)$/
 const SCRIPT_RUNNERS = new Set(["bun", "bash", "sh", "node"])
+const SHELL_OPTIONS_WITH_VALUE = new Set(["-o", "-O"])
+const NODE_OPTIONS_WITH_VALUE = new Set([
+  "--conditions",
+  "--diagnostic-dir",
+  "--disable-warning",
+  "--env-file",
+  "--env-file-if-exists",
+  "--eval",
+  "--experimental-loader",
+  "--heap-prof-dir",
+  "--icu-data-dir",
+  "--import",
+  "--input-type",
+  "--inspect-port",
+  "--loader",
+  "--openssl-config",
+  "--redirect-warnings",
+  "--require",
+  "--test-name-pattern",
+  "--test-reporter",
+  "--test-reporter-destination",
+  "--title",
+  "--trace-event-categories",
+  "--trace-event-file-pattern",
+  "-e",
+  "-p",
+  "-r",
+])
 
-export function directScriptTargets(command: string): string[] {
-  const targets = new Set<string>()
-  const tokens = parse(command, () => "").filter((token): token is string => typeof token === "string")
+function isScriptTarget(token: string | undefined): token is string {
+  return token !== undefined && SCRIPT_EXTENSION.test(token)
+}
 
+function addRunnerTarget(runner: string, args: string[], targets: Set<string>): void {
+  let index = 0
+
+  if (runner === "bun" && args[index] === "run") index += 1
+
+  while (index < args.length) {
+    const argument = args[index]!
+
+    if (argument === "--") {
+      index += 1
+      break
+    }
+
+    if (runner === "bash" || runner === "sh") {
+      if (argument === "-c" || (/^-[^-]+$/.test(argument) && argument.includes("c"))) {
+        const command = args[index + 1]
+        if (command) {
+          for (const target of directScriptTargets(command)) targets.add(target)
+        }
+        return
+      }
+      if (SHELL_OPTIONS_WITH_VALUE.has(argument)) {
+        index += 2
+        continue
+      }
+    }
+
+    if (runner === "node" && NODE_OPTIONS_WITH_VALUE.has(argument)) {
+      index += 2
+      continue
+    }
+
+    if (argument.startsWith("-")) {
+      index += 1
+      continue
+    }
+
+    break
+  }
+
+  const target = args[index]
+  if (isScriptTarget(target)) targets.add(target)
+}
+
+function addCommandTargets(tokens: string[], targets: Set<string>): void {
   for (let index = 0; index < tokens.length; index += 1) {
     const token = tokens[index]!
-    if ((token.startsWith("./") || token.startsWith("../")) && SCRIPT_EXTENSION.test(token)) {
+    if ((token.startsWith("./") || token.startsWith("../")) && isScriptTarget(token)) {
       targets.add(token)
       continue
     }
 
-    if (token === "--config" || token === "-c" || token.toLowerCase() === "-file") {
+    if (token === "--config" || token.toLowerCase() === "-file") {
       const target = tokens[index + 1]
-      if (target && SCRIPT_EXTENSION.test(target)) targets.add(target)
+      if (isScriptTarget(target)) targets.add(target)
       continue
     }
 
     if (SCRIPT_RUNNERS.has(token)) {
-      let targetIndex = index + 1
-      if (token === "bun" && tokens[targetIndex] === "run") targetIndex += 1
-      const target = tokens[targetIndex]
-      if (target && SCRIPT_EXTENSION.test(target)) targets.add(target)
+      addRunnerTarget(token, tokens.slice(index + 1), targets)
     }
   }
+}
+
+export function directScriptTargets(command: string): string[] {
+  const targets = new Set<string>()
+  let commandTokens: string[] = []
+
+  for (const token of parse(command, () => "")) {
+    if (typeof token === "string") {
+      commandTokens.push(token)
+    } else {
+      addCommandTargets(commandTokens, targets)
+      commandTokens = []
+    }
+  }
+  addCommandTargets(commandTokens, targets)
+
   return [...targets].sort()
 }
 

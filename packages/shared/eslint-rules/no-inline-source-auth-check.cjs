@@ -70,7 +70,9 @@ module.exports = {
           node.property.name === 'isAuthenticated'
         ) {
           if (
-            (node.parent.type === 'AssignmentExpression' && node.parent.left === node) ||
+            (node.parent.type === 'AssignmentExpression' &&
+              node.parent.left === node &&
+              node.parent.operator === '=') ||
             node.parent.type === 'UpdateExpression'
           ) {
             return
