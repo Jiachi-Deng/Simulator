@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "defaultDecision": "excluded",
+  "decisions": [
+    {
+      "id": "upstream-apache-source",
+      "kind": "source",
+      "decision": "included",
+      "license": "Apache-2.0",
+      "scope": "compiled OpenScience object form at the exact source pin"
+    },
+    {
+      "id": "embedded-web-dependencies",
+      "kind": "software",
+      "decision": "conditional",
+      "license": "SBOM-and-notices-required",
+      "scope": "only components resolved by the locked build and enumerated in SBOM"
+    },
+    {
+      "id": "rdkit-capability",
+      "kind": "software",
+      "decision": "conditional",
+      "license": "SBOM-and-notices-required",
+      "scope": "embedded RDKit capability only; datasets and external assets excluded"
+    },
+    {
+      "id": "scientific-data-apis",
+      "kind": "api",
+      "decision": "excluded",
+      "license": "unknown-or-source-specific",
+      "scope": "all third-party scientific APIs until separately reviewed"
+    },
+    {
+      "id": "remote-assets-and-models",
+      "kind": "asset",
+      "decision": "excluded",
+      "license": "unknown",
+      "scope": "runtime-downloaded models, datasets, fonts, media, and code"
+    }
+  ]
+}
