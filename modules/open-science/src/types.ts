@@ -1,17 +1,21 @@
+export type ArtifactRole =
+  | "binary" | "license" | "notice" | "third-party-notices" | "sbom" | "checksums"
+  | "runtime-policy" | "provenance" | "third-party-decisions" | "models-snapshot"
+  | "build-attestation" | "runtime-conformance"
+
 export interface InventoryFile {
   path: string
   sha256: string
   size: number
-  role: "binary" | "license" | "notice" | "third-party-notices" | "sbom" | "checksums" | "runtime-policy"
+  role: ArtifactRole
 }
 
 export interface ArtifactInventory {
   schemaVersion: 1
   source: {
     repository: "https://github.com/synthetic-sciences/openscience"
-    tag: "v1.3.4"
+    ref: "refs/tags/v1.3.4"
     commit: "109a1b94329fa4cdd82e984b5a40bfe8842b5e6f"
-    sourceDate: "2026-07-11T07:22:21Z"
   }
   artifact: {
     name: "openscience"
@@ -32,19 +36,48 @@ export interface RuntimePolicy {
     requireHostValidation: true
     requireOriginValidation: true
   }
-  isolation: {
-    xdgDataHome: string
-    xdgConfigHome: string
-    xdgCacheHome: string
-    xdgStateHome: string
-  }
-  nativeControls: {
-    agent: "preserve"
-    mcp: "preserve"
-    permissions: "preserve"
-  }
+  isolation: Record<"xdgDataHome" | "xdgConfigHome" | "xdgCacheHome" | "xdgStateHome", string>
+  nativeControls: Record<"agent" | "mcp" | "permissions", "preserve">
   credentials: {
     productionPersistence: "forbidden"
     futurePersistence: "host-bridge-required"
   }
+}
+
+export interface BuildBindings {
+  binarySha256: string
+  sourceRepository: string
+  sourceRef: string
+  sourceCommit: string
+  bunVersion: string
+  modelsDevApiSha256: string
+  networkDisabled: true
+}
+
+export interface RuntimeBindings {
+  binarySha256: string
+  dynamicLoopbackBind: true
+  hostValidation: true
+  originValidation: true
+  productionCredentialPersistenceDenied: true
+}
+
+export interface TrustDecision {
+  trusted: boolean
+  reason?: string
+}
+
+export interface TrustedProvenanceVerifier {
+  readonly verifierKind: string
+  verify(attestation: unknown, expected: BuildBindings): Promise<TrustDecision>
+}
+
+export interface TrustedRuntimeConformanceVerifier {
+  readonly verifierKind: string
+  verify(evidence: unknown, expected: RuntimeBindings): Promise<TrustDecision>
+}
+
+export interface ValidationOptions {
+  provenanceVerifier?: TrustedProvenanceVerifier
+  runtimeVerifier?: TrustedRuntimeConformanceVerifier
 }
