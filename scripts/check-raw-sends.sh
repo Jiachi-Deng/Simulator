@@ -7,6 +7,7 @@ if command -v rg >/dev/null 2>&1; then
   VIOLATIONS=$(rg 'webContents\.send\(' apps/electron/src/main/ \
     --glob '!**/window-manager.ts' \
     --glob '!**/browser-pane-manager.ts' \
+    --glob '!**/module-view-manager.ts' \
     --glob '!**/menu.ts' \
     -l 2>/dev/null || true)
 else
@@ -15,6 +16,7 @@ else
     --include='*.tsx' \
     --exclude='window-manager.ts' \
     --exclude='browser-pane-manager.ts' \
+    --exclude='module-view-manager.ts' \
     --exclude='menu.ts' 2>/dev/null || true)
 fi
 

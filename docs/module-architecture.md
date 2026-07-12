@@ -180,3 +180,41 @@ previous committed -> stage complete next state -> publish committed -> clear st
 Registry mutation 先 copy-on-write 构造 next state，再交给 persistence commit；只有 commit 成功后才发布新的内存 state。测试 adapter 可以在 stage 后、publish 前 deterministic interrupt。重启时 registry 忽略 staged state，只恢复 previous committed snapshot，并报告 `RECOVERY_INTERRUPTED_COMMIT`。
 
 Persisted state schema、plain-data shape、manifest、Module identity、version uniqueness、host range 与 active/LKG references 会在恢复时重新验证。任一 corrupt/conflicting state 都 fail safe 为 empty optional-module registry，并只报告 `CORRUPT_PERSISTED_STATE`。`RegistryCrashRecoveryFixture` 同时持有独立且 immutable 的 built-in Agent availability state，用于证明 registry corruption 和 interrupted commit 不会传播到内置 Agent。
+
+## 第四切片：Electron Module View Transport
+
+`ModuleViewManager` 是 optional Module local frontend 与 Simulator host 之间的 Electron-only UI 边界。它使用 Electron 39 的 `WebContentsView`，不依赖或连接 Installer、Downloader、Daemon、Registry activation 或任何真实领域 Module。实现依据 Simulator Issue #64 的公开行为要求 clean-room 完成；设计和实现不读取、不引用、不复制 Proma 源码或 generated output。
+
+### View 与 Session Isolation
+
+每次首次 attach 都创建一个独立 `WebContentsView` 和唯一的非持久化 session partition；同一 view 的显式 recreate 复用该 partition，但 destroy 后重新 attach 不复用旧 handler、cookie 或 cache。view 强制使用最小 preload、`nodeIntegration: false`、`contextIsolation: true`、`sandbox: true`、`webSecurity: true` 和 `webviewTag: false`；packaged build 同时关闭 DevTools。session 对 permissions、device permissions、display capture 和 downloads 全部 fail closed。
+
+frontend URL 只能使用带显式 port 的 `127.0.0.1`、`[::1]` 或 `localhost` HTTP origin。`webRequest` 使用 `<all_urls>` 覆盖 HTTP、WebSocket 和其他 request scheme：HTTP 只允许完整 canonical origin，`ws:` 只允许相同 hostname 与显式 port；`wss:`、其他 host/port 和其他 scheme 默认拒绝。popup、离开 allowlist 的 main-frame redirect/navigation、subframe navigation 和 external resource request 均被拒绝，不转交 `shell.openExternal`。这条边界只允许 Module 自己的本地 frontend，不是通用 browser surface。
+
+manager 提供 attach、detach/reattach、resize、full-content rect、hide/show、send、destroy 和失效后的显式 recreate。renderer crash 或 preload failure 会在调用 host failure callback 前同步进入 quarantine：隐藏 view、设置 zero bounds、从 parent native view tree 移除并停止接受旧 sender IPC，因此旧 view 不再参与 hit testing；只有 `recreate()` 会创建 replacement 并按失效前 attach 状态恢复。manager 不自动重启 daemon 或激活其他 Module。
+
+### Narrow IPC Envelope
+
+专用 preload 只向页面暴露 frozen `window.simulatorModuleView`：固定 identity、transport version、`send(payload)` 和 `onMessage(listener)`。它不暴露 `ipcRenderer`、filesystem、process、shell、network credential 或通用 Electron API。
+
+双向 IPC envelope 固定为 version 1，并同时携带 direction、`moduleId` 和 `viewInstanceId`。identity 由 main process 通过 `additionalArguments` 绑定；main process 还把 envelope 与实际 live sender `webContents.id`、非 null main frame 和 manager record 交叉校验，preload 对 host-to-module envelope 再做反向校验，因此 destroyed sender、null sender frame、subframe 或伪造其他 view identity 都不能产生 cross-talk。
+
+payload 只允许 finite JSON-like plain data，并限制 envelope bytes、单字符串 bytes、depth、node count、array length、object key count 和 key bytes；unknown field、accessor、symbol、sparse/custom array、cycle、non-finite number 和 future version 一律拒绝。preload 在页面 listener 注册前最多缓存 16 条已验证 host message，超过上限即向 host 报告 failure。
+
+### Build 与 Smoke
+
+`module-view-preload.cjs` 是 Electron preload build 和 asset validation 的 required output，随 `dist/**/*` 进入 package。fake frontend fixture 只存在于测试目录，不进入 app package。
+
+源码 smoke：
+
+```bash
+cd apps/electron && bun run smoke:module-view
+```
+
+packaged macOS smoke：
+
+```bash
+cd apps/electron && bun scripts/module-view-smoke.ts --app release/mac-arm64/Simulator.app
+```
+
+smoke 启动临时 loopback HTTP/WebSocket server 和隐藏 host window，通过真实 preload 完成双实例 `ready -> smoke-ping -> smoke-pong`。它验证 cookie 与 Cache Storage partition isolation、同 host/port local WebSocket 可用、另一 port WebSocket 在到达 server 前被拒绝、renderer crash 后 host hit testing 恢复，以及只有显式 recreate 才重新 attach；同时确认进程按预期运行于 source 或 packaged mode。
