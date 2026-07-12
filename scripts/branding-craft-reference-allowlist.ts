@@ -15,6 +15,11 @@ export const CRAFT_REFERENCE_PATTERN =
 
 export const CRAFT_REFERENCE_ALLOWLIST: CraftReferenceCategory[] = [
   {
+    id: 'allowlist-test-infrastructure',
+    reason: 'The scanner definition necessarily names the references that it detects and classifies.',
+    matches: ({ path }) => path === 'scripts/branding-craft-reference-allowlist.ts',
+  },
+  {
     id: 'legal-and-upstream-attribution',
     reason: 'License, notice, trademark, conduct, and fork attribution must keep upstream names.',
     matches: ({ path, line }) =>
