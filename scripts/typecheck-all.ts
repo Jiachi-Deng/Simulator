@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { dirname, relative, resolve } from "node:path";
 
 interface PackageJson {
@@ -38,7 +39,11 @@ const excluded = await findPackageJsons(
     .map((pattern) => pattern.slice(1)),
 );
 
-const typecheckWorkspaces: Array<{ directory: string; label: string }> = [];
+const typecheckWorkspaces: Array<{
+  directory: string;
+  label: string;
+  command: string[];
+}> = [];
 for (const packageJsonPath of [...included].sort()) {
   if (excluded.has(packageJsonPath)) continue;
 
@@ -46,12 +51,17 @@ for (const packageJsonPath of [...included].sort()) {
   if (directory === rootDir) continue;
 
   const packageJson = (await Bun.file(resolve(rootDir, packageJsonPath)).json()) as PackageJson;
-  if (typeof packageJson.scripts?.typecheck === "string") {
-    typecheckWorkspaces.push({
-      directory,
-      label: packageJson.name ?? relative(rootDir, directory),
-    });
-  }
+  const hasTypecheckScript = typeof packageJson.scripts?.typecheck === "string";
+  const hasTsconfig = existsSync(resolve(directory, "tsconfig.json"));
+  if (!hasTypecheckScript && !hasTsconfig) continue;
+
+  typecheckWorkspaces.push({
+    directory,
+    label: packageJson.name ?? relative(rootDir, directory),
+    command: hasTypecheckScript
+      ? ["bun", "run", "typecheck"]
+      : ["bun", "x", "tsc", "--noEmit"],
+  });
 }
 
 if (typecheckWorkspaces.length === 0) {
@@ -61,7 +71,7 @@ if (typecheckWorkspaces.length === 0) {
 console.log(`Running typecheck in ${typecheckWorkspaces.length} workspaces`);
 for (const workspace of typecheckWorkspaces) {
   console.log(`\n> ${workspace.label}`);
-  const child = Bun.spawn(["bun", "run", "typecheck"], {
+  const child = Bun.spawn(workspace.command, {
     cwd: workspace.directory,
     stdin: "inherit",
     stdout: "inherit",
