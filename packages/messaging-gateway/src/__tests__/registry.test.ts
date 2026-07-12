@@ -16,7 +16,7 @@ import { tmpdir } from 'node:os'
 import type {
   CredentialManager,
 } from '@craft-agent/shared/credentials'
-import type { ISessionManager } from '@craft-agent/server-core/handlers'
+import type { MessagingSessionManager } from '../contracts'
 
 import { MessagingGatewayRegistry } from '../registry'
 import type { TelegramChatInfo } from '../adapters/telegram/index'
@@ -32,10 +32,10 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-function makeStubSessionManager(): ISessionManager {
+function makeStubSessionManager(): MessagingSessionManager {
   return {
     setAutomationBinder: () => {},
-  } as unknown as ISessionManager
+  } as unknown as MessagingSessionManager
 }
 
 function makeStubCredentialManager(): CredentialManager {

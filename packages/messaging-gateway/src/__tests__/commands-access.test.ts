@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { Session } from '@craft-agent/shared/protocol'
-import type { ISessionManager } from '@craft-agent/server-core/handlers'
+import type { MessagingSessionManager } from '../contracts'
 import { BindingStore } from '../binding-store'
 import { Commands, type AccessControlDeps, type PairingCodeConsumer } from '../commands'
 import type {
@@ -47,7 +47,7 @@ function makeSession(id: string): Session {
   } as unknown as Session
 }
 
-function makeSessionManager(sessions: Session[] = []): ISessionManager {
+function makeSessionManager(sessions: Session[] = []): MessagingSessionManager {
   return {
     getSessions: () => sessions,
     getSession: async (sessionId: string) => sessions.find((s) => s.id === sessionId) ?? null,
@@ -56,7 +56,7 @@ function makeSessionManager(sessions: Session[] = []): ISessionManager {
     sendMessage: async () => {},
     cancelProcessing: async () => {},
     respondToPermission: () => true,
-  } as unknown as ISessionManager
+  } as unknown as MessagingSessionManager
 }
 
 function makeAdapter(): PlatformAdapter & { sent: string[] } {

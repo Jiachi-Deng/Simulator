@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { Session } from '@craft-agent/shared/protocol'
-import type { ISessionManager } from '@craft-agent/server-core/handlers'
+import type { MessagingSessionManager } from '../contracts'
 import { BindingStore } from '../binding-store'
 import { Commands } from '../commands'
 import type { IncomingMessage, PlatformAdapter, SentMessage } from '../types'
@@ -22,7 +22,7 @@ function makeSession(id: string, name: string, lastMessageAt: number): Session {
   } as unknown as Session
 }
 
-function makeSessionManager(sessions: Session[]): ISessionManager {
+function makeSessionManager(sessions: Session[]): MessagingSessionManager {
   return {
     getSessions: () => sessions,
     getSession: async (sessionId: string) => sessions.find((session) => session.id === sessionId) ?? null,
@@ -30,7 +30,7 @@ function makeSessionManager(sessions: Session[]): ISessionManager {
     sendMessage: async () => {},
     cancelProcessing: async () => {},
     respondToPermission: () => true,
-  } as unknown as ISessionManager
+  } as unknown as MessagingSessionManager
 }
 
 function makeAdapter(platform: 'telegram' | 'whatsapp', inlineButtons: boolean): PlatformAdapter & { sent: string[] } {

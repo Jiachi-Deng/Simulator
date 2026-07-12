@@ -10,7 +10,6 @@
  * /stop          — abort the current agent run
  */
 
-import type { ISessionManager } from '@craft-agent/server-core/handlers'
 import {
   evaluatePreBindingAccess,
   executeRejection,
@@ -20,6 +19,7 @@ import {
 } from './access-control'
 import type { BindingStore } from './binding-store'
 import type { PendingSendersStore } from './pending-senders'
+import type { MessagingSessionManager } from './contracts'
 import type {
   IncomingMessage,
   MessagingConfig,
@@ -123,7 +123,7 @@ export class Commands {
   private readonly recentRejectReplies = new Map<string, number>()
 
   constructor(
-    private readonly sessionManager: ISessionManager,
+    private readonly sessionManager: MessagingSessionManager,
     private readonly bindingStore: BindingStore,
     private readonly workspaceId: string,
     private readonly pairingConsumer?: PairingCodeConsumer,
@@ -660,7 +660,7 @@ export class Commands {
     )
   }
 
-  private getRecentSessions(): ReturnType<ISessionManager['getSessions']> {
+  private getRecentSessions(): ReturnType<MessagingSessionManager['getSessions']> {
     return this.sessionManager.getSessions(this.workspaceId)
       .filter((s) => !s.isArchived)
       .sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0))
@@ -669,8 +669,8 @@ export class Commands {
 
   private async resolveBindTarget(
     bindArg: string,
-    recent: ReturnType<ISessionManager['getSessions']>,
-  ): Promise<Awaited<ReturnType<ISessionManager['getSession']>> | undefined> {
+    recent: ReturnType<MessagingSessionManager['getSessions']>,
+  ): Promise<Awaited<ReturnType<MessagingSessionManager['getSession']>> | undefined> {
     if (/^\d+$/.test(bindArg)) {
       const index = Number(bindArg)
       if (index >= 1 && index <= recent.length) {

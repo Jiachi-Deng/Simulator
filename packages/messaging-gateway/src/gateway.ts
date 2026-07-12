@@ -5,7 +5,6 @@
  * renderer, and binding store together. One instance per workspace.
  */
 
-import type { ISessionManager } from '@craft-agent/server-core/handlers'
 import type { PushTarget } from '@craft-agent/shared/protocol'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import {
@@ -19,6 +18,7 @@ import { Commands, type AccessControlDeps, type PairingCodeConsumer } from './co
 import { Renderer, type SessionEvent } from './renderer'
 import { PendingSendersStore } from './pending-senders'
 import { PlanTokenRegistry } from './plan-tokens'
+import type { MessagingSessionManager } from './contracts'
 import type {
   PlatformAdapter,
   PlatformType,
@@ -44,7 +44,7 @@ const consoleLogger: MessagingLogger = {
 }
 
 export interface GatewayOptions {
-  sessionManager: ISessionManager
+  sessionManager: MessagingSessionManager
   workspaceId: string
   /** Absolute path to the messaging storage directory. */
   storageDir: string
@@ -127,7 +127,7 @@ interface PendingCompactAccept {
 const COMPACT_ACCEPT_TTL_MS = 10 * 60 * 1000
 
 export class MessagingGateway {
-  private readonly sessionManager: ISessionManager
+  private readonly sessionManager: MessagingSessionManager
   private readonly workspaceId: string
   private readonly bindingStore: BindingStore
   private readonly pendingStore: PendingSendersStore
