@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "ref": "open-design-v0.14.1",
+    "commit": "2225647726d5387bb24e9539fdb577958b6d88c6"
+  },
+  "files": [
+    {"path": "web/standalone/server.js", "kind": "runtime", "dependencyScope": "artifact"},
+    {"path": "runtime/daemon/dist/cli.js", "kind": "runtime", "dependencyScope": "production"},
+    {"path": "legal/LICENSE", "kind": "legal", "dependencyScope": "artifact"},
+    {"path": "legal/SBOM.spdx.json", "kind": "legal", "dependencyScope": "artifact"},
+    {"path": "provenance.json", "kind": "metadata", "dependencyScope": "artifact"},
+    {"path": "artifact-manifest.json", "kind": "metadata", "dependencyScope": "artifact"}
+  ]
+}
