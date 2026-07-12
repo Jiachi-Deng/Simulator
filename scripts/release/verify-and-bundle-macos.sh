@@ -62,16 +62,35 @@ if result.returncode != 0:
 PY
 }
 
+write_inventory() {
+  local app=$1
+  local output=$2
+  (
+    cd "$app"
+    find . -type f -print | LC_ALL=C sort | while IFS= read -r path; do
+      shasum -a 256 "$path"
+    done | sed 's#  \./#  #'
+  ) > "$output"
+}
+
 DMG_APPS=("$MOUNT"/*.app)
 ZIP_APPS=("$UNZIP"/*.app)
 [[ ${#DMG_APPS[@]} -eq 1 && -d "${DMG_APPS[0]}" ]] || { echo "DMG must contain one app" >&2; exit 1; }
 [[ ${#ZIP_APPS[@]} -eq 1 && -d "${ZIP_APPS[0]}" ]] || { echo "ZIP must contain one app" >&2; exit 1; }
 verify_app "${DMG_APPS[0]}"
 verify_app "${ZIP_APPS[0]}"
+write_inventory "${DMG_APPS[0]}" "$WORK/dmg-files.sha256"
+write_inventory "${ZIP_APPS[0]}" "$WORK/zip-files.sha256"
+if ! cmp -s "$WORK/dmg-files.sha256" "$WORK/zip-files.sha256"; then
+  echo "DMG and ZIP app file inventories differ" >&2
+  diff -u "$WORK/dmg-files.sha256" "$WORK/zip-files.sha256" >&2 || true
+  exit 1
+fi
 
 mkdir -p "$BUNDLE_DIR"
 find "$BUNDLE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 cp "$DMG" "$ZIP" "$BUNDLE_DIR/"
+cp "$WORK/dmg-files.sha256" "$BUNDLE_DIR/packaged-files.sha256"
 (
   cd "$BUNDLE_DIR"
   shasum -a 256 "$(basename "$DMG")" "$(basename "$ZIP")" > SHA256SUMS

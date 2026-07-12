@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync } from "node:fs"
 import { basename } from "node:path"
 
 interface LockedPackage { name: string; version: string }
+interface PackagedFile { path: string; sha256: string }
 
 export function packagesFromBunLock(content: string): LockedPackage[] {
   const packages = new Map<string, LockedPackage>()
@@ -14,9 +15,25 @@ export function packagesFromBunLock(content: string): LockedPackage[] {
   return [...packages.values()].sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version))
 }
 
-export function generateSpdx(lockContent: string, version: string, sourceSha: string, created: string): object {
+export function packagedFilesFromChecksums(content: string): PackagedFile[] {
+  const files = content
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      const match = line.match(/^([0-9a-f]{64})  (.+)$/)
+      if (!match || match[2].startsWith("/") || match[2].split("/").includes("..")) {
+        throw new Error(`Invalid packaged file checksum line: ${line}`)
+      }
+      return { path: match[2], sha256: match[1] }
+    })
+  return files.sort((a, b) => a.path.localeCompare(b.path))
+}
+
+export function generateSpdx(lockContent: string, inventoryContent: string, version: string, sourceSha: string, created: string): object {
   const packages = packagesFromBunLock(lockContent)
-  const namespaceSeed = createHash("sha256").update(`${version}\n${sourceSha}\n${lockContent}`).digest("hex")
+  const packagedFiles = packagedFilesFromChecksums(inventoryContent)
+  const lockHash = createHash("sha256").update(lockContent).digest("hex")
+  const namespaceSeed = createHash("sha256").update(`${version}\n${sourceSha}\n${lockHash}\n${inventoryContent}`).digest("hex")
   return {
     spdxVersion: "SPDX-2.3",
     dataLicense: "CC0-1.0",
@@ -26,7 +43,7 @@ export function generateSpdx(lockContent: string, version: string, sourceSha: st
     creationInfo: {
       created,
       creators: ["Tool: scripts/release/generate-spdx.ts"],
-      comment: "Deterministic minimal SBOM derived from bun.lock package resolutions. It does not inspect bundled binaries, transitive runtime files, licenses, or packages copied outside Bun's lockfile.",
+      comment: "Artifact file inventory contains regular files present identically in the DMG and ZIP app bundles. Symlinks, filesystem metadata, code-signing structures, licenses, and runtime dependency reachability are not analyzed. bun.lock resolutions are recorded separately as source build inputs, not claimed runtime dependencies.",
     },
     documentDescribes: ["SPDXRef-Package-Simulator"],
     packages: [
@@ -35,14 +52,31 @@ export function generateSpdx(lockContent: string, version: string, sourceSha: st
         SPDXID: "SPDXRef-Package-Simulator",
         versionInfo: version,
         downloadLocation: `git+https://github.com/Jiachi-Deng/Simulator.git@${sourceSha}`,
-        filesAnalyzed: false,
+        filesAnalyzed: true,
         licenseConcluded: "NOASSERTION",
         licenseDeclared: "Apache-2.0",
         copyrightText: "NOASSERTION",
+        hasFiles: packagedFiles.map((_, index) => `SPDXRef-File-${index + 1}`),
+      },
+      {
+        name: "Simulator source lock inventory",
+        SPDXID: "SPDXRef-Package-SourceLock",
+        versionInfo: sourceSha,
+        downloadLocation: `git+https://github.com/Jiachi-Deng/Simulator.git@${sourceSha}`,
+        filesAnalyzed: false,
+        licenseConcluded: "NOASSERTION",
+        licenseDeclared: "NOASSERTION",
+        copyrightText: "NOASSERTION",
+        comment: "Inventory of package resolutions parsed from bun.lock. Presence here means available to the monorepo build, not necessarily shipped or reachable at runtime.",
+        externalRefs: [{
+          referenceCategory: "OTHER",
+          referenceType: "simulator-source-lock",
+          referenceLocator: `bun.lock@sha256:${lockHash}`,
+        }],
       },
       ...packages.map((item, index) => ({
         name: item.name,
-        SPDXID: `SPDXRef-Package-${index + 1}`,
+        SPDXID: `SPDXRef-BuildPackage-${index + 1}`,
         versionInfo: item.version,
         downloadLocation: "NOASSERTION",
         filesAnalyzed: false,
@@ -56,19 +90,34 @@ export function generateSpdx(lockContent: string, version: string, sourceSha: st
         }],
       })),
     ],
-    relationships: packages.map((_, index) => ({
-      spdxElementId: "SPDXRef-Package-Simulator",
-      relationshipType: "DEPENDS_ON",
-      relatedSpdxElement: `SPDXRef-Package-${index + 1}`,
+    files: packagedFiles.map((file, index) => ({
+      fileName: `./app/${file.path}`,
+      SPDXID: `SPDXRef-File-${index + 1}`,
+      checksums: [{ algorithm: "SHA256", checksumValue: file.sha256 }],
+      licenseConcluded: "NOASSERTION",
+      copyrightText: "NOASSERTION",
     })),
+    relationships: [
+      ...packagedFiles.map((_, index) => ({
+        spdxElementId: "SPDXRef-Package-Simulator",
+        relationshipType: "CONTAINS",
+        relatedSpdxElement: `SPDXRef-File-${index + 1}`,
+      })),
+      ...packages.map((_, index) => ({
+        spdxElementId: `SPDXRef-BuildPackage-${index + 1}`,
+        relationshipType: "BUILD_DEPENDENCY_OF",
+        relatedSpdxElement: "SPDXRef-Package-Simulator",
+        comment: "Source-lock relationship only; this does not assert the package is present in the built artifact.",
+      })),
+    ],
   }
 }
 
 if (import.meta.main) {
-  const [lockPath, outputPath, version, sourceSha, created] = process.argv.slice(2)
-  if (!lockPath || !outputPath || !version || !sourceSha || !created || Number.isNaN(Date.parse(created))) {
-    throw new Error(`Usage: ${basename(process.argv[1])} LOCK OUTPUT VERSION SOURCE_SHA CREATED_ISO`)
+  const [lockPath, inventoryPath, outputPath, version, sourceSha, created] = process.argv.slice(2)
+  if (!lockPath || !inventoryPath || !outputPath || !version || !sourceSha || !created || Number.isNaN(Date.parse(created))) {
+    throw new Error(`Usage: ${basename(process.argv[1])} LOCK PACKAGED_CHECKSUMS OUTPUT VERSION SOURCE_SHA CREATED_ISO`)
   }
-  const spdx = generateSpdx(readFileSync(lockPath, "utf8"), version, sourceSha, new Date(created).toISOString())
+  const spdx = generateSpdx(readFileSync(lockPath, "utf8"), readFileSync(inventoryPath, "utf8"), version, sourceSha, new Date(created).toISOString())
   writeFileSync(outputPath, `${JSON.stringify(spdx, null, 2)}\n`)
 }
