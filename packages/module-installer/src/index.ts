@@ -1,0 +1,19 @@
+export { ModuleInstaller } from './installer.ts'
+export {
+  DEFAULT_INSTALL_LIMITS,
+  ModuleInstallerError,
+  SimulatedInstallerCrash,
+  type InstalledModuleState,
+  type InstallLimits,
+  type InstallPhase,
+  type InstallProgress,
+  type InstallRequest,
+  type InstallResult,
+  type InstallerFaultInjector,
+  type InstallerFaultPoint,
+  type ModuleInstallerErrorCode,
+  type ModuleInstallerOptions,
+  type RollbackResult,
+  type UninstallRequest,
+  type VerifiedArtifactDescriptor,
+} from './types.ts'

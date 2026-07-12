@@ -1,0 +1,634 @@
+import { randomUUID } from 'node:crypto'
+import { lstat, mkdir, readFile, readdir, rename, rm, stat } from 'node:fs/promises'
+import { isAbsolute, join, resolve } from 'node:path'
+import { parseModuleManifest, type ModuleId, type ModuleSha256, type ModuleVersion } from '@simulator/module-contract'
+import { assertGzipFile, extractArchive, inspectArchive, validateEntrypointPlan } from './archive.ts'
+import {
+  atomicWriteJson,
+  copyAndHashArchive,
+  createJsonExclusive,
+  fsyncDirectory,
+  fsyncTree,
+  hashExtractedTree,
+  pathExists,
+} from './filesystem.ts'
+import {
+  DEFAULT_INSTALL_LIMITS,
+  ModuleInstallerError,
+  SimulatedInstallerCrash,
+  type InstalledModuleState,
+  type InstallLimits,
+  type InstallProgress,
+  type InstallRequest,
+  type InstallResult,
+  type ModuleInstallerOptions,
+  type ResolvedDescriptor,
+  type RollbackResult,
+  type UninstallRequest,
+  type VerifiedArtifactDescriptor,
+} from './types.ts'
+
+const STATE_SCHEMA_VERSION = 1
+const JOURNAL_SCHEMA_VERSION = 1
+const MODULE_ID_PATTERN = /^(?=.{3,128}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/
+const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/
+const SHA256_PATTERN = /^[a-f0-9]{64}$/
+const TRANSACTION_ID_PATTERN = /^[a-f0-9-]{36}$/
+
+interface StateFile {
+  readonly schemaVersion: 1
+  readonly activeVersion: string | null
+  readonly lastKnownGoodVersion: string | null
+}
+
+type JournalOperation = 'install' | 'rollback' | 'uninstall'
+type JournalCheckpoint = 'prepared' | 'version-published' | 'state-activated'
+
+interface JournalFile {
+  readonly schemaVersion: 1
+  readonly operation: JournalOperation
+  readonly checkpoint: JournalCheckpoint
+  readonly transactionId: string
+  readonly moduleId: string
+  readonly version: string
+  readonly previousState: StateFile
+  readonly nextState: StateFile
+}
+
+interface ModulePaths {
+  readonly moduleDirectory: string
+  readonly versionsDirectory: string
+  readonly state: string
+  readonly journal: string
+  readonly recoveringJournal: string
+}
+
+function emptyState(): StateFile {
+  return { schemaVersion: STATE_SCHEMA_VERSION, activeVersion: null, lastKnownGoodVersion: null }
+}
+
+function publicState(moduleId: ModuleId, state: StateFile): InstalledModuleState {
+  return {
+    moduleId,
+    activeVersion: state.activeVersion as ModuleVersion | null,
+    lastKnownGoodVersion: state.lastKnownGoodVersion as ModuleVersion | null,
+  }
+}
+
+function statesEqual(left: StateFile, right: StateFile): boolean {
+  return left.activeVersion === right.activeVersion && left.lastKnownGoodVersion === right.lastKnownGoodVersion
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype
+}
+
+function validVersion(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 256 && VERSION_PATTERN.test(value)
+}
+
+function parseState(value: unknown): StateFile {
+  if (!isPlainObject(value)
+    || value.schemaVersion !== STATE_SCHEMA_VERSION
+    || (value.activeVersion !== null && !validVersion(value.activeVersion))
+    || (value.lastKnownGoodVersion !== null && !validVersion(value.lastKnownGoodVersion))
+    || Object.keys(value).sort().join(',') !== 'activeVersion,lastKnownGoodVersion,schemaVersion') {
+    throw new ModuleInstallerError('JOURNAL_INVALID', 'Module activation state is malformed')
+  }
+  return {
+    schemaVersion: STATE_SCHEMA_VERSION,
+    activeVersion: value.activeVersion,
+    lastKnownGoodVersion: value.lastKnownGoodVersion,
+  }
+}
+
+function parseJournal(value: unknown, expectedModuleId: string): JournalFile {
+  if (!isPlainObject(value)
+    || value.schemaVersion !== JOURNAL_SCHEMA_VERSION
+    || (value.operation !== 'install' && value.operation !== 'rollback' && value.operation !== 'uninstall')
+    || (value.checkpoint !== 'prepared' && value.checkpoint !== 'version-published' && value.checkpoint !== 'state-activated')
+    || typeof value.transactionId !== 'string'
+    || !TRANSACTION_ID_PATTERN.test(value.transactionId)
+    || value.moduleId !== expectedModuleId
+    || !validVersion(value.version)) {
+    throw new ModuleInstallerError('JOURNAL_INVALID', 'Module transaction journal is malformed')
+  }
+  const allowed = ['checkpoint', 'moduleId', 'nextState', 'operation', 'previousState', 'schemaVersion', 'transactionId', 'version']
+  if (Object.keys(value).sort().join(',') !== allowed.join(',')) {
+    throw new ModuleInstallerError('JOURNAL_INVALID', 'Module transaction journal contains unknown fields')
+  }
+  return {
+    schemaVersion: JOURNAL_SCHEMA_VERSION,
+    operation: value.operation,
+    checkpoint: value.checkpoint,
+    transactionId: value.transactionId,
+    moduleId: value.moduleId,
+    version: value.version,
+    previousState: parseState(value.previousState),
+    nextState: parseState(value.nextState),
+  }
+}
+
+function validateLimits(overrides?: Partial<InstallLimits>): InstallLimits {
+  const limits = { ...DEFAULT_INSTALL_LIMITS, ...overrides }
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new ModuleInstallerError('DESCRIPTOR_INVALID', `Install limit ${name} must be a positive safe integer`)
+    }
+  }
+  return Object.freeze(limits)
+}
+
+function resolveDescriptor(descriptor: VerifiedArtifactDescriptor): ResolvedDescriptor {
+  if (!isPlainObject(descriptor) || descriptor.verified !== true || descriptor.format !== 'tar.gz') {
+    throw new ModuleInstallerError('DESCRIPTOR_INVALID', 'Installer requires a verified tar.gz artifact descriptor')
+  }
+  const parsed = parseModuleManifest(descriptor.manifest)
+  if (!parsed.ok) throw new ModuleInstallerError('DESCRIPTOR_INVALID', 'Descriptor contains an invalid module manifest')
+  if (!SHA256_PATTERN.test(descriptor.extractedManifestSha256)) {
+    throw new ModuleInstallerError('DESCRIPTOR_INVALID', 'Descriptor extracted manifest SHA-256 is invalid')
+  }
+
+  const artifact = parsed.value.artifacts.find((candidate) => candidate.platform === descriptor.artifact?.platform)
+  if (!artifact
+    || artifact.entrypoint !== descriptor.artifact.entrypoint
+    || artifact.url !== descriptor.artifact.url
+    || artifact.sha256 !== descriptor.artifact.sha256) {
+    throw new ModuleInstallerError('DESCRIPTOR_INVALID', 'Descriptor artifact does not exactly match its verified manifest')
+  }
+  const url = new URL(artifact.url)
+  if (!url.pathname.endsWith('.tar.gz')) {
+    throw new ModuleInstallerError('FORMAT_UNSUPPORTED', 'Verified artifact URL must identify the production .tar.gz format')
+  }
+  return {
+    moduleId: parsed.value.id,
+    version: parsed.value.version,
+    platform: artifact.platform,
+    artifact,
+    archiveSha256: artifact.sha256,
+    extractedManifestSha256: descriptor.extractedManifestSha256,
+  }
+}
+
+export class ModuleInstaller {
+  readonly #root: string
+  readonly #limits: InstallLimits
+  readonly #faultInjector: ModuleInstallerOptions['faultInjector']
+  readonly #busy = new Set<string>()
+  #rootReady = false
+
+  constructor(moduleRoot: string, options: ModuleInstallerOptions = {}) {
+    if (typeof moduleRoot !== 'string' || moduleRoot.length === 0 || moduleRoot.includes('\0')) {
+      throw new ModuleInstallerError('DESCRIPTOR_INVALID', 'Module root must be a non-empty filesystem path')
+    }
+    this.#root = resolve(moduleRoot)
+    this.#limits = validateLimits(options.limits)
+    this.#faultInjector = options.faultInjector
+  }
+
+  get root(): string {
+    return this.#root
+  }
+
+  async install(request: InstallRequest): Promise<InstallResult> {
+    const descriptor = resolveDescriptor(request.descriptor)
+    return this.#exclusive(descriptor.moduleId, async () => {
+      await this.#ensureRoot()
+      const paths = await this.#ensureModuleLayout(descriptor.moduleId)
+      await this.#assertIdle(paths)
+      const target = join(paths.versionsDirectory, descriptor.version)
+      if (await pathExists(target)) {
+        throw new ModuleInstallerError('INSTALL_CONFLICT', `Module version ${descriptor.version} is already installed`)
+      }
+
+      const transactionId = randomUUID()
+      const staging = this.#stagingPath(transactionId)
+      const archive = join(staging, 'artifact.tar.gz')
+      const payload = join(staging, 'payload')
+      let journalWritten = false
+      let intendedState: StateFile | undefined
+      let committedResult: InstallResult | undefined
+      const report = this.#progressReporter(request.onProgress)
+      report({ phase: 'preparing', completed: 0, total: 100 })
+
+      try {
+        this.#abortIfRequested(request.signal)
+        await mkdir(staging, { mode: 0o700 })
+        await mkdir(payload, { mode: 0o700 })
+        const archiveSha256 = await copyAndHashArchive(request.archivePath, archive, this.#limits, request.signal, report)
+        if (archiveSha256 !== descriptor.archiveSha256) {
+          throw new ModuleInstallerError('ARCHIVE_HASH_MISMATCH', 'Compressed archive SHA-256 does not match verified descriptor')
+        }
+        await this.#fault('after-archive-copy')
+        await assertGzipFile(archive)
+
+        const plan = await inspectArchive(archive, this.#limits, request.signal, report)
+        validateEntrypointPlan(plan, descriptor.artifact.entrypoint)
+        await this.#fault('after-archive-inspection')
+        await extractArchive(archive, payload, plan, this.#limits, request.signal, report)
+        await this.#fault('after-extraction')
+
+        const tree = await hashExtractedTree(payload, this.#limits, request.signal, report)
+        if (tree.sha256 !== descriptor.extractedManifestSha256) {
+          throw new ModuleInstallerError('TREE_HASH_MISMATCH', 'Extracted file manifest SHA-256 does not match verified descriptor')
+        }
+        const entrypoint = tree.files.get(descriptor.artifact.entrypoint)
+        if (!entrypoint?.executable) {
+          throw new ModuleInstallerError('ENTRYPOINT_INVALID', 'Extracted entrypoint is missing or not executable')
+        }
+        for (const [path, file] of tree.files) {
+          if (file.executable && path !== descriptor.artifact.entrypoint) {
+            throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Extracted executable is not the declared entrypoint: ${JSON.stringify(path)}`)
+          }
+        }
+
+        await this.#fault('before-content-fsync')
+        await fsyncTree(payload)
+        this.#abortIfRequested(request.signal)
+
+        const previousState = await this.#readState(paths.state)
+        const nextState: StateFile = {
+          schemaVersion: STATE_SCHEMA_VERSION,
+          activeVersion: descriptor.version,
+          lastKnownGoodVersion: previousState.activeVersion,
+        }
+        intendedState = nextState
+        committedResult = {
+          ...publicState(descriptor.moduleId, nextState),
+          installedPath: target,
+          archiveSha256: archiveSha256 as ModuleSha256,
+          extractedManifestSha256: tree.sha256,
+        }
+        let journal: JournalFile = {
+          schemaVersion: JOURNAL_SCHEMA_VERSION,
+          operation: 'install',
+          checkpoint: 'prepared',
+          transactionId,
+          moduleId: descriptor.moduleId,
+          version: descriptor.version,
+          previousState,
+          nextState,
+        }
+        await this.#claimJournal(paths, journal)
+        journalWritten = true
+        await this.#fault('after-journal-prepared')
+        this.#abortIfRequested(request.signal)
+
+        report({ phase: 'activating', completed: 90, total: 100 })
+        await this.#fault('before-publish-rename')
+        await rename(payload, target)
+        await fsyncDirectory(staging)
+        await fsyncDirectory(paths.versionsDirectory)
+        journal = { ...journal, checkpoint: 'version-published' }
+        await atomicWriteJson(paths.journal, journal)
+        await this.#fault('after-version-published')
+        this.#abortIfRequested(request.signal)
+
+        await this.#fault('before-state-rename')
+        await atomicWriteJson(paths.state, nextState)
+        journal = { ...journal, checkpoint: 'state-activated' }
+        await atomicWriteJson(paths.journal, journal)
+        await this.#fault('after-state-activated')
+        await this.#fault('before-cleanup')
+        await this.#cleanupTransaction(paths, transactionId)
+        report({ phase: 'complete', completed: 100, total: 100, entries: tree.fileCount, bytes: tree.totalBytes })
+        return committedResult
+      } catch (error) {
+        if (error instanceof SimulatedInstallerCrash) throw error
+        if (journalWritten) {
+          const committed = intendedState !== undefined && statesEqual(await this.#readState(paths.state), intendedState)
+          await this.#recoverModule(descriptor.moduleId)
+          if (committed && committedResult) {
+            report({ phase: 'complete', completed: 100, total: 100 })
+            return committedResult
+          }
+        } else {
+          await rm(staging, { recursive: true, force: true }).catch(() => undefined)
+        }
+        if (error instanceof ModuleInstallerError) throw error
+        throw new ModuleInstallerError('FILESYSTEM_ERROR', error instanceof Error ? error.message : String(error), error)
+      }
+    })
+  }
+
+  async getState(moduleId: ModuleId): Promise<InstalledModuleState> {
+    this.#validateModuleId(moduleId)
+    await this.#ensureRoot()
+    const paths = this.#modulePaths(moduleId)
+    return publicState(moduleId, await this.#readState(paths.state))
+  }
+
+  async rollback(moduleId: ModuleId): Promise<RollbackResult> {
+    this.#validateModuleId(moduleId)
+    return this.#exclusive(moduleId, async () => {
+      await this.#ensureRoot()
+      const paths = await this.#ensureModuleLayout(moduleId)
+      await this.#assertIdle(paths)
+      const previousState = await this.#readState(paths.state)
+      if (previousState.lastKnownGoodVersion === null) {
+        throw new ModuleInstallerError('NO_LAST_KNOWN_GOOD', 'Module has no last-known-good version')
+      }
+      const lkgPath = join(paths.versionsDirectory, previousState.lastKnownGoodVersion)
+      if (!(await pathExists(lkgPath))) throw new ModuleInstallerError('NOT_INSTALLED', 'Last-known-good version is missing')
+      const nextState: StateFile = {
+        schemaVersion: STATE_SCHEMA_VERSION,
+        activeVersion: previousState.lastKnownGoodVersion,
+        lastKnownGoodVersion: previousState.activeVersion,
+      }
+      const transactionId = randomUUID()
+      let journal: JournalFile = {
+        schemaVersion: JOURNAL_SCHEMA_VERSION,
+        operation: 'rollback',
+        checkpoint: 'prepared',
+        transactionId,
+        moduleId,
+        version: previousState.lastKnownGoodVersion,
+        previousState,
+        nextState,
+      }
+      await this.#claimJournal(paths, journal)
+      try {
+        await this.#fault('after-journal-prepared')
+        await this.#fault('before-state-rename')
+        await atomicWriteJson(paths.state, nextState)
+        journal = { ...journal, checkpoint: 'state-activated' }
+        await atomicWriteJson(paths.journal, journal)
+        await this.#fault('after-state-activated')
+        await this.#cleanupTransaction(paths, transactionId)
+      } catch (error) {
+        if (error instanceof SimulatedInstallerCrash) throw error
+        const committed = statesEqual(await this.#readState(paths.state), nextState)
+        await this.#recoverModule(moduleId)
+        if (committed) return { ...publicState(moduleId, nextState), activePath: lkgPath }
+        if (error instanceof ModuleInstallerError) throw error
+        throw new ModuleInstallerError('FILESYSTEM_ERROR', error instanceof Error ? error.message : String(error), error)
+      }
+      return { ...publicState(moduleId, nextState), activePath: lkgPath }
+    })
+  }
+
+  async uninstall(request: UninstallRequest): Promise<void> {
+    this.#validateModuleId(request.moduleId)
+    if (!validVersion(request.version)) throw new ModuleInstallerError('DESCRIPTOR_INVALID', 'Uninstall version is invalid')
+    await this.#exclusive(request.moduleId, async () => {
+      await this.#ensureRoot()
+      const paths = await this.#ensureModuleLayout(request.moduleId)
+      await this.#assertIdle(paths)
+      const state = await this.#readState(paths.state)
+      if (state.activeVersion === request.version || state.lastKnownGoodVersion === request.version || request.inUseVersions?.has(request.version)) {
+        throw new ModuleInstallerError('PROTECTED_VERSION', 'Cannot uninstall an active, last-known-good, or in-use version')
+      }
+      const target = join(paths.versionsDirectory, request.version)
+      if (!(await pathExists(target))) throw new ModuleInstallerError('NOT_INSTALLED', 'Module version is not installed')
+      const transactionId = randomUUID()
+      const trash = this.#trashPath(transactionId)
+      const journal: JournalFile = {
+        schemaVersion: JOURNAL_SCHEMA_VERSION,
+        operation: 'uninstall',
+        checkpoint: 'prepared',
+        transactionId,
+        moduleId: request.moduleId,
+        version: request.version,
+        previousState: state,
+        nextState: state,
+      }
+      await this.#claimJournal(paths, journal)
+      try {
+        await mkdir(resolve(trash, '..'), { recursive: true, mode: 0o700 })
+        await rename(target, trash)
+        await fsyncDirectory(paths.versionsDirectory)
+        await fsyncDirectory(resolve(trash, '..'))
+        await atomicWriteJson(paths.journal, { ...journal, checkpoint: 'version-published' })
+        await rm(trash, { recursive: true, force: true })
+        await this.#cleanupTransaction(paths, transactionId)
+      } catch (error) {
+        if (error instanceof SimulatedInstallerCrash) throw error
+        await this.#recoverModule(request.moduleId)
+        if (!(await pathExists(target))) return
+        if (error instanceof ModuleInstallerError) throw error
+        throw new ModuleInstallerError('FILESYSTEM_ERROR', error instanceof Error ? error.message : String(error), error)
+      }
+    })
+  }
+
+  async recover(moduleId: ModuleId): Promise<void> {
+    this.#validateModuleId(moduleId)
+    await this.#exclusive(moduleId, async () => {
+      await this.#ensureRoot()
+      await this.#recoverModule(moduleId)
+    })
+  }
+
+  /** Resume only after the host has established that the prior recovery owner is gone. */
+  async recoverInterrupted(moduleId: ModuleId): Promise<void> {
+    this.#validateModuleId(moduleId)
+    await this.#exclusive(moduleId, async () => {
+      await this.#ensureRoot()
+      await this.#recoverModule(moduleId, true)
+    })
+  }
+
+  async recoverAll(): Promise<void> {
+    await this.#ensureRoot()
+    const modulesDirectory = join(this.#root, 'modules')
+    const entries = await readdir(modulesDirectory, { withFileTypes: true })
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !MODULE_ID_PATTERN.test(entry.name)) {
+        throw new ModuleInstallerError('JOURNAL_INVALID', `Unexpected entry in module root: ${JSON.stringify(entry.name)}`)
+      }
+      await this.recover(entry.name as ModuleId)
+    }
+  }
+
+  async #recoverModule(moduleId: ModuleId, resumeInterrupted = false): Promise<void> {
+    const paths = this.#modulePaths(moduleId)
+    const hasJournal = await pathExists(paths.journal)
+    const hasRecoveringJournal = await pathExists(paths.recoveringJournal)
+    if (hasJournal && hasRecoveringJournal) {
+      throw new ModuleInstallerError('JOURNAL_INVALID', 'Module has conflicting transaction journals')
+    }
+    if (!hasJournal && !hasRecoveringJournal) return
+    if (hasRecoveringJournal && !resumeInterrupted) {
+      throw new ModuleInstallerError('BUSY', 'Another installer owns recovery; use recoverInterrupted only after confirming it stopped')
+    }
+    if (hasJournal) {
+      try {
+        await rename(paths.journal, paths.recoveringJournal)
+        await fsyncDirectory(paths.moduleDirectory)
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT' && await pathExists(paths.recoveringJournal)) {
+          throw new ModuleInstallerError('BUSY', 'Another installer is recovering this module')
+        }
+        throw error
+      }
+    }
+    await this.#fault('after-recovery-claimed')
+    const journal = parseJournal(await this.#readSmallJson(paths.recoveringJournal), moduleId)
+    const currentState = await this.#readState(paths.state)
+    const staging = this.#stagingPath(journal.transactionId)
+    const trash = this.#trashPath(journal.transactionId)
+    const target = join(paths.versionsDirectory, journal.version)
+
+    if (journal.operation === 'uninstall') {
+      if (await pathExists(trash)) await rm(trash, { recursive: true, force: true })
+      await this.#cleanupTransaction(paths, journal.transactionId, paths.recoveringJournal)
+      return
+    }
+
+    if (statesEqual(currentState, journal.nextState)) {
+      await this.#cleanupTransaction(paths, journal.transactionId, paths.recoveringJournal)
+      return
+    }
+
+    if (!statesEqual(currentState, journal.previousState)) {
+      throw new ModuleInstallerError('JOURNAL_INVALID', 'Activation state does not match either side of pending transaction')
+    }
+    if (journal.operation === 'install' && await pathExists(target)) {
+      await rm(target, { recursive: true, force: true })
+      await fsyncDirectory(paths.versionsDirectory)
+    }
+    if (await pathExists(staging)) await rm(staging, { recursive: true, force: true })
+    await rm(paths.recoveringJournal, { force: true })
+    await fsyncDirectory(paths.moduleDirectory)
+  }
+
+  async #ensureRoot(): Promise<void> {
+    if (this.#rootReady) return
+    await mkdir(this.#root, { recursive: true, mode: 0o700 })
+    const info = await lstat(this.#root)
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      throw new ModuleInstallerError('FILESYSTEM_ERROR', 'Module root must be a real directory, not a link')
+    }
+    await this.#ensureDirectory(join(this.#root, '.module-installer'))
+    await this.#ensureDirectory(join(this.#root, '.module-installer', 'staging'))
+    await this.#ensureDirectory(join(this.#root, '.module-installer', 'trash'))
+    await this.#ensureDirectory(join(this.#root, 'modules'))
+    const rootDevice = (await stat(this.#root)).dev
+    for (const child of [join(this.#root, '.module-installer'), join(this.#root, 'modules')]) {
+      if ((await stat(child)).dev !== rootDevice) {
+        throw new ModuleInstallerError('FILESYSTEM_ERROR', 'Installer control and module directories must share one filesystem')
+      }
+    }
+    this.#rootReady = true
+  }
+
+  async #ensureModuleLayout(moduleId: ModuleId): Promise<ModulePaths> {
+    const paths = this.#modulePaths(moduleId)
+    await this.#ensureDirectory(paths.moduleDirectory)
+    await this.#ensureDirectory(paths.versionsDirectory)
+    return paths
+  }
+
+  async #ensureDirectory(path: string): Promise<void> {
+    await mkdir(path, { recursive: true, mode: 0o700 })
+    const info = await lstat(path)
+    if (!info.isDirectory() || info.isSymbolicLink()) {
+      throw new ModuleInstallerError('FILESYSTEM_ERROR', `Installer path must be a real directory: ${path}`)
+    }
+  }
+
+  #modulePaths(moduleId: ModuleId): ModulePaths {
+    this.#validateModuleId(moduleId)
+    const moduleDirectory = join(this.#root, 'modules', moduleId)
+    return {
+      moduleDirectory,
+      versionsDirectory: join(moduleDirectory, 'versions'),
+      state: join(moduleDirectory, 'state.json'),
+      journal: join(moduleDirectory, 'transaction.json'),
+      recoveringJournal: join(moduleDirectory, 'transaction.recovering.json'),
+    }
+  }
+
+  #stagingPath(transactionId: string): string {
+    if (!TRANSACTION_ID_PATTERN.test(transactionId)) throw new ModuleInstallerError('JOURNAL_INVALID', 'Invalid transaction identifier')
+    return join(this.#root, '.module-installer', 'staging', transactionId)
+  }
+
+  #trashPath(transactionId: string): string {
+    if (!TRANSACTION_ID_PATTERN.test(transactionId)) throw new ModuleInstallerError('JOURNAL_INVALID', 'Invalid transaction identifier')
+    return join(this.#root, '.module-installer', 'trash', transactionId)
+  }
+
+  async #readState(path: string): Promise<StateFile> {
+    if (!(await pathExists(path))) return emptyState()
+    return parseState(await this.#readSmallJson(path))
+  }
+
+  async #readSmallJson(path: string): Promise<unknown> {
+    const info = await stat(path)
+    if (!info.isFile() || info.size > 64 * 1024) throw new ModuleInstallerError('JOURNAL_INVALID', 'Installer metadata file is invalid')
+    try {
+      return JSON.parse(await readFile(path, 'utf8')) as unknown
+    } catch (error) {
+      throw new ModuleInstallerError('JOURNAL_INVALID', 'Installer metadata is not valid JSON', error)
+    }
+  }
+
+  async #cleanupTransaction(paths: ModulePaths, transactionId: string, metadataPath = paths.journal): Promise<void> {
+    await rm(this.#stagingPath(transactionId), { recursive: true, force: true })
+    await rm(this.#trashPath(transactionId), { recursive: true, force: true })
+    await rm(metadataPath, { force: true })
+    await fsyncDirectory(paths.moduleDirectory)
+  }
+
+  #progressReporter(callback?: (progress: InstallProgress) => void): (progress: InstallProgress) => void {
+    let completed = -1
+    return (progress) => {
+      if (progress.completed < completed) return
+      completed = progress.completed
+      callback?.(Object.freeze({ ...progress }))
+    }
+  }
+
+  #abortIfRequested(signal?: AbortSignal): void {
+    if (signal?.aborted) throw new ModuleInstallerError('ABORTED', 'Module installation was cancelled')
+  }
+
+  async #fault(point: Parameters<NonNullable<ModuleInstallerOptions['faultInjector']>>[0]): Promise<void> {
+    await this.#faultInjector?.(point)
+  }
+
+  async #assertIdle(paths: ModulePaths): Promise<void> {
+    if (await pathExists(paths.journal) || await pathExists(paths.recoveringJournal)) {
+      throw new ModuleInstallerError('BUSY', 'Module has a pending transaction; recover it before starting another operation')
+    }
+  }
+
+  async #claimJournal(paths: ModulePaths, journal: JournalFile): Promise<void> {
+    try {
+      await createJsonExclusive(paths.journal, journal)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
+        throw new ModuleInstallerError('BUSY', 'Another installer owns the module transaction')
+      }
+      throw error
+    }
+    try {
+      const currentState = await this.#readState(paths.state)
+      if (statesEqual(currentState, journal.previousState)) return
+    } catch (error) {
+      await rm(paths.journal, { force: true })
+      await fsyncDirectory(paths.moduleDirectory)
+      throw error
+    }
+    await rm(paths.journal, { force: true })
+    await fsyncDirectory(paths.moduleDirectory)
+    throw new ModuleInstallerError('BUSY', 'Module state changed while acquiring transaction ownership')
+  }
+
+  #validateModuleId(moduleId: string): asserts moduleId is ModuleId {
+    if (!MODULE_ID_PATTERN.test(moduleId) || isAbsolute(moduleId)) {
+      throw new ModuleInstallerError('DESCRIPTOR_INVALID', 'Module id is not a safe path component')
+    }
+  }
+
+  async #exclusive<T>(moduleId: ModuleId, operation: () => Promise<T>): Promise<T> {
+    if (this.#busy.has(moduleId)) throw new ModuleInstallerError('BUSY', `Another operation is active for ${moduleId}`)
+    this.#busy.add(moduleId)
+    try {
+      return await operation()
+    } finally {
+      this.#busy.delete(moduleId)
+    }
+  }
+}
