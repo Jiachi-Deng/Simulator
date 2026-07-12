@@ -1,0 +1,19 @@
+{
+  "name": "@simulator/open-science-artifact-policy",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "validate-open-science-artifact": "dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "diff-check": "git diff --check -- modules/open-science"
+  },
+  "devDependencies": {
+    "@types/node": "24.0.13",
+    "typescript": "5.8.3"
+  }
+}
