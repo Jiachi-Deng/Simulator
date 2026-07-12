@@ -268,6 +268,18 @@
         "typescript": "^5.8.2",
       },
     },
+    "packages/module-registry": {
+      "name": "@simulator/module-registry",
+      "version": "0.11.1",
+      "dependencies": {
+        "@simulator/module-contract": "workspace:*",
+        "semver": "7.7.3",
+      },
+      "devDependencies": {
+        "@types/semver": "^7.7.1",
+        "typescript": "^5.8.2",
+      },
+    },
     "packages/pi-agent-server": {
       "name": "@craft-agent/pi-agent-server",
       "version": "0.11.1",
@@ -1286,6 +1298,8 @@
     "@silvia-odwyer/photon-node": ["@silvia-odwyer/photon-node@0.3.4", "", {}, "sha512-bnly4BKB3KDTFxrUIcgCLbaeVVS8lrAkri1pEzskpmxu9MdfGQTy8b8EgcD83ywD3RPMsIulY8xJH5Awa+t9fA=="],
 
     "@simulator/module-contract": ["@simulator/module-contract@workspace:packages/module-contract"],
+
+    "@simulator/module-registry": ["@simulator/module-registry@workspace:packages/module-registry"],
 
     "@sinclair/typebox": ["@sinclair/typebox@0.34.48", "", {}, "sha512-kKJTNuK3AQOrgjjotVxMrCn1sUJwM76wMszfq1kdU4uYVJjvEWuFQ6HgvLt4Xz3fSmZlTOxJ/Ie13KnIcWQXFA=="],
 
