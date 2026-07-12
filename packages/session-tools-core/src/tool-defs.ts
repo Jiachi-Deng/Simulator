@@ -125,7 +125,7 @@ export const UpdatePreferencesSchema = z.object({
   region: z.string().optional().describe("The user's state/region/province"),
   country: z.string().optional().describe("The user's country"),
   notes: z.string().optional().describe('Additional notes about the user that would be helpful to remember (preferences, context, etc.). Replaces any existing notes.'),
-  includeCoAuthoredBy: z.boolean().optional().describe("Whether to include the upstream 'Co-Authored-By: Craft Agent' trailer on git commits. Defaults to true."),
+  includeCoAuthoredBy: z.boolean().optional().describe("Whether to opt in to the upstream 'Co-Authored-By: Craft Agent' trailer on git commits. Defaults to false for Simulator commits."),
 });
 
 export const TransformDataSchema = z.object({

@@ -252,7 +252,11 @@ export function TopBar({
               <Icons.HelpCircle className="h-4 w-4 text-foreground/50" strokeWidth={1.5} />
             </TopBarButton>
           </DropdownMenuTrigger>
-          <StyledDropdownMenuContent align="end" minWidth="min-w-48">
+          <StyledDropdownMenuContent align="end" minWidth="min-w-72">
+            <div className="px-2 py-1.5 text-xs font-medium text-muted-foreground">
+              {t("menu.allDocumentation")}
+            </div>
+            <StyledDropdownMenuSeparator />
             <StyledDropdownMenuItem onClick={() => window.electronAPI.openUrl(getDocUrl('sources'))}>
               <Icons.DatabaseZap className="h-3.5 w-3.5" />
               <span className="flex-1">{t("sidebar.sources")}</span>

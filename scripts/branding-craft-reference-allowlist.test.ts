@@ -52,4 +52,26 @@ describe('remaining Craft references', () => {
 
     expect(unused).toEqual([])
   })
+
+  test('scanner detects bare Craft domains and the former package support address', () => {
+    expect([...'https://craft.do'.matchAll(CRAFT_REFERENCE_PATTERN)].map((match) => match[0])).toEqual(['craft.do'])
+    expect([...'support@craft.do'.matchAll(CRAFT_REFERENCE_PATTERN)].map((match) => match[0])).toEqual(['support@craft.do'])
+  })
+
+  test('current package metadata and desktop artifacts use Simulator ownership', () => {
+    const electronPackage = JSON.parse(readFileSync(resolve(repoRoot, 'apps/electron/package.json'), 'utf8'))
+    const serverPackage = JSON.parse(readFileSync(resolve(repoRoot, 'packages/server/package.json'), 'utf8'))
+    const builderConfig = readFileSync(resolve(repoRoot, 'apps/electron/electron-builder.yml'), 'utf8')
+    const dmgScript = readFileSync(resolve(repoRoot, 'apps/electron/scripts/build-dmg.sh'), 'utf8')
+
+    expect(electronPackage.author).toEqual({
+      name: 'Simulator contributors',
+      url: 'https://github.com/Jiachi-Deng/Simulator',
+    })
+    expect(serverPackage.author).toEqual(electronPackage.author)
+    expect(builderConfig).toContain('copyright: Copyright © 2026 Simulator contributors')
+    expect(builderConfig).toContain('maintainer: "Simulator contributors (https://github.com/Jiachi-Deng/Simulator)"')
+    expect(builderConfig.match(/artifactName: "Simulator-\$\{arch\}/g)).toHaveLength(4)
+    expect(dmgScript).toContain('DMG_NAME="Simulator-${ARCH}.dmg"')
+  })
 })

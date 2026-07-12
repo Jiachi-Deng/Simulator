@@ -11,7 +11,7 @@ export interface CraftReferenceCategory {
 }
 
 export const CRAFT_REFERENCE_PATTERN =
-  /Craft Agents?|CraftAgents|craft-agents|craft-agent|CRAFT_[A-Z0-9_]+|\bCraft\b/g
+  /support@craft\.do|(?:[a-z0-9-]+\.)*craft\.do|Craft Agents?|CraftAgents|craft-agents|craft-agent|CRAFT_[A-Z0-9_]+|\bCraft\b/g
 
 export const CRAFT_REFERENCE_ALLOWLIST: CraftReferenceCategory[] = [
   {
@@ -28,14 +28,12 @@ export const CRAFT_REFERENCE_ALLOWLIST: CraftReferenceCategory[] = [
   },
   {
     id: 'runtime-upstream-attribution',
-    reason: 'Upstream authorship and package metadata must continue crediting Craft Docs and Craft Agent.',
+    reason: 'Explicitly enabled upstream co-authorship and bundled upstream theme metadata retain their original attribution.',
     matches: ({ path, line }) =>
       (/(?:Co-Authored-By: Craft Agent|upstream Craft Agent attribution)/.test(line)
         && /^(?:packages\/shared\/src\/prompts\/(?:system|__tests__\/system\.test)\.ts|packages\/session-tools-core\/src\/tool-defs\.ts)$/.test(path))
       || (/"author": "Craft Agent"/.test(line)
-        && /^apps\/electron\/resources\/themes\/(?:default|haze)\.json$/.test(path))
-      || (/"name": "Craft Docs Ltd\."/.test(line)
-        && /^(?:apps\/electron|packages\/server)\/package\.json$/.test(path)),
+        && /^apps\/electron\/resources\/themes\/(?:default|haze)\.json$/.test(path)),
   },
   {
     id: 'historical-release-notes',
@@ -44,9 +42,30 @@ export const CRAFT_REFERENCE_ALLOWLIST: CraftReferenceCategory[] = [
   },
   {
     id: 'craft-services-and-examples',
-    reason: 'Craft Docs integrations, docs proxy names, bot examples, and service fixtures identify external systems.',
+    reason: 'Craft integrations, docs proxy names, bot examples, and service fixtures identify external systems.',
     matches: ({ line }) =>
-      /craft\.do|Craft Agents (?:Docs|documentation)|SearchCraftAgents|CraftAgentsBot|CraftAgents E2E|craft-public|Craft document|Craft MCP|Craft (?:space|source|API|Admin|CLI)|\{source:Craft\}/i.test(line),
+      /Craft Agents (?:Docs|documentation)|SearchCraftAgents|CraftAgentsBot|CraftAgents E2E|craft-public|Craft document|Craft MCP|Craft (?:space|source|API|Admin|CLI)|\{source:Craft\}/i.test(line),
+  },
+  {
+    id: 'upstream-craft-service-endpoints',
+    reason: 'Known Craft-hosted docs, sharing, updater, OAuth, MCP, viewer, and integration endpoints remain external service dependencies.',
+    matches: ({ path, line }) =>
+      /https?:\/\/agents\.craft\.do(?:\/(?:docs|electron|auth|s|install-app\.(?:sh|ps1))(?:[/?#][^\s'"<)]*)?)?(?:['"<)\s]|$)/.test(line)
+      || /https?:\/\/(?:mcp|connect)\.craft\.do(?:[/:?][^\s'"<)]*)?/.test(line)
+      || (path === 'packages/shared/src/docs/source-guides.ts' && /craft:\s*'craft\.do'/.test(line)),
+  },
+  {
+    id: 'craft-mcp-url-validation',
+    reason: 'The Craft MCP URL validator documents and tests the exact external hostname, including rejected malformed examples.',
+    matches: ({ path, line }) =>
+      path === 'packages/shared/src/validation/url-validator.ts' && /mcp\.craft\.do/.test(line),
+  },
+  {
+    id: 'localized-upstream-doc-labels',
+    reason: 'Localized UI labels identify links as upstream Craft documentation.',
+    matches: ({ path, line }) =>
+      /^packages\/shared\/src\/i18n\/locales\/(?:de|en|es|hu|ja|pl|zh-Hans)\.json$/.test(path)
+      && /(?:upstream|Upstream|上游|アップストリーム).*Craft|Craft.*(?:upstream|Upstream|上游|アップストリーム)/.test(line),
   },
   {
     id: 'localized-craft-integration-copy',
@@ -93,11 +112,21 @@ export const CRAFT_REFERENCE_ALLOWLIST: CraftReferenceCategory[] = [
   },
   {
     id: 'updater-and-installer-compatibility',
-    reason: 'Published artifact names and upstream installers must continue matching the existing update service.',
-    matches: ({ path }) =>
-      path === 'apps/electron/electron-builder.yml'
-      || /^scripts\/(?:install-app\.(?:sh|ps1)|build\/.*\.ts)$/.test(path)
-      || /^apps\/electron\/scripts\/(?:build-dmg\.sh|build-linux\.sh|build-win\.ps1)$/.test(path),
+    reason: 'Updater and installer lines retain the upstream endpoint and legacy installed-app identifiers required for compatibility.',
+    matches: ({ path, line }) => {
+      if (path === 'apps/electron/electron-builder.yml') {
+        return /url:\s*https:\/\/agents\.craft\.do\/electron\/latest/.test(line)
+      }
+
+      if (!/^scripts\/install-app\.(?:sh|ps1)$/.test(path)) return false
+
+      return /https:\/\/agents\.craft\.do\/(?:electron|install-app\.(?:sh|ps1))/.test(line)
+        || /Craft-Agents-(?:\$\{?arch\}?|x64|arm64|x86_64|aarch64)\.(?:dmg|zip|exe|AppImage|\$\{ext\})/.test(line)
+        || /(?:APP_NAME|APPIMAGE_PATH|APPIMAGE_INSTALL_PATH|OLD_APPIMAGE|Get-Process|LOCALAPPDATA|pgrep|pkill|open -a|Closing|Quitting|Stopping|has been installed|not found).*Craft Agents?/.test(line)
+        || /Craft Agents?.*(?:APP_NAME|APPIMAGE_PATH|APPIMAGE_INSTALL_PATH|OLD_APPIMAGE|Get-Process|LOCALAPPDATA|pgrep|pkill|open -a|Closing|Quitting|Stopping|has been installed|not found)/.test(line)
+        || /(?:pgrep|pkill).*Craft-Agent\.\*AppImage/.test(line)
+        || /^# Craft Agents? (?:Windows Installer|launcher)/.test(line)
+    },
   },
   {
     id: 'preserved-icons-and-logo',
@@ -137,6 +166,7 @@ export const CRAFT_REFERENCE_ALLOWLIST: CraftReferenceCategory[] = [
       || path === 'apps/electron/resources/scripts/tests/test_docx_tool_smoke.py'
       || path === 'packages/shared/src/agent/__tests__/spawn-session-tilde-expansion.test.ts'
       || path === 'apps/electron/src/main/__tests__/browser-pane-manager.test.ts'
+      || path === 'packages/server-core/src/webui/__tests__/oauth-callback.test.ts'
       || path === 'apps/electron/src/renderer/assets/samples/sample-invoice.pdf'
       || path === 'packages/shared/src/config/__tests__/storage-update-llm-connection.test.ts'
       || /^apps\/electron\/src\/renderer\/playground\/(?:registry\/(?:browser-ui|mobile-webui|planner)|demos\/mobile-webui\/AppMenuMobilePreview)\.tsx$/.test(path),

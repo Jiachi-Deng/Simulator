@@ -5,8 +5,8 @@
   "main": "dist/main.cjs",
   "private": true,
   "author": {
-    "name": "Craft Docs Ltd.",
-    "email": "support@craft.do"
+    "name": "Simulator contributors",
+    "url": "https://github.com/Jiachi-Deng/Simulator"
   },
   "homepage": "https://github.com/Jiachi-Deng/Simulator#readme",
   "repository": {
