@@ -25,9 +25,9 @@
 5. 对 native binary 记录 `platform`、`arch`、`nodeAbi`、`libc`，并按目标平台分别验证。
 6. 离线运行 validator；通过后才允许后续签名、归档或分发步骤。
 
-validator 不访问文件系统中的 artifact。`produce-inventory.mjs` 负责安全读取一个已经完成构建和筛选的 staging root：逐级 `lstat`/`realpath` containment，不跟随 symlink，只接受 regular files；打开 descriptor 后以 `fstat` 绑定 identity，流式计算 SHA-256 和 bytes，再检查 descriptor 与路径的 dev/inode/size/mtime 未变化。hard-link alias、特殊文件、采集期间替换和修改均会失败。
+validator 不访问文件系统中的 artifact。`produce-inventory.mjs` 负责安全读取一个已经完成构建和筛选的 staging root：逐级 `lstat`/`realpath` containment，不跟随 symlink，只接受 regular files；打开 descriptor 后以 `fstat` 绑定 identity，流式计算 SHA-256 和 bytes，再检查 descriptor 与路径的 dev/inode/size/mtime/ctime 未变化。hard-link alias、特殊文件、采集期间替换和修改均会失败。
 
-producer 使用 UTF-8 byte order 排序，并拒绝 NFKC + full Unicode case-fold collision。每个 staged leaf 必须被现有 exact/prefix path rule 覆盖。字体、图片和 native binary 必须在 metadata map 中以 artifact exact path 提供资源 metadata；多余路径、未知字段和缺失 metadata 都会 fail closed。生成后 producer 会立即调用同一个 `validateArtifact`，不会输出未验证 inventory。
+producer 使用 UTF-8 byte order 排序，并拒绝 NFKC + full Unicode case-fold collision。初始安全遍历记录所有目录和 leaf 的 exact path 与 `dev/ino/size/mtimeNs/ctimeNs`；采集完成后再次完整遍历并复核 exact path set、identity 与每个 leaf 的 SHA-256，随后用 confirmation pass 确保已复核文件没有在 final hash traversal 后变化，因此新增、删除、替换或后改文件都会失败。遍历通过 `opendir` 流式累计 entry count，在保存完整单目录列表前执行全局上限。每个 staged leaf 必须被现有 exact/prefix path rule 覆盖。字体、图片、native binary，以及路径含 `plugins`、`skills`、`templates`、`design-templates`、`design-systems` 或 `assets` 的资源必须在 metadata map 中以 artifact exact path 提供资源 metadata；多余路径、未知字段和缺失 metadata 都会 fail closed。生成后 producer 会立即调用同一个 `validateArtifact`，不会输出未验证 inventory。
 
 `artifact-manifest.json` 是 producer 的输出，不得预先出现在 staging root。producer 会合成其 inventory entry，稳定计算 canonical JSON bytes，并按 validator 已定义的 self-digest 规则绑定 inventory。
 
@@ -82,7 +82,7 @@ target 文件示例：
 }
 ```
 
-输出到 stdout，或使用 `--output` 以 exclusive-create 方式写入一个尚不存在的文件（可直接指定 staging root 下的 `artifact-manifest.json`）：
+输出默认写到 stdout，也可使用 `--output` 以 exclusive-create 方式写入尚不存在的文件。staging root 外可使用任意输出路径；staging root 内只接受根目录的 exact `artifact-manifest.json`，producer 会在采集期间保留该路径、写入后复核内容，任何其他内部输出路径都会被拒绝。CLI 拒绝未知参数、重复参数和缺值参数：
 
 ```sh
 npm run inventory -- \

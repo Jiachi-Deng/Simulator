@@ -29,7 +29,8 @@ export async function produceInventory({ stagingRoot, metadata = {}, provenance,
   const rootStat = await safeLstat(stagingRoot, "staging root");
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) fail("STAGING_ROOT_INVALID", "staging root must be a real directory");
   const rootReal = await realpath(stagingRoot);
-  const leafPaths = await walkDirectory(stagingRoot, "", rootReal, policy);
+  const initial = await snapshotDirectory(stagingRoot, rootReal, policy);
+  const leafPaths = initial.leafPaths;
   if (leafPaths.includes("artifact-manifest.json")) fail("OUTPUT_PATH_OCCUPIED", "staging root must not contain the generated artifact-manifest.json");
   const foldedPaths = new Map();
   for (const artifactPath of leafPaths) {
@@ -50,7 +51,7 @@ export async function produceInventory({ stagingRoot, metadata = {}, provenance,
     const rule = findRule(artifactPath, policy);
     if (!rule) fail("PATH_NOT_ALLOWED", `path is outside the feature profile: ${artifactPath}`);
     const special = validateMetadata(artifactPath, metadata[artifactPath], policy);
-    const collected = await collectFile({ stagingRoot, artifactPath, rootReal, policy, hook });
+    const collected = await collectFile({ stagingRoot, artifactPath, rootReal, policy, hook, expected: initial.entries.get(artifactPath) });
     const identityKey = `${collected.stat.dev}:${collected.stat.ino}`;
     if (identities.has(identityKey)) fail("HARD_LINK_ALIAS", `hard-linked artifact paths are forbidden: ${identities.get(identityKey)} and ${artifactPath}`);
     identities.set(identityKey, artifactPath);
@@ -74,6 +75,13 @@ export async function produceInventory({ stagingRoot, metadata = {}, provenance,
     });
   }
 
+  await hook?.({ phase: "afterCollection" });
+  const final = await snapshotDirectory(stagingRoot, rootReal, policy, { hashFiles: true });
+  assertConsistentSnapshots(initial, final, files);
+  await hook?.({ phase: "afterFinalHash" });
+  const confirmation = await snapshotDirectory(stagingRoot, rootReal, policy);
+  assertSamePathIdentities(final, confirmation, "staging changed after final hash");
+
   const manifestRule = findRule("artifact-manifest.json", policy);
   const manifestRequired = policy.requiredFiles.find((file) => file.path === "artifact-manifest.json");
   if (!manifestRule || !manifestRequired) fail("POLICY_INVALID", "policy must define artifact-manifest.json as a required exact path");
@@ -93,29 +101,39 @@ export async function produceInventory({ stagingRoot, metadata = {}, provenance,
   manifest.sha256 = digestInventory(inventory);
   const result = validateArtifact({ provenance, policy, decisions, inventory, schemas: schemas ?? await loadRuntimeSchemas() });
   if (!result.ok) fail("ARTIFACT_INVALID", result.errors.map((error) => `${error.code}: ${error.message}`).join("; "));
-  return { inventory, json: `${canonicalJson(inventory)}\n` };
+  return { inventory, json: `${canonicalJson(inventory)}\n`, baseline: final };
 }
 
-async function walkDirectory(absoluteDirectory, relativeDirectory, rootReal, policy) {
-  await assertDirectory(absoluteDirectory, rootReal, relativeDirectory || ".");
-  const entries = [];
-  const directory = await opendir(absoluteDirectory);
-  for await (const entry of directory) entries.push(entry.name);
-  entries.sort(compareUtf8);
+async function snapshotDirectory(stagingRoot, rootReal, policy, { hashFiles = false } = {}) {
+  const entries = new Map();
+  const leafPaths = [];
+  let entryCount = 0;
 
-  const files = [];
-  for (const name of entries) {
-    const artifactPath = relativeDirectory ? `${relativeDirectory}/${name}` : name;
-    validateArtifactPath(artifactPath, policy);
-    const absolutePath = path.join(absoluteDirectory, name);
-    const stat = await safeLstat(absolutePath, artifactPath);
-    if (stat.isSymbolicLink()) fail("SYMLINK_FORBIDDEN", `symlink is forbidden: ${artifactPath}`);
-    if (stat.isDirectory()) files.push(...await walkDirectory(absolutePath, artifactPath, rootReal, policy));
-    else if (stat.isFile()) files.push(artifactPath);
-    else fail("SPECIAL_FILE_FORBIDDEN", `only regular files are allowed: ${artifactPath}`);
-    if (files.length > policy.limits.maxEntries) fail("ENTRY_LIMIT_EXCEEDED", "staging root exceeds maxEntries");
+  async function visit(absoluteDirectory, relativeDirectory) {
+    const beforeDirectory = await assertDirectory(absoluteDirectory, rootReal, relativeDirectory || ".");
+    const directory = await opendir(absoluteDirectory);
+    for await (const entry of directory) {
+      entryCount += 1;
+      if (entryCount > policy.limits.maxEntries) fail("ENTRY_LIMIT_EXCEEDED", "staging root exceeds maxEntries");
+      const artifactPath = relativeDirectory ? `${relativeDirectory}/${entry.name}` : entry.name;
+      validateArtifactPath(artifactPath, policy);
+      const absolutePath = path.join(absoluteDirectory, entry.name);
+      const stat = await safeLstat(absolutePath, artifactPath);
+      if (stat.isSymbolicLink()) fail("SYMLINK_FORBIDDEN", `symlink is forbidden: ${artifactPath}`);
+      entries.set(artifactPath, identityOf(stat));
+      if (stat.isDirectory()) await visit(absolutePath, artifactPath);
+      else if (stat.isFile()) {
+        leafPaths.push(artifactPath);
+        if (hashFiles) entries.get(artifactPath).sha256 = await hashSnapshotFile({ stagingRoot, artifactPath, rootReal, policy, expected: stat });
+      } else fail("SPECIAL_FILE_FORBIDDEN", `only regular files are allowed: ${artifactPath}`);
+    }
+    const afterDirectory = await safeLstat(absoluteDirectory, relativeDirectory || ".");
+    if (!sameIdentity(beforeDirectory, afterDirectory)) fail("STAGING_CHANGED", `directory changed during traversal: ${relativeDirectory || "."}`);
   }
-  return files;
+
+  await visit(stagingRoot, "");
+  leafPaths.sort(compareUtf8);
+  return { entries, leafPaths };
 }
 
 async function assertDirectory(absolutePath, rootReal, artifactPath) {
@@ -123,9 +141,10 @@ async function assertDirectory(absolutePath, rootReal, artifactPath) {
   if (!stat.isDirectory() || stat.isSymbolicLink()) fail("SYMLINK_FORBIDDEN", `directory component is not a real directory: ${artifactPath}`);
   const resolved = await realpath(absolutePath);
   assertContained(rootReal, resolved, artifactPath);
+  return stat;
 }
 
-async function collectFile({ stagingRoot, artifactPath, rootReal, policy, hook }) {
+async function collectFile({ stagingRoot, artifactPath, rootReal, policy, hook, expected }) {
   const absolutePath = path.join(stagingRoot, ...artifactPath.split("/"));
   await assertPathComponents(stagingRoot, artifactPath, rootReal);
   const beforePath = await safeLstat(absolutePath, artifactPath);
@@ -134,7 +153,7 @@ async function collectFile({ stagingRoot, artifactPath, rootReal, policy, hook }
   const handle = await open(absolutePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
   try {
     const before = await handle.stat({ bigint: true });
-    if (!before.isFile() || !sameIdentity(before, beforePath)) fail("FILE_CHANGED", `file identity changed while opening: ${artifactPath}`);
+    if (!before.isFile() || !sameIdentity(before, beforePath) || !sameIdentity(before, expected)) fail("FILE_CHANGED", `file identity changed while opening: ${artifactPath}`);
     if (before.size > BigInt(policy.limits.maxFileBytes)) fail("FILE_LIMIT_EXCEEDED", `file exceeds maxFileBytes: ${artifactPath}`);
     await hook?.({ phase: "afterOpen", path: artifactPath, fileHandle: handle });
 
@@ -164,6 +183,27 @@ async function collectFile({ stagingRoot, artifactPath, rootReal, policy, hook }
   }
 }
 
+async function hashSnapshotFile({ stagingRoot, artifactPath, rootReal, policy, expected }) {
+  const collected = await collectFile({ stagingRoot, artifactPath, rootReal, policy, expected });
+  return collected.sha256;
+}
+
+function assertConsistentSnapshots(initial, final, collectedFiles) {
+  assertSamePathIdentities(initial, final, "staging changed during collection");
+  const collectedByPath = new Map(collectedFiles.map((file) => [file.path, file]));
+  for (const artifactPath of initial.leafPaths) {
+    if (final.entries.get(artifactPath).sha256 !== collectedByPath.get(artifactPath)?.sha256) fail("STAGING_CHANGED", `staged file content changed after collection: ${artifactPath}`);
+  }
+}
+
+function assertSamePathIdentities(expected, actual, message) {
+  if (expected.entries.size !== actual.entries.size) fail("STAGING_CHANGED", `${message}: path set differs`);
+  for (const [artifactPath, identity] of expected.entries) {
+    const actualIdentity = actual.entries.get(artifactPath);
+    if (!actualIdentity || !sameIdentity(identity, actualIdentity)) fail("STAGING_CHANGED", `${message}: ${artifactPath}`);
+  }
+}
+
 async function assertPathComponents(stagingRoot, artifactPath, rootReal) {
   const components = artifactPath.split("/").slice(0, -1);
   let absolutePath = stagingRoot;
@@ -184,17 +224,26 @@ function validateArtifactPath(value, policy) {
 
 function validateMetadata(artifactPath, value, policy) {
   const extension = path.posix.extname(artifactPath).toLowerCase();
+  const pathCategory = inferResourcePathCategory(artifactPath, policy);
   const inferredCategory = policy.nativeBinaryExtensions.includes(extension) ? "native-binaries" : Object.entries(policy.resourceExtensions).find(([, extensions]) => extensions.includes(extension))?.[0];
   if (value === undefined) {
-    if (inferredCategory) fail("METADATA_MISSING", `resource/native metadata is required for exact path: ${artifactPath}`);
+    if (inferredCategory || pathCategory !== undefined) fail("METADATA_MISSING", `resource/native metadata is required for exact path: ${artifactPath}`);
     return {};
   }
   if (!isPlainObject(value) || Object.keys(value).some((key) => !RESOURCE_FIELDS.has(key))) fail("METADATA_INVALID", `metadata has unknown fields: ${artifactPath}`);
   for (const key of ["resourceCategory", "sourcePath", "decisionId"]) if (typeof value[key] !== "string" || !value[key]) fail("METADATA_INVALID", `metadata.${key} is required: ${artifactPath}`);
   if (inferredCategory && value.resourceCategory !== inferredCategory) fail("METADATA_INVALID", `metadata category does not match file type: ${artifactPath}`);
+  if (pathCategory && value.resourceCategory !== pathCategory) fail("METADATA_INVALID", `metadata category does not match resource path: ${artifactPath}`);
   if (value.resourceCategory === "native-binaries" && !isPlainObject(value.nativeTarget)) fail("METADATA_MISSING", `nativeTarget is required: ${artifactPath}`);
   if (value.resourceCategory !== "native-binaries" && value.nativeTarget !== undefined) fail("METADATA_INVALID", `nativeTarget is only valid for native binaries: ${artifactPath}`);
   return structuredClone(value);
+}
+
+function inferResourcePathCategory(artifactPath, policy) {
+  for (const segment of artifactPath.split("/")) {
+    if (Object.hasOwn(policy.resourcePathCategories, segment)) return policy.resourcePathCategories[segment] ?? null;
+  }
+  return undefined;
 }
 
 function findRule(artifactPath, policy) {
@@ -202,7 +251,11 @@ function findRule(artifactPath, policy) {
 }
 
 function sameIdentity(left, right) {
-  return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeNs === right.mtimeNs;
+  return left.dev === right.dev && left.ino === right.ino && left.size === right.size && left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs;
+}
+
+function identityOf(stat) {
+  return { dev: stat.dev, ino: stat.ino, size: stat.size, mtimeNs: stat.mtimeNs, ctimeNs: stat.ctimeNs };
 }
 
 function assertContained(rootReal, candidate, artifactPath) {
@@ -219,18 +272,61 @@ function isPlainObject(value) { return value !== null && typeof value === "objec
 async function readJson(filename) { return JSON.parse(await readFile(filename, "utf8")); }
 
 async function main(argv) {
-  const option = (name) => { const index = argv.indexOf(`--${name}`); return index >= 0 ? argv[index + 1] : undefined; };
-  const stagingRoot = option("staging-root");
-  const metadataPath = option("metadata");
-  const targetPath = option("target");
-  const output = option("output");
-  if (!stagingRoot || !metadataPath || !targetPath) fail("ARGUMENT_MISSING", "required: --staging-root ABSOLUTE --metadata FILE --target FILE [--output FILE]");
+  const options = parseArguments(argv);
+  const stagingRoot = options["staging-root"];
+  const metadataPath = options.metadata;
+  const targetPath = options.target;
+  const output = options.output;
+  const internalOutput = output && isWithin(stagingRoot, path.resolve(output));
+  if (internalOutput && path.resolve(output) !== path.join(path.resolve(stagingRoot), "artifact-manifest.json")) fail("OUTPUT_PATH_INVALID", "output inside staging root must be exact artifact-manifest.json");
   const [metadata, target, provenance, policy, decisions] = await Promise.all([
     readJson(metadataPath), readJson(targetPath), readJson(new URL("provenance.json", moduleRoot)), readJson(new URL("artifact-policy.json", moduleRoot)), readJson(new URL("resource-decisions.json", moduleRoot))
   ]);
-  const { json } = await produceInventory({ stagingRoot, metadata, target, provenance, policy, decisions });
-  if (output) await writeFile(output, json, { encoding: "utf8", flag: "wx" });
+  const { inventory, json, baseline } = await produceInventory({ stagingRoot, metadata, target, provenance, policy, decisions });
+  if (output) {
+    await writeFile(output, json, { encoding: "utf8", flag: "wx" });
+    if (internalOutput) await verifyInternalOutput({ stagingRoot, output, json, inventory, baseline, policy });
+  }
   else process.stdout.write(json);
+}
+
+function parseArguments(argv) {
+  const allowed = new Set(["staging-root", "metadata", "target", "output"]);
+  const options = {};
+  for (let index = 0; index < argv.length; index += 2) {
+    const token = argv[index];
+    if (!token?.startsWith("--") || !allowed.has(token.slice(2))) fail("ARGUMENT_UNKNOWN", `unknown argument: ${token}`);
+    const name = token.slice(2);
+    if (Object.hasOwn(options, name)) fail("ARGUMENT_DUPLICATE", `duplicate argument: ${token}`);
+    const value = argv[index + 1];
+    if (!value || value.startsWith("--")) fail("ARGUMENT_MISSING", `missing value for ${token}`);
+    options[name] = value;
+  }
+  for (const name of ["staging-root", "metadata", "target"]) if (!options[name]) fail("ARGUMENT_MISSING", `required argument: --${name}`);
+  return options;
+}
+
+function isWithin(root, candidate) {
+  const relative = path.relative(path.resolve(root), candidate);
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+async function verifyInternalOutput({ stagingRoot, output, json, inventory, baseline, policy }) {
+  const stat = await safeLstat(output, "artifact-manifest.json");
+  if (!stat.isFile() || stat.isSymbolicLink()) fail("OUTPUT_VERIFY_FAILED", "generated manifest is not a regular file");
+  const rootReal = await realpath(stagingRoot);
+  const final = await snapshotDirectory(stagingRoot, rootReal, policy, { hashFiles: true });
+  const expectedPaths = new Set([...baseline.entries.keys(), "artifact-manifest.json"]);
+  if (final.entries.size !== expectedPaths.size || [...final.entries.keys()].some((entry) => !expectedPaths.has(entry))) fail("OUTPUT_VERIFY_FAILED", "output created an unlisted staging entry");
+  for (const [artifactPath, identity] of baseline.entries) {
+    const finalIdentity = final.entries.get(artifactPath);
+    if (!finalIdentity || !sameIdentity(identity, finalIdentity) || identity.sha256 !== finalIdentity.sha256) fail("OUTPUT_VERIFY_FAILED", `staging entry changed while writing output: ${artifactPath}`);
+  }
+  const manifestEntry = inventory.files.find((file) => file.path === "artifact-manifest.json");
+  if (!manifestEntry || await readFile(output, "utf8") !== json) fail("OUTPUT_VERIFY_FAILED", "generated manifest failed final verification");
+  const confirmation = await snapshotDirectory(stagingRoot, rootReal, policy);
+  try { assertSamePathIdentities(final, confirmation, "staging changed after output verification"); }
+  catch (error) { if (error instanceof InventoryProductionError) fail("OUTPUT_VERIFY_FAILED", error.message); else throw error; }
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {

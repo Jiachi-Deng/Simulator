@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { link, mkdir, mkdtemp, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { link, mkdir, mkdtemp, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 import { canonicalJson, loadRuntimeSchemas } from "../src/validate-artifact.mjs";
@@ -11,6 +12,7 @@ import { readFile } from "node:fs/promises";
 
 const execFileAsync = promisify(execFile);
 const moduleRoot = new URL("../", import.meta.url);
+const producerPath = fileURLToPath(new URL("../src/produce-inventory.mjs", import.meta.url));
 const load = async (name) => JSON.parse(await readFile(new URL(name, moduleRoot), "utf8"));
 const base = {
   provenance: await load("provenance.json"),
@@ -43,6 +45,21 @@ async function run(root, overrides = {}) {
 
 async function rejectsCode(promise, code) {
   await assert.rejects(promise, (error) => error instanceof InventoryProductionError && error.code === code, `expected ${code}`);
+}
+
+async function cliFixture(root) {
+  const configRoot = await mkdtemp(path.join(os.tmpdir(), "open-design-cli-"));
+  const metadata = path.join(configRoot, "metadata.json");
+  const target = path.join(configRoot, "target.json");
+  await Promise.all([writeFile(metadata, "{}\n"), writeFile(target, `${JSON.stringify(base.target)}\n`)]);
+  return {
+    configRoot,
+    args: ["--staging-root", root, "--metadata", metadata, "--target", target]
+  };
+}
+
+async function rejectsCli(args, code) {
+  await assert.rejects(execFileAsync(process.execPath, [producerPath, ...args]), (error) => error.stderr.includes(`${code}:`));
 }
 
 test("produces byte-identical canonical JSON and validates it", async (t) => {
@@ -131,6 +148,39 @@ test("detects an intermediate component replaced during collection", async (t) =
   } }), "SYMLINK_FORBIDDEN");
 });
 
+test("rejects additions, deletions, replacements and post-collection modifications", async (t) => {
+  for (const mutation of ["add", "delete", "replace", "modify"]) {
+    const root = await fixture();
+    const replacement = path.join(os.tmpdir(), `open-design-replacement-${process.pid}-${mutation}`);
+    t.after(() => Promise.all([rm(root, { recursive: true, force: true }), rm(replacement, { force: true })]));
+    let changed = false;
+    await rejectsCode(run(root, { hook: async ({ phase }) => {
+      if (changed || phase !== "afterCollection") return;
+      changed = true;
+      const server = path.join(root, "web/standalone/server.js");
+      if (mutation === "add") await writeFile(path.join(root, "web/standalone/new.js"), "new\n");
+      if (mutation === "delete") await unlink(server);
+      if (mutation === "replace") {
+        await writeFile(replacement, "server\n");
+        await rename(replacement, server);
+      }
+      if (mutation === "modify") await writeFile(server, "changed after collection\n");
+    } }), "STAGING_CHANGED");
+  }
+});
+
+test("rejects a collected file changed after the final hash traversal", async (t) => {
+  const root = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  let changed = false;
+  await rejectsCode(run(root, { hook: async ({ phase }) => {
+    if (!changed && phase === "afterFinalHash") {
+      changed = true;
+      await writeFile(path.join(root, "web/standalone/server.js"), "changed after final hash\n");
+    }
+  } }), "STAGING_CHANGED");
+});
+
 test("requires exact resource metadata and rejects unknown metadata", async (t) => {
   const root = await fixture();
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -139,6 +189,33 @@ test("requires exact resource metadata and rejects unknown metadata", async (t) 
   await rejectsCode(run(root), "METADATA_MISSING");
   await rejectsCode(run(root, { metadata: { "web/public/missing.png": { resourceCategory: "images", sourcePath: "assets/missing.png", decisionId: "missing" } } }), "UNEXPECTED_METADATA");
   await rejectsCode(run(root, { metadata: { "web/public/logo.png": { resourceCategory: "images", sourcePath: "assets/logo.png", decisionId: "logo", unknown: true } } }), "METADATA_INVALID");
+});
+
+test("classifies resource paths independently of extension", async (t) => {
+  for (const relative of ["web/public/plugins/tool.txt", "web/public/skills/guide.txt", "web/public/templates/base.txt", "web/public/design-systems/tokens.json", "web/public/assets/data.txt"]) {
+    const root = await fixture();
+    t.after(() => rm(root, { recursive: true, force: true }));
+    await mkdir(path.dirname(path.join(root, relative)), { recursive: true });
+    await writeFile(path.join(root, relative), "resource\n");
+    await rejectsCode(run(root), "METADATA_MISSING");
+  }
+});
+
+test("resource-path metadata still requires an exact approved decision", async (t) => {
+  const root = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const artifactPath = "web/public/assets/data.txt";
+  await mkdir(path.dirname(path.join(root, artifactPath)), { recursive: true });
+  await writeFile(path.join(root, artifactPath), "resource\n");
+  await rejectsCode(run(root, { metadata: { [artifactPath]: { resourceCategory: "images", sourcePath: "assets/data.txt", decisionId: "not-approved" } } }), "ARTIFACT_INVALID");
+});
+
+test("enforces a global entry limit while iterating directories", async (t) => {
+  const root = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const policy = structuredClone(base.policy);
+  policy.limits.maxEntries = 2;
+  await rejectsCode(run(root, { policy }), "ENTRY_LIMIT_EXCEEDED");
 });
 
 test("rejects oversized files before hashing", async (t) => {
@@ -161,4 +238,23 @@ test("rejects NFKC full-case-fold collisions and path byte limits", async (t) =>
   const policy = structuredClone(base.policy);
   policy.limits.maxPathBytes = 10;
   await rejectsCode(run(limitRoot, { policy }), "PATH_LIMIT_EXCEEDED");
+});
+
+test("CLI accepts only the exact internal manifest output", async (t) => {
+  const root = await fixture();
+  const { configRoot, args } = await cliFixture(root);
+  t.after(() => Promise.all([rm(root, { recursive: true, force: true }), rm(configRoot, { recursive: true, force: true })]));
+  await rejectsCli([...args, "--output", path.join(root, "web/standalone/output.json")], "OUTPUT_PATH_INVALID");
+  const output = path.join(root, "artifact-manifest.json");
+  await execFileAsync(process.execPath, [producerPath, ...args, "--output", output]);
+  assert.equal(JSON.parse(await readFile(output, "utf8")).files.some((file) => file.path === "artifact-manifest.json"), true);
+});
+
+test("CLI rejects unknown, duplicate and missing-value arguments", async (t) => {
+  const root = await fixture();
+  const { configRoot, args } = await cliFixture(root);
+  t.after(() => Promise.all([rm(root, { recursive: true, force: true }), rm(configRoot, { recursive: true, force: true })]));
+  await rejectsCli([...args, "--unknown", "value"], "ARGUMENT_UNKNOWN");
+  await rejectsCli([...args, "--target", args.at(-1)], "ARGUMENT_DUPLICATE");
+  await rejectsCli([...args, "--output"], "ARGUMENT_MISSING");
 });
