@@ -1,3 +1,3 @@
 export * from './lifecycle.ts'
 export * from './manifest-types.ts'
-export { parseModuleManifest } from './manifest.ts'
+export { isValidatedModuleManifest, parseModuleManifest } from './manifest.ts'
