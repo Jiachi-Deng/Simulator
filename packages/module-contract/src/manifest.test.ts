@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { parseModuleManifest } from './manifest.ts'
+import { isValidatedModuleManifest, parseModuleManifest } from './manifest.ts'
 import { MAX_MODULE_ARTIFACTS, MAX_MODULE_CAPABILITIES } from './manifest-types.ts'
 import { GOLDEN_MODULE_MANIFEST_INPUT } from './testing/golden-manifest.ts'
 
@@ -40,6 +40,13 @@ describe('parseModuleManifest', () => {
     expect(Object.isFrozen(result.value.artifacts)).toBe(true)
     expect(Object.isFrozen(result.value.artifacts[0])).toBe(true)
     expect(Object.isFrozen(result.value.capabilities)).toBe(true)
+    expect(isValidatedModuleManifest(result.value)).toBe(true)
+  })
+
+  it('does not trust structurally valid or manually frozen manifest objects', () => {
+    expect(isValidatedModuleManifest(GOLDEN_MODULE_MANIFEST_INPUT)).toBe(false)
+    expect(isValidatedModuleManifest(Object.freeze({ ...GOLDEN_MODULE_MANIFEST_INPUT }))).toBe(false)
+    expect(isValidatedModuleManifest(null)).toBe(false)
   })
 
   it.each([[null], [[]], ['manifest'], [1]])('rejects non-object input: %p', (input) => {
