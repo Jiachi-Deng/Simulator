@@ -9,6 +9,7 @@ fi
 VERSION=$1
 RELEASE_DIR=$2
 BUNDLE_DIR=$3
+SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DMG="$RELEASE_DIR/Simulator-arm64.dmg"
 ZIP="$RELEASE_DIR/Simulator-arm64.zip"
 
@@ -40,20 +41,13 @@ verify_app() {
   local plist="$app/Contents/Info.plist"
   local executable_name executable
   [[ -f "$plist" ]] || { echo "Missing Info.plist in $app" >&2; exit 1; }
+  bun "$SCRIPT_DIR/updates-disabled.ts" --app "$app"
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" == "$VERSION" ]]
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" == "com.lukilabs.craft-agent" ]]
   executable_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")
   executable="$app/Contents/MacOS/$executable_name"
   [[ -x "$executable" ]] || { echo "Missing executable in $app" >&2; exit 1; }
-  [[ "$(lipo -archs "$executable")" == "arm64" ]]
-  if codesign -dvv "$app" 2>&1 | grep -q '^Authority='; then
-    echo "Engineering RC must be unsigned (signing Authority found): $app" >&2
-    exit 1
-  fi
-  while IFS= read -r -d '' file; do
-    file -b "$file" | grep -q 'Mach-O' || continue
-    [[ "$(lipo -archs "$file")" == "arm64" ]] || { echo "Non-arm64 Mach-O: $file" >&2; exit 1; }
-  done < <(find "$app" -type f -print0)
+  bun "$SCRIPT_DIR/verify-macos-signatures.ts" "$app"
   python3 - "$executable" <<'PY'
 import subprocess, sys
 result = subprocess.run([sys.argv[1], "--version"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
