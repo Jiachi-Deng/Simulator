@@ -56,9 +56,15 @@ interface DaemonRecord {
 
 interface PendingStart {
   readonly request: StartModuleDaemonRequest
+  readonly generation: number
   readonly controller: AbortController
   readonly promise: Promise<ModuleDaemonSnapshot>
-  stopPromise?: Promise<ModuleDaemonSnapshot | undefined>
+}
+
+interface QueuedStart {
+  readonly request: StartModuleDaemonRequest
+  readonly generation: number
+  readonly promise: Promise<ModuleDaemonSnapshot>
 }
 
 type MonitorOutcome =
@@ -91,6 +97,10 @@ function positiveInteger(value: number, name: string, allowZero = false): number
 export class ModuleDaemonManager {
   private readonly records = new Map<ModuleId, DaemonRecord>()
   private readonly pendingStarts = new Map<ModuleId, PendingStart>()
+  private readonly queuedStarts = new Map<ModuleId, Set<QueuedStart>>()
+  private readonly generations = new Map<ModuleId, number>()
+  private readonly moduleStops = new Map<ModuleId, Promise<ModuleDaemonSnapshot | undefined>>()
+  private readonly pendingTerminals = new Map<ModuleId, ModuleDaemonSnapshot>()
   private readonly listeners = new Set<(snapshot: ModuleDaemonSnapshot) => void>()
   private readonly startupTimeoutMs: number
   private readonly healthTimeoutMs: number
@@ -124,6 +134,19 @@ export class ModuleDaemonManager {
     if (this.draining) {
       return Promise.reject(new ModuleDaemonError('MANAGER_DRAINING', 'Module daemon manager is draining'))
     }
+    if (this.moduleStops.has(request.manifest.id)) {
+      return Promise.reject(new ModuleDaemonError('STOP_REQUESTED', 'Module daemon stop is in progress'))
+    }
+    return this.startInGeneration(request, this.generation(request.manifest.id))
+  }
+
+  private startInGeneration(request: StartModuleDaemonRequest, generation: number): Promise<ModuleDaemonSnapshot> {
+    if (generation !== this.generation(request.manifest.id)) {
+      return Promise.reject(new ModuleDaemonError('STOP_REQUESTED', 'Queued module daemon start was cancelled'))
+    }
+    if (this.draining) {
+      return Promise.reject(new ModuleDaemonError('MANAGER_DRAINING', 'Module daemon manager is draining'))
+    }
 
     const current = this.records.get(request.manifest.id)
     if (current?.cleanupFailed || (current?.process && !current.supervising && current.state === 'crashed')) {
@@ -149,14 +172,15 @@ export class ModuleDaemonManager {
       const pendingRequest = pending.request
       if (pendingRequest.manifest.version !== request.manifest.version
         || pendingRequest.activatedRoot !== request.activatedRoot) {
-        return pending.promise.then(() => this.start(request), () => this.start(request))
+        return this.enqueueStart(request, generation, pending.promise)
       }
       return pending.promise
     }
 
+    this.pendingTerminals.delete(request.manifest.id)
     const controller = new AbortController()
-    const operation = Promise.resolve().then(() => this.startNew(request, controller.signal))
-    const pendingStart: PendingStart = { request, controller, promise: operation }
+    const operation = Promise.resolve().then(() => this.startNew(request, controller.signal, generation))
+    const pendingStart: PendingStart = { request, generation, controller, promise: operation }
     this.pendingStarts.set(request.manifest.id, pendingStart)
     const clear = (): void => {
       if (this.pendingStarts.get(request.manifest.id) === pendingStart) {
@@ -167,11 +191,39 @@ export class ModuleDaemonManager {
     return operation
   }
 
-  private async startNew(request: StartModuleDaemonRequest, pendingSignal: AbortSignal): Promise<ModuleDaemonSnapshot> {
+  private enqueueStart(
+    request: StartModuleDaemonRequest,
+    generation: number,
+    predecessor: Promise<ModuleDaemonSnapshot>,
+  ): Promise<ModuleDaemonSnapshot> {
+    const operation = predecessor.then(
+      () => this.startInGeneration(request, generation),
+      () => this.startInGeneration(request, generation),
+    )
+    const queued: QueuedStart = { request, generation, promise: operation }
+    let starts = this.queuedStarts.get(request.manifest.id)
+    if (!starts) {
+      starts = new Set()
+      this.queuedStarts.set(request.manifest.id, starts)
+    }
+    starts.add(queued)
+    const clear = (): void => {
+      starts!.delete(queued)
+      if (starts!.size === 0) this.queuedStarts.delete(request.manifest.id)
+    }
+    void operation.then(clear, clear)
+    return operation
+  }
+
+  private async startNew(
+    request: StartModuleDaemonRequest,
+    pendingSignal: AbortSignal,
+    generation: number,
+  ): Promise<ModuleDaemonSnapshot> {
     const artifact = selectArtifact(request.manifest.artifacts, request.platform)
     const resolved = await (this.options.activation?.resolveEntrypoint(request.activatedRoot, artifact)
       ?? resolveActivatedEntrypoint(request.activatedRoot, artifact))
-    if (pendingSignal.aborted) {
+    if (pendingSignal.aborted || generation !== this.generation(request.manifest.id)) {
       throw new ModuleDaemonError('STOP_REQUESTED', 'Module daemon stopped before activation resolution completed')
     }
     if (this.draining) {
@@ -226,23 +278,55 @@ export class ModuleDaemonManager {
   }
 
   async stop(id: ModuleId): Promise<ModuleDaemonSnapshot | undefined> {
+    const existingStop = this.moduleStops.get(id)
+    if (existingStop) return existingStop
+    const operation = this.stopGeneration(id)
+    this.moduleStops.set(id, operation)
+    void operation.finally(() => {
+      if (this.moduleStops.get(id) === operation) this.moduleStops.delete(id)
+    }).catch(() => undefined)
+    return operation
+  }
+
+  private async stopGeneration(id: ModuleId): Promise<ModuleDaemonSnapshot | undefined> {
+    const cancelledGeneration = this.generation(id)
+    this.generations.set(id, cancelledGeneration + 1)
+    const pending = this.pendingStarts.get(id)
+    if (pending && pending.generation <= cancelledGeneration) pending.controller.abort()
+    const queued = [...(this.queuedStarts.get(id) ?? [])]
+      .filter((start) => start.generation <= cancelledGeneration)
+    const fallbackRequest = pending?.request ?? queued[0]?.request
+
+    let result: ModuleDaemonSnapshot | undefined
+    let failure: unknown
+    try {
+      result = await this.stopCurrent(id, pending)
+    } catch (error) {
+      failure = error
+    }
+    await Promise.allSettled(queued.map((start) => start.promise))
+    if (failure !== undefined) throw failure
+    if (!result && fallbackRequest) result = this.pendingStoppedSnapshot(fallbackRequest)
+    return result
+  }
+
+  private async stopCurrent(
+    id: ModuleId,
+    pending: PendingStart | undefined,
+  ): Promise<ModuleDaemonSnapshot | undefined> {
     let record = this.records.get(id)
     if (!record) {
-      const pending = this.pendingStarts.get(id)
-      if (!pending) return undefined
-      pending.controller.abort()
-      pending.stopPromise ??= pending.promise.then(
-        () => this.stop(id),
-        (error) => {
-          const active = this.records.get(id)
-          if (active) return this.stop(id)
-          if (error instanceof ModuleDaemonError && error.code !== 'STOP_REQUESTED' && error.code !== 'MANAGER_DRAINING') {
-            throw error
-          }
+      if (!pending) return this.pendingTerminals.get(id)
+      try {
+        await pending.promise
+      } catch {
+        record = this.records.get(id)
+        if (!record) {
           return this.pendingStoppedSnapshot(pending.request)
-        },
-      )
-      return pending.stopPromise
+        }
+      }
+      record = this.records.get(id)
+      if (!record) return this.pendingStoppedSnapshot(pending.request)
     }
     if (record.state === 'stopped') return this.snapshot(record)
     if (record.stopPromise) return record.stopPromise
@@ -262,7 +346,7 @@ export class ModuleDaemonManager {
 
   async drain(): Promise<void> {
     this.draining = true
-    const ids = new Set([...this.records.keys(), ...this.pendingStarts.keys()])
+    const ids = new Set([...this.records.keys(), ...this.pendingStarts.keys(), ...this.queuedStarts.keys()])
     this.drainPromise ??= Promise.all([...ids].map((id) => this.stop(id))).then(() => undefined)
     return this.drainPromise
   }
@@ -276,13 +360,13 @@ export class ModuleDaemonManager {
 
   get(id: ModuleId): ModuleDaemonSnapshot | undefined {
     const record = this.records.get(id)
-    return record ? this.snapshot(record) : undefined
+    return record ? this.snapshot(record) : this.pendingTerminals.get(id)
   }
 
   list(): readonly ModuleDaemonSnapshot[] {
-    return Object.freeze([...this.records.values()]
-      .sort((left, right) => left.id.localeCompare(right.id))
-      .map((record) => this.snapshot(record)))
+    const snapshots = new Map(this.pendingTerminals)
+    for (const record of this.records.values()) snapshots.set(record.id, this.snapshot(record))
+    return Object.freeze([...snapshots.values()].sort((left, right) => left.id.localeCompare(right.id)))
   }
 
   subscribe(listener: (snapshot: ModuleDaemonSnapshot) => void): () => void {
@@ -539,7 +623,7 @@ export class ModuleDaemonManager {
   }
 
   private pendingStoppedSnapshot(request: StartModuleDaemonRequest): ModuleDaemonSnapshot {
-    return Object.freeze({
+    const snapshot: ModuleDaemonSnapshot = Object.freeze({
       id: request.manifest.id,
       version: request.manifest.version,
       state: 'stopped',
@@ -551,6 +635,12 @@ export class ModuleDaemonManager {
         restartCount: 0,
       }),
     })
+    this.pendingTerminals.set(request.manifest.id, snapshot)
+    return snapshot
+  }
+
+  private generation(id: ModuleId): number {
+    return this.generations.get(id) ?? 0
   }
 
   private async probe(

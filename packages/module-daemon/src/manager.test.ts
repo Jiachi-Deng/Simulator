@@ -18,11 +18,11 @@ function currentPlatform(): ModulePlatform {
   return `${process.platform}-${process.arch}` as ModulePlatform
 }
 
-function manifest(id = 'org.simulator.daemon', entrypoint = 'bin/daemon'): ModuleManifest {
+function manifest(id = 'org.simulator.daemon', entrypoint = 'bin/daemon', version = '1.2.3'): ModuleManifest {
   const result = parseModuleManifest({
     schemaVersion: 1,
     id,
-    version: '1.2.3',
+    version,
     artifacts: [{
       platform: currentPlatform(),
       entrypoint,
@@ -363,6 +363,90 @@ describe('ModuleDaemonManager', () => {
     expect(processAdapter.requests).toHaveLength(0)
   })
 
+  test('stop cancels a pending version and a queued replacement before either can spawn', async () => {
+    const root = await activatedRoot()
+    let releaseResolution!: () => void
+    let resolutionStarted!: () => void
+    const startedResolution = new Promise<void>((resolve) => { resolutionStarted = resolve })
+    const resolutionGate = new Promise<void>((resolve) => { releaseResolution = resolve })
+    const activation: ActivationAdapter = {
+      async resolveEntrypoint(activatedRoot: string, artifact: ModuleArtifact) {
+        resolutionStarted()
+        await resolutionGate
+        return {
+          activatedRoot: await realpath(activatedRoot),
+          executable: await realpath(join(activatedRoot, ...artifact.entrypoint.split('/'))),
+        }
+      },
+    }
+    const { manager, processAdapter } = harness({ activation })
+    const id = 'org.simulator.queued-stop'
+    const moduleId = manifest(id).id
+    const request = (version: string) => ({
+      manifest: manifest(id, 'bin/daemon', version),
+      activatedRoot: root,
+      platform: currentPlatform(),
+    })
+    const versionOne = manager.start(request('1.0.0'))
+    const versionTwo = manager.start(request('2.0.0'))
+    await startedResolution
+    const stopping = manager.stop(moduleId)
+    let stopSettled = false
+    void stopping.finally(() => { stopSettled = true })
+    await settle()
+    expect(stopSettled).toBe(false)
+    await expect(manager.start(request('3.0.0'))).rejects.toMatchObject({ code: 'STOP_REQUESTED' })
+    releaseResolution()
+
+    await expect(stopping).resolves.toMatchObject({ state: 'stopped' })
+    await expect(versionOne).rejects.toMatchObject({ code: 'STOP_REQUESTED' })
+    await expect(versionTwo).rejects.toMatchObject({ code: 'STOP_REQUESTED' })
+    expect(processAdapter.requests).toHaveLength(0)
+    expect(manager.get(moduleId)).toMatchObject({ state: 'stopped' })
+
+    const restarted = await manager.start(request('2.0.0'))
+    expect(restarted).toMatchObject({ state: 'healthy', version: '2.0.0' })
+    expect(processAdapter.requests).toHaveLength(1)
+    await manager.stop(moduleId)
+  })
+
+  test('stop invalidates every version already queued for a module', async () => {
+    const root = await activatedRoot()
+    let releaseResolution!: () => void
+    let resolutionStarted!: () => void
+    const startedResolution = new Promise<void>((resolve) => { resolutionStarted = resolve })
+    const resolutionGate = new Promise<void>((resolve) => { releaseResolution = resolve })
+    const activation: ActivationAdapter = {
+      async resolveEntrypoint(activatedRoot: string, artifact: ModuleArtifact) {
+        resolutionStarted()
+        await resolutionGate
+        return {
+          activatedRoot: await realpath(activatedRoot),
+          executable: await realpath(join(activatedRoot, ...artifact.entrypoint.split('/'))),
+        }
+      },
+    }
+    const { manager, processAdapter } = harness({ activation })
+    const id = 'org.simulator.many-queued'
+    const moduleId = manifest(id).id
+    const starts = ['1.0.0', '2.0.0', '3.0.0', '4.0.0'].map((version) => manager.start({
+      manifest: manifest(id, 'bin/daemon', version),
+      activatedRoot: root,
+      platform: currentPlatform(),
+    }))
+    await startedResolution
+    const stopping = manager.stop(moduleId)
+    releaseResolution()
+
+    await stopping
+    const results = await Promise.allSettled(starts)
+    expect(results.every((result) => result.status === 'rejected'
+      && result.reason instanceof ModuleDaemonError
+      && result.reason.code === 'STOP_REQUESTED')).toBe(true)
+    expect(processAdapter.requests).toHaveLength(0)
+    expect(manager.get(moduleId)?.state).toBe('stopped')
+  })
+
   test('drain cancels a pending activation resolution before spawn', async () => {
     const root = await activatedRoot()
     let releaseResolution!: () => void
@@ -389,6 +473,43 @@ describe('ModuleDaemonManager', () => {
     await draining
     await expect(starting).rejects.toMatchObject({ code: 'STOP_REQUESTED' })
     expect(processAdapter.requests).toHaveLength(0)
+  })
+
+  test('drain invalidates all queued versions and permanently rejects later starts', async () => {
+    const root = await activatedRoot()
+    let releaseResolution!: () => void
+    let resolutionStarted!: () => void
+    const startedResolution = new Promise<void>((resolve) => { resolutionStarted = resolve })
+    const resolutionGate = new Promise<void>((resolve) => { releaseResolution = resolve })
+    const activation: ActivationAdapter = {
+      async resolveEntrypoint(activatedRoot: string, artifact: ModuleArtifact) {
+        resolutionStarted()
+        await resolutionGate
+        return {
+          activatedRoot: await realpath(activatedRoot),
+          executable: await realpath(join(activatedRoot, ...artifact.entrypoint.split('/'))),
+        }
+      },
+    }
+    const { manager, processAdapter } = harness({ activation })
+    const id = 'org.simulator.queued-drain'
+    const moduleId = manifest(id).id
+    const requests = ['1.0.0', '2.0.0', '3.0.0'].map((version) => ({
+      manifest: manifest(id, 'bin/daemon', version),
+      activatedRoot: root,
+      platform: currentPlatform(),
+    }))
+    const starts = requests.map((request) => manager.start(request))
+    await startedResolution
+    const draining = manager.drain()
+    releaseResolution()
+
+    await draining
+    const results = await Promise.allSettled(starts)
+    expect(results.every((result) => result.status === 'rejected')).toBe(true)
+    expect(processAdapter.requests).toHaveLength(0)
+    expect(manager.get(moduleId)?.state).toBe('stopped')
+    await expect(manager.start(requests[2]!)).rejects.toMatchObject({ code: 'MANAGER_DRAINING' })
   })
 
   test('stop during a health probe and restart backoff cannot launch a replacement', async () => {
