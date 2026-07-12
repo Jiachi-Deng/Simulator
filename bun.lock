@@ -272,6 +272,18 @@
         "typescript": "^5.8.2",
       },
     },
+    "packages/module-downloader": {
+      "name": "@simulator/module-downloader",
+      "version": "0.11.1",
+      "dependencies": {
+        "@simulator/module-contract": "workspace:*",
+        "@simulator/module-release-trust": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^25.0.8",
+        "typescript": "^5.8.2",
+      },
+    },
     "packages/module-registry": {
       "name": "@simulator/module-registry",
       "version": "0.11.1",
@@ -1314,8 +1326,11 @@
 
     "@simulator/module-contract": ["@simulator/module-contract@workspace:packages/module-contract"],
 
-    "@simulator/module-release-trust": ["@simulator/module-release-trust@workspace:packages/module-release-trust"],
+    "@simulator/module-downloader": ["@simulator/module-downloader@workspace:packages/module-downloader"],
+
     "@simulator/module-registry": ["@simulator/module-registry@workspace:packages/module-registry"],
+
+    "@simulator/module-release-trust": ["@simulator/module-release-trust@workspace:packages/module-release-trust"],
 
     "@sinclair/typebox": ["@sinclair/typebox@0.34.48", "", {}, "sha512-kKJTNuK3AQOrgjjotVxMrCn1sUJwM76wMszfq1kdU4uYVJjvEWuFQ6HgvLt4Xz3fSmZlTOxJ/Ie13KnIcWQXFA=="],
 

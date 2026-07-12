@@ -80,6 +80,30 @@ trusted key 由唯一 `keyId`、public key、`activeFrom`、可选 `activeUntil`
 catalog lifetime 最多 24 小时。当前时间必须位于 catalog issuance/expiry window，调用方可提供最多 5 分钟的 non-negative `clockSkewMs`；clock skew 不延迟 key revocation。options、trusted key entry、state 都按 unknown plain-data input 验证，null、accessor、proxy、sparse/oversized key set 返回结构化 diagnostic 而不执行 getter 或抛出异常。
 
 调用方必须原子持久化 `highestSequence` 和 `latestIssuedAt`；初始 state 为 `{ highestSequence: 0 }`，第一次成功后两者必须成对存在。sequence 小于或等于 high-water mark 时返回 `ROLLBACK_DETECTED`，`issuedAt` 未严格推进时返回 `BACKDATED_CATALOG`，因此 backdated catalog 不能用超高 sequence 污染 rollback state。package 自身不通过 filesystem 隐式持久化。所有失败均返回固定 `code`、阶段 `stage`、RFC 6901 风格 `path`、稳定 `message` 和适用时的 `keyId`。
+
+## 第四切片：Verified Catalog / Artifact Downloader
+
+`@simulator/module-downloader` 负责把不可信 HTTPS 响应转换成经过验证、可原子发布的 catalog 与 artifact cache 记录。package 依赖 `@simulator/module-release-trust`，但 network、clock 和 cache 都由调用方通过 adapter 注入；它不包含 installer、archive extraction、Electron、daemon、process、UI 或真实领域 Module。
+
+### Catalog Wire 与原子信任状态
+
+catalog endpoint 返回严格 JSON envelope，字段固定为 `schemaVersion`、`keyId`、canonical padded base64 `catalogBytes` 和 `signature`。下载器对完整响应设置 timeout 和 byte 上限，保存收到的 envelope 原字节，decode 后把原始 `catalogBytes` 与 signature 交给 `verifyModuleReleaseCatalog`。它不会 parse catalog 后重新序列化为另一组待验证 bytes。
+
+verified catalog、ETag、expiry 和 verifier 返回的 monotonic trust state 先作为完整 staged record 写入，再由 cache adapter 原子 publish。启动恢复会重新 decode 和验签 staged 原字节，并核对 staged expiry/trust metadata；只有完整匹配才 publish，损坏或不可信 stage 会被丢弃。若 crash 发生在 publish 后、stage 清理前，恢复通过 byte 与 trust-state equality 识别已提交事务并只清理 stage。
+
+`304 Not Modified` 仅在同一 catalog URL 存在重新验签成功且按注入 clock 尚未过期的 exact cached response 时接受。无 cache、cache 损坏、key 已失效或 catalog 已过期时，`304` fail closed。fresh `200` 必须通过当前 committed high-water mark 验证，防止 rollback/backdating。
+
+### HTTPS 与 Redirect Policy
+
+初始 catalog URL、artifact manifest URL、每个 fetch adapter 报告的最终 URL和每个 redirect target 都必须是 canonical HTTPS URL，且不能含 credentials 或 fragment。fetch adapter 必须使用 manual redirect；若 adapter 隐式跟随，下载器拒绝响应。redirect 仅允许保持初始 origin，限制 hop 数，跨 origin、降级协议或 malformed `Location` 均 fail closed。
+
+### Artifact Streaming、Resume 与并发
+
+artifact 使用 verified catalog 中的 SHA-256 和平台 byte size作为发布条件。下载过程中逐 chunk 写 unique partial、检查累计 size、验证 `Content-Length`，完成后从 cache adapter 重新流式读取 partial 计算 SHA-256；size 与 hash 都匹配后才能原子 publish。hash mismatch 会删除 poisoned partial。
+
+续传是可选优化：只有 partial 的 URL、hash、expected size 全匹配并持有 strong ETag 时，才发送 `Range` 与 `If-Range`。服务端必须返回 `206`、精确 `Content-Range`、相同 strong ETag 和正确剩余 `Content-Length`；任一不匹配都会删除 partial，并按 retry policy 从 byte zero 重试。weak/no validator partial 不会续传。启动时按注入 clock 清理超过 age policy 的 stale partial。
+
+同一进程内，相同 hash 的并发请求共享一个下载与最终 publish；URL 或 expected size 冲突不会合并。每个 caller 独立接收 progress 和 cancellation，只有最后一个 subscriber 取消才终止共享 transfer。retry 只处理 timeout、network、明确 retryable HTTP status 和可安全重启的 Range/size 中断，backoff 由注入 clock 执行。
 ## 第二切片：Deterministic Module Registry
 
 `@simulator/module-registry` 是可选 Module 的 runtime-neutral metadata source of truth。它依赖 `@simulator/module-contract` 和仓库已有的 `semver`，不依赖 filesystem、network、archive、process、Electron、React 或任何领域 Module。内置 Agent workspace 不读取该 registry，因此 optional-module state 为空、损坏或不兼容时不会阻塞 Agent。
