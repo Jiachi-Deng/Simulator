@@ -1,4 +1,5 @@
 export const PUBLIC_BUILD_ENV = "SIMULATOR_PUBLIC_BUILD"
+export const DISABLE_UPDATES_ENV = "SIMULATOR_DISABLE_UPDATES"
 
 export const EMBEDDED_BUILD_VARIABLES = [
   "SLACK_OAUTH_CLIENT_ID",
@@ -18,4 +19,8 @@ export function embeddedBuildValue(
   env: NodeJS.ProcessEnv = process.env,
 ): string {
   return isPublicBuild(env) ? "" : (env[variable] ?? "")
+}
+
+export function areBuildUpdatesDisabled(env: NodeJS.ProcessEnv = process.env): boolean {
+  return env[DISABLE_UPDATES_ENV] === "1"
 }

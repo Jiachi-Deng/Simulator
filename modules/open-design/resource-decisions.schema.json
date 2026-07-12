@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "open-design-resource-decisions-v1",
+  "type": "object",
+  "required": ["schemaVersion", "policy", "decisions"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "policy": {"type": "string", "minLength": 1, "maxLength": 2048},
+    "decisions": {
+      "type": "array", "maxItems": 100000,
+      "items": {
+        "type": "object",
+        "required": ["id", "category", "sourcePath", "status", "rightsStatus", "license", "rightsEvidence", "reason"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1, "maxLength": 128},
+          "category": {"enum": ["templates", "fonts", "images", "plugins", "skills", "native-binaries"]},
+          "sourcePath": {"type": "string", "minLength": 1, "maxLength": 1024},
+          "status": {"enum": ["include", "exclude", "review"]},
+          "rightsStatus": {"enum": ["cleared", "pending", "unknown", "not-applicable"]},
+          "license": {"type": ["string", "null"], "maxLength": 256},
+          "rightsEvidence": {
+            "type": ["object", "null"],
+            "required": ["type", "reference", "sha256"],
+            "properties": {
+              "type": {"enum": ["license-file", "review-record", "upstream-notice"]},
+              "reference": {"type": "string", "minLength": 1, "maxLength": 1024},
+              "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+            },
+            "additionalProperties": false
+          },
+          "reason": {"type": "string", "minLength": 1, "maxLength": 2048}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

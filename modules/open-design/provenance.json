@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "repository": "https://github.com/nexu-io/open-design",
+  "source": {
+    "refType": "tag",
+    "ref": "open-design-v0.14.1",
+    "commit": "2225647726d5387bb24e9539fdb577958b6d88c6",
+    "sourceDate": "2026-07-10T19:33:51+08:00",
+    "observedHead": "4567a0d57557b29eb79ef1f7a40826f2b801d982",
+    "auditedAt": "2026-07-12T00:00:00Z"
+  },
+  "license": {
+    "spdxId": "Apache-2.0",
+    "sourceFile": "LICENSE"
+  },
+  "upstreamManifest": {
+    "path": "package.json",
+    "name": "open-design",
+    "version": "0.14.1",
+    "packageManager": "pnpm@10.33.2"
+  },
+  "buildToolchainExpectations": {
+    "node": "~24",
+    "pnpm": ">=10.33.2 <11",
+    "typescript": "5.9.3 (most runtime workspaces; selected upstream packages use 6.0.3)",
+    "next": "16.2.6",
+    "artifactTargets": [
+      "Next.js standalone server and static/public assets",
+      "OpenDesign daemon and production runtime dependencies"
+    ],
+    "reproducibility": "Build from the pinned commit with the committed pnpm-lock.yaml; build and native ABI verification are platform-specific."
+  }
+}

@@ -8,9 +8,11 @@ import { existsSync, readFileSync, statSync, mkdirSync } from "fs";
 import { join } from "path";
 import {
   EMBEDDED_BUILD_VARIABLES,
+  DISABLE_UPDATES_ENV,
   embeddedBuildValue,
   isPublicBuild,
 } from "./build-environment";
+import { resolveBuildPolicy, writeBuildPolicy } from "./build-policy";
 
 const ROOT_DIR = join(import.meta.dir, "..");
 const DIST_DIR = join(ROOT_DIR, "apps/electron/dist");
@@ -58,11 +60,15 @@ function loadEnvFile(): void {
 // To enable in the future, add @sentry/esbuild-plugin. See apps/electron/CLAUDE.md.
 // NOTE: Google OAuth credentials are NOT baked into the build - users provide their own
 // via source config. See README_FOR_OSS.md for setup instructions.
-function getBuildDefines(): string[] {
-  return EMBEDDED_BUILD_VARIABLES.map((varName) => {
+function getBuildDefines(policy = resolveBuildPolicy()): string[] {
+  const credentialDefines = EMBEDDED_BUILD_VARIABLES.map((varName) => {
     const value = embeddedBuildValue(varName);
     return `--define:process.env.${varName}="${value}"`;
   });
+  return [
+    ...credentialDefines,
+    `--define:process.env.${DISABLE_UPDATES_ENV}="${policy.updatesDisabled ? "1" : "0"}"`,
+  ];
 }
 
 // Wait for file to stabilize (no size changes)
@@ -334,7 +340,8 @@ async function main(): Promise<void> {
   // Build WhatsApp worker (Baileys subprocess — optional package)
   await buildWhatsAppWorker();
 
-  const buildDefines = getBuildDefines();
+  const buildPolicy = resolveBuildPolicy();
+  const buildDefines = getBuildDefines(buildPolicy);
 
   console.log("🔨 Building main process...");
 
@@ -392,6 +399,8 @@ async function main(): Promise<void> {
     console.error("❌ Build verification failed:", verification.error);
     process.exit(1);
   }
+
+  writeBuildPolicy(join(DIST_DIR, "resources"), buildPolicy);
 
   console.log("✅ Build complete and verified");
   process.exit(0);
