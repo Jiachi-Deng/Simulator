@@ -34,12 +34,23 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      sentry-non-major:
+        patterns:
+          - "@sentry/cli"
+          - "@sentry/electron"
+          - "@sentry/react"
+          - "@sentry/vite-plugin"
+        update-types:
+          - "minor"
+          - "patch"
       electron-non-major:
         patterns:
           - "@electron/*"
           - "@sentry/electron"
           - "electron"
           - "electron-*"
+        exclude-patterns:
+          - "@sentry/electron"
         update-types:
           - "minor"
           - "patch"
@@ -64,6 +75,8 @@ updates:
           - "typescript"
           - "vite"
         exclude-patterns:
+          - "@sentry/react"
+          - "@sentry/vite-plugin"
           - "@tailwindcss/typography"
         update-types:
           - "minor"
