@@ -1,6 +1,6 @@
 {
-  "name": "Craft Agents",
-  "short_name": "Craft Agents",
+  "name": "Simulator",
+  "short_name": "Simulator",
   "description": "AI agent interface",
   "start_url": "./",
   "display": "standalone",
