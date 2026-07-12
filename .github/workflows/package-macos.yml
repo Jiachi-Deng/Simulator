@@ -62,14 +62,21 @@ jobs:
             echo "Packaged app executable was not found"
             exit 1
           fi
-          file "${app_binaries[0]}" | grep -q 'arm64'
-          while IFS= read -r -d '' executable; do
-            description=$(file "$executable")
-            if [[ "$description" == *"Mach-O"* && "$description" != *"arm64"* ]]; then
-              echo "Non-arm64 Mach-O found: $description"
+          if [[ "$(lipo -archs "${app_binaries[0]}")" != "arm64" ]]; then
+            echo "Packaged app executable is not arm64-only"
+            exit 1
+          fi
+          while IFS= read -r -d '' artifact; do
+            description=$(file -b "$artifact")
+            if [[ "$description" != *"Mach-O"* ]]; then
+              continue
+            fi
+            archs=$(lipo -archs "$artifact")
+            if [[ "$archs" != "arm64" ]]; then
+              echo "Mach-O artifact is not arm64-only: $artifact ($archs)"
               exit 1
             fi
-          done < <(find apps/electron/release/mac-arm64 -type f -perm -111 -print0)
+          done < <(find apps/electron/release/mac-arm64 -type f -print0)
           shasum -a 256 "${dmgs[0]}" | tee apps/electron/release/SHA256SUMS
 
       - name: Upload engineering artifact
