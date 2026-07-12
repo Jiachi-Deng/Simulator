@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import {
+  access,
+  chmod,
   lstat,
   mkdir,
   open,
@@ -11,7 +13,13 @@ import {
 } from 'node:fs/promises'
 import { dirname, join, relative, sep } from 'node:path'
 import type { ModuleSha256 } from '@simulator/module-contract'
-import { ModuleInstallerError, type InstallLimits, type InstallProgress } from './types.ts'
+import {
+  ModuleInstallerError,
+  SimulatedInstallerCrash,
+  type InstallLimits,
+  type InstallProgress,
+  type InstallerFaultInjector,
+} from './types.ts'
 
 export interface TreeManifestResult {
   readonly sha256: ModuleSha256
@@ -115,6 +123,14 @@ function portableRelative(root: string, path: string): string {
   return relative(root, path).split(sep).join('/')
 }
 
+const SAFE_PATH_SEGMENT = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
+
+function assertSafeExtractedPath(path: string): void {
+  if (!path.split('/').every((segment) => SAFE_PATH_SEGMENT.test(segment))) {
+    throw new ModuleInstallerError('ARCHIVE_INVALID', `Extracted path is outside the safe ASCII contract: ${JSON.stringify(path)}`)
+  }
+}
+
 export async function hashExtractedTree(
   root: string,
   limits: InstallLimits,
@@ -135,10 +151,11 @@ export async function hashExtractedTree(
       if (signal?.aborted) throw new ModuleInstallerError('ABORTED', 'Module installation was cancelled')
       const absolute = join(directory, child.name)
       const path = portableRelative(root, absolute)
-      const key = path.normalize('NFKC').toLocaleLowerCase('en-US')
+      assertSafeExtractedPath(path)
+      const key = path.toLowerCase()
       const prior = collisionKeys.get(key)
       if (prior !== undefined) {
-        throw new ModuleInstallerError('ARCHIVE_INVALID', `Extracted paths collide after Unicode case folding: ${JSON.stringify(prior)} and ${JSON.stringify(path)}`)
+        throw new ModuleInstallerError('ARCHIVE_INVALID', `Extracted paths collide under ASCII case folding: ${JSON.stringify(prior)} and ${JSON.stringify(path)}`)
       }
       collisionKeys.set(key, path)
       entries += 1
@@ -181,6 +198,35 @@ export async function hashExtractedTree(
     return { sha256: digest, fileCount: files.size, totalBytes, files }
   } catch (error) {
     throw filesystemError('Could not verify extracted files', error)
+  }
+}
+
+export async function normalizeAndVerifyModes(root: string, entrypoint: string): Promise<void> {
+  async function visit(directory: string): Promise<void> {
+    await chmod(directory, 0o700)
+    for (const child of await readdir(directory, { withFileTypes: true })) {
+      const absolute = join(directory, child.name)
+      const relativePath = portableRelative(root, absolute)
+      if (child.isDirectory()) {
+        await visit(absolute)
+      } else if (child.isFile()) {
+        await chmod(absolute, relativePath === entrypoint ? 0o700 : 0o600)
+      } else {
+        throw new ModuleInstallerError('ARCHIVE_INVALID', `Cannot normalize mode for non-regular entry: ${JSON.stringify(relativePath)}`)
+      }
+    }
+  }
+
+  try {
+    await visit(root)
+    const entrypointPath = join(root, ...entrypoint.split('/'))
+    const info = await lstat(entrypointPath)
+    if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o100) === 0) {
+      throw new ModuleInstallerError('ENTRYPOINT_INVALID', 'Extracted entrypoint is not an owner-executable regular file')
+    }
+    await access(entrypointPath, constants.X_OK)
+  } catch (error) {
+    throw filesystemError('Could not normalize or verify extracted file modes', error)
   }
 }
 
@@ -247,19 +293,52 @@ export async function atomicWriteJson(path: string, value: unknown): Promise<voi
   }
 }
 
-export async function createJsonExclusive(path: string, value: unknown): Promise<void> {
+export async function createJsonExclusive(
+  path: string,
+  claimPath: string,
+  value: unknown,
+  fault?: InstallerFaultInjector,
+): Promise<void> {
   const directory = dirname(path)
   await mkdir(directory, { recursive: true, mode: 0o700 })
+  const temporary = join(directory, `.transaction.${randomUUID()}.tmp`)
   let handle
+  let claimed = false
+  let published = false
   try {
-    handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
-    await handle.writeFile(`${JSON.stringify(value)}\n`, 'utf8')
+    await fault?.('before-journal-temp-write')
+    handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
+    const serialized = Buffer.from(`${JSON.stringify(value)}\n`, 'utf8')
+    const midpoint = Math.max(1, Math.floor(serialized.length / 2))
+    await handle.writeFile(serialized.subarray(0, midpoint))
+    await fault?.('during-journal-temp-write')
+    await handle.writeFile(serialized.subarray(midpoint))
     await handle.sync()
     await handle.close()
     handle = undefined
+    await fault?.('after-journal-temp-fsync')
+    await mkdir(claimPath, { mode: 0o700 })
+    claimed = true
+    await fault?.('after-journal-claim')
+    if (await pathExists(path)) {
+      const error = new Error('Journal already exists') as NodeJS.ErrnoException
+      error.code = 'EEXIST'
+      throw error
+    }
+    await rename(temporary, path)
+    published = true
+    await fault?.('after-journal-rename')
+    await fsyncDirectory(directory)
+    await rm(claimPath, { recursive: true })
+    claimed = false
     await fsyncDirectory(directory)
   } catch (error) {
     await handle?.close().catch(() => undefined)
+    if (error instanceof SimulatedInstallerCrash) throw error
+    await rm(temporary, { force: true }).catch(() => undefined)
+    if (published) await rm(path, { force: true }).catch(() => undefined)
+    if (claimed) await rm(claimPath, { recursive: true, force: true }).catch(() => undefined)
+    await fsyncDirectory(directory).catch(() => undefined)
     throw error
   }
 }

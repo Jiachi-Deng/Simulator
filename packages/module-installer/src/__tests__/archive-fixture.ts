@@ -6,7 +6,7 @@ import type { VerifiedArtifactDescriptor } from '../types.ts'
 
 export interface TarFixtureEntry {
   readonly path: string
-  readonly type?: '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | 'S'
+  readonly type?: '0' | '1' | '2' | '3' | '4' | '5' | '6' | '7' | 'S' | 'g' | 'x' | 'L' | 'K'
   readonly mode?: number
   readonly content?: string | Uint8Array
   readonly linkpath?: string

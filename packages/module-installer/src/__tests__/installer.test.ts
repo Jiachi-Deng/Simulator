@@ -1,11 +1,17 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync, gunzipSync } from 'node:zlib'
 import type { ModuleId, ModuleSha256, ModuleVersion } from '@simulator/module-contract'
 import { ModuleInstaller } from '../installer.ts'
-import { ModuleInstallerError, SimulatedInstallerCrash, type InstallLimits, type InstallerFaultPoint } from '../types.ts'
+import {
+  ModuleInstallerError,
+  SimulatedInstallerCrash,
+  type InstallLimits,
+  type InstallerFaultPoint,
+  type ModuleUsageGuard,
+} from '../types.ts'
 import {
   buildTarGz,
   descriptor,
@@ -17,6 +23,32 @@ import {
 
 const roots: string[] = []
 const MODULE_ID = 'org.simulator.fixture' as ModuleId
+
+class TestUsageGuard implements ModuleUsageGuard {
+  readonly inUse = new Set<string>()
+  #available = Promise.resolve()
+  #release: (() => void) | undefined
+
+  async runExclusive<T>(
+    _moduleId: ModuleId,
+    operation: (lease: { isVersionInUse(version: ModuleVersion): boolean }) => Promise<T>,
+  ): Promise<T> {
+    await this.#available
+    this.#available = new Promise<void>((resolve) => { this.#release = resolve })
+    try {
+      return await operation({ isVersionInUse: (version) => this.inUse.has(version) })
+    } finally {
+      this.#release?.()
+      this.#release = undefined
+    }
+  }
+
+  async acquireReference(version: ModuleVersion): Promise<() => void> {
+    await this.#available
+    this.inUse.add(version)
+    return () => this.inUse.delete(version)
+  }
+}
 
 async function tempRoot(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), 'simulator-module-installer-'))
@@ -31,6 +63,23 @@ afterEach(async () => {
 async function artifactAt(root: string, entries: readonly TarFixtureEntry[] = VALID_ENTRIES): Promise<{ path: string; archive: Buffer }> {
   const path = join(root, 'fixture.tar.gz')
   return { path, archive: await writeArtifact(path, entries) }
+}
+
+async function exists(path: string): Promise<boolean> {
+  try {
+    await stat(path)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false
+    throw error
+  }
+}
+
+function paxRecord(key: string, value: string): string {
+  const body = ` ${key}=${value}\n`
+  let length = body.length + 1
+  while (`${length}${body}`.length !== length) length = `${length}${body}`.length
+  return `${length}${body}`
 }
 
 describe('ModuleInstaller production tar.gz path', () => {
@@ -76,7 +125,8 @@ describe('ModuleInstaller production tar.gz path', () => {
 
   it('retains LKG, rolls back atomically, and protects active/LKG/in-use versions from uninstall', async () => {
     const root = await tempRoot()
-    const installer = new ModuleInstaller(join(root, 'modules-root'))
+    const usageGuard = new TestUsageGuard()
+    const installer = new ModuleInstaller(join(root, 'modules-root'), { usageGuard })
     const source = await artifactAt(root)
 
     await installer.install({ descriptor: descriptor(source.archive, VALID_ENTRIES, '1.0.0'), archivePath: source.path })
@@ -87,12 +137,23 @@ describe('ModuleInstaller production tar.gz path', () => {
     const rolledBack = await installer.rollback(MODULE_ID)
     expect(rolledBack).toMatchObject({ activeVersion: '1.0.0', lastKnownGoodVersion: '2.0.0' })
     await installer.install({ descriptor: descriptor(source.archive, VALID_ENTRIES, '3.0.0'), archivePath: source.path })
-    await expect(installer.uninstall({
-      moduleId: MODULE_ID,
-      version: '2.0.0' as ModuleVersion,
-      inUseVersions: new Set(['2.0.0']),
-    })).rejects.toMatchObject({ code: 'PROTECTED_VERSION' })
+    usageGuard.inUse.add('2.0.0')
+    await expect(installer.uninstall({ moduleId: MODULE_ID, version: '2.0.0' as ModuleVersion })).rejects.toMatchObject({ code: 'PROTECTED_VERSION' })
+    usageGuard.inUse.delete('2.0.0')
     await installer.uninstall({ moduleId: MODULE_ID, version: '2.0.0' as ModuleVersion })
+  })
+
+  it('normalizes installed modes and verifies the entrypoint with X_OK', async () => {
+    const root = await tempRoot()
+    const source = await artifactAt(root)
+    const result = await new ModuleInstaller(join(root, 'modules-root')).install({
+      descriptor: descriptor(source.archive, VALID_ENTRIES),
+      archivePath: source.path,
+    })
+    expect((await stat(result.installedPath)).mode & 0o777).toBe(0o700)
+    expect((await stat(join(result.installedPath, 'bin'))).mode & 0o777).toBe(0o700)
+    expect((await stat(join(result.installedPath, 'bin', 'module'))).mode & 0o777).toBe(0o700)
+    expect((await stat(join(result.installedPath, 'data.txt'))).mode & 0o777).toBe(0o600)
   })
 
   it('rejects archive and extracted-manifest hash mismatches without changing active state', async () => {
@@ -150,6 +211,8 @@ describe('malicious archive matrix', () => {
     { name: 'FIFO', entries: [...VALID_ENTRIES, { path: 'module/fifo', type: '6' }] },
     { name: 'contiguous/special file', entries: [...VALID_ENTRIES, { path: 'module/special', type: '7' }] },
     { name: 'extra executable', entries: [...VALID_ENTRIES, { path: 'module/helper', mode: 0o755, content: 'x' }] },
+    { name: 'group-only executable entrypoint', entries: VALID_ENTRIES.map((entry) => entry.path === 'module/bin/module' ? { ...entry, mode: 0o050 } : entry) },
+    { name: 'non-ASCII path', entries: [...VALID_ENTRIES, { path: 'module/caf\u00e9', content: 'x' }] },
   ]
 
   for (const fixture of malicious) {
@@ -208,6 +271,44 @@ describe('malicious archive matrix', () => {
     }
   })
 
+  it('counts PAX and global metadata headers before the tar library parses entries', async () => {
+    const root = await tempRoot()
+    const entries = [
+      { path: 'pax-1', type: 'x', content: paxRecord('comment', 'local-a') },
+      { path: 'global-1', type: 'g', content: paxRecord('comment', 'global') },
+      { path: 'pax-2', type: 'x', content: paxRecord('comment', 'local-b') },
+      ...VALID_ENTRIES,
+    ] as const satisfies readonly TarFixtureEntry[]
+    const source = await artifactAt(root, entries)
+    const installer = new ModuleInstaller(join(root, 'modules-root'), { limits: { maxEntries: 6 } })
+    await expect(installer.install({ descriptor: descriptor(source.archive, entries), archivePath: source.path })).rejects.toMatchObject({ code: 'ARCHIVE_LIMIT_EXCEEDED' })
+  })
+
+  it('accepts valid bounded PAX metadata without treating it as payload entries', async () => {
+    const root = await tempRoot()
+    const entries = [
+      { path: 'global-1', type: 'g', content: paxRecord('comment', 'bounded') },
+      ...VALID_ENTRIES,
+    ] as const satisfies readonly TarFixtureEntry[]
+    const source = await artifactAt(root, entries)
+    const result = await new ModuleInstaller(join(root, 'modules-root'), { limits: { maxEntries: 5 } }).install({
+      descriptor: descriptor(source.archive, entries),
+      archivePath: source.path,
+    })
+    expect(result.activeVersion).toBe('1.0.0' as ModuleVersion)
+  })
+
+  it('enforces cumulative PAX/global metadata bytes in the raw pre-scan', async () => {
+    const root = await tempRoot()
+    const entries = [
+      { path: 'global-1', type: 'g', content: paxRecord('comment', '0123456789') },
+      ...VALID_ENTRIES,
+    ] as const satisfies readonly TarFixtureEntry[]
+    const source = await artifactAt(root, entries)
+    const installer = new ModuleInstaller(join(root, 'modules-root'), { limits: { maxMetadataBytes: 8 } })
+    await expect(installer.install({ descriptor: descriptor(source.archive, entries), archivePath: source.path })).rejects.toMatchObject({ code: 'ARCHIVE_LIMIT_EXCEEDED' })
+  })
+
   it('rejects a high-ratio gzip tar bomb before extraction', async () => {
     const root = await tempRoot()
     const entries = [
@@ -218,7 +319,7 @@ describe('malicious archive matrix', () => {
     const installer = new ModuleInstaller(join(root, 'modules-root'), {
       limits: { maxDecompressionRatio: 2, maxFileBytes: 2 * 1024 * 1024, maxTotalBytes: 2 * 1024 * 1024 },
     })
-    await expect(installer.install({ descriptor: descriptor(source.archive, entries), archivePath: source.path })).rejects.toMatchObject({ code: 'ARCHIVE_INVALID' })
+    await expect(installer.install({ descriptor: descriptor(source.archive, entries), archivePath: source.path })).rejects.toMatchObject({ code: 'ARCHIVE_LIMIT_EXCEEDED' })
   })
 })
 
@@ -272,10 +373,79 @@ describe('transaction fault injection and recovery', () => {
     })
   }
 
+  for (const point of [
+    'before-journal-temp-write',
+    'during-journal-temp-write',
+    'after-journal-temp-fsync',
+    'after-journal-claim',
+    'after-journal-rename',
+  ] as const) {
+    it(`cleans a non-crash ${point} failure so the module is not permanently busy`, async () => {
+      const root = await tempRoot()
+      const source = await artifactAt(root)
+      const moduleRoot = join(root, 'modules-root')
+      let fired = false
+      const failing = new ModuleInstaller(moduleRoot, {
+        faultInjector(candidate) {
+          if (!fired && candidate === point) {
+            fired = true
+            const error = new Error(`Injected ${point}`) as NodeJS.ErrnoException
+            error.code = point.includes('temp') ? 'ENOSPC' : 'EIO'
+            throw error
+          }
+        },
+      })
+      await expect(failing.install({ descriptor: descriptor(source.archive, VALID_ENTRIES), archivePath: source.path })).rejects.toMatchObject({ code: 'FILESYSTEM_ERROR' })
+      expect(await exists(join(moduleRoot, 'modules', MODULE_ID, 'transaction.json'))).toBe(false)
+      expect(await exists(join(moduleRoot, 'modules', MODULE_ID, 'transaction.claim'))).toBe(false)
+      const retried = await new ModuleInstaller(moduleRoot).install({ descriptor: descriptor(source.archive, VALID_ENTRIES), archivePath: source.path })
+      expect(retried.activeVersion).toBe('1.0.0' as ModuleVersion)
+    })
+  }
+
+  it('allows retry after a crash before journal ownership is published', async () => {
+    const root = await tempRoot()
+    const source = await artifactAt(root)
+    const moduleRoot = join(root, 'modules-root')
+    const crashing = new ModuleInstaller(moduleRoot, {
+      faultInjector(point) {
+        if (point === 'after-journal-temp-fsync') throw new SimulatedInstallerCrash(point)
+      },
+    })
+    await expect(crashing.install({ descriptor: descriptor(source.archive, VALID_ENTRIES), archivePath: source.path })).rejects.toBeInstanceOf(SimulatedInstallerCrash)
+    expect(await exists(join(moduleRoot, 'modules', MODULE_ID, 'transaction.claim'))).toBe(false)
+    await new ModuleInstaller(moduleRoot).install({ descriptor: descriptor(source.archive, VALID_ENTRIES), archivePath: source.path })
+  })
+
+  for (const point of ['after-journal-claim', 'after-journal-rename'] as const) {
+    it(`explicitly recovers an abandoned journal publisher after crash at ${point}`, async () => {
+      const root = await tempRoot()
+      const source = await artifactAt(root)
+      const moduleRoot = join(root, 'modules-root')
+      const crashing = new ModuleInstaller(moduleRoot, {
+        faultInjector(candidate) {
+          if (candidate === point) throw new SimulatedInstallerCrash(candidate)
+        },
+      })
+      await expect(crashing.install({ descriptor: descriptor(source.archive, VALID_ENTRIES), archivePath: source.path })).rejects.toBeInstanceOf(SimulatedInstallerCrash)
+      const recovered = new ModuleInstaller(moduleRoot)
+      await expect(recovered.recover(MODULE_ID)).rejects.toMatchObject({ code: 'BUSY' })
+      await recovered.recoverInterrupted(MODULE_ID)
+      await recovered.install({ descriptor: descriptor(source.archive, VALID_ENTRIES), archivePath: source.path })
+    })
+  }
+
   const crashCases: ReadonlyArray<{ point: InstallerFaultPoint; activeAfterRecovery: string | null }> = [
     { point: 'after-journal-prepared', activeAfterRecovery: null },
+    { point: 'before-publish-rename', activeAfterRecovery: null },
+    { point: 'after-publish-rename', activeAfterRecovery: null },
+    { point: 'after-publish-source-fsync', activeAfterRecovery: null },
+    { point: 'after-publish-destination-fsync', activeAfterRecovery: null },
     { point: 'after-version-published', activeAfterRecovery: null },
+    { point: 'before-state-rename', activeAfterRecovery: null },
+    { point: 'after-state-rename', activeAfterRecovery: '1.0.0' },
     { point: 'after-state-activated', activeAfterRecovery: '1.0.0' },
+    { point: 'before-cleanup', activeAfterRecovery: '1.0.0' },
   ]
 
   for (const fixture of crashCases) {
@@ -296,6 +466,109 @@ describe('transaction fault injection and recovery', () => {
       expect(await Bun.file(join(moduleRoot, 'modules', MODULE_ID, 'transaction.json')).exists()).toBe(false)
     })
   }
+
+  const rollbackCrashCases: ReadonlyArray<{ point: InstallerFaultPoint; activeAfterRecovery: string }> = [
+    { point: 'after-journal-prepared', activeAfterRecovery: '2.0.0' },
+    { point: 'before-state-rename', activeAfterRecovery: '2.0.0' },
+    { point: 'after-state-rename', activeAfterRecovery: '1.0.0' },
+    { point: 'after-state-activated', activeAfterRecovery: '1.0.0' },
+    { point: 'before-cleanup', activeAfterRecovery: '1.0.0' },
+  ]
+
+  for (const fixture of rollbackCrashCases) {
+    it(`recovers rollback deterministically after crash at ${fixture.point}`, async () => {
+      const root = await tempRoot()
+      const source = await artifactAt(root)
+      const moduleRoot = join(root, 'modules-root')
+      const setup = new ModuleInstaller(moduleRoot)
+      await setup.install({ descriptor: descriptor(source.archive, VALID_ENTRIES, '1.0.0'), archivePath: source.path })
+      await setup.install({ descriptor: descriptor(source.archive, VALID_ENTRIES, '2.0.0'), archivePath: source.path })
+      const crashing = new ModuleInstaller(moduleRoot, {
+        faultInjector(point) {
+          if (point === fixture.point) throw new SimulatedInstallerCrash(point)
+        },
+      })
+      await expect(crashing.rollback(MODULE_ID)).rejects.toBeInstanceOf(SimulatedInstallerCrash)
+      const recovered = new ModuleInstaller(moduleRoot)
+      await recovered.recover(MODULE_ID)
+      expect((await recovered.getState(MODULE_ID)).activeVersion as string).toBe(fixture.activeAfterRecovery)
+    })
+  }
+
+  const uninstallCrashCases: ReadonlyArray<{ point: InstallerFaultPoint; installedAfterRecovery: boolean }> = [
+    { point: 'after-journal-prepared', installedAfterRecovery: true },
+    { point: 'before-trash-rename', installedAfterRecovery: true },
+    { point: 'after-trash-rename', installedAfterRecovery: false },
+    { point: 'after-trash-source-fsync', installedAfterRecovery: false },
+    { point: 'after-trash-destination-fsync', installedAfterRecovery: false },
+    { point: 'after-trash-published', installedAfterRecovery: false },
+    { point: 'before-trash-delete', installedAfterRecovery: false },
+    { point: 'after-trash-delete', installedAfterRecovery: false },
+    { point: 'before-cleanup', installedAfterRecovery: false },
+  ]
+
+  for (const fixture of uninstallCrashCases) {
+    it(`recovers uninstall deterministically after crash at ${fixture.point}`, async () => {
+      const root = await tempRoot()
+      const source = await artifactAt(root)
+      const moduleRoot = join(root, 'modules-root')
+      const usageGuard = new TestUsageGuard()
+      const setup = new ModuleInstaller(moduleRoot, { usageGuard })
+      for (const version of ['1.0.0', '2.0.0', '3.0.0']) {
+        await setup.install({ descriptor: descriptor(source.archive, VALID_ENTRIES, version), archivePath: source.path })
+      }
+      const crashing = new ModuleInstaller(moduleRoot, {
+        usageGuard,
+        faultInjector(point) {
+          if (point === fixture.point) throw new SimulatedInstallerCrash(point)
+        },
+      })
+      await expect(crashing.uninstall({ moduleId: MODULE_ID, version: '1.0.0' as ModuleVersion })).rejects.toBeInstanceOf(SimulatedInstallerCrash)
+      const recovered = new ModuleInstaller(moduleRoot)
+      await recovered.recover(MODULE_ID)
+      expect(await exists(join(moduleRoot, 'modules', MODULE_ID, 'versions', '1.0.0'))).toBe(fixture.installedAfterRecovery)
+    })
+  }
+
+  it('fails closed without a usage guard and blocks a new reference through version rename', async () => {
+    const root = await tempRoot()
+    const source = await artifactAt(root)
+    const moduleRoot = join(root, 'modules-root')
+    const usageGuard = new TestUsageGuard()
+    const setup = new ModuleInstaller(moduleRoot, { usageGuard })
+    for (const version of ['1.0.0', '2.0.0', '3.0.0']) {
+      await setup.install({ descriptor: descriptor(source.archive, VALID_ENTRIES, version), archivePath: source.path })
+    }
+    await expect(new ModuleInstaller(moduleRoot).uninstall({ moduleId: MODULE_ID, version: '1.0.0' as ModuleVersion })).rejects.toMatchObject({ code: 'USAGE_GUARD_REQUIRED' })
+
+    let releaseRename!: () => void
+    let renamed!: () => void
+    const renameGate = new Promise<void>((resolve) => { releaseRename = resolve })
+    const didRename = new Promise<void>((resolve) => { renamed = resolve })
+    const installer = new ModuleInstaller(moduleRoot, {
+      usageGuard,
+      async faultInjector(point) {
+        if (point === 'after-trash-rename') {
+          renamed()
+          await renameGate
+        }
+      },
+    })
+    const uninstalling = installer.uninstall({ moduleId: MODULE_ID, version: '1.0.0' as ModuleVersion })
+    await didRename
+    let referenceAcquired = false
+    const reference = usageGuard.acquireReference('1.0.0' as ModuleVersion).then((release) => {
+      referenceAcquired = true
+      return release
+    })
+    await Bun.sleep(10)
+    expect(referenceAcquired).toBe(false)
+    releaseRename()
+    await uninstalling
+    const releaseReference = await reference
+    expect(referenceAcquired).toBe(true)
+    releaseReference()
+  })
 
   it('treats a durable state switch as committed when cleanup is interrupted', async () => {
     const root = await tempRoot()

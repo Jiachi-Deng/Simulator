@@ -13,6 +13,8 @@ export {
   type InstallerFaultPoint,
   type ModuleInstallerErrorCode,
   type ModuleInstallerOptions,
+  type ModuleUsageGuard,
+  type ModuleUsageGuardLease,
   type RollbackResult,
   type UninstallRequest,
   type VerifiedArtifactDescriptor,

@@ -81,7 +81,22 @@ export interface InstallRequest {
 export interface UninstallRequest {
   readonly moduleId: ModuleId
   readonly version: ModuleVersion
-  readonly inUseVersions?: ReadonlySet<string>
+}
+
+/** Held by the host while reference acquisition is serialized against a module mutation. */
+export interface ModuleUsageGuardLease {
+  isVersionInUse(version: ModuleVersion): boolean | Promise<boolean>
+}
+
+/**
+ * The host must prevent new runtime references for the full duration of operation.
+ * The installer deliberately has no permissive fallback when this authority is absent.
+ */
+export interface ModuleUsageGuard {
+  runExclusive<T>(
+    moduleId: ModuleId,
+    operation: (lease: ModuleUsageGuardLease) => Promise<T>,
+  ): Promise<T>
 }
 
 export type InstallerFaultPoint =
@@ -89,11 +104,27 @@ export type InstallerFaultPoint =
   | 'after-archive-inspection'
   | 'after-extraction'
   | 'before-content-fsync'
+  | 'before-journal-temp-write'
+  | 'during-journal-temp-write'
+  | 'after-journal-temp-fsync'
+  | 'after-journal-claim'
+  | 'after-journal-rename'
   | 'after-journal-prepared'
   | 'before-publish-rename'
+  | 'after-publish-rename'
+  | 'after-publish-source-fsync'
+  | 'after-publish-destination-fsync'
   | 'after-version-published'
   | 'before-state-rename'
+  | 'after-state-rename'
   | 'after-state-activated'
+  | 'before-trash-rename'
+  | 'after-trash-rename'
+  | 'after-trash-source-fsync'
+  | 'after-trash-destination-fsync'
+  | 'after-trash-published'
+  | 'before-trash-delete'
+  | 'after-trash-delete'
   | 'after-recovery-claimed'
   | 'before-cleanup'
 
@@ -102,6 +133,7 @@ export type InstallerFaultInjector = (point: InstallerFaultPoint) => void | Prom
 export interface ModuleInstallerOptions {
   readonly limits?: Partial<InstallLimits>
   readonly faultInjector?: InstallerFaultInjector
+  readonly usageGuard?: ModuleUsageGuard
 }
 
 export type ModuleInstallerErrorCode =
@@ -120,6 +152,7 @@ export type ModuleInstallerErrorCode =
   | 'NOT_INSTALLED'
   | 'PROTECTED_VERSION'
   | 'TREE_HASH_MISMATCH'
+  | 'USAGE_GUARD_REQUIRED'
 
 export class ModuleInstallerError extends Error {
   readonly code: ModuleInstallerErrorCode

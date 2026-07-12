@@ -1,5 +1,7 @@
-import { open } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
+import { open, stat } from 'node:fs/promises'
 import { posix } from 'node:path'
+import { createGunzip } from 'node:zlib'
 import { extract, list, type ReadEntry } from 'tar'
 import {
   ModuleInstallerError,
@@ -9,6 +11,9 @@ import {
 
 const WINDOWS_DEVICE = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i
 const DRIVE_OR_UNC = /^(?:[A-Za-z]:|[/\\]{2})/
+const SAFE_PATH_SEGMENT = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
+const TAR_BLOCK_SIZE = 512
+const TAR_METADATA_TYPES = new Set(['g', 'x', 'L', 'K'])
 
 export interface ArchiveEntryPlan {
   readonly archivePath: string
@@ -57,7 +62,10 @@ function validatePath(path: string, limits: InstallLimits): string {
     limitExceeded(`Archive path exceeds maximum depth ${limits.maxDepth}`)
   }
   for (const segment of segments) {
-    if (segment.endsWith('.') || segment.endsWith(' ') || WINDOWS_DEVICE.test(segment)) {
+    if (!SAFE_PATH_SEGMENT.test(segment)) {
+      invalidEntry(`Archive path is outside the safe ASCII segment contract: ${JSON.stringify(path)}`)
+    }
+    if (segment.endsWith('.') || WINDOWS_DEVICE.test(segment)) {
       invalidEntry(`Archive path has a platform-ambiguous component: ${JSON.stringify(path)}`)
     }
   }
@@ -67,7 +75,88 @@ function validatePath(path: string, limits: InstallLimits): string {
 }
 
 function collisionKey(path: string): string {
-  return path.normalize('NFKC').toLocaleLowerCase('en-US')
+  return path.toLowerCase()
+}
+
+function parseTarOctal(field: Buffer, label: string): number {
+  if ((field[0]! & 0x80) !== 0) invalidEntry(`Base-256 tar ${label} is not supported`)
+  const nul = field.indexOf(0)
+  const text = field.subarray(0, nul === -1 ? field.length : nul).toString('ascii').trim()
+  if (text === '') return 0
+  if (!/^[0-7]+$/.test(text)) invalidEntry(`Tar ${label} is not canonical octal`)
+  const value = Number.parseInt(text, 8)
+  if (!Number.isSafeInteger(value) || value < 0) invalidEntry(`Tar ${label} is outside the safe integer range`)
+  return value
+}
+
+function validateTarChecksum(header: Buffer): void {
+  const expected = parseTarOctal(header.subarray(148, 156), 'checksum')
+  let actual = 0
+  for (let index = 0; index < header.length; index += 1) {
+    actual += index >= 148 && index < 156 ? 0x20 : header[index]!
+  }
+  if (actual !== expected) invalidEntry('Tar header checksum is invalid')
+}
+
+async function inspectRawTarHeaders(path: string, limits: InstallLimits, signal?: AbortSignal): Promise<void> {
+  const stream = createReadStream(path).pipe(createGunzip())
+  const compressedBytes = (await stat(path)).size
+  const boundedEnvelope = limits.maxTotalBytes + limits.maxMetadataBytes + (limits.maxEntries * 1024) + 1024
+  const ratioEnvelope = compressedBytes * limits.maxDecompressionRatio
+  const maxRawBytes = Math.min(Number.MAX_SAFE_INTEGER, boundedEnvelope, ratioEnvelope)
+  let buffer = Buffer.alloc(0)
+  let dataBytesRemaining = 0
+  let rawBytes = 0
+  let headerCount = 0
+  let metadataBytes = 0
+  let zeroBlocks = 0
+  let ended = false
+
+  try {
+    for await (const value of stream) {
+      abortIfRequested(signal)
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value)
+      rawBytes += chunk.length
+      if (!Number.isSafeInteger(rawBytes) || rawBytes > maxRawBytes) {
+        limitExceeded('Raw tar stream exceeds the bounded production envelope')
+      }
+      buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk])
+      while (buffer.length > 0) {
+        if (dataBytesRemaining > 0) {
+          const consumed = Math.min(dataBytesRemaining, buffer.length)
+          buffer = buffer.subarray(consumed)
+          dataBytesRemaining -= consumed
+          if (dataBytesRemaining > 0) break
+          continue
+        }
+        if (buffer.length < TAR_BLOCK_SIZE) break
+        const header = buffer.subarray(0, TAR_BLOCK_SIZE)
+        buffer = buffer.subarray(TAR_BLOCK_SIZE)
+        if (header.every((byte) => byte === 0)) {
+          zeroBlocks += 1
+          if (zeroBlocks >= 2) ended = true
+          continue
+        }
+        if (ended) invalidEntry('Tar archive contains entries after its end marker')
+        zeroBlocks = 0
+        validateTarChecksum(header)
+        headerCount += 1
+        if (headerCount > limits.maxEntries) limitExceeded(`Tar archive exceeds ${limits.maxEntries} total headers`)
+        const size = parseTarOctal(header.subarray(124, 136), 'size')
+        const type = String.fromCharCode(header[156]!)
+        if (TAR_METADATA_TYPES.has(type)) {
+          metadataBytes += size
+          if (!Number.isSafeInteger(metadataBytes) || metadataBytes > limits.maxMetadataBytes) {
+            limitExceeded(`Tar metadata exceeds ${limits.maxMetadataBytes} bytes`)
+          }
+        }
+        dataBytesRemaining = Math.ceil(size / TAR_BLOCK_SIZE) * TAR_BLOCK_SIZE
+      }
+    }
+  } catch (error) {
+    throw toInstallerError(error, 'Raw tar header inspection failed')
+  }
+  if (dataBytesRemaining !== 0 || buffer.length !== 0 || !ended) invalidEntry('Tar archive is truncated or lacks a canonical end marker')
 }
 
 function asPlan(entry: ReadEntry, limits: InstallLimits): ArchiveEntryPlan {
@@ -122,6 +211,7 @@ export async function inspectArchive(
   let validationError: ModuleInstallerError | undefined
 
   try {
+    await inspectRawTarHeaders(archivePath, limits, signal)
     await list({
       file: archivePath,
       gzip: true,
@@ -138,7 +228,7 @@ export async function inspectArchive(
           const key = collisionKey(planned.archivePath)
           const prior = collisionKeys.get(key)
           if (prior !== undefined) {
-            invalidEntry(`Archive paths collide after Unicode case folding: ${JSON.stringify(prior)} and ${JSON.stringify(entry.path)}`)
+            invalidEntry(`Archive paths collide under ASCII case folding: ${JSON.stringify(prior)} and ${JSON.stringify(entry.path)}`)
           }
           entries.set(planned.archivePath, planned)
           collisionKeys.set(key, planned.archivePath)
@@ -243,8 +333,8 @@ export async function extractArchive(
 
 export function validateEntrypointPlan(plan: ArchivePlan, entrypoint: string): void {
   const planned = plan.entries.get(posix.join('module', entrypoint))
-  if (!planned || planned.type !== 'file' || (planned.mode & 0o111) === 0) {
-    throw new ModuleInstallerError('ENTRYPOINT_INVALID', 'Declared entrypoint must be an executable regular file')
+  if (!planned || planned.type !== 'file' || (planned.mode & 0o100) === 0) {
+    throw new ModuleInstallerError('ENTRYPOINT_INVALID', 'Declared entrypoint must be an owner-executable regular file')
   }
   for (const entry of plan.entries.values()) {
     if (entry.type === 'file' && (entry.mode & 0o111) !== 0 && entry.relativePath !== entrypoint) {

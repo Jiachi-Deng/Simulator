@@ -10,6 +10,7 @@ import {
   fsyncDirectory,
   fsyncTree,
   hashExtractedTree,
+  normalizeAndVerifyModes,
   pathExists,
 } from './filesystem.ts'
 import {
@@ -60,6 +61,7 @@ interface ModulePaths {
   readonly versionsDirectory: string
   readonly state: string
   readonly journal: string
+  readonly journalClaim: string
   readonly recoveringJournal: string
 }
 
@@ -174,6 +176,7 @@ export class ModuleInstaller {
   readonly #root: string
   readonly #limits: InstallLimits
   readonly #faultInjector: ModuleInstallerOptions['faultInjector']
+  readonly #usageGuard: ModuleInstallerOptions['usageGuard']
   readonly #busy = new Set<string>()
   #rootReady = false
 
@@ -184,6 +187,7 @@ export class ModuleInstaller {
     this.#root = resolve(moduleRoot)
     this.#limits = validateLimits(options.limits)
     this.#faultInjector = options.faultInjector
+    this.#usageGuard = options.usageGuard
   }
 
   get root(): string {
@@ -227,6 +231,7 @@ export class ModuleInstaller {
         await this.#fault('after-archive-inspection')
         await extractArchive(archive, payload, plan, this.#limits, request.signal, report)
         await this.#fault('after-extraction')
+        await normalizeAndVerifyModes(payload, descriptor.artifact.entrypoint)
 
         const tree = await hashExtractedTree(payload, this.#limits, request.signal, report)
         if (tree.sha256 !== descriptor.extractedManifestSha256) {
@@ -277,8 +282,11 @@ export class ModuleInstaller {
         report({ phase: 'activating', completed: 90, total: 100 })
         await this.#fault('before-publish-rename')
         await rename(payload, target)
+        await this.#fault('after-publish-rename')
         await fsyncDirectory(staging)
+        await this.#fault('after-publish-source-fsync')
         await fsyncDirectory(paths.versionsDirectory)
+        await this.#fault('after-publish-destination-fsync')
         journal = { ...journal, checkpoint: 'version-published' }
         await atomicWriteJson(paths.journal, journal)
         await this.#fault('after-version-published')
@@ -286,6 +294,7 @@ export class ModuleInstaller {
 
         await this.#fault('before-state-rename')
         await atomicWriteJson(paths.state, nextState)
+        await this.#fault('after-state-rename')
         journal = { ...journal, checkpoint: 'state-activated' }
         await atomicWriteJson(paths.journal, journal)
         await this.#fault('after-state-activated')
@@ -351,9 +360,11 @@ export class ModuleInstaller {
         await this.#fault('after-journal-prepared')
         await this.#fault('before-state-rename')
         await atomicWriteJson(paths.state, nextState)
+        await this.#fault('after-state-rename')
         journal = { ...journal, checkpoint: 'state-activated' }
         await atomicWriteJson(paths.journal, journal)
         await this.#fault('after-state-activated')
+        await this.#fault('before-cleanup')
         await this.#cleanupTransaction(paths, transactionId)
       } catch (error) {
         if (error instanceof SimulatedInstallerCrash) throw error
@@ -370,12 +381,15 @@ export class ModuleInstaller {
   async uninstall(request: UninstallRequest): Promise<void> {
     this.#validateModuleId(request.moduleId)
     if (!validVersion(request.version)) throw new ModuleInstallerError('DESCRIPTOR_INVALID', 'Uninstall version is invalid')
-    await this.#exclusive(request.moduleId, async () => {
+    if (!this.#usageGuard) {
+      throw new ModuleInstallerError('USAGE_GUARD_REQUIRED', 'Uninstall requires an authoritative host usage guard')
+    }
+    await this.#usageGuard.runExclusive(request.moduleId, async (lease) => this.#exclusive(request.moduleId, async () => {
       await this.#ensureRoot()
       const paths = await this.#ensureModuleLayout(request.moduleId)
       await this.#assertIdle(paths)
       const state = await this.#readState(paths.state)
-      if (state.activeVersion === request.version || state.lastKnownGoodVersion === request.version || request.inUseVersions?.has(request.version)) {
+      if (state.activeVersion === request.version || state.lastKnownGoodVersion === request.version || await lease.isVersionInUse(request.version)) {
         throw new ModuleInstallerError('PROTECTED_VERSION', 'Cannot uninstall an active, last-known-good, or in-use version')
       }
       const target = join(paths.versionsDirectory, request.version)
@@ -395,11 +409,21 @@ export class ModuleInstaller {
       await this.#claimJournal(paths, journal)
       try {
         await mkdir(resolve(trash, '..'), { recursive: true, mode: 0o700 })
+        await this.#fault('after-journal-prepared')
+        await this.#fault('before-trash-rename')
         await rename(target, trash)
+        await this.#fault('after-trash-rename')
         await fsyncDirectory(paths.versionsDirectory)
+        await this.#fault('after-trash-source-fsync')
         await fsyncDirectory(resolve(trash, '..'))
+        await this.#fault('after-trash-destination-fsync')
         await atomicWriteJson(paths.journal, { ...journal, checkpoint: 'version-published' })
+        await this.#fault('after-trash-published')
+        await this.#fault('before-trash-delete')
         await rm(trash, { recursive: true, force: true })
+        await fsyncDirectory(resolve(trash, '..'))
+        await this.#fault('after-trash-delete')
+        await this.#fault('before-cleanup')
         await this.#cleanupTransaction(paths, transactionId)
       } catch (error) {
         if (error instanceof SimulatedInstallerCrash) throw error
@@ -408,7 +432,7 @@ export class ModuleInstaller {
         if (error instanceof ModuleInstallerError) throw error
         throw new ModuleInstallerError('FILESYSTEM_ERROR', error instanceof Error ? error.message : String(error), error)
       }
-    })
+    }))
   }
 
   async recover(moduleId: ModuleId): Promise<void> {
@@ -444,8 +468,16 @@ export class ModuleInstaller {
     const paths = this.#modulePaths(moduleId)
     const hasJournal = await pathExists(paths.journal)
     const hasRecoveringJournal = await pathExists(paths.recoveringJournal)
+    const hasJournalClaim = await pathExists(paths.journalClaim)
     if (hasJournal && hasRecoveringJournal) {
       throw new ModuleInstallerError('JOURNAL_INVALID', 'Module has conflicting transaction journals')
+    }
+    if (hasJournalClaim && !resumeInterrupted) {
+      throw new ModuleInstallerError('BUSY', 'A journal publisher may still be active; resume only after confirming it stopped')
+    }
+    if (hasJournalClaim) {
+      await rm(paths.journalClaim, { recursive: true, force: true })
+      await fsyncDirectory(paths.moduleDirectory)
     }
     if (!hasJournal && !hasRecoveringJournal) return
     if (hasRecoveringJournal && !resumeInterrupted) {
@@ -535,6 +567,7 @@ export class ModuleInstaller {
       versionsDirectory: join(moduleDirectory, 'versions'),
       state: join(moduleDirectory, 'state.json'),
       journal: join(moduleDirectory, 'transaction.json'),
+      journalClaim: join(moduleDirectory, 'transaction.claim'),
       recoveringJournal: join(moduleDirectory, 'transaction.recovering.json'),
     }
   }
@@ -567,6 +600,8 @@ export class ModuleInstaller {
   async #cleanupTransaction(paths: ModulePaths, transactionId: string, metadataPath = paths.journal): Promise<void> {
     await rm(this.#stagingPath(transactionId), { recursive: true, force: true })
     await rm(this.#trashPath(transactionId), { recursive: true, force: true })
+    await fsyncDirectory(join(this.#root, '.module-installer', 'staging'))
+    await fsyncDirectory(join(this.#root, '.module-installer', 'trash'))
     await rm(metadataPath, { force: true })
     await fsyncDirectory(paths.moduleDirectory)
   }
@@ -589,19 +624,20 @@ export class ModuleInstaller {
   }
 
   async #assertIdle(paths: ModulePaths): Promise<void> {
-    if (await pathExists(paths.journal) || await pathExists(paths.recoveringJournal)) {
+    if (await pathExists(paths.journal) || await pathExists(paths.recoveringJournal) || await pathExists(paths.journalClaim)) {
       throw new ModuleInstallerError('BUSY', 'Module has a pending transaction; recover it before starting another operation')
     }
   }
 
   async #claimJournal(paths: ModulePaths, journal: JournalFile): Promise<void> {
     try {
-      await createJsonExclusive(paths.journal, journal)
+      await createJsonExclusive(paths.journal, paths.journalClaim, journal, (point) => this.#fault(point))
     } catch (error) {
+      if (error instanceof SimulatedInstallerCrash || error instanceof ModuleInstallerError) throw error
       if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
         throw new ModuleInstallerError('BUSY', 'Another installer owns the module transaction')
       }
-      throw error
+      throw new ModuleInstallerError('FILESYSTEM_ERROR', `Could not publish module transaction journal: ${error instanceof Error ? error.message : String(error)}`, error)
     }
     try {
       const currentState = await this.#readState(paths.state)
