@@ -208,10 +208,12 @@ When exposing the server over the network, TLS encrypts the WebSocket connection
 
 ```bash
 ./scripts/generate-dev-cert.sh
-# Creates certs/cert.pem and certs/key.pem (valid 365 days)
+# Creates an RSA cert/key pair in certs/ (valid 365 days)
 ```
 
-The desktop app uses standard certificate verification and rejects an untrusted self-signed certificate. Install the development CA in the client system trust store for testing, or use `craft-cli --tls-ca <path>`.
+The generated certificate contains SANs for `localhost`, `127.0.0.1`, and `::1`. It is intended only for loopback development; use a certificate matching the real DNS name for remote access.
+
+The desktop app uses standard certificate verification and rejects an untrusted self-signed certificate. Install the development certificate in the client system trust store for testing, or trust it for one CLI connection with `craft-cli --tls-ca certs/cert.pem`.
 
 **Start the server with TLS:**
 
@@ -279,7 +281,7 @@ export CRAFT_SERVER_TOKEN=<your-token>
 craft-cli --url ws://127.0.0.1:9100 --token <token> ping
 ```
 
-For TLS connections (`wss://`), use `--tls-ca <path>` for self-signed certificates.
+For TLS connections (`wss://`), use `--tls-ca <path>` to trust a self-signed certificate for that CLI connection. This does not disable certificate or hostname verification.
 
 ### Commands
 
