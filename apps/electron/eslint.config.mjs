@@ -121,6 +121,7 @@ export default [
           'shadow-none',
           'shadow-xs',
           'shadow-minimal',
+          'shadow-dragging',
           'shadow-tinted',
           'shadow-thin',
           'shadow-middle',

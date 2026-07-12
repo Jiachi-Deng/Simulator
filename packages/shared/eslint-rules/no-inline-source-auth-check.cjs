@@ -16,6 +16,8 @@
  *   - storage.ts (where isSourceUsable is defined)
  *   - credential-manager.ts (state-setting operations, inverse check)
  *   - server-builder.ts (documented exceptions for OAuth providers)
+ *   - assignments that update auth state
+ *   - tests that assert the stored low-level state
  *
  * Bad:
  *   source.config.isAuthenticated
@@ -55,7 +57,7 @@ module.exports = {
     const basename = filename.split('/').pop() || ''
 
     // Allow in specific files
-    if (allowedFiles.includes(basename)) {
+    if (allowedFiles.includes(basename) || filename.includes('/__tests__/')) {
       return {}
     }
 
@@ -67,6 +69,13 @@ module.exports = {
           node.property.type === 'Identifier' &&
           node.property.name === 'isAuthenticated'
         ) {
+          if (
+            (node.parent.type === 'AssignmentExpression' &&
+              node.parent.left === node &&
+              node.parent.operator === '=')
+          ) {
+            return
+          }
           // Check if accessed via .config.isAuthenticated pattern
           if (
             node.object.type === 'MemberExpression' &&

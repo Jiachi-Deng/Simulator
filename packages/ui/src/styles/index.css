@@ -547,3 +547,14 @@ html[data-font="inter"] {
   pointer-events: none;
   border-radius: inherit;
 }
+
+/* Runtime annotation code toggles these attributes and supplies only the
+   selected background color. Elevation remains in the shared style system. */
+[data-ca-block-annotated="true"] {
+  outline: 1px solid color-mix(in srgb, var(--info) 22%, transparent);
+  outline-offset: -1px;
+}
+
+code[data-ca-annotation-inline-code="true"] {
+  box-shadow: none;
+}
