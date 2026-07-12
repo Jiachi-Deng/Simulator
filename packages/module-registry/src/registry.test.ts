@@ -233,6 +233,39 @@ describe('ModuleRegistry state transitions', () => {
     expect(firstCode(undefinedTransition)).toBe('VERSION_NOT_FOUND')
     expect(registry.snapshot()).toEqual(before)
   })
+
+  it('does not let active removal transition bypass disabled activation rules', () => {
+    const registry = new ModuleRegistry(HOST)
+    registry.install(validatedManifest('org.simulator.disabled-remove', '1.0.0'), { hostVersionRange: '*' })
+    registry.install(validatedManifest('org.simulator.disabled-remove', '2.0.0'), { hostVersionRange: '*' })
+    registry.activate('org.simulator.disabled-remove', '1.0.0')
+    registry.disable('org.simulator.disabled-remove')
+    const before = registry.snapshot()
+
+    const replacement = registry.remove('org.simulator.disabled-remove', '1.0.0', {
+      activeVersion: '2.0.0',
+    })
+    expect(firstCode(replacement)).toBe('MODULE_DISABLED')
+    expect(registry.snapshot()).toEqual(before)
+
+    expect(registry.remove('org.simulator.disabled-remove', '1.0.0', { activeVersion: null }).ok).toBe(true)
+    expect(registry.snapshot().modules[0]?.activeVersion).toBeNull()
+  })
+
+  it('does not let unrelated removal change the active version', () => {
+    const registry = new ModuleRegistry(HOST)
+    for (const version of ['1.0.0', '2.0.0', '3.0.0']) {
+      registry.install(validatedManifest('org.simulator.unrelated-remove', version), { hostVersionRange: '*' })
+    }
+    registry.activate('org.simulator.unrelated-remove', '1.0.0')
+    const before = registry.snapshot()
+
+    const result = registry.remove('org.simulator.unrelated-remove', '2.0.0', {
+      activeVersion: '3.0.0',
+    })
+    expect(firstCode(result)).toBe('ACTIVE_REMOVAL_GUARD')
+    expect(registry.snapshot()).toEqual(before)
+  })
 })
 
 describe('ModuleRegistry persistence recovery', () => {

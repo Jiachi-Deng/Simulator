@@ -323,6 +323,15 @@ export class ModuleRegistry {
       ))
     }
 
+    if (Object.hasOwn(transition, 'activeVersion') && module.activeVersion !== version) {
+      return this.failure(diagnostic(
+        'ACTIVE_REMOVAL_GUARD',
+        'Active transition is only allowed when removing the current active version',
+        moduleId,
+        version,
+      ))
+    }
+
     if (Object.hasOwn(transition, 'activeVersion') && transition.activeVersion === undefined) {
       return this.failure(diagnostic(
         'VERSION_NOT_FOUND',
@@ -342,6 +351,14 @@ export class ModuleRegistry {
 
     const activeError = this.validateTransitionTarget(module, version, transition.activeVersion, 'activeVersion')
     if (activeError) return this.failure(activeError)
+    if (transition.activeVersion !== undefined && transition.activeVersion !== null && module.disabled) {
+      return this.failure(diagnostic(
+        'MODULE_DISABLED',
+        'Disabled module cannot activate a replacement during removal',
+        moduleId,
+        transition.activeVersion,
+      ))
+    }
     const lastKnownGoodError = this.validateTransitionTarget(
       module,
       version,
