@@ -1,3 +1,4 @@
+// Runs separately because Bun's Electron module mocks are process-global.
 import { beforeEach, describe, expect, it, mock } from 'bun:test'
 
 type Listener = (...args: any[]) => any
