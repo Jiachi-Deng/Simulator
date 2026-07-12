@@ -269,6 +269,29 @@ describe('ModuleRegistry state transitions', () => {
 })
 
 describe('ModuleRegistry persistence recovery', () => {
+  it('defensively clones initial committed state before caller mutation', () => {
+    const manifest = validatedManifest('org.simulator.initial-clone', '1.0.0')
+    const initial = {
+      schemaVersion: 1 as const,
+      host: { ...HOST },
+      modules: [{
+        id: manifest.id,
+        disabled: false,
+        activeVersion: null,
+        lastKnownGoodVersion: null,
+        versions: [{ manifest: structuredClone(manifest), hostVersionRange: '*' }],
+      }],
+    }
+    const persistence = new InMemoryModuleRegistryPersistence(initial)
+
+    initial.schemaVersion = 99 as 1
+    ;(initial.modules[0]!.versions[0]!.manifest as unknown as { version: string }).version = 'corrupted-after-construction'
+
+    const snapshot = new ModuleRegistry(HOST, persistence).snapshot()
+    expect(snapshot.diagnostics).toEqual([])
+    expect(snapshot.modules[0]?.versions.map((item) => item.version)).toEqual(['1.0.0'])
+  })
+
   it('recovers the previous complete snapshot after an interrupted commit', () => {
     const fixture = new RegistryCrashRecoveryFixture(HOST)
     const registry = fixture.start()

@@ -14,7 +14,7 @@ export class InMemoryModuleRegistryPersistence implements ModuleRegistryPersiste
   private interruptNext = false
 
   constructor(initialCommitted: unknown | null = null) {
-    this.committed = initialCommitted
+    this.committed = initialCommitted === null ? null : cloneData(initialCommitted)
   }
 
   read(): RegistryPersistenceRead {
