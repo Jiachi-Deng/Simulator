@@ -20,6 +20,7 @@ import {
 import type { RpcClient } from './types'
 import { serializeEnvelope, deserializeEnvelope } from './codec'
 import { evaluateWebSocketUrl } from './websocket-url-policy'
+import { redactSecret } from './secret-redaction'
 
 // ---------------------------------------------------------------------------
 // Pending request state
@@ -153,7 +154,7 @@ export class WsRpcClient implements RpcClient {
     this.workspaceId = opts?.workspaceId
     this.webContentsId = opts?.webContentsId
     this.token = opts?.token
-    this.stateUrl = this.redactToken(this.urlPolicy.diagnosticUrl)
+    this.stateUrl = redactSecret(this.urlPolicy.diagnosticUrl, this.token)
     this.clientCapabilities = opts?.clientCapabilities ?? []
     this.requestTimeout = opts?.requestTimeout ?? REQUEST_TIMEOUT_MS
     this.maxReconnectDelay = opts?.maxReconnectDelay ?? 30_000
@@ -446,7 +447,7 @@ export class WsRpcClient implements RpcClient {
           || ('error' in event && event.error?.message)
           || undefined
         const message = detail
-          ? `WebSocket error: ${this.redactToken(detail)}`
+          ? `WebSocket error: ${redactSecret(detail, this.token)}`
           : 'WebSocket error during connection setup'
         const err = this.createConnectionError('network', message, 'WS_ERROR')
         this.connectError = err
@@ -584,7 +585,7 @@ export class WsRpcClient implements RpcClient {
           this.pending.delete(envelope.id)
           clearTimeout(req.timeout)
           if (envelope.error) {
-            const err = new Error(this.redactToken(envelope.error.message))
+            const err = new Error(redactSecret(envelope.error.message, this.token))
             ;(err as any).code = envelope.error.code
             req.reject(err)
           } else {
@@ -928,19 +929,6 @@ export class WsRpcClient implements RpcClient {
       : null
   }
 
-  private redactToken(message: string): string {
-    if (!this.token) return message
-
-    const encoded = encodeURIComponent(this.token)
-    const variants = [...new Set([this.token, encoded, encodeURIComponent(encoded)])]
-      .sort((a, b) => b.length - a.length)
-    let redacted = message
-    for (const variant of variants) {
-      if (variant) redacted = redacted.split(variant).join('[REDACTED]')
-    }
-    return redacted
-  }
-
   private setConnectionState(
     partial: Omit<Partial<TransportConnectionState>, 'mode' | 'url' | 'updatedAt'>,
   ): void {
@@ -963,7 +951,7 @@ export class WsRpcClient implements RpcClient {
   }
 
   private createConnectionError(kind: TransportConnectionErrorKind, message: string, code?: string): Error {
-    const err = new Error(this.redactToken(message))
+    const err = new Error(redactSecret(message, this.token))
     ;(err as any).kind = kind
     if (code) (err as any).code = code
     return err
@@ -976,7 +964,7 @@ export class WsRpcClient implements RpcClient {
 
     return {
       kind,
-      message: this.redactToken(err.message),
+      message: redactSecret(err.message, this.token),
       code,
     }
   }

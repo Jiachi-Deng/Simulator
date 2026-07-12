@@ -230,7 +230,7 @@ describe('WsRpcClient connection policy', () => {
   })
 
   const tlsIt = hasTlsTooling() ? it : it.skip
-  tlsIt('rejects a real self-signed WSS handshake without exposing the token (requires sh + openssl)', async () => {
+  tlsIt('rejects an untrusted WSS certificate and accepts the same certificate as an explicit CA (requires sh + openssl)', async () => {
     const tls = generateSelfSignedCert()
     const server = new WsRpcServer({ host: '127.0.0.1', port: 0, tls })
     await server.listen()
@@ -238,7 +238,7 @@ describe('WsRpcClient connection policy', () => {
     const token = 'real tls token/with?reserved=characters'
     const encodedToken = encodeURIComponent(token)
     const client = new WsRpcClient(
-      `wss://127.0.0.1:${server.port}/rpc?token=${encodedToken}#${token}`,
+      `wss://127.0.0.1:${server.port}/rpc?token=${encodedToken}`,
       { token, autoReconnect: false, connectTimeout: 2_000 },
     )
 
@@ -256,6 +256,40 @@ describe('WsRpcClient connection policy', () => {
       expect(state.url).toBe(`wss://127.0.0.1:${server.port}/rpc`)
       expect(`${error?.message}\n${JSON.stringify(state)}`).not.toContain(token)
       expect(`${error?.message}\n${JSON.stringify(state)}`).not.toContain(encodedToken)
+
+      // Let the failed socket deliver its close event before starting the
+      // trusted connection, so no TLS error can escape after test teardown.
+      await new Promise((resolveClose) => setTimeout(resolveClose, 50))
+
+      const trustedHandshake = await new Promise<MessageEnvelope>((resolveHandshake, rejectHandshake) => {
+        const TrustedWebSocket = WebSocket as unknown as new (
+          url: string,
+          options: { tls: { ca: string } },
+        ) => WebSocket
+        const ws = new TrustedWebSocket(
+          `wss://127.0.0.1:${server.port}/rpc`,
+          { tls: { ca: tls.cert } },
+        )
+        ws.onerror = (event) => {
+          const message = 'message' in event && typeof event.message === 'string'
+            ? event.message
+            : 'Trusted WSS connection failed'
+          rejectHandshake(new Error(message))
+        }
+        ws.onopen = () => {
+          ws.send(JSON.stringify({
+            id: 'trusted-handshake',
+            type: 'handshake',
+            protocolVersion: '1.0',
+          }))
+        }
+        ws.onmessage = (event) => {
+          const envelope = JSON.parse(String(event.data)) as MessageEnvelope
+          ws.close()
+          resolveHandshake(envelope)
+        }
+      })
+      expect(trustedHandshake).toMatchObject({ type: 'handshake_ack' })
     } finally {
       client.destroy()
       server.close()

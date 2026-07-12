@@ -38,11 +38,11 @@ describe('remote TLS security invariants', () => {
     expect(mainSource).not.toContain("app.on('certificate-error'")
   })
 
-  it('keeps the inbound insecure-bind override out of every production outbound client', () => {
+  it('allows insecure transport only as an explicit standalone inbound opt-in, never as an outbound bypass', () => {
     const outboundSources = PRODUCTION_OUTBOUND_PATHS.map(read).join('\n')
     const inboundServerSource = read('packages/server/src/index.ts')
 
-    expect(inboundServerSource).toContain('--allow-insecure-bind')
+    expect(inboundServerSource).toContain("process.argv.includes('--allow-insecure-bind')")
     expect(outboundSources).not.toContain('--allow-insecure-bind')
   })
 

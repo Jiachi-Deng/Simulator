@@ -22,7 +22,7 @@ interface MockServer {
 }
 
 function createMockServer(opts?: {
-  rejectAuth?: boolean
+  handshakeError?: { message: string; data?: unknown }
   noAck?: boolean
   tls?: { cert: string; key: string }
 }): MockServer {
@@ -43,11 +43,11 @@ function createMockServer(opts?: {
         lastMsg = envelope
 
         if (envelope.type === 'handshake') {
-          if (opts?.rejectAuth) {
+          if (opts?.handshakeError) {
             const error: MessageEnvelope = {
               id: envelope.id,
               type: 'error',
-              error: { code: 'AUTH_FAILED', message: 'Invalid token' },
+              error: { code: 'AUTH_FAILED', ...opts.handshakeError },
             }
             ws.send(serializeEnvelope(error))
             ws.close()
@@ -100,7 +100,7 @@ function createMockServer(opts?: {
   }
 }
 
-function createErrorServer(errorData?: unknown): MockServer {
+function createErrorServer(errorMessage: string, errorData?: unknown): MockServer {
   let lastMsg: MessageEnvelope | null = null
   const clients = new Set<any>()
 
@@ -133,7 +133,7 @@ function createErrorServer(errorData?: unknown): MockServer {
             id: envelope.id,
             type: 'response',
             channel: envelope.channel,
-            error: { code: 'HANDLER_ERROR', message: 'test error', data: errorData },
+            error: { code: 'HANDLER_ERROR', message: errorMessage, data: errorData },
           }
           ws.send(serializeEnvelope(response))
         }
@@ -208,9 +208,41 @@ describe('CliRpcClient', () => {
   })
 
   it('rejects on auth failure', async () => {
-    server = createMockServer({ rejectAuth: true })
+    server = createMockServer({ handshakeError: { message: 'Invalid token' } })
     const client = new CliRpcClient(server.url, { token: 'bad-token' })
     await expect(client.connect()).rejects.toThrow('Invalid token')
+    client.destroy()
+  })
+
+  it('redacts literal, encoded, and double-encoded tokens in handshake errors', async () => {
+    const token = 'PoC token/with?reserved=value'
+    const encoded = encodeURIComponent(token).replaceAll('%2F', '%2f').replaceAll('%3F', '%3f')
+    const doubleEncoded = encodeURIComponent(encoded)
+    const mutableData = { token, encoded, doubleEncoded }
+    server = createMockServer({
+      handshakeError: {
+        message: `Rejected ${token} / ${encoded} / ${doubleEncoded}`,
+        data: mutableData,
+      },
+    })
+    const client = new CliRpcClient(server.url, { token })
+
+    let error: (Error & { code?: string; data?: unknown }) | undefined
+    try {
+      await client.connect()
+    } catch (cause) {
+      error = cause as Error & { code?: string; data?: unknown }
+    }
+    mutableData.token = 'mutated-after-response'
+
+    expect(error).toMatchObject({
+      message: 'Rejected [REDACTED] / [REDACTED] / [REDACTED]',
+      code: 'AUTH_FAILED',
+    })
+    expect(error).not.toHaveProperty('data')
+    expect(JSON.stringify(error)).not.toContain(token)
+    expect(JSON.stringify(error)).not.toContain(encoded)
+    expect(JSON.stringify(error)).not.toContain(doubleEncoded)
     client.destroy()
   })
 
@@ -241,10 +273,12 @@ describe('CliRpcClient', () => {
   })
 
   it('invoke rejects on server error', async () => {
-    const secret = 'rpc-secret'
-    const mutableData = { token: secret, nested: { value: encodeURIComponent(encodeURIComponent(secret)) } }
-    server = createErrorServer(mutableData)
-    const client = new CliRpcClient(server.url)
+    const secret = 'PoC rpc/secret?value=yes'
+    const encoded = encodeURIComponent(secret).replaceAll('%2F', '%2f').replaceAll('%3F', '%3f')
+    const doubleEncoded = encodeURIComponent(encoded)
+    const mutableData = { token: secret, nested: { value: doubleEncoded } }
+    server = createErrorServer(`Failed ${secret} / ${encoded} / ${doubleEncoded}`, mutableData)
+    const client = new CliRpcClient(server.url, { token: secret })
     await client.connect()
     let error: (Error & { code?: string; data?: unknown }) | undefined
     try {
@@ -253,9 +287,14 @@ describe('CliRpcClient', () => {
       error = cause as Error & { code?: string; data?: unknown }
     }
     mutableData.nested.value = 'mutated-after-response'
-    expect(error).toMatchObject({ message: 'test error', code: 'HANDLER_ERROR' })
+    expect(error).toMatchObject({
+      message: 'Failed [REDACTED] / [REDACTED] / [REDACTED]',
+      code: 'HANDLER_ERROR',
+    })
     expect(error).not.toHaveProperty('data')
     expect(JSON.stringify(error)).not.toContain(secret)
+    expect(JSON.stringify(error)).not.toContain(encoded)
+    expect(JSON.stringify(error)).not.toContain(doubleEncoded)
     expect(JSON.stringify(error)).not.toContain('mutated-after-response')
     client.destroy()
   })

@@ -9,6 +9,8 @@
  */
 
 import { describe, it, expect, afterEach } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Subprocess } from 'bun'
 import WebSocket from 'ws'
@@ -28,6 +30,7 @@ interface SpawnedServer {
 async function spawnTestServer(extraEnv?: Record<string, string>): Promise<SpawnedServer> {
   const token = crypto.randomUUID() + crypto.randomUUID() // 72 chars, well above 16 minimum
   const { CLAUDECODE: _, ...parentEnv } = process.env
+  const configDir = mkdtempSync(join(tmpdir(), 'craft-server-smoke-'))
 
   const proc = Bun.spawn(['bun', 'run', SERVER_ENTRY], {
     env: {
@@ -37,6 +40,7 @@ async function spawnTestServer(extraEnv?: Record<string, string>): Promise<Spawn
       CRAFT_RPC_PORT: '0',
       CRAFT_RPC_HOST: '127.0.0.1',
       CRAFT_HEALTH_PORT: '0', // random port
+      CRAFT_CONFIG_DIR: configDir,
     },
     stdout: 'pipe',
     stderr: 'pipe',
@@ -68,6 +72,7 @@ async function spawnTestServer(extraEnv?: Record<string, string>): Promise<Spawn
             stop: async () => {
               proc.kill('SIGTERM')
               await proc.exited
+              rmSync(configDir, { recursive: true, force: true })
             },
           })
           return
@@ -90,6 +95,7 @@ async function spawnTestServer(extraEnv?: Record<string, string>): Promise<Spawn
       }
       clearTimeout(timer)
       if (!url) {
+        rmSync(configDir, { recursive: true, force: true })
         reject(new Error('Server exited before printing CRAFT_SERVER_URL'))
       }
     })()
@@ -166,6 +172,36 @@ describe('headless server smoke test', () => {
     expect(exitCode).not.toBe(0)
   }, TEST_TIMEOUT)
 
+  it('fails closed for a standalone non-loopback inbound bind without an explicit opt-in flag', async () => {
+    const token = crypto.randomUUID() + crypto.randomUUID()
+    const { CLAUDECODE: _, ...parentEnv } = process.env
+    const configDir = mkdtempSync(join(tmpdir(), 'craft-server-inbound-guard-'))
+    const proc = Bun.spawn(['bun', 'run', SERVER_ENTRY], {
+      env: {
+        ...parentEnv,
+        CRAFT_SERVER_TOKEN: token,
+        CRAFT_RPC_PORT: '0',
+        CRAFT_RPC_HOST: '0.0.0.0',
+        CRAFT_DISABLE_MESSAGING: 'true',
+        CRAFT_CONFIG_DIR: configDir,
+      },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+
+    const [exitCode, stdout, stderr] = await Promise.all([
+      proc.exited,
+      new Response(proc.stdout).text(),
+      new Response(proc.stderr).text(),
+    ])
+    rmSync(configDir, { recursive: true, force: true })
+
+    expect(exitCode).not.toBe(0)
+    expect(stdout).not.toContain('CRAFT_SERVER_URL=')
+    expect(stderr).toContain('Refusing to bind to a network address without TLS')
+    expect(stderr).toContain('--allow-insecure-bind')
+  }, TEST_TIMEOUT)
+
   it('shuts down cleanly on SIGTERM', async () => {
     server = await spawnTestServer()
     const ws = await connectWs(server.url, server.token)
@@ -178,7 +214,7 @@ describe('headless server smoke test', () => {
     const exitCode = await server.proc.exited
     expect(exitCode).toBe(0)
 
-    // Mark as stopped so afterEach doesn't double-kill
+    await server.stop()
     server = null
   }, TEST_TIMEOUT)
 })

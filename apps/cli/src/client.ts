@@ -13,6 +13,7 @@ import {
   serializeEnvelope,
   deserializeEnvelope,
   evaluateWebSocketUrl,
+  redactSecret,
 } from '@craft-agent/server-core/transport'
 
 // ---------------------------------------------------------------------------
@@ -112,7 +113,7 @@ export class CliRpcClient {
           resolve(this._clientId!)
         } else if (envelope.type === 'error') {
           clearTimeout(timer)
-          const err = new Error(envelope.error?.message ?? 'Connection rejected')
+          const err = new Error(redactSecret(envelope.error?.message ?? 'Connection rejected', this.token))
           ;(err as any).code = envelope.error?.code
           reject(err)
         }
@@ -220,7 +221,7 @@ export class CliRpcClient {
           this.pending.delete(envelope.id)
           clearTimeout(req.timeout)
           if (envelope.error) {
-            const err = new Error(envelope.error.message)
+            const err = new Error(redactSecret(envelope.error.message, this.token))
             ;(err as any).code = envelope.error.code
             req.reject(err)
           } else {

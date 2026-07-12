@@ -236,23 +236,14 @@ docker run -d \
   -p 9100:9100 \
   -e CRAFT_SERVER_TOKEN=<token> \
   -e CRAFT_RPC_HOST=0.0.0.0 \
-  -v craft-data:/root/.craft-agent \
-  craft-agents-server
-```
-
-To enable TLS in Docker, mount your certificates and set the env vars:
-
-```bash
-docker run -d \
-  -p 9100:9100 \
-  -e CRAFT_SERVER_TOKEN=<token> \
-  -e CRAFT_RPC_HOST=0.0.0.0 \
   -e CRAFT_RPC_TLS_CERT=/certs/cert.pem \
   -e CRAFT_RPC_TLS_KEY=/certs/key.pem \
   -v ./certs:/certs:ro \
   -v craft-data:/root/.craft-agent \
   craft-agents-server
 ```
+
+The certificate must match the hostname clients use. A non-loopback Docker bind without TLS fails closed unless the container command explicitly passes `--allow-insecure-bind`; that opt-in is intended only for trusted development networks.
 
 ## CLI Client
 
