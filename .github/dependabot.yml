@@ -10,7 +10,148 @@ updates:
     commit-message:
       prefix: "deps(bun)"
     groups:
-      bun-non-major:
+      agent-ai-non-major:
+        patterns:
+          - "@anthropic-ai/*"
+          - "@earendil-works/*"
+          - "@github/copilot-sdk"
+          - "@modelcontextprotocol/sdk"
+          - "@sinclair/typebox"
+          - "openai"
+        update-types:
+          - "minor"
+          - "patch"
+      electron-non-major:
+        patterns:
+          - "@electron/*"
+          - "@sentry/electron"
+          - "electron"
+          - "electron-*"
+        update-types:
+          - "minor"
+          - "patch"
+      react-build-non-major:
+        patterns:
+          - "@tailwindcss/*"
+          - "@types/react"
+          - "@types/react-dom"
+          - "@vitejs/*"
+          - "@sentry/react"
+          - "@sentry/vite-plugin"
+          - "autoprefixer"
+          - "postcss"
+          - "react"
+          - "react-dom"
+          - "tailwindcss"
+          - "typescript"
+          - "vite"
+        update-types:
+          - "minor"
+          - "patch"
+      ui-components-non-major:
+        patterns:
+          - "@dnd-kit/*"
+          - "@paper-design/*"
+          - "@radix-ui/*"
+          - "@tanstack/*"
+          - "@uiw/*"
+          - "class-variance-authority"
+          - "clsx"
+          - "cmdk"
+          - "jotai*"
+          - "lucide-react"
+          - "motion"
+          - "next-themes"
+          - "qrcode.react"
+          - "react-colorful"
+          - "react-day-picker"
+          - "react-devtools-core"
+          - "react-resizable-panels"
+          - "react-simple-code-editor"
+          - "sonner"
+          - "tailwind-merge"
+          - "vaul"
+        update-types:
+          - "minor"
+          - "patch"
+      content-editor-non-major:
+        patterns:
+          - "@shikijs/*"
+          - "@tiptap/*"
+          - "@types/katex"
+          - "@types/linkify-it"
+          - "beautiful-mermaid"
+          - "gray-matter"
+          - "katex"
+          - "linkify-it"
+          - "markitdown-js"
+          - "marked"
+          - "node-html-parser"
+          - "pdfjs-dist"
+          - "prosemirror-*"
+          - "react-pdf"
+          - "react-markdown"
+          - "rehype-*"
+          - "remark*"
+          - "shiki"
+          - "strip-markdown"
+          - "tiptap-*"
+          - "turndown"
+          - "unified"
+          - "unist-util-*"
+        update-types:
+          - "minor"
+          - "patch"
+      backend-messaging-non-major:
+        patterns:
+          - "@aws-sdk/*"
+          - "@img/*"
+          - "@larksuiteoapi/*"
+          - "@whiskeysockets/*"
+          - "@types/ws"
+          - "grammy"
+          - "i18next*"
+          - "jose"
+          - "sharp"
+          - "undici"
+          - "ws"
+          - "zod*"
+        update-types:
+          - "minor"
+          - "patch"
+      data-jobs-non-major:
+        patterns:
+          - "@isaacs/ttlcache"
+          - "@leeoniya/ufuzzy"
+          - "bash-parser"
+          - "chrono-node"
+          - "croner"
+          - "date-fns"
+          - "filtrex"
+          - "glob"
+          - "incr-regex-package"
+          - "js-yaml"
+          - "semver"
+          - "shell-quote"
+          - "tar"
+          - "yaml"
+        update-types:
+          - "minor"
+          - "patch"
+      tooling-non-major:
+        patterns:
+          - "@rollup/*"
+          - "@types/*"
+          - "@typescript-eslint/*"
+          - "@vscode/*"
+          - "concurrently"
+          - "esbuild"
+          - "eslint*"
+          - "husky"
+        update-types:
+          - "minor"
+          - "patch"
+      runtime-misc-non-major:
         patterns:
           - "*"
         update-types:
