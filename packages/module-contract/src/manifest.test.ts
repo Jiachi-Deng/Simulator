@@ -102,8 +102,15 @@ describe('parseModuleManifest', () => {
     expect(errorsFor(manifest({ id }))[0]?.code).toBe('INVALID_ID')
   })
 
-  it.each(['1', 'v1.0.0', '01.0.0', '1.0.0-', '1.0.0+'])('rejects invalid version %p', (version) => {
+  it.each(['1', 'v1.0.0', '01.0.0', '1.0.0-', '1.0.0+', '9007199254740992.0.0'])('rejects invalid version %p', (version) => {
     expect(errorsFor(manifest({ version }))[0]?.code).toBe('INVALID_VERSION')
+  })
+
+  it('matches the semver library safe-integer boundary with a structured contract error', () => {
+    expect(parseModuleManifest(manifest({ version: '9007199254740991.0.0' })).ok).toBe(true)
+    expect(errorsFor(manifest({ version: '9007199254740992.0.0' }))).toEqual([
+      { code: 'INVALID_VERSION', path: '/version', message: 'Module version must be valid Semantic Versioning' },
+    ])
   })
 
   it.each(['macos-arm64', 'linux', 'darwin-universal'])('rejects invalid platform %p', (platform) => {

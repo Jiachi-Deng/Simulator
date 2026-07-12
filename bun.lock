@@ -264,7 +264,11 @@
     "packages/module-contract": {
       "name": "@simulator/module-contract",
       "version": "0.11.1",
+      "dependencies": {
+        "semver": "7.7.3",
+      },
       "devDependencies": {
+        "@types/semver": "^7.7.1",
         "typescript": "^5.8.2",
       },
     },

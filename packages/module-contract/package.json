@@ -14,7 +14,11 @@
     "test": "bun test src",
     "typecheck": "tsc --noEmit"
   },
+  "dependencies": {
+    "semver": "7.7.3"
+  },
   "devDependencies": {
+    "@types/semver": "^7.7.1",
     "typescript": "^5.8.2"
   }
 }

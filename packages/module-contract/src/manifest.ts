@@ -16,6 +16,7 @@ import {
   type ModuleSha256,
   type ModuleVersion,
 } from './manifest-types.ts'
+import { valid as validSemver } from 'semver'
 
 type DataRecord = Record<string, unknown>
 
@@ -256,7 +257,7 @@ export function parseModuleManifest(input: unknown): ModuleManifestParseResult {
     if (id !== undefined && !ID_PATTERN.test(id)) {
       errors.push(error('INVALID_ID', '/id', 'Module ID must be a lowercase dotted identifier'))
     }
-    if (version !== undefined && !VERSION_PATTERN.test(version)) {
+    if (version !== undefined && (!VERSION_PATTERN.test(version) || validSemver(version) === null)) {
       errors.push(error('INVALID_VERSION', '/version', 'Module version must be valid Semantic Versioning'))
     }
 

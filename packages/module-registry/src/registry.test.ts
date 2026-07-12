@@ -133,6 +133,30 @@ describe('ModuleRegistry installation and deterministic snapshots', () => {
     expect(registry.snapshot()).toEqual(installed)
   })
 
+  it('sorts two safe-integer boundary versions and rejects the first unsafe version at the contract', () => {
+    const registry = new ModuleRegistry(HOST)
+    const lower = validatedManifest('org.simulator.large-version', '9007199254740990.0.0')
+    const upper = validatedManifest('org.simulator.large-version', '9007199254740991.0.0')
+
+    expect(registry.install(upper, { hostVersionRange: '*' }).ok).toBe(true)
+    expect(registry.install(lower, { hostVersionRange: '*' }).ok).toBe(true)
+    expect(registry.snapshot().modules[0]?.versions.map((item) => item.version)).toEqual([
+      '9007199254740990.0.0',
+      '9007199254740991.0.0',
+    ])
+
+    const unsafe = parseModuleManifest({
+      ...lower,
+      version: '9007199254740992.0.0',
+    })
+    expect(unsafe).toEqual({
+      ok: false,
+      errors: [
+        { code: 'INVALID_VERSION', path: '/version', message: 'Module version must be valid Semantic Versioning' },
+      ],
+    })
+  })
+
   it('returns deep immutable snapshots and does not expose accepted manifest references', () => {
     const registry = new ModuleRegistry(HOST)
     const manifest = validatedManifest('org.simulator.immutable', '1.0.0')
