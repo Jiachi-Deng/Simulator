@@ -433,7 +433,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   async #publishGeneration(path: string, bytes: Buffer, digest: string): Promise<void> {
     const temp = join(dirname(path), `.${randomUUID()}.generation.tmp`)
     await this.#faultAt('temp-write', temp)
-    const handle = await open(temp, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, FILE_MODE)
+    const handle = await open(temp, exclusiveWriteFlags(), FILE_MODE)
     try {
       const midpoint = Math.max(1, Math.floor(bytes.byteLength / 2)); await handle.write(bytes.subarray(0, midpoint))
       await this.#checkpoint('catalog-generation-mid-write', temp)
@@ -471,7 +471,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
 
   async #immutableJson(path: string, value: unknown): Promise<void> { await this.#immutableBytes(path, Buffer.from(JSON.stringify(value))) }
   async #immutableBytes(path: string, bytes: Uint8Array): Promise<void> {
-    await this.#faultAt('temp-write', path); const handle = await open(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, FILE_MODE)
+    await this.#faultAt('temp-write', path); const handle = await open(path, exclusiveWriteFlags(), FILE_MODE)
     try { await handle.writeFile(bytes); await this.#faultAt('file-sync', path); await handle.sync() } finally { await handle.close() }
     await chmod(path, FILE_MODE); await this.#syncDirectory(dirname(path))
   }
@@ -516,7 +516,8 @@ async function safeStatFile(path: string, root: string) { const handle = await s
 async function safeRemoveFile(path: string, root: string): Promise<void> { const info = await lstat(path).catch(() => undefined); if (!info) return; if (!info.isFile() || info.isSymbolicLink()) throw new Error('Refusing to remove unsafe cache leaf'); await assertContained(root, path); await rm(path) }
 async function hashFile(path: string, root: string): Promise<string> { const handle = await safeOpen(path, constants.O_RDONLY, root); const hash = createHash('sha256'); const stream = createReadStream('', { fd: handle.fd, autoClose: false }); try { for await (const chunk of stream) hash.update(chunk as Buffer); return hash.digest('hex') } finally { await handle.close() } }
 async function claimToken(path: string, root: string): Promise<string | undefined> { const value = await safeReadJson<{ token?: string }>(join(path, 'claim.json'), root).catch(() => undefined); return value?.token && UUID.test(value.token) ? value.token : undefined }
-async function copyVerified(source: string, destination: string, root: string): Promise<void> { const input = await safeOpen(source, constants.O_RDONLY, root); const output = await open(destination, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, FILE_MODE); try { for await (const chunk of input.createReadStream({ autoClose: false })) await output.write(chunk as Buffer); await output.sync() } finally { await Promise.all([input.close(), output.close()]) } }
+async function copyVerified(source: string, destination: string, root: string): Promise<void> { const input = await safeOpen(source, constants.O_RDONLY, root); const output = await open(destination, exclusiveWriteFlags(), FILE_MODE); try { for await (const chunk of input.createReadStream({ autoClose: false })) await output.write(chunk as Buffer); await output.sync() } finally { await Promise.all([input.close(), output.close()]) } }
+function exclusiveWriteFlags(): 'wx' | number { return process.platform === 'win32' ? 'wx' : constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY }
 function sleep(ms: number, signal: AbortSignal): Promise<void> { return new Promise((resolveSleep, reject) => { const timer = setTimeout(done, ms); const abort = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); reject(signal.reason) }; function done() { signal.removeEventListener('abort', abort); resolveSleep() } signal.addEventListener('abort', abort, { once: true }) }) }
 
 async function processStartIdentity(pid: number): Promise<string | undefined> {
