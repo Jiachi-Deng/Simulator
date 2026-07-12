@@ -30,6 +30,7 @@ export async function produceInventory({ stagingRoot, metadata = {}, provenance,
   if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) fail("STAGING_ROOT_INVALID", "staging root must be a real directory");
   const rootReal = await realpath(stagingRoot);
   const leafPaths = await walkDirectory(stagingRoot, "", rootReal, policy);
+  if (leafPaths.includes("artifact-manifest.json")) fail("OUTPUT_PATH_OCCUPIED", "staging root must not contain the generated artifact-manifest.json");
   const foldedPaths = new Map();
   for (const artifactPath of leafPaths) {
     const key = caseFold(artifactPath.normalize("NFKC"));
@@ -73,9 +74,23 @@ export async function produceInventory({ stagingRoot, metadata = {}, provenance,
     });
   }
 
+  const manifestRule = findRule("artifact-manifest.json", policy);
+  const manifestRequired = policy.requiredFiles.find((file) => file.path === "artifact-manifest.json");
+  if (!manifestRule || !manifestRequired) fail("POLICY_INVALID", "policy must define artifact-manifest.json as a required exact path");
+  files.push({
+    schemaVersion: 1, path: "artifact-manifest.json", type: "file", artifactKind: manifestRule.artifactKind,
+    component: manifestRule.component, dependencyScope: "artifact", bytes: 0, sha256: "0".repeat(64),
+    mediaType: manifestRequired.mediaType, schemaId: manifestRequired.schemaId,
+    contentSchemaVersion: manifestRequired.schemaVersion, sourceCommit: provenance.source.commit
+  });
+  files.sort((left, right) => compareUtf8(left.path, right.path));
   const inventory = { schemaVersion: 1, source: { ref: provenance.source.ref, commit: provenance.source.commit }, target: structuredClone(target), files };
   const manifest = files.find((file) => file.path === "artifact-manifest.json");
-  if (manifest) manifest.sha256 = digestInventory(inventory);
+  for (let previousBytes = -1; manifest.bytes !== previousBytes;) {
+    previousBytes = manifest.bytes;
+    manifest.bytes = encoder.encode(`${canonicalJson(inventory)}\n`).length;
+  }
+  manifest.sha256 = digestInventory(inventory);
   const result = validateArtifact({ provenance, policy, decisions, inventory, schemas: schemas ?? await loadRuntimeSchemas() });
   if (!result.ok) fail("ARTIFACT_INVALID", result.errors.map((error) => `${error.code}: ${error.message}`).join("; "));
   return { inventory, json: `${canonicalJson(inventory)}\n` };

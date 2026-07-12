@@ -32,8 +32,7 @@ async function fixture() {
     writeFile(path.join(root, "runtime/daemon/dist/cli.js"), "daemon\n"),
     writeFile(path.join(root, "legal/LICENSE"), "Apache License\n"),
     writeFile(path.join(root, "legal/SBOM.spdx.json"), "{}\n"),
-    writeFile(path.join(root, "provenance.json"), canonicalJson(base.provenance)),
-    writeFile(path.join(root, "artifact-manifest.json"), "{}\n")
+    writeFile(path.join(root, "provenance.json"), canonicalJson(base.provenance))
   ]);
   return root;
 }
@@ -53,6 +52,13 @@ test("produces byte-identical canonical JSON and validates it", async (t) => {
   const second = await run(root);
   assert.equal(first.json, second.json);
   assert.deepEqual(first.inventory.files.map((file) => file.path), [...first.inventory.files.map((file) => file.path)].sort((a, b) => Buffer.compare(Buffer.from(a), Buffer.from(b))));
+});
+
+test("rejects a staged file occupying the generated manifest path", async (t) => {
+  const root = await fixture();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  await writeFile(path.join(root, "artifact-manifest.json"), "stale\n");
+  await rejectsCode(run(root), "OUTPUT_PATH_OCCUPIED");
 });
 
 test("rejects leaf and intermediate directory symlinks", async (t) => {
