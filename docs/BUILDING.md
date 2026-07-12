@@ -12,7 +12,6 @@ Install the frozen dependency graph and verify that every distributable workspac
 ```bash
 bun install --frozen-lockfile
 bun run check-version
-bun run check:scripts
 ```
 
 ## Development build
