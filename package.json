@@ -34,6 +34,8 @@
     "typecheck:shared": "cd packages/shared && bun run tsc --noEmit",
     "typecheck:staged": "bash scripts/typecheck-staged.sh",
     "typecheck:all": "bun run scripts/typecheck-all.ts",
+    "test:module-contract": "cd packages/module-contract && bun test",
+    "typecheck:module-contract": "cd packages/module-contract && bun run typecheck",
     "server:start": "bun run packages/server/src/index.ts",
     "server:dev": "bun run server:build:subprocess && CRAFT_DEBUG=true CRAFT_BUNDLED_ASSETS_ROOT=$PWD/apps/electron bun run packages/server/src/index.ts",
     "server:build": "bun run scripts/build-server.ts",
