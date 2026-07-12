@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "policy": "A decision authorizes only its exact normalized sourcePath and category. Unknown rights remain excluded or pending review.",
+  "decisions": [
+    {"id": "templates-root", "category": "templates", "sourcePath": "design-templates", "status": "review", "rightsStatus": "pending", "license": null, "rightsEvidence": null, "reason": "Each template requires an exact per-resource decision."},
+    {"id": "fonts-unreviewed", "category": "fonts", "sourcePath": "unreviewed/fonts", "status": "review", "rightsStatus": "unknown", "license": null, "rightsEvidence": null, "reason": "Font redistribution rights are not inventoried."},
+    {"id": "images-unreviewed", "category": "images", "sourcePath": "unreviewed/images", "status": "review", "rightsStatus": "unknown", "license": null, "rightsEvidence": null, "reason": "Image redistribution rights are not inventoried."},
+    {"id": "plugins-root", "category": "plugins", "sourcePath": "plugins", "status": "exclude", "rightsStatus": "pending", "license": null, "rightsEvidence": null, "reason": "Plugins are outside the minimum profile."},
+    {"id": "skills-root", "category": "skills", "sourcePath": "skills", "status": "exclude", "rightsStatus": "pending", "license": null, "rightsEvidence": null, "reason": "Skills are outside the minimum profile."},
+    {"id": "native-unreviewed", "category": "native-binaries", "sourcePath": "unreviewed/native-binaries", "status": "review", "rightsStatus": "pending", "license": null, "rightsEvidence": null, "reason": "Native outputs require exact license evidence and target ABI declarations."}
+  ]
+}
