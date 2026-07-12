@@ -54,3 +54,47 @@ uninstalled -> installed -> running -> stopped -> running
 ```
 
 非法 transition 不改变 state 或 transition history。`health` 不改变状态，仅在 `running` 时返回 `healthy`。该 fixture 用于验证 contract 和后续 registry；它不是 production module runtime。
+
+## 第二切片：Module Daemon Manager
+
+`@simulator/module-daemon` 是 host-neutral 的可选 Module 进程 supervisor。它依赖 `@simulator/module-contract` 选择当前平台声明的 artifact，但不包含 Electron/React、installer/downloader、catalog network、Host Agent API、领域 adapter 或 sandbox/container 逻辑。
+
+### Activation Boundary
+
+调用方必须传入已激活 Module version 的 absolute root。Manager 对 root 与 manifest entrypoint 执行 `realpath`，拒绝解析到 root 外的 symlink、目录、缺失文件以及 POSIX 上不可执行的文件。启动请求固定为：
+
+- executable：校验后的 activated-root entrypoint。
+- args：空数组。
+- cwd：canonical activated root。
+- `shell: false`。
+- env：调用方显式提供的 minimal base env，加上 `SIMULATOR_MODULE_ID`、`SIMULATOR_MODULE_VERSION`、`SIMULATOR_MODULE_HEALTH_HOST`、`SIMULATOR_MODULE_HEALTH_PORT`。不会继承 host `process.env`；Module 也不能覆盖这四个 host-owned 值。
+
+activated root 必须由 installer 作为 immutable activation 管理；Manager 不承担下载、解压、签名校验或可写 root 的并发变更防护。
+
+### Health Protocol And Endpoint Allocation
+
+每次 launch 都向 OS 请求一个新的 `127.0.0.1:0` ephemeral endpoint，释放 reservation 后把实际 port 传给 daemon。Manager 拒绝 `0.0.0.0`、LAN 地址、hostname 和无效 port；restart 会重新分配 endpoint，不复用固定 port。
+
+daemon 必须在 `/health` 返回 HTTP 2xx、`Content-Type: application/json`，且 body 精确符合：
+
+```json
+{"status":"healthy"}
+```
+
+连接失败在 startup window 内会 bounded retry；格式错误 fail closed。运行期连续失败先进入 `degraded`，达到 threshold 后清理当前 process tree 并按 restart policy 处理。单次 probe 与整体 startup 分别有独立 timeout。
+
+### Lifecycle And Supervision
+
+Manager 对每个 Module ID 跟踪 `starting`、`healthy`、`degraded`、`stopping`、`stopped`、`crashed`，并输出带稳定 code、timestamp 和 restart count 的 diagnostic。状态转换由每个 Module 唯一的 supervisor loop 串行驱动：
+
+```text
+starting -> healthy <-> degraded
+starting|healthy|degraded -> crashed -> backoff -> starting
+starting|healthy|degraded|crashed -> stopping -> stopped
+```
+
+startup failure、unexpected exit 和 health threshold failure 共用有限 restart budget；backoff 取 bounded schedule 的最后一个值封顶，不会无限增长或无限 restart。budget 耗尽后稳定停在 `crashed`。`touch(id)` 更新活动时间，超过 idle timeout 会清理后进入 `stopped`，不消耗 restart budget。
+
+同一 activated version 的 concurrent start 会合并为一个 Promise；不同 root/version 不会覆盖 active process。explicit stop、health probe 中 stop、backoff 中 stop 和重复 stop 都是 race-safe/idempotent。`drain()` 原子地拒绝后续 start，并等待所有已登记 daemon 完成 process-tree cleanup，供 app quit 使用。
+
+POSIX real process adapter 使用独立 process group，先向整组发送 `SIGTERM`，grace timeout 后向整组发送 `SIGKILL`；Windows 使用 `taskkill /T /F`。deterministic fake process/clock/health adapters 从 `@simulator/module-daemon/testing` 导出。真实本地 fixture 在 package test 中执行 20 次 start/health/stop，并逐轮确认 parent 与 descendant PID 都已退出。
