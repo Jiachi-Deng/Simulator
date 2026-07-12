@@ -14,7 +14,7 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import type { ISessionManager } from '@craft-agent/server-core/handlers'
+import type { MessagingSessionManager } from '../contracts'
 import { MessagingGateway } from '../gateway'
 import type { SessionEvent } from '../renderer'
 import type {
@@ -80,7 +80,7 @@ function makeFakeAdapter(): FakeAdapter {
   return adapter
 }
 
-function makeStubSessionManager(): ISessionManager {
+function makeStubSessionManager(): MessagingSessionManager {
   return {
     getSession: async (id: string) => ({ id, name: id } as never),
     sendMessage: async () => {},
@@ -90,13 +90,13 @@ function makeStubSessionManager(): ISessionManager {
     setPendingPlanExecution: mock(async () => {}),
     clearPendingPlanExecution: mock(async () => {}),
     setAutomationBinder: () => {},
-  } as unknown as ISessionManager
+  } as unknown as MessagingSessionManager
 }
 
 interface Harness {
   gateway: MessagingGateway
   adapter: FakeAdapter
-  sessionManager: ISessionManager
+  sessionManager: MessagingSessionManager
   workspaceConfig: MessagingConfig
 }
 

@@ -18,6 +18,7 @@ export type { PairingEntry, GeneratedPairing } from './pairing'
 export { Router } from './router'
 export { Commands, type PairingCodeConsumer } from './commands'
 export { Renderer } from './renderer'
+export type { MessagingSessionManager } from './contracts'
 
 export type {
   PlatformType,

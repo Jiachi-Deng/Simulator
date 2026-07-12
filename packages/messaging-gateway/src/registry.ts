@@ -17,12 +17,6 @@ import { join } from 'node:path'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import type { PushTarget } from '@craft-agent/shared/protocol'
 import type { CredentialManager } from '@craft-agent/shared/credentials'
-import type {
-  ISessionManager,
-  IMessagingGatewayRegistry,
-  MessagingBindingInfo,
-  MessagingConfigInfo,
-} from '@craft-agent/server-core/handlers'
 
 import { MessagingGateway } from './gateway'
 import { ConfigStore } from './config-store'
@@ -33,6 +27,11 @@ import { LarkAdapter, parseLarkCredentials, type LarkCredentials } from './adapt
 import { TopicRegistry } from './topic-registry'
 import type { SessionEvent } from './renderer'
 import type { EventSinkFn } from './event-fanout'
+import type {
+  MessagingBindingInfo,
+  MessagingConfigInfo,
+  MessagingSessionManager,
+} from './contracts'
 import type {
   BindingAccessMode,
   ChannelBinding,
@@ -60,7 +59,7 @@ const consoleLogger: MessagingLogger = {
 }
 
 export interface MessagingGatewayRegistryOptions {
-  sessionManager: ISessionManager
+  sessionManager: MessagingSessionManager
   credentialManager: CredentialManager
   /** Absolute path to the messaging storage directory for the given workspace. */
   getMessagingDir: (workspaceId: string) => string
@@ -91,7 +90,7 @@ interface WorkspaceState {
   runtime: Record<PlatformType, MessagingPlatformRuntimeInfo>
 }
 
-export class MessagingGatewayRegistry implements IMessagingGatewayRegistry {
+export class MessagingGatewayRegistry {
   private readonly workspaces = new Map<string, WorkspaceState>()
   private readonly pairing = new PairingCodeManager()
   private readonly log: MessagingLogger

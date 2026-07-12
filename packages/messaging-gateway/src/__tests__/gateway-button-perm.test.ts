@@ -25,7 +25,7 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import type { ISessionManager } from '@craft-agent/server-core/handlers'
+import type { MessagingSessionManager } from '../contracts'
 import { MessagingGateway } from '../gateway'
 import type { SessionEvent } from '../renderer'
 import type {
@@ -119,7 +119,7 @@ interface StubSessionManagerOpts {
   respondToPermissionReturn?: boolean
 }
 
-function makeStubSessionManager(opts: StubSessionManagerOpts = {}): ISessionManager {
+function makeStubSessionManager(opts: StubSessionManagerOpts = {}): MessagingSessionManager {
   const respondReturn = opts.respondToPermissionReturn ?? true
   return {
     getSession: async (id: string) => ({ id, name: id } as never),
@@ -130,13 +130,13 @@ function makeStubSessionManager(opts: StubSessionManagerOpts = {}): ISessionMana
     setPendingPlanExecution: mock(async () => {}),
     clearPendingPlanExecution: mock(async () => {}),
     setAutomationBinder: () => {},
-  } as unknown as ISessionManager
+  } as unknown as MessagingSessionManager
 }
 
 interface Harness {
   gateway: MessagingGateway
   adapter: FakeAdapter
-  sessionManager: ISessionManager
+  sessionManager: MessagingSessionManager
 }
 
 const OPEN_TELEGRAM_CONFIG: MessagingConfig = {

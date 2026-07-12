@@ -17,7 +17,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import type { CredentialManager } from '@craft-agent/shared/credentials'
-import type { ISessionManager } from '@craft-agent/server-core/handlers'
+import type { MessagingSessionManager } from '../contracts'
 import { MessagingGatewayRegistry } from '../registry'
 import type { PlatformAdapter } from '../types'
 
@@ -31,8 +31,8 @@ afterEach(() => {
   rmSync(dir, { recursive: true, force: true })
 })
 
-function stubSessionManager(): ISessionManager {
-  return { setAutomationBinder: () => {} } as unknown as ISessionManager
+function stubSessionManager(): MessagingSessionManager {
+  return { setAutomationBinder: () => {} } as unknown as MessagingSessionManager
 }
 
 function stubCredentialManager(): CredentialManager {
