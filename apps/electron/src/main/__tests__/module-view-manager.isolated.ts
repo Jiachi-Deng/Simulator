@@ -7,6 +7,7 @@ const ipcListeners = new Map<string, Listener>()
 const sessions = new Map<string, ReturnType<typeof createMockSession>>()
 const createdViews: any[] = []
 let nextWebContentsId = 100
+let loadURLImplementation: ((webContents: any, url: string) => Promise<void>) | undefined
 
 function createEmitter() {
   const listeners = new Map<string, Listener[]>()
@@ -34,17 +35,18 @@ function createMockWebContents() {
   const emitter = createEmitter()
   const mainFrame = {}
   let destroyed = false
-  return {
+  const webContents = {
     ...emitter,
     id: nextWebContentsId++,
     mainFrame,
     isDestroyed: mock(() => destroyed),
     close: mock((_options?: unknown) => { destroyed = true }),
-    loadURL: mock(async (_url: string) => {}),
+    loadURL: mock(async (url: string) => loadURLImplementation?.(webContents, url)),
     send: mock((_channel: string, _envelope: unknown) => {}),
     setWindowOpenHandler: mock((_handler: Listener) => {}),
     closeDevTools: mock(() => {}),
   }
+  return webContents
 }
 
 function createMockSession() {
@@ -139,6 +141,7 @@ describe('ModuleViewManager', () => {
     sessions.clear()
     createdViews.length = 0
     nextWebContentsId = 100
+    loadURLImplementation = undefined
   })
 
   it('attaches a WebContentsView with a dedicated hardened session and full-content rect', async () => {
@@ -200,6 +203,77 @@ describe('ModuleViewManager', () => {
     hostWindow._destroy()
     expect(manager.get(identity)).toBeUndefined()
     expect(view.webContents.close).toHaveBeenCalledWith({ waitForBeforeUnload: false })
+    manager.dispose()
+  })
+
+  it('quarantines an initial did-fail-load once before destroying the failed attachment', async () => {
+    const hostWindow = createHostWindow()
+    const failures: any[] = []
+    let manager: InstanceType<typeof ModuleViewManager>
+    manager = new ModuleViewManager({
+      onFailure: (failure) => {
+        const view = createdViews[0]
+        expect(view.setVisible).toHaveBeenLastCalledWith(false)
+        expect(view.setBounds).toHaveBeenLastCalledWith({ x: 0, y: 0, width: 0, height: 0 })
+        expect(hostWindow.contentView.removeChildView).toHaveBeenCalledWith(view)
+        expect(manager.get(identity)).toMatchObject({ state: 'failed', attached: false, visible: false })
+        failures.push(failure)
+      },
+    })
+    loadURLImplementation = async (webContents, url) => {
+      webContents.emit('did-fail-load', {}, -105, 'NAME_NOT_RESOLVED', url, true)
+      throw new Error('loadURL rejected after did-fail-load')
+    }
+
+    await expect(manager.attach(attachOptions(hostWindow))).rejects.toThrow('loadURL rejected after did-fail-load')
+    expect(failures).toHaveLength(1)
+    expect(failures[0]).toMatchObject({ code: 'LOAD_FAILED', ...identity })
+    expect(manager.get(identity)).toBeUndefined()
+    expect(manager.destroy(identity)).toBe(false)
+    expect(manager.destroy(identity)).toBe(false)
+    expect(createdViews[0].webContents.close).toHaveBeenCalledTimes(1)
+    manager.dispose()
+  })
+
+  it('quarantines a post-attach main-frame reload failure before callback and disables its sender', async () => {
+    const hostWindow = createHostWindow()
+    const failures: any[] = []
+    const messages: any[] = []
+    let manager: InstanceType<typeof ModuleViewManager>
+    manager = new ModuleViewManager({
+      onMessage: (payload) => messages.push(payload),
+      onFailure: (failure) => {
+        const view = createdViews[0]
+        expect(view.setVisible).toHaveBeenLastCalledWith(false)
+        expect(view.setBounds).toHaveBeenLastCalledWith({ x: 0, y: 0, width: 0, height: 0 })
+        expect(hostWindow.contentView.removeChildView).toHaveBeenCalledWith(view)
+        expect(manager.get(identity)).toMatchObject({ state: 'failed', attached: false, visible: false })
+        failures.push(failure)
+      },
+    })
+    await manager.attach(attachOptions(hostWindow))
+    const view = createdViews[0]
+
+    view.webContents.emit('did-fail-load', {}, -2, 'FAILED', `${origin}/index.html`, true)
+    expect(failures).toHaveLength(1)
+    expect(failures[0]).toMatchObject({
+      code: 'LOAD_FAILED',
+      detail: { errorCode: -2, errorDescription: 'FAILED', url: `${origin}/index.html` },
+      ...identity,
+    })
+    expect(hostWindow.contentView.removeChildView).toHaveBeenCalledTimes(1)
+
+    emitIpc(view, {
+      version: 1,
+      direction: 'module-to-host',
+      ...identity,
+      type: 'message',
+      payload: { shouldNotArrive: true },
+    })
+    view.webContents.emit('did-fail-load', {}, -2, 'FAILED_AGAIN', `${origin}/index.html`, true)
+    expect(messages).toHaveLength(0)
+    expect(failures).toHaveLength(1)
+    expect(() => manager.reattach(identity)).toThrow(ModuleViewManagerError)
     manager.dispose()
   })
 

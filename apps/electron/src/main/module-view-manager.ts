@@ -274,7 +274,7 @@ export class ModuleViewManager {
     try {
       await view.webContents.loadURL(options.frontendUrl)
     } catch (error) {
-      this.reportFailure(record, 'LOAD_FAILED', 'Module frontend failed to load', {
+      this.handleLoadFailure(record, view.webContents, {
         error: error instanceof Error ? error.message : String(error),
       })
       this.destroy(options)
@@ -393,8 +393,7 @@ export class ModuleViewManager {
     try {
       await replacement.webContents.loadURL(record.frontendUrl)
     } catch (error) {
-      this.quarantine(record, 'failed', replacement.webContents)
-      this.reportFailure(record, 'LOAD_FAILED', 'Recreated module frontend failed to load', {
+      this.handleLoadFailure(record, replacement.webContents, {
         error: error instanceof Error ? error.message : String(error),
       })
       throw error
@@ -513,7 +512,7 @@ export class ModuleViewManager {
     })
     webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedUrl, isMainFrame) => {
       if (!isMainFrame || errorCode === -3) return
-      this.reportFailure(record, 'LOAD_FAILED', 'Module frontend failed to load', {
+      this.handleLoadFailure(record, webContents, {
         errorCode,
         errorDescription,
         url: validatedUrl,
@@ -583,6 +582,15 @@ export class ModuleViewManager {
     })
   }
 
+  private handleLoadFailure(
+    record: ModuleViewRecord,
+    webContents: Electron.WebContents,
+    detail: Readonly<Record<string, string | number | boolean | null>>,
+  ): void {
+    if (!this.quarantine(record, 'failed', webContents)) return
+    this.reportFailure(record, 'LOAD_FAILED', 'Module frontend failed to load', detail)
+  }
+
   private quarantine(
     record: ModuleViewRecord,
     state: 'crashed' | 'failed',
@@ -598,6 +606,7 @@ export class ModuleViewManager {
     }
 
     record.state = state
+    this.keyByWebContentsId.delete(expectedWebContents.id)
     record.reattachAfterRecreate = record.attached
     record.restoreVisibleAfterRecreate = record.visible
     record.visible = false
