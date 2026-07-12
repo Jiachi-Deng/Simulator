@@ -1,44 +1,46 @@
 import type { DownloaderFetchAdapter, DownloaderFetchRequest, DownloaderResponse } from './types.ts'
 
 export class NodeFetchAdapter implements DownloaderFetchAdapter {
-  readonly #fetch: typeof globalThis.fetch
+  readonly #fetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>
 
-  constructor(fetchImplementation: typeof globalThis.fetch = globalThis.fetch) {
+  constructor(fetchImplementation: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = globalThis.fetch) {
     if (typeof fetchImplementation !== 'function') throw new TypeError('A native fetch implementation is required')
     this.#fetch = fetchImplementation
   }
 
   async fetch(request: DownloaderFetchRequest): Promise<DownloaderResponse> {
     const response = await this.#fetch(request.url, {
-      method: 'GET',
-      headers: request.headers,
-      signal: request.signal,
-      redirect: request.redirect,
+      method: 'GET', headers: request.headers, signal: request.signal, redirect: request.redirect,
     })
-    let disposed = false
+    const body = response.body ? new ResponseBodyOwner(response.body) : null
+    let disposal: Promise<void> | undefined
     return {
-      status: response.status,
-      url: response.url,
-      headers: response.headers,
-      body: response.body ? readableStreamBytes(response.body) : null,
-      async dispose() {
-        if (disposed) return
-        disposed = true
-        if (response.body && !response.body.locked) await response.body.cancel()
-      },
+      status: response.status, url: response.url, headers: response.headers, body,
+      dispose() { return (disposal ??= body?.dispose() ?? Promise.resolve()) },
     }
   }
 }
 
-async function* readableStreamBytes(stream: ReadableStream<Uint8Array>): AsyncIterable<Uint8Array> {
-  const reader = stream.getReader()
-  try {
-    while (true) {
-      const next = await reader.read()
-      if (next.done) return
-      yield next.value
+class ResponseBodyOwner implements AsyncIterable<Uint8Array> {
+  readonly #reader: { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(): Promise<void>; releaseLock(): void }
+  #iteratorCreated = false
+  #disposed = false
+
+  constructor(stream: ReadableStream<Uint8Array>) { this.#reader = stream.getReader() }
+
+  [Symbol.asyncIterator](): AsyncIterator<Uint8Array> {
+    if (this.#iteratorCreated) throw new Error('Response body can only be consumed once')
+    this.#iteratorCreated = true
+    const reader = this.#reader
+    return {
+      next: async () => { const result = await reader.read(); return result.done ? { done: true, value: undefined } : { done: false, value: result.value! } },
+      return: async () => { await this.dispose(); return { done: true, value: undefined } },
     }
-  } finally {
-    reader.releaseLock()
+  }
+
+  async dispose(): Promise<void> {
+    if (this.#disposed) return
+    this.#disposed = true
+    try { await this.#reader.cancel() } finally { this.#reader.releaseLock() }
   }
 }
