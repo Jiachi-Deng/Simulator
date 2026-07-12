@@ -56,10 +56,10 @@
 
 ## Checklist
 
-- [ ] The linked user problem and acceptance criteria are clear.
+- [ ] The linked user problem and acceptance criteria are clear, when an Issue is applicable.
 - [ ] Scope and non-scope are explicit.
 - [ ] Tests cover the changed behavior, or the testing gap is justified.
-- [ ] UI evidence is attached for UI changes.
+- [ ] UI evidence is attached for UI changes; otherwise the section says N/A.
 - [ ] Risks and a practical recovery path are documented.
 - [ ] Security, permission, and data/privacy impacts were reviewed.
 - [ ] Dependency licenses, attribution, and source provenance were reviewed.
