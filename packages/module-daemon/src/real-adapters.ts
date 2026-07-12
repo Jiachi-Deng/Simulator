@@ -72,21 +72,22 @@ class RealModuleProcess implements ModuleProcess {
       return
     }
 
-    this.signalGroup('SIGTERM')
+    this.signalGroup('SIGTERM', false)
     const exited = await Promise.race([
       this.exited.then(() => true),
       new Promise<false>((resolve) => setTimeout(() => resolve(false), graceMs)),
     ])
     // The leader may exit before descendants. Always signal the process group again.
-    this.signalGroup('SIGKILL')
+    this.signalGroup('SIGKILL', exited)
     if (!exited) await this.exited
   }
 
-  private signalGroup(signal: NodeJS.Signals): void {
+  private signalGroup(signal: NodeJS.Signals, allowExitedLeaderRace: boolean): void {
     try {
       process.kill(-this.pid, signal)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') throw error
+      const code = (error as NodeJS.ErrnoException).code
+      if (code !== 'ESRCH' && !(allowExitedLeaderRace && code === 'EPERM')) throw error
     }
   }
 }
