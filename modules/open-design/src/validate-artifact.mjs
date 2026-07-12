@@ -78,7 +78,10 @@ export function validateArtifact({ provenance, policy, decisions, inventory, sch
     } else if (file.symlinkTarget !== undefined) fail("FILE_METADATA_INVALID", `regular file cannot declare symlinkTarget: ${file.path}`);
 
     const inferredCategory = native ? "native-binaries" : inferResourceCategory(extension, policy);
+    const pathCategory = inferResourcePathCategory(file.path, policy);
     if (inferredCategory && file.resourceCategory !== inferredCategory) fail("UNEXPECTED_RESOURCE", `${inferredCategory} resource lacks its category/decision: ${file.path}`);
+    if (pathCategory && file.resourceCategory !== pathCategory) fail("UNEXPECTED_RESOURCE", `${pathCategory} resource lacks its category/decision: ${file.path}`);
+    if (pathCategory !== undefined && !file.resourceCategory) fail("UNEXPECTED_RESOURCE", `resource path lacks its category/decision: ${file.path}`);
     if (file.resourceCategory) validateResource(file, decisionById, fail);
     else if (file.sourcePath !== undefined || file.decisionId !== undefined) fail("UNEXPECTED_RESOURCE", `resource metadata is incomplete: ${file.path}`);
 
@@ -179,6 +182,13 @@ function matchesSimpleGlob(value, pattern) {
 
 function inferResourceCategory(extension, policy) {
   return Object.entries(policy.resourceExtensions).find(([, extensions]) => extensions.includes(extension))?.[0];
+}
+
+export function inferResourcePathCategory(artifactPath, policy) {
+  for (const segment of artifactPath.split("/")) {
+    if (Object.hasOwn(policy.resourcePathCategories, segment)) return policy.resourcePathCategories[segment] ?? null;
+  }
+  return undefined;
 }
 
 function validateResource(file, decisions, fail) {

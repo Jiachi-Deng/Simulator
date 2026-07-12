@@ -6,7 +6,7 @@ import { lstat, open, opendir, readFile, realpath, writeFile } from "node:fs/pro
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { caseFold } from "unicode-case-folding";
-import { canonicalJson, digestInventory, loadRuntimeSchemas, validateArtifact } from "./validate-artifact.mjs";
+import { canonicalJson, digestInventory, inferResourcePathCategory, loadRuntimeSchemas, validateArtifact } from "./validate-artifact.mjs";
 
 const moduleRoot = new URL("../", import.meta.url);
 const encoder = new TextEncoder();
@@ -239,13 +239,6 @@ function validateMetadata(artifactPath, value, policy) {
   return structuredClone(value);
 }
 
-function inferResourcePathCategory(artifactPath, policy) {
-  for (const segment of artifactPath.split("/")) {
-    if (Object.hasOwn(policy.resourcePathCategories, segment)) return policy.resourcePathCategories[segment] ?? null;
-  }
-  return undefined;
-}
-
 function findRule(artifactPath, policy) {
   return policy.exactPathRules.find((rule) => rule.path === artifactPath) ?? policy.pathRules.find((rule) => artifactPath.startsWith(rule.prefix));
 }
@@ -277,15 +270,14 @@ async function main(argv) {
   const metadataPath = options.metadata;
   const targetPath = options.target;
   const output = options.output;
-  const internalOutput = output && isWithin(stagingRoot, path.resolve(output));
-  if (internalOutput && path.resolve(output) !== path.join(path.resolve(stagingRoot), "artifact-manifest.json")) fail("OUTPUT_PATH_INVALID", "output inside staging root must be exact artifact-manifest.json");
+  const outputLocation = output && await resolveOutputLocation(stagingRoot, output);
   const [metadata, target, provenance, policy, decisions] = await Promise.all([
     readJson(metadataPath), readJson(targetPath), readJson(new URL("provenance.json", moduleRoot)), readJson(new URL("artifact-policy.json", moduleRoot)), readJson(new URL("resource-decisions.json", moduleRoot))
   ]);
   const { inventory, json, baseline } = await produceInventory({ stagingRoot, metadata, target, provenance, policy, decisions });
-  if (output) {
-    await writeFile(output, json, { encoding: "utf8", flag: "wx" });
-    if (internalOutput) await verifyInternalOutput({ stagingRoot, output, json, inventory, baseline, policy });
+  if (outputLocation) {
+    await writeFile(outputLocation.path, json, { encoding: "utf8", flag: "wx" });
+    if (outputLocation.internal) await verifyInternalOutput({ stagingRoot, output: outputLocation.path, json, inventory, baseline, policy });
   }
   else process.stdout.write(json);
 }
@@ -309,6 +301,23 @@ function parseArguments(argv) {
 function isWithin(root, candidate) {
   const relative = path.relative(path.resolve(root), candidate);
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+async function resolveOutputLocation(stagingRoot, output) {
+  const stagingAbsolute = path.resolve(stagingRoot);
+  const rootStat = await safeLstat(stagingAbsolute, "staging root");
+  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) fail("STAGING_ROOT_INVALID", "staging root must be a real directory");
+  const rootReal = await realpath(stagingAbsolute);
+  const requestedPath = path.resolve(output);
+  const requestedInternal = isWithin(stagingAbsolute, requestedPath);
+  const parentReal = await realpath(path.dirname(requestedPath));
+  const parentStat = await safeLstat(parentReal, "output parent");
+  if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) fail("OUTPUT_PATH_INVALID", "output parent must resolve to a real directory");
+  const actualPath = path.join(parentReal, path.basename(requestedPath));
+  const actualInternal = isWithin(rootReal, actualPath);
+  if (requestedInternal !== actualInternal) fail("OUTPUT_PATH_INVALID", "output path must not cross the staging boundary through a symlink");
+  if (actualInternal && actualPath !== path.join(rootReal, "artifact-manifest.json")) fail("OUTPUT_PATH_INVALID", "output inside staging root must be exact artifact-manifest.json");
+  return { path: actualPath, internal: actualInternal };
 }
 
 async function verifyInternalOutput({ stagingRoot, output, json, inventory, baseline, policy }) {

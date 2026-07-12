@@ -250,6 +250,19 @@ test("CLI accepts only the exact internal manifest output", async (t) => {
   assert.equal(JSON.parse(await readFile(output, "utf8")).files.some((file) => file.path === "artifact-manifest.json"), true);
 });
 
+test("CLI rejects output paths that cross the staging boundary through symlinks", async (t) => {
+  const root = await fixture();
+  const externalRoot = await mkdtemp(path.join(os.tmpdir(), "open-design-output-"));
+  const { configRoot, args } = await cliFixture(root);
+  t.after(() => Promise.all([rm(root, { recursive: true, force: true }), rm(externalRoot, { recursive: true, force: true }), rm(configRoot, { recursive: true, force: true })]));
+  const injectedParent = path.join(externalRoot, "into-staging");
+  await symlink(root, injectedParent);
+  await rejectsCli([...args, "--output", path.join(injectedParent, "artifact-manifest.json")], "OUTPUT_PATH_INVALID");
+  await symlink(externalRoot, path.join(root, "escape"));
+  await rejectsCli([...args, "--output", path.join(root, "escape", "artifact-manifest.json")], "OUTPUT_PATH_INVALID");
+  await assert.rejects(readFile(path.join(externalRoot, "artifact-manifest.json"), "utf8"));
+});
+
 test("CLI rejects unknown, duplicate and missing-value arguments", async (t) => {
   const root = await fixture();
   const { configRoot, args } = await cliFixture(root);

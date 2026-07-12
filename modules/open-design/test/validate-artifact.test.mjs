@@ -29,6 +29,10 @@ function runtimeFile(path, overrides = {}) {
   return { schemaVersion: 1, path, type: "file", artifactKind: "runtime-package", component: "runtime-package", dependencyScope: "production", bytes: 10, sha256: digest, ...overrides };
 }
 
+function publicFile(path, overrides = {}) {
+  return { schemaVersion: 1, path, type: "file", artifactKind: "web-static", component: "next-public", dependencyScope: "artifact", bytes: 10, sha256: digest, ...overrides };
+}
+
 function approveResource(input, { id, category, sourcePath, license = "MIT" }) {
   input.decisions.decisions.push({
     id, category, sourcePath, status: "include", rightsStatus: "cleared", license,
@@ -80,6 +84,24 @@ test("binds a resource decision to exact normalized sourcePath and category", ()
     input.inventory.files.push(runtimeFile("web/public/logo.png", { artifactKind: "web-static", component: "next-public", dependencyScope: "artifact", resourceCategory: "fonts", decisionId: "image", sourcePath: "assets/logo.png" }));
   }), "RESOURCE_DECISION_MISMATCH");
   has(mutate(({ decisions }) => { decisions.decisions[0].sourcePath = "design-templates/**"; }), "DECISION_SOURCE_INVALID");
+});
+
+test("requires exact approved metadata decisions for resource-category paths", () => {
+  const cases = [
+    ["web/public/plugins/tool.txt", "plugins"],
+    ["web/public/skills/guide.txt", "skills"],
+    ["web/public/templates/base.txt", "templates"],
+    ["web/public/design-systems/tokens.json", "images"],
+    ["web/public/assets/data.txt", "images"]
+  ];
+  for (const [artifactPath, category] of cases) {
+    has(mutate(({ inventory }) => { inventory.files.push(publicFile(artifactPath)); }), "UNEXPECTED_RESOURCE");
+    has(mutate((input) => {
+      const sourcePath = `review/${artifactPath}`;
+      input.decisions.decisions.push({ id: `pending-${category}`, category, sourcePath, status: "review", rightsStatus: "pending", license: null, rightsEvidence: null, reason: "Not approved" });
+      input.inventory.files.push(publicFile(artifactPath, { resourceCategory: category, sourcePath, decisionId: `pending-${category}` }));
+    }), "RESOURCE_EXCLUDED");
+  }
 });
 
 test("include+cleared decisions require a license and rights evidence", () => {
