@@ -1,3 +1,5 @@
 export { ModuleDownloader } from './downloader.ts'
 export { decodeCatalogEnvelope } from './wire.ts'
+export { NodeFetchAdapter } from './node-fetch.ts'
+export { NodeFilesystemModuleDownloaderCache, type NodeFilesystemCacheOptions } from './node-cache.ts'
 export * from './types.ts'
