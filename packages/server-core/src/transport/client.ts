@@ -135,6 +135,7 @@ export class WsRpcClient implements RpcClient {
   private serverChannels: Set<string> | null = null
 
   private readonly url: string
+  private readonly stateUrl: string
   private readonly workspaceId: string | undefined
   private readonly webContentsId: number | undefined
   private readonly token: string | undefined
@@ -150,6 +151,7 @@ export class WsRpcClient implements RpcClient {
     this.workspaceId = opts?.workspaceId
     this.webContentsId = opts?.webContentsId
     this.token = opts?.token
+    this.stateUrl = this.sanitizeConnectionStateUrl(url)
     this.clientCapabilities = opts?.clientCapabilities ?? []
     this.requestTimeout = opts?.requestTimeout ?? REQUEST_TIMEOUT_MS
     this.maxReconnectDelay = opts?.maxReconnectDelay ?? 30_000
@@ -160,7 +162,7 @@ export class WsRpcClient implements RpcClient {
     this.connectionState = {
       mode: this.mode,
       status: 'idle',
-      url: this.url,
+      url: this.stateUrl,
       attempt: 0,
       updatedAt: Date.now(),
     }
@@ -580,7 +582,7 @@ export class WsRpcClient implements RpcClient {
           this.pending.delete(envelope.id)
           clearTimeout(req.timeout)
           if (envelope.error) {
-            const err = new Error(envelope.error.message)
+            const err = new Error(this.redactToken(envelope.error.message))
             ;(err as any).code = envelope.error.code
             ;(err as any).data = envelope.error.data
             req.reject(err)
@@ -596,7 +598,7 @@ export class WsRpcClient implements RpcClient {
         // No pending request — connection is about to close.
         if (envelope.error?.message) {
           const kind = this.classifyErrorKindFromCode(envelope.error.code)
-          const err = this.createConnectionError(kind, this.redactToken(envelope.error.message), envelope.error.code)
+          const err = this.createConnectionError(kind, envelope.error.message, envelope.error.code)
           this.connectError = err
           this.setConnectionState({
             status: 'failed',
@@ -735,7 +737,7 @@ export class WsRpcClient implements RpcClient {
     const closeInfo: TransportCloseInfo | undefined = closeEvent
       ? {
           code: Number.isFinite(closeEvent.code) ? closeEvent.code : undefined,
-          reason: closeEvent.reason || undefined,
+          reason: closeEvent.reason ? this.redactToken(closeEvent.reason) : undefined,
           wasClean: closeEvent.wasClean,
         }
       : undefined
@@ -931,6 +933,14 @@ export class WsRpcClient implements RpcClient {
       return this.createConnectionError('protocol', 'Invalid WebSocket server URL', 'INVALID_WEBSOCKET_URL')
     }
 
+    if (parsed.username || parsed.password) {
+      return this.createConnectionError(
+        'protocol',
+        'WebSocket server URL must not include userinfo',
+        'WEBSOCKET_URL_USERINFO_NOT_ALLOWED',
+      )
+    }
+
     if (parsed.protocol === 'wss:') return null
     if (parsed.protocol === 'ws:' && this.isLoopbackHostname(parsed.hostname)) return null
 
@@ -944,8 +954,25 @@ export class WsRpcClient implements RpcClient {
     return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
   }
 
+  private sanitizeConnectionStateUrl(url: string): string {
+    try {
+      const parsed = new URL(url)
+      return this.redactToken(`${parsed.protocol}//${parsed.host}${parsed.pathname}`)
+    } catch {
+      return ''
+    }
+  }
+
   private redactToken(message: string): string {
-    return this.token ? message.split(this.token).join('[REDACTED]') : message
+    if (!this.token) return message
+
+    const variants = [...new Set([this.token, encodeURIComponent(this.token)])]
+      .sort((a, b) => b.length - a.length)
+    let redacted = message
+    for (const variant of variants) {
+      if (variant) redacted = redacted.split(variant).join('[REDACTED]')
+    }
+    return redacted
   }
 
   private setConnectionState(
@@ -955,7 +982,7 @@ export class WsRpcClient implements RpcClient {
       ...this.connectionState,
       ...partial,
       mode: this.mode,
-      url: this.url,
+      url: this.stateUrl,
       updatedAt: Date.now(),
     }
 
@@ -970,7 +997,7 @@ export class WsRpcClient implements RpcClient {
   }
 
   private createConnectionError(kind: TransportConnectionErrorKind, message: string, code?: string): Error {
-    const err = new Error(message)
+    const err = new Error(this.redactToken(message))
     ;(err as any).kind = kind
     if (code) (err as any).code = code
     return err
@@ -983,7 +1010,7 @@ export class WsRpcClient implements RpcClient {
 
     return {
       kind,
-      message: err.message,
+      message: this.redactToken(err.message),
       code,
     }
   }
