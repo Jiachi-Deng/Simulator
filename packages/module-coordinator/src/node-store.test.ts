@@ -26,9 +26,11 @@ async function root(): Promise<string> {
 async function shortPath(path: string): Promise<string | undefined> {
   if (process.platform !== 'win32') return undefined
   const { stdout } = await execFileAsync('cmd.exe', ['/d', '/c', `for %I in ("${path}") do @echo %~sI`])
-  const value = stdout.trim().replace(/^"|"$/g, '')
+  const value = stdout.trim().replace(/^"+|"+$/g, '')
   if (value.length === 0 || value === path) return undefined
-  if (!win32.isAbsolute(value)) throw new Error(`cmd.exe returned an invalid short path: ${JSON.stringify(value)}`)
+  if (value.includes('"') || !win32.isAbsolute(value)) {
+    throw new Error(`cmd.exe returned an invalid short path: ${JSON.stringify(stdout.trim())}`)
+  }
   return value
 }
 
