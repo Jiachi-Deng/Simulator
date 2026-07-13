@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "source": {
+    "repository": "https://github.com/synthetic-sciences/openscience",
+    "tag": "v1.3.4",
+    "commit": "109a1b94329fa4cdd82e984b5a40bfe8842b5e6f",
+    "sourceDate": "2026-07-11T07:22:21Z",
+    "releasePublishedAt": "2026-07-11T07:26:40Z",
+    "license": "Apache-2.0",
+    "noticeRequired": true,
+    "licenseSha256": "d8ac5e917b2099e5cbe2999f297b56e2cc946e545f39aebc1e1aa91dd5cb0e9f",
+    "noticeSha256": "7632b32824f48bc3d5f0654cfa2370c1821fc0086349f1d331c9d27b8d66e960"
+  },
+  "toolchain": {
+    "bun": "1.3.5",
+    "buildCommand": "bun run --cwd backend/cli build -- --single",
+    "target": "bun-darwin-arm64",
+    "modelsDevSnapshot": {
+      "environmentVariable": "MODELS_DEV_API_JSON",
+      "required": true,
+      "format": "models.dev /api.json response",
+      "sha256Required": true,
+      "networkFetchForbidden": true
+    }
+  },
+  "attestation": {
+    "required": true,
+    "trustedVerifierRequired": true,
+    "predicateType": "https://slsa.dev/provenance/v1",
+    "networkDisabledBuild": true
+  },
+  "runtimeConformance": {
+    "required": true,
+    "trustedVerifierRequired": true,
+    "binaryDigestBindingRequired": true
+  },
+  "upstreamEvidence": {
+    "release": "https://github.com/synthetic-sciences/openscience/releases/tag/v1.3.4",
+    "commit": "https://github.com/synthetic-sciences/openscience/commit/109a1b94329fa4cdd82e984b5a40bfe8842b5e6f",
+    "license": "https://github.com/synthetic-sciences/openscience/blob/109a1b94329fa4cdd82e984b5a40bfe8842b5e6f/LICENSE",
+    "notice": "https://github.com/synthetic-sciences/openscience/blob/109a1b94329fa4cdd82e984b5a40bfe8842b5e6f/NOTICE",
+    "buildScript": "https://github.com/synthetic-sciences/openscience/blob/109a1b94329fa4cdd82e984b5a40bfe8842b5e6f/backend/cli/script/build.ts"
+  }
+}
