@@ -144,6 +144,22 @@ describe('production filesystem cache', () => {
     expect(ownIdentityCalls).toBe(1)
   })
 
+  it('retries a transiently unavailable current process identity instead of memoizing absence', async () => {
+    const directory = await root(); let ownIdentityCalls = 0
+    const cache = new NodeFilesystemModuleDownloaderCache(directory, {
+      processIdentity: async (pid) => {
+        if (pid !== process.pid) return undefined
+        ownIdentityCalls += 1
+        return ownIdentityCalls === 1 ? undefined : 'current-start'
+      },
+    })
+    const firstBytes = Buffer.from('first owner'); const firstSha = createHash('sha256').update(firstBytes).digest('hex')
+    const secondBytes = Buffer.from('second owner'); const secondSha = createHash('sha256').update(secondBytes).digest('hex')
+    await cache.createPartial({ sha256: firstSha, sourceUrl: 'https://example.test/first', expectedSize: firstBytes.length, updatedAt: 1 })
+    await cache.createPartial({ sha256: secondSha, sourceUrl: 'https://example.test/second', expectedSize: secondBytes.length, updatedAt: 2 })
+    expect(ownIdentityCalls).toBe(2)
+  })
+
   it('makes catalog compare-and-swap atomic without a caller-held lease', async () => {
     const directory = await root(); const left = new NodeFilesystemModuleDownloaderCache(directory); const right = new NodeFilesystemModuleDownloaderCache(directory)
     const first = catalogRecord(1, 1); const second = catalogRecord(1, 2)

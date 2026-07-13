@@ -547,7 +547,18 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   }
 
   async #newOwner(): Promise<OwnerRecord> {
-    const processStartIdentity = await (this.#ownProcessIdentity ??= this.#processIdentity(process.pid))
+    const pendingIdentity = this.#ownProcessIdentity ?? this.#processIdentity(process.pid)
+    this.#ownProcessIdentity = pendingIdentity
+    let processStartIdentity: string | undefined
+    try {
+      processStartIdentity = await pendingIdentity
+    } catch (cause) {
+      if (this.#ownProcessIdentity === pendingIdentity) this.#ownProcessIdentity = undefined
+      throw cause
+    }
+    if (!processStartIdentity && this.#ownProcessIdentity === pendingIdentity) {
+      this.#ownProcessIdentity = undefined
+    }
     return { token: randomUUID(), pid: process.pid, processInstanceId: PROCESS_INSTANCE_ID, ...(processStartIdentity ? { processStartIdentity } : {}), acquiredAt: this.#now() }
   }
   async #ownerRecordRecoverable(owner: OwnerRecord): Promise<boolean> {
