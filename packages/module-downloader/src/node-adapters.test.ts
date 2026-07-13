@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createServer, type RequestListener, type Server } from 'node:http'
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { NodeFetchAdapter } from './node-fetch.ts'
@@ -37,6 +37,63 @@ describe('production filesystem cache', () => {
     await first.done
     await second.done
     expect(second.output()).toContain('acquired:')
+  })
+
+  it.skipIf(process.platform !== 'win32')('defers transient released-marker cleanup without failing logical release', async () => {
+    const directory = await root(); let cleanupFaults = 2
+    const cache = new NodeFilesystemModuleDownloaderCache(directory, {
+      leasePollMs: 5,
+      faultInjector(point, path) {
+        if (point === 'cleanup' && path.includes('.released-') && cleanupFaults > 0) {
+          cleanupFaults -= 1
+          throw Object.assign(new Error('transient Windows cleanup contention'), { code: 'EFAULT' })
+        }
+      },
+    })
+    const lease = await cache.acquireLease('deferred cleanup', new AbortController().signal)
+    await expect(lease.release()).resolves.toBeUndefined()
+    expect(cleanupFaults).toBe(0)
+    expect((await readdir(join(directory, 'leases', 'claims'))).some((name) => name.includes('.released-'))).toBe(true)
+
+    const replacement = new NodeFilesystemModuleDownloaderCache(directory, { leasePollMs: 5 })
+    const next = await replacement.acquireLease('deferred cleanup', AbortSignal.timeout(5_000))
+    await next.release()
+    expect((await readdir(join(directory, 'leases', 'claims'))).some((name) => name.includes('.released-'))).toBe(false)
+  })
+
+  for (const code of ['EFAULT', 'EBUSY', 'EPERM'] as const) {
+    it.skipIf(process.platform !== 'win32')(`fails finitely without granting a new owner when marker cleanup stays ${code}`, async () => {
+      const directory = await root()
+      const cache = new NodeFilesystemModuleDownloaderCache(directory, {
+        leasePollMs: 1,
+        maxStaleRecoveries: 2,
+        faultInjector(point, path) {
+          if (point === 'cleanup' && path.includes('.released-')) {
+            throw Object.assign(new Error(`persistent ${code}`), { code })
+          }
+        },
+      })
+      const lease = await cache.acquireLease(`persistent cleanup ${code}`, new AbortController().signal)
+      await expect(lease.release()).resolves.toBeUndefined()
+      await expect(cache.acquireLease(`persistent cleanup ${code}`, AbortSignal.timeout(5_000))).rejects.toMatchObject({
+        code: 'LEASE_CLEANUP_BLOCKED',
+      })
+    })
+  }
+
+  it.skipIf(process.platform !== 'win32')('prunes an orphan released marker during bounded startup recovery', async () => {
+    const directory = await root()
+    const setup = new NodeFilesystemModuleDownloaderCache(directory)
+    await setup.readCatalog()
+    const key = 'startup released marker'
+    const base = createHash('sha256').update(key).digest('hex')
+    const token = '00000000-0000-4000-8000-000000000000'
+    const marker = join(directory, 'leases', 'claims', `${base}.released-${token}`)
+    await writeFile(marker, token)
+
+    const recovered = new NodeFilesystemModuleDownloaderCache(directory, { maxStartupPrunes: 1 })
+    await recovered.readCatalog()
+    await expect(stat(marker)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('elects one cross-process artifact publisher and one verified reader', async () => {
@@ -300,6 +357,25 @@ describe('production filesystem cache', () => {
     const cache = new NodeFilesystemModuleDownloaderCache(directory, { staleLeaseMs: 1, maxStartupPrunes: 1, now: () => 10_000 })
     await cache.readCatalog()
     expect(await readdirNames(owners)).toHaveLength(1)
+  })
+
+  it.skipIf(process.platform === 'win32')('does not spend POSIX startup recovery budget on released lease quarantine', async () => {
+    const directory = await root()
+    const initial = new NodeFilesystemModuleDownloaderCache(directory)
+    await initial.readCatalog()
+    const released = `${createHash('sha256').update('released quarantine').digest('hex')}.released-00000000-0000-4000-8000-000000000000`
+    await mkdir(join(directory, 'leases', 'claims', released))
+    const token = '00000000-0000-4000-8000-000000000001'
+    const owner = join(directory, 'artifacts', 'owners', `${token}.json`)
+    await writeFile(owner, JSON.stringify({ token, pid: 999_999_999, processInstanceId: token, acquiredAt: 0 }))
+
+    const recovered = new NodeFilesystemModuleDownloaderCache(directory, {
+      staleLeaseMs: 1,
+      maxStartupPrunes: 1,
+      now: () => 10_000,
+    })
+    await recovered.readCatalog()
+    await expect(stat(owner)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('fails closed on artifact owner and claim leaf symlinks during startup', async () => {
