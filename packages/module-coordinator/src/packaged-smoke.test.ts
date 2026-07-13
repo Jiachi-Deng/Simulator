@@ -88,7 +88,7 @@ async function packagedArchive(): Promise<{ archive: Buffer; treeHash: ModuleSha
   const executableFixture = await compiledFixture
   const executable = executableFixture.bytes
   const frontend = await readFile(join(fixture, 'frontend', 'index.html'))
-  const data = await readFile(join(fixture, 'data.txt'))
+  const data = Buffer.from((await readFile(join(fixture, 'data.txt'), 'utf8')).replaceAll('\r\n', '\n'), 'utf8')
   const archive = gzipSync(Buffer.concat([
     tarEntry('module/', '5', 0o755),
     tarEntry('module/bin/', '5', 0o755),
@@ -515,15 +515,19 @@ describe('packaged fake module with production runtime adapters', () => {
       { id: right, version: '1.0.0', ...packaged },
     ]))
     for (const id of [left, right]) {
-      await system.coordinator.install({ ...system.request(id), operationId: `isolation-install-${id}` })
-      await system.coordinator.start({ operationId: `isolation-start-${id}`, moduleId: id as ModuleId })
+      expectOperationOk(await system.coordinator.install({ ...system.request(id), operationId: `isolation-install-${id}` }))
     }
+    await Promise.all([left, right].map(async (id) => {
+      expectOperationOk(await system.coordinator.start({ operationId: `isolation-start-${id}`, moduleId: id as ModuleId }))
+    }))
     const leftBefore = system.daemon.get(left as ModuleId)!
     const rightBefore = system.daemon.get(right as ModuleId)!
     await crashAndAwaitHealthyRestart(system, left as ModuleId, leftBefore)
     expect(system.daemon.get(right as ModuleId)).toMatchObject({ state: 'healthy', pid: rightBefore.pid })
     expect(await system.view.query(right as ModuleId)).toMatchObject({ state: 'attached' })
-    for (const id of [left, right]) await system.coordinator.stop({ operationId: `isolation-stop-${id}`, moduleId: id as ModuleId })
+    await Promise.all([left, right].map(async (id) => {
+      expectOperationOk(await system.coordinator.stop({ operationId: `isolation-stop-${id}`, moduleId: id as ModuleId }))
+    }))
   }, 20_000)
 })
 
