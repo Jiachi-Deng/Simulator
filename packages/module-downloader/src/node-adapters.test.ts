@@ -212,7 +212,7 @@ describe('production filesystem cache', () => {
       const directory = await root(); const baseline = new NodeFilesystemModuleDownloaderCache(directory); const first = catalogRecord(1, 1)
       await baseline.stageCatalog(first); expect(await baseline.publishCatalog(undefined)).toBe(true)
       let armed = false
-      const faulted = new NodeFilesystemModuleDownloaderCache(directory, { faultInjector(candidate, path) { if (armed && candidate === point && (path.includes('/generations/') || path.endsWith('current.json') || (candidate === 'directory-sync' && path.endsWith('generations')))) throw new Error(`crash:${point}`) } })
+      const faulted = new NodeFilesystemModuleDownloaderCache(directory, { faultInjector(candidate, path) { if (armed && candidate === point && (hasPathSegments(path, 'catalog', 'generations') || path.endsWith('current.json') || (candidate === 'directory-sync' && path.endsWith('generations')))) throw new Error(`crash:${point}`) } })
       const second = catalogRecord(2, 2); await faulted.stageCatalog(second); armed = true
       await expect(faulted.publishCatalog(first.trustState)).rejects.toThrow(`crash:${point}`)
       const recovered = await new NodeFilesystemModuleDownloaderCache(directory).readCatalog()
@@ -300,7 +300,7 @@ describe('production filesystem cache', () => {
       const { responseBytes, ...rest } = record
       const winnerBytes = Buffer.from(JSON.stringify({ ...rest, responseBytesBase64: Buffer.from(responseBytes).toString('base64') }))
       const cache = new NodeFilesystemModuleDownloaderCache(directory, { faultInjector: async (point, path) => {
-        if (point !== 'rename' || !path.includes('/catalog/generations/') || raced) return
+        if (point !== 'rename' || !hasPathSegments(path, 'catalog', 'generations') || raced) return
         raced = true
         await writeFile(path, sameDigest ? winnerBytes : Buffer.from('different winner'))
       } })
@@ -383,6 +383,7 @@ function child(fixture: string, ...args: string[]) {
   return { done, output: () => output, until: async (text: string) => { while (!output.includes(text)) { if (process.exitCode !== null) await done; await new Promise((resolve) => setTimeout(resolve, 5)) } } }
 }
 function catalogRecord(sequence: number, marker: number) { return { sourceUrl: `https://example.test/catalog-${marker}`, responseBytes: new Uint8Array([marker]), expiresAt: '2030-01-01T00:00:00.000Z', trustState: { highestSequence: sequence, latestIssuedAt: '2029-01-01T00:00:00.000Z' }, committedAt: marker } }
+function hasPathSegments(path: string, ...segments: string[]): boolean { const normalized = path.replaceAll('\\', '/'); const suffix = `/${segments.join('/')}`; return normalized.includes(`${suffix}/`) || normalized.endsWith(suffix) }
 async function readdirNames(path: string): Promise<string[]> { return (await import('node:fs/promises')).readdir(path).then((names) => names.sort()) }
 async function killAtCheckpoint(fixture: string, directory: string, mode: string): Promise<void> {
   const process = spawn('bun', [fixture, directory, mode], { stdio: ['ignore', 'pipe', 'pipe'] }); let output = ''

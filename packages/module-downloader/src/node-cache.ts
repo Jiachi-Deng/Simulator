@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { constants, createReadStream } from 'node:fs'
+import { constants } from 'node:fs'
 import {
   chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm,
 } from 'node:fs/promises'
@@ -191,8 +191,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   async readPartial(id: string): Promise<AsyncIterable<Uint8Array>> {
     await this.#requiredPartial(id)
     const handle = await safeOpen(this.#partialData(id), constants.O_RDONLY, this.root)
-    const stream = createReadStream('', { fd: handle.fd, autoClose: false })
-    return (async function* () { try { for await (const chunk of stream) yield Uint8Array.from(chunk as Buffer) } finally { await handle.close() } })()
+    return readChunks(handle)
   }
 
   async appendPartial(id: string, bytes: Uint8Array, updatedAt: number, validator?: string): Promise<ArtifactPartialRecord> {
@@ -514,10 +513,11 @@ async function safeReadFile(path: string, root: string): Promise<Buffer> { const
 async function safeReadJson<T>(path: string, root: string): Promise<T | undefined> { try { return JSON.parse((await safeReadFile(path, root)).toString('utf8')) as T } catch (cause) { if (hasCode(cause, 'ENOENT')) return undefined; throw cause } }
 async function safeStatFile(path: string, root: string) { const handle = await safeOpen(path, constants.O_RDONLY, root); try { return await handle.stat() } finally { await handle.close() } }
 async function safeRemoveFile(path: string, root: string): Promise<void> { const info = await lstat(path).catch(() => undefined); if (!info) return; if (!info.isFile() || info.isSymbolicLink()) throw new Error('Refusing to remove unsafe cache leaf'); await assertContained(root, path); await rm(path) }
-async function hashFile(path: string, root: string): Promise<string> { const handle = await safeOpen(path, constants.O_RDONLY, root); const hash = createHash('sha256'); const stream = createReadStream('', { fd: handle.fd, autoClose: false }); try { for await (const chunk of stream) hash.update(chunk as Buffer); return hash.digest('hex') } finally { await handle.close() } }
+async function hashFile(path: string, root: string): Promise<string> { const handle = await safeOpen(path, constants.O_RDONLY, root); const hash = createHash('sha256'); try { for await (const chunk of readChunks(handle, false)) hash.update(chunk); return hash.digest('hex') } finally { await handle.close() } }
 async function claimToken(path: string, root: string): Promise<string | undefined> { const value = await safeReadJson<{ token?: string }>(join(path, 'claim.json'), root).catch(() => undefined); return value?.token && UUID.test(value.token) ? value.token : undefined }
-async function copyVerified(source: string, destination: string, root: string): Promise<void> { const input = await safeOpen(source, constants.O_RDONLY, root); const output = await open(destination, exclusiveWriteFlags(), FILE_MODE); try { for await (const chunk of input.createReadStream({ autoClose: false })) await output.write(chunk as Buffer); await output.sync() } finally { await Promise.all([input.close(), output.close()]) } }
+async function copyVerified(source: string, destination: string, root: string): Promise<void> { const input = await safeOpen(source, constants.O_RDONLY, root); const output = await open(destination, exclusiveWriteFlags(), FILE_MODE); try { let position = 0; for await (const chunk of readChunks(input, false)) { let offset = 0; while (offset < chunk.byteLength) { const { bytesWritten } = await output.write(chunk, offset, chunk.byteLength - offset, position + offset); if (bytesWritten === 0) throw new Error('Artifact copy made no progress'); offset += bytesWritten } position += chunk.byteLength } await output.sync() } finally { await Promise.all([input.close(), output.close()]) } }
 function exclusiveWriteFlags(): 'wx' | number { return process.platform === 'win32' ? 'wx' : constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY }
+async function* readChunks(handle: Awaited<ReturnType<typeof open>>, close = true): AsyncGenerator<Uint8Array> { const buffer = Buffer.allocUnsafe(64 * 1024); let position = 0; try { while (true) { const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, position); if (bytesRead === 0) return; position += bytesRead; yield Uint8Array.from(buffer.subarray(0, bytesRead)) } } finally { if (close) await handle.close() } }
 function sleep(ms: number, signal: AbortSignal): Promise<void> { return new Promise((resolveSleep, reject) => { const timer = setTimeout(done, ms); const abort = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); reject(signal.reason) }; function done() { signal.removeEventListener('abort', abort); resolveSleep() } signal.addEventListener('abort', abort, { once: true }) }) }
 
 async function processStartIdentity(pid: number): Promise<string | undefined> {
