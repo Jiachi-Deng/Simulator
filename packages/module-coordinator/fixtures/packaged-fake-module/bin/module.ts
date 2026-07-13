@@ -10,7 +10,6 @@ if (host !== '127.0.0.1' || !Number.isSafeInteger(port) || port < 1 || port > 65
 
 if (startupDelayMs > 0) await Bun.sleep(startupDelayMs)
 
-let exitScheduled = false
 const moduleRoot = join(dirname(process.execPath), '..')
 const server = Bun.serve({
   hostname: host,
@@ -19,10 +18,6 @@ const server = Bun.serve({
     const url = new URL(request.url)
     if (url.pathname === '/health') {
       if (mode === 'readiness-failure') return Response.json({ status: 'unhealthy' }, { status: 503 })
-      if (mode === 'crash-after-ready' && !exitScheduled) {
-        exitScheduled = true
-        setTimeout(() => process.exit(17), 100)
-      }
       return Response.json({ status: 'healthy' })
     }
     if (url.pathname === '/' || url.pathname === '/index.html') {

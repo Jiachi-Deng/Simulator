@@ -207,7 +207,7 @@ interface PackagedSystem {
 }
 
 interface PackagedRuntimeOptions {
-  readonly mode?: 'healthy' | 'readiness-failure' | 'crash-after-ready'
+  readonly mode?: 'healthy' | 'readiness-failure'
   readonly restartLimit?: number
   readonly startupDelayMs?: number
 }
@@ -481,12 +481,16 @@ describe('packaged fake module with production runtime adapters', () => {
   it('records restart budget exhaustion and detaches the frontend', async () => {
     const packaged = await packagedArchive()
     const id = 'org.simulator.packaged-restart-budget'
-    const system = await createSystem(bundle([{ id, version: '1.0.0', ...packaged }]), { mode: 'crash-after-ready', restartLimit: 1 })
+    const system = await createSystem(bundle([{ id, version: '1.0.0', ...packaged }]), { restartLimit: 1 })
     await system.coordinator.install({ ...system.request(id), operationId: 'budget-install' })
     expectOperationOk(await system.coordinator.start({ operationId: 'budget-start', moduleId: id as ModuleId }))
+    const initial = system.daemon.get(id as ModuleId)!
+    const restarted = await crashAndAwaitHealthyRestart(system, id as ModuleId, initial)
     const trace = traceDaemon(system.daemon, id as ModuleId)
-    const diagnostics = () => runtimeDiagnostics(system, id as ModuleId, trace.history)
+    const diagnostics = () => runtimeDiagnostics(system, id as ModuleId, trace.history, restarted.pid)
     try {
+      const response = await fetch(`http://${restarted.endpoint!.host}:${restarted.endpoint!.port}/crash`)
+      if (!response.ok) throw new Error(`Packaged fixture crash endpoint returned HTTP ${response.status}`)
       await waitForPhase(
         'daemon restart budget exhaustion',
         () => system.daemon.get(id as ModuleId)?.diagnostic?.code === 'RESTART_BUDGET_EXHAUSTED' ? true : undefined,
