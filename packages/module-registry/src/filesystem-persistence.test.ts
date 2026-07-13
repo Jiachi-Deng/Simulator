@@ -88,6 +88,27 @@ describe('FilesystemModuleRegistryPersistence', () => {
     expect(() => new FilesystemModuleRegistryPersistence(directory).read()).toThrow('symlink')
   })
 
+  it('excludes concurrent writers and reclaims a dead writer lock', () => {
+    const directory = root()
+    const second = new FilesystemModuleRegistryPersistence(directory)
+    let checked = false
+    const first = new FilesystemModuleRegistryPersistence(directory, {
+      faultInjector(point) {
+        if (point !== 'after-pending-sync' || checked) return
+        checked = true
+        expect(() => second.commit({ schemaVersion: 1, host: HOST, modules: [] })).toThrow('writer is active')
+      },
+    })
+    first.commit({ schemaVersion: 1, host: HOST, modules: [] })
+
+    writeFileSync(join(directory, 'module-registry.lock'), `${JSON.stringify({
+      pid: 2_147_483_647,
+      token: '00000000-0000-4000-8000-000000000000',
+    })}\n`)
+    second.commit({ schemaVersion: 1, host: HOST, modules: [] })
+    expect(new ModuleRegistry(HOST, second).snapshot().modules).toHaveLength(0)
+  })
+
   it('rejects a lstat/open substitution race via O_NOFOLLOW', () => {
     if (process.platform === 'win32') return
     const directory = root()
