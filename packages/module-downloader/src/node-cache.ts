@@ -330,7 +330,9 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     if (!stale) return 'blocked'
     await this.#checkpoint('lease-stale-observed', lock)
     const quarantine = `${base}.recover-${randomUUID()}`
-    await this.#rename(lock, quarantine); await this.#checkpoint('lease-quarantined', quarantine)
+    try { await this.#rename(lock, quarantine) }
+    catch (cause) { if (hasCode(cause, 'ENOENT')) return 'blocked'; throw cause }
+    await this.#checkpoint('lease-quarantined', quarantine)
     const movedToken = await claimToken(quarantine, this.root)
     if (!movedToken || await exists(this.#leaseReleased(movedToken)) || await this.#ownerDeadOrStale(movedToken, quarantine)) await rm(quarantine, { recursive: true, force: true })
     else if (!await exists(lock)) await this.#rename(quarantine, lock)

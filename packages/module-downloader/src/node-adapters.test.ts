@@ -75,6 +75,26 @@ describe('production filesystem cache', () => {
     await expect(stat(lock)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
+  it('re-observes state when another recoverer wins the stale-lock rename', async () => {
+    const directory = await root(); const leaseName = createHash('sha256').update('catalog').digest('hex')
+    const lock = join(directory, 'leases', 'claims', `${leaseName}.lock`); await mkdir(lock, { recursive: true }); await utimes(lock, 0, 0)
+    let lostRecoveryRace = false
+    const cache = new NodeFilesystemModuleDownloaderCache(directory, {
+      staleLeaseMs: 1,
+      leasePollMs: 1,
+      now: () => 10_000,
+      faultInjector(point, path) {
+        if (point === 'rename' && path.includes('.recover-') && !lostRecoveryRace) {
+          lostRecoveryRace = true
+          throw Object.assign(new Error('another recoverer moved the lock'), { code: 'ENOENT' })
+        }
+      },
+    })
+    const lease = await cache.acquireLease('catalog', new AbortController().signal); await lease.release()
+    expect(lostRecoveryRace).toBe(true)
+    await expect(stat(lock)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('does not delete a replacement owner after a stale-read pathname ABA', async () => {
     const directory = await root(); const leaseName = createHash('sha256').update('catalog').digest('hex')
     const setup = new NodeFilesystemModuleDownloaderCache(directory); await setup.readCatalog()
