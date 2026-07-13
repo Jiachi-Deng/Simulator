@@ -35,6 +35,7 @@
     "typecheck:all": "bun run scripts/typecheck-all.ts",
     "test:module-contract": "cd packages/module-contract && bun test",
     "test:module-coordinator": "cd packages/module-coordinator && bun test",
+    "test:module-coordinator:packaged": "cd packages/module-coordinator && bun run test:packaged",
     "test:module-registry": "cd packages/module-registry && bun test",
     "typecheck:module-contract": "cd packages/module-contract && bun run typecheck",
     "typecheck:module-coordinator": "cd packages/module-coordinator && bun run typecheck",
