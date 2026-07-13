@@ -1,0 +1,71 @@
+name: Module Coordinator
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/module-coordinator.yml"
+      - "bun.lock"
+      - "package.json"
+      - "packages/module-coordinator/**"
+      - "packages/module-contract/**"
+      - "packages/module-release-trust/**"
+      - "packages/module-downloader/**"
+      - "packages/module-installer/**"
+      - "packages/module-registry/**"
+      - "packages/module-daemon/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/module-coordinator.yml"
+      - "bun.lock"
+      - "package.json"
+      - "packages/module-coordinator/**"
+      - "packages/module-contract/**"
+      - "packages/module-release-trust/**"
+      - "packages/module-downloader/**"
+      - "packages/module-installer/**"
+      - "packages/module-registry/**"
+      - "packages/module-daemon/**"
+  workflow_dispatch:
+
+concurrency:
+  group: module-coordinator-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  module-coordinator:
+    name: Module Coordinator (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.10"
+      - run: bun install --frozen-lockfile
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: bun run validate:module-coordinator
+
+  module-coordinator-gate:
+    name: Module Coordinator Gate
+    needs: module-coordinator
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all module coordinator platforms
+        env:
+          MATRIX_RESULT: ${{ needs.module-coordinator.result }}
+        run: |
+          if [[ "$MATRIX_RESULT" != "success" ]]; then
+            echo "Module coordinator matrix result: $MATRIX_RESULT"
+            exit 1
+          fi
