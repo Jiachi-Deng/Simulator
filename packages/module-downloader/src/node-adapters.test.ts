@@ -128,6 +128,22 @@ describe('production filesystem cache', () => {
     await expect(stat(claim)).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
+  it('memoizes the current process identity while creating cache owners', async () => {
+    const directory = await root(); let ownIdentityCalls = 0
+    const cache = new NodeFilesystemModuleDownloaderCache(directory, {
+      processIdentity: async (pid) => {
+        if (pid === process.pid) ownIdentityCalls += 1
+        return 'current-start'
+      },
+    })
+    const bytes = Buffer.from('owner identity'); const sha256 = createHash('sha256').update(bytes).digest('hex')
+    const first = await cache.createPartial({ sha256, sourceUrl: 'https://example.test/a', expectedSize: bytes.length, updatedAt: 1 }); await cache.appendPartial(first.id, bytes, 2)
+    expect(await cache.publishPartial(first.id, { sha256, size: bytes.length, committedAt: 3 })).toBe('published')
+    const second = await cache.createPartial({ sha256, sourceUrl: 'https://example.test/a', expectedSize: bytes.length, updatedAt: 4 }); await cache.appendPartial(second.id, bytes, 5)
+    expect(await cache.publishPartial(second.id, { sha256, size: bytes.length, committedAt: 6 })).toBe('already-present')
+    expect(ownIdentityCalls).toBe(1)
+  })
+
   it('makes catalog compare-and-swap atomic without a caller-held lease', async () => {
     const directory = await root(); const left = new NodeFilesystemModuleDownloaderCache(directory); const right = new NodeFilesystemModuleDownloaderCache(directory)
     const first = catalogRecord(1, 1); const second = catalogRecord(1, 2)

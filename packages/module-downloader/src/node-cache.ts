@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { constants } from 'node:fs'
 import {
-  chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm,
+  chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, rmdir,
 } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { ModuleReleaseTrustState } from '@simulator/module-release-trust'
@@ -53,6 +53,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   readonly #processIdentity: (pid: number) => Promise<string | undefined>
   readonly #ready: Promise<void>
   #stage?: CatalogTransaction
+  #ownProcessIdentity?: Promise<string | undefined>
 
   constructor(root: string, options: NodeFilesystemCacheOptions = {}) {
     if (!root || !isAbsolute(root)) throw new TypeError('Cache root must be an absolute path')
@@ -322,10 +323,24 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
       return 'blocked'
     }
     const lock = `${base}.lock`; const info = await lstat(lock).catch(() => undefined)
-    if (!info) return 'clear'
+    if (!info) {
+      if (process.platform === 'win32' && !await this.#clearReleasedLeaseMarkers(base)) return 'blocked'
+      return 'clear'
+    }
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Unsafe lease claim')
     const token = await claimToken(lock, this.root)
-    if (token && await exists(this.#leaseReleased(token))) { await this.#removeClaim(base, token); return 'clear' }
+    if (token && await exists(this.#leaseReleased(token))) {
+      await this.#removeClaim(base, token)
+      return await this.#releasedLeaseCleared(base, lock)
+    }
+    if (process.platform === 'win32') {
+      const released = await this.#releasedLeaseTokens(base)
+      if (!token && released.length === 1) {
+        await this.#removeClaim(base, released[0]!)
+        return await this.#releasedLeaseCleared(base, lock)
+      }
+      if (!token && released.length > 1) throw new Error('Ambiguous released lease markers')
+    }
     const stale = token ? await this.#ownerDeadOrStale(token, lock) : this.#now() - info.mtimeMs > this.#staleMs
     if (!stale) return 'blocked'
     await this.#checkpoint('lease-stale-observed', lock)
@@ -351,13 +366,65 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     await this.#reconcileLease(base)
   }
   async #removeClaim(base: string, token: string): Promise<void> {
-    const lock = `${base}.lock`; if (await claimToken(lock, this.root) !== token) return
+    const lock = `${base}.lock`; const claimedToken = await claimToken(lock, this.root)
+    if (process.platform === 'win32') {
+      if (claimedToken !== undefined && claimedToken !== token) return
+      const marker = this.#leaseReleaseMarker(base, token)
+      try { await this.#immutableBytes(marker, Buffer.from(token)) }
+      catch (cause) {
+        if (!hasCode(cause, 'EEXIST') || (await safeReadFile(marker, this.root)).toString() !== token) throw cause
+      }
+      try { await safeRemoveFile(join(lock, 'claim.json'), this.root) }
+      catch (cause) {
+        if (hasCode(cause, 'ENOENT') || hasCode(cause, 'EPERM')) return
+        throw cause
+      }
+      try { await rmdir(lock) }
+      catch (cause) {
+        if (hasCode(cause, 'ENOENT') || hasCode(cause, 'ENOTEMPTY') || hasCode(cause, 'EPERM')) return
+        throw cause
+      }
+      await this.#syncDirectory(dirname(base))
+      await safeRemoveFile(marker, this.root).catch((cause) => {
+        if (!hasCode(cause, 'ENOENT') && !hasCode(cause, 'EPERM')) throw cause
+      })
+      return
+    }
+    if (claimedToken !== token) return
     const released = `${base}.released-${token}`
     try { await this.#rename(lock, released) } catch (cause) { if (hasCode(cause, 'ENOENT')) return; throw cause }
     await rm(released, { recursive: true, force: true }); await this.#syncDirectory(dirname(base))
   }
   #leaseOwner(token: string): string { validateId(token); return join(this.root, 'leases', 'owners', `${token}.json`) }
   #leaseReleased(token: string): string { validateId(token); return join(this.root, 'leases', 'owners', `${token}.released`) }
+  #leaseReleaseMarker(base: string, token: string): string { validateId(token); return `${base}.released-${token}` }
+  async #releasedLeaseTokens(base: string): Promise<string[]> {
+    const prefix = `${baseName(base)}.released-`
+    const tokens: string[] = []
+    for (const name of (await directoryNames(dirname(base))).filter((value) => value.startsWith(prefix))) {
+      const token = name.slice(prefix.length)
+      if (!UUID.test(token)) continue
+      if ((await safeReadFile(join(dirname(base), name), this.root)).toString() !== token) throw new Error('Invalid released lease marker')
+      tokens.push(token)
+    }
+    return tokens
+  }
+  async #clearReleasedLeaseMarkers(base: string): Promise<boolean> {
+    for (const token of await this.#releasedLeaseTokens(base)) {
+      try { await safeRemoveFile(this.#leaseReleaseMarker(base, token), this.root) }
+      catch (cause) {
+        if (hasCode(cause, 'ENOENT')) continue
+        if (hasCode(cause, 'EPERM')) return false
+        throw cause
+      }
+    }
+    return true
+  }
+  async #releasedLeaseCleared(base: string, lock: string): Promise<'clear' | 'blocked'> {
+    if (await exists(lock)) return 'blocked'
+    if (process.platform === 'win32' && !await this.#clearReleasedLeaseMarkers(base)) return 'blocked'
+    return 'clear'
+  }
 
   async #recoverArtifactClaim(claim: string, destination: string): Promise<boolean> {
     const owner = await safeReadJson<OwnerRecord>(claim, this.root).catch(() => undefined)
@@ -474,7 +541,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   }
 
   async #newOwner(): Promise<OwnerRecord> {
-    const processStartIdentity = await this.#processIdentity(process.pid)
+    const processStartIdentity = await (this.#ownProcessIdentity ??= this.#processIdentity(process.pid))
     return { token: randomUUID(), pid: process.pid, processInstanceId: PROCESS_INSTANCE_ID, ...(processStartIdentity ? { processStartIdentity } : {}), acquiredAt: this.#now() }
   }
   async #ownerRecordRecoverable(owner: OwnerRecord): Promise<boolean> {
