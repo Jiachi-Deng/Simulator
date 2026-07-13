@@ -73,8 +73,8 @@
       "<node> <pnpm> --filter <runtime-package> build",
       "<node> <pnpm> --filter @open-design/web build",
       "<node> <pnpm> --filter @open-design/web build:sidecar",
-      "<node> <pnpm> --offline --frozen-lockfile --ignore-scripts --filter @open-design/daemon deploy --prod --legacy <daemon-deploy>",
-      "<node> <pnpm> --offline --frozen-lockfile --ignore-scripts --filter @open-design/web deploy --prod --legacy <web-sidecar-deploy>"
+      "<node> <pnpm> --prefer-offline --frozen-lockfile --ignore-scripts --filter @open-design/daemon deploy --prod --legacy <daemon-deploy>",
+      "<node> <pnpm> --prefer-offline --frozen-lockfile --ignore-scripts --filter @open-design/web deploy --prod --legacy <web-sidecar-deploy>"
     ]
   }
 }

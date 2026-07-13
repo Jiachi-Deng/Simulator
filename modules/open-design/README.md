@@ -20,7 +20,7 @@
 
 1. `stage-open-design.mjs` 验证 upstream `origin`、完整 commit、tag、根 manifest、Node `~24`、精确 `pnpm@10.33.2`，以及 `provenance.json` 固定的 `pnpm-lock.yaml` SHA-256。
 2. checkout 必须 clean；唯一例外是当前 pinned Next.js 会生成的 `apps/web/next-env.d.ts` 单行路径变更。该例外要求 Git status 和文件前后内容均精确匹配，任何其他改动都会 fail closed。
-3. 真实模式按 upstream `tools/pack` 的 build closure 顺序执行 `pnpm install --frozen-lockfile`、workspace runtime build、Next standalone、web sidecar 和两个 offline/frozen/ignore-scripts 的 `pnpm deploy --prod --legacy` closure；`--legacy` 是 pnpm 10 对未启用 injected workspace packages 的显式 deploy 兼容模式。
+3. 真实模式按 upstream `tools/pack` 的 build closure 顺序执行 `pnpm install --frozen-lockfile`、workspace runtime build、Next standalone、web sidecar 和两个 prefer-offline/frozen/ignore-scripts 的 `pnpm deploy --prod --legacy` closure；`--legacy` 是 pnpm 10 对未启用 injected workspace packages 的显式 deploy 兼容模式。legacy deploy 仍可能读取 registry metadata，不能宣称 offline/hermetic，但 lockfile 和 integrity 保持 fail-closed。
 4. copier 只写入 `artifact-policy.json` 的目标路径：Next standalone（连同 `.next/static`、`public`）、daemon closure、web sidecar closure、LICENSE、外部 SPDX SBOM 和本模块 provenance。它不会 stage source map、test/cache/Electron/updater 等 policy 排除项，并拒绝 symlink、special file 和 hard link。
 5. native inventory 对 staged `better-sqlite3`、`node-pty` 和 `sharp` 的二进制格式、platform、arch、Node ABI、libc 和显式 metadata 做闭包检查。上游 `pnpm.onlyBuiltDependencies` 也必须逐项允许三个 native package；`node-pty` 被 ignored 时立即失败。
 6. 通过现有 producer 生成并校验 inventory 后，runner 用 `O_EXCL` 写入 `artifact-manifest.json`；随后才能执行 loopback smoke、签名、归档或分发。
