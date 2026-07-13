@@ -61,7 +61,7 @@ writeFileSync(manifestPath, `${JSON.stringify({
 })}\n`)
 
 function packagedExecutable(path: string): string {
-  const absolute = resolve(path)
+  const absolute = resolve(repoRoot, path)
   if (!absolute.endsWith('.app')) return absolute
   return join(absolute, 'Contents', 'MacOS', basename(absolute, '.app'))
 }
