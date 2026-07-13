@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { NodeFetchAdapter } from './node-fetch.ts'
 import { NodeFilesystemModuleDownloaderCache, type NodeCacheFaultPoint } from './node-cache.ts'
+import type { ModuleDownloaderCacheLease } from './types.ts'
 
 const roots: string[] = []
 const servers: Server[] = []
@@ -60,6 +61,82 @@ describe('production filesystem cache', () => {
     await next.release()
     expect((await readdir(join(directory, 'leases', 'claims'))).some((name) => name.includes('.released-'))).toBe(false)
   })
+
+  it.skipIf(process.platform !== 'win32')('treats a released marker that vanishes after EEXIST as a completed release', async () => {
+    const directory = await root()
+    const cache = new NodeFilesystemModuleDownloaderCache(directory, {
+      faultInjector(point, path) {
+        if (point === 'temp-write' && path.includes('.released-')) {
+          return rm(path, { force: true }).then(() => {
+            throw Object.assign(new Error('simulated marker collision'), { code: 'EEXIST' })
+          })
+        }
+      },
+    })
+    const lease = await cache.acquireLease('vanishing released marker', new AbortController().signal)
+    await expect(lease.release()).resolves.toBeUndefined()
+  })
+
+  it.skipIf(process.platform !== 'win32')('completes release when cleanup removes a marker before publication chmod', async () => {
+    const directory = await root(); let removed = false
+    const cache = new NodeFilesystemModuleDownloaderCache(directory, {
+      faultInjector(point, path) {
+        if (point === 'before-chmod' && path.includes('.released-') && !removed) {
+          removed = true
+          return rm(path, { force: true })
+        }
+      },
+    })
+    const lease = await cache.acquireLease('marker publication race', new AbortController().signal)
+    await expect(lease.release()).resolves.toBeUndefined()
+    expect(removed).toBe(true)
+
+    const replacement = new NodeFilesystemModuleDownloaderCache(directory, { leasePollMs: 1 })
+    const next = await replacement.acquireLease('marker publication race', AbortSignal.timeout(5_000))
+    await expect(next.release()).resolves.toBeUndefined()
+  })
+
+  for (const mode of ['eexist', 'before-chmod'] as const) {
+    it.skipIf(process.platform !== 'win32')(`does not remove a replacement owner during ${mode} marker finalization`, async () => {
+      const directory = await root(); const key = `replacement owner during ${mode}`
+      let injected = false; let replacementLease: ModuleDownloaderCacheLease | undefined
+      const original = new NodeFilesystemModuleDownloaderCache(directory, {
+        leasePollMs: 1,
+        faultInjector: async (point, path) => {
+          const targetPoint = mode === 'before-chmod' ? 'before-chmod' : 'temp-write'
+          if (injected || point !== targetPoint || !path.includes('.released-')) return
+          injected = true
+          const replacement = new NodeFilesystemModuleDownloaderCache(directory, { leasePollMs: 1 })
+          replacementLease = await replacement.acquireLease(key, AbortSignal.timeout(2_000))
+          if (mode === 'eexist') throw Object.assign(new Error('marker existed, then cleanup removed it'), { code: 'EEXIST' })
+        },
+      })
+
+      try {
+        const first = await original.acquireLease(key, AbortSignal.timeout(2_000))
+        await expect(first.release()).resolves.toBeUndefined()
+        expect(injected).toBe(true)
+        expect(replacementLease).toBeDefined()
+
+        const contenderAbort = new AbortController(); let overlappingOwnerGranted = false
+        const contender = new NodeFilesystemModuleDownloaderCache(directory, { leasePollMs: 1 }).acquireLease(key, contenderAbort.signal).then((lease) => {
+          overlappingOwnerGranted = true
+          return lease
+        })
+        await new Promise((resolve) => setTimeout(resolve, 50))
+        expect(overlappingOwnerGranted).toBe(false)
+        contenderAbort.abort(new Error('replacement owner remains active'))
+        await expect(contender).rejects.toMatchObject({ message: 'replacement owner remains active' })
+
+        await replacementLease!.release()
+        replacementLease = undefined
+        const next = await new NodeFilesystemModuleDownloaderCache(directory, { leasePollMs: 1 }).acquireLease(key, AbortSignal.timeout(2_000))
+        await expect(next.release()).resolves.toBeUndefined()
+      } finally {
+        if (replacementLease) await Promise.resolve(replacementLease.release()).catch(() => undefined)
+      }
+    })
+  }
 
   for (const code of ['EFAULT', 'EBUSY', 'EPERM'] as const) {
     it.skipIf(process.platform !== 'win32')(`fails finitely without granting a new owner when marker cleanup stays ${code}`, async () => {
