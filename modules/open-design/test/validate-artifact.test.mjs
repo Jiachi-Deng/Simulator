@@ -196,6 +196,19 @@ test("models native targets by kind and matches the artifact target", () => {
     input.attestation.build.normalization.nativeOrigins.push({ path: file.path, sha256: file.sha256, freshFromBuild: true, mode: "0644" });
     refreshAttestationAndManifest(input);
   }).ok, true, "non-Node executable must not require nodeAbi");
+  assert.equal(mutate((input) => {
+    const sourcePath = "sharp-libvips-darwin-arm64@1.2.4/lib/libvips.dylib";
+    approveResource(input, { id: "standalone-dylib", category: "native-binaries", sourcePath, license: "LGPL-3.0-or-later" });
+    const file = runtimeFile("web/standalone/node_modules/@img/sharp-libvips-darwin-arm64/lib/libvips.dylib", {
+      artifactKind: "native-binary", component: "next-standalone", dependencyScope: "artifact", fileMode: "0644",
+      resourceCategory: "native-binaries", decisionId: "standalone-dylib", sourcePath,
+      nativeTarget: { format: "shared-library", platform: "darwin", arch: "arm64", libc: "none" },
+    });
+    input.inventory.files.push(file);
+    input.attestation.native.push({ packageName: "sharp", path: file.path, format: "shared-library", platform: "darwin", arch: "arm64", nodeAbi: "137", libc: "none", binaryFormat: "mach-o", resourceClass: "native-binary", mode: "0644", sha256: file.sha256, freshFromBuild: true, load: null });
+    input.attestation.build.normalization.nativeOrigins.push({ path: file.path, sha256: file.sha256, freshFromBuild: true, mode: "0644" });
+    refreshAttestationAndManifest(input);
+  }).ok, true, "standalone web-server closure must permit fully attested native libraries");
   has(mutate((input) => {
     approveResource(input, { id: "addon", category: "native-binaries", sourcePath: "packages/addon.node" });
     input.inventory.files.push(runtimeFile("runtime/packages/addon.node", { artifactKind: "native-binary", fileMode: "0644", resourceCategory: "native-binaries", decisionId: "addon", sourcePath: "packages/addon.node", nativeTarget: { format: "node-addon", platform: "linux", arch: "arm64", libc: "glibc", nodeAbi: "137" } }));

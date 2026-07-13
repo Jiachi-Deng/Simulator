@@ -68,7 +68,7 @@ export function validateArtifact({ provenance, policy, decisions, attestation, i
     if (!rule) fail("PATH_NOT_ALLOWED", `path is outside the feature profile: ${file.path}`);
     else {
       const expectedKind = rule.artifactKind;
-      const kindAllowed = file.artifactKind === expectedKind || (runtimeClass && ["runtime-package", "daemon-runtime"].includes(expectedKind) && file.artifactKind === runtimeClass);
+      const kindAllowed = file.artifactKind === expectedKind || (runtimeClass && ["web-server", "runtime-package", "daemon-runtime"].includes(expectedKind) && file.artifactKind === runtimeClass);
       const componentAllowed = rule.component ? file.component === rule.component : rule.components.includes(file.component);
       if (!kindAllowed || !componentAllowed) fail("PROFILE_MISMATCH", `artifact kind/component does not match its path rule: ${file.path}`);
     }
