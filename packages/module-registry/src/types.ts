@@ -71,6 +71,11 @@ export interface SafeRemovalTransition {
   readonly lastKnownGoodVersion?: string | null
 }
 
+export interface ModuleActivationState {
+  readonly activeVersion: string | null
+  readonly lastKnownGoodVersion: string | null
+}
+
 export interface PersistedModuleVersionV1 {
   readonly manifest: unknown
   readonly hostVersionRange: string

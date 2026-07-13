@@ -12,6 +12,7 @@ import {
   MODULE_REGISTRY_STATE_SCHEMA_VERSION,
   type InstalledModuleSnapshot,
   type InstalledModuleVersionSnapshot,
+  type ModuleActivationState,
   type ModuleInstallCompatibility,
   type ModuleRegistryHost,
   type ModuleRegistryPersistence,
@@ -288,6 +289,27 @@ export class ModuleRegistry {
     if ('diagnostic' in lookup) return this.failure(lookup.diagnostic)
     return this.mutate((next) => {
       next.get(moduleId)!.lastKnownGoodVersion = version
+    })
+  }
+
+  restoreActivation(moduleId: string, state: ModuleActivationState): RegistryMutationResult {
+    const module = this.modules.get(moduleId)
+    if (!module) return this.failure(diagnostic('MODULE_NOT_FOUND', 'Module is not installed', moduleId))
+    for (const [name, version] of [
+      ['active', state.activeVersion],
+      ['last-known-good', state.lastKnownGoodVersion],
+    ] as const) {
+      if (version === null) continue
+      const lookup = this.compatibleVersion(moduleId, version)
+      if ('diagnostic' in lookup) return this.failure(lookup.diagnostic)
+      if (name === 'active' && module.disabled) {
+        return this.failure(diagnostic('MODULE_DISABLED', 'Disabled module cannot be activated', moduleId, version))
+      }
+    }
+    return this.mutate((next) => {
+      const target = next.get(moduleId)!
+      target.activeVersion = state.activeVersion
+      target.lastKnownGoodVersion = state.lastKnownGoodVersion
     })
   }
 
