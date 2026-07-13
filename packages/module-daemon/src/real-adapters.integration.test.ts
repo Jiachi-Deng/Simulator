@@ -50,17 +50,19 @@ async function waitForExit(pid: number): Promise<void> {
 }
 
 function parseFixturePid(value: string): number | undefined {
-  if (!/^[1-9]\d*$/.test(value)) return undefined
-  const pid = Number(value)
-  return Number.isSafeInteger(pid) ? pid : undefined
+  const match = value.match(/^([1-9]\d*)\n$/)
+  if (!match) return undefined
+  const pid = Number(match[1])
+  return Number.isSafeInteger(pid) && pid <= 0x7fffffff ? pid : undefined
 }
 
-async function waitForPidFile(path: string, timeoutMs = 2_000): Promise<number> {
+async function waitForPidFile(path: string, timeoutMs = 2_000, onRead?: (value: string) => void): Promise<number> {
   const deadline = Date.now() + timeoutMs
   let lastValue: string | undefined
   while (Date.now() < deadline) {
     try {
       lastValue = await readFile(path, 'utf8')
+      onRead?.(lastValue)
       const pid = parseFixturePid(lastValue)
       if (pid !== undefined) return pid
     } catch (error) {
@@ -72,18 +74,30 @@ async function waitForPidFile(path: string, timeoutMs = 2_000): Promise<number> 
 }
 
 describe('fixture PID readiness', () => {
-  test('waits for an empty PID file to contain a canonical positive integer', async () => {
+  test('waits through observed empty and digit-prefix states for a terminated PID record', async () => {
     const root = await mkdtemp(join(tmpdir(), 'simulator-daemon-pid-'))
     roots.push(root)
     const path = join(root, 'child.pid')
     await Bun.write(path, '')
-    setTimeout(() => { void Bun.write(path, String(process.pid)) }, 20)
+    let resolveEmpty!: () => void
+    let resolvePrefix!: () => void
+    const observedEmpty = new Promise<void>((resolve) => { resolveEmpty = resolve })
+    const observedPrefix = new Promise<void>((resolve) => { resolvePrefix = resolve })
+    const waiting = waitForPidFile(path, 1_000, (value) => {
+      if (value === '') resolveEmpty()
+      if (value === '123') resolvePrefix()
+    })
 
-    expect(await waitForPidFile(path, 1_000)).toBe(process.pid)
+    await observedEmpty
+    await Bun.write(path, '123')
+    await observedPrefix
+    await Bun.write(path, `${process.pid}\n`)
+
+    expect(await waiting).toBe(process.pid)
   })
 
   test('rejects values that must never reach process.kill', () => {
-    for (const value of ['', '0', '-1', '1.5', '1x', '01', String(Number.MAX_SAFE_INTEGER + 1)]) {
+    for (const value of ['', '0\n', '-1\n', '1.5\n', '1x\n', '01\n', '123', '2147483648\n']) {
       expect(parseFixturePid(value)).toBeUndefined()
     }
   })
