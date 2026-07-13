@@ -11,7 +11,7 @@ import {
   rm,
   unlink,
 } from 'node:fs/promises'
-import { isAbsolute, join, resolve } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { parseModuleCoordinatorState } from './state-schema.ts'
 import {
   ModuleCoordinatorError,
@@ -30,6 +30,7 @@ interface FilesystemIdentity {
 }
 
 interface RootIdentity extends FilesystemIdentity {
+  readonly path: string
   readonly canonical: string
 }
 
@@ -44,18 +45,26 @@ export type NodeCoordinatorStoreFaultPoint =
 
 export interface NodeFilesystemModuleCoordinatorStoreOptions {
   readonly faultInjector?: (point: NodeCoordinatorStoreFaultPoint) => void | Promise<void>
+  /** Host-owned, non-group/world-writable ancestor that defines the mutable trust boundary. */
+  readonly trustedBoundary?: string
 }
 
 /** Durable single-writer state store rooted in a host-selected trusted directory. */
 export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorStore {
   readonly root: string
   readonly path: string
-  readonly #ready: Promise<RootIdentity>
+  readonly #trustedBoundary: string
+  readonly #ready: Promise<readonly RootIdentity[]>
   readonly #fault?: NodeFilesystemModuleCoordinatorStoreOptions['faultInjector']
 
   constructor(trustedRoot: string, options: NodeFilesystemModuleCoordinatorStoreOptions = {}) {
     if (!isAbsolute(trustedRoot)) throw new TypeError('Coordinator trusted root must be absolute')
     this.root = resolve(trustedRoot)
+    this.#trustedBoundary = resolve(options.trustedBoundary ?? dirname(this.root))
+    const fromBoundary = relative(this.#trustedBoundary, this.root)
+    if (!fromBoundary || fromBoundary.startsWith('..') || isAbsolute(fromBoundary)) {
+      throw new TypeError('Coordinator trusted boundary must be a strict ancestor of the store root')
+    }
     this.path = join(this.root, STATE_FILE)
     this.#fault = options.faultInjector
     this.#ready = this.#initializeRoot()
@@ -67,7 +76,10 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
     try {
       info = await lstat(this.path)
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        await this.#assertRoot()
+        return undefined
+      }
       throw error
     }
     if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_STATE_BYTES) this.#corrupt('state path is not a bounded regular file')
@@ -86,7 +98,9 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
       const bytes = await handle.readFile()
       if (bytes.byteLength > MAX_STATE_BYTES) this.#corrupt('state exceeds the size limit')
       try {
-        return structuredClone(parseModuleCoordinatorState(JSON.parse(bytes.toString('utf8')) as unknown))
+        const state = structuredClone(parseModuleCoordinatorState(JSON.parse(bytes.toString('utf8')) as unknown))
+        await this.#assertRoot()
+        return state
       } catch (error) {
         this.#corrupt(this.#message(error))
       }
@@ -139,6 +153,7 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
         this.#corrupt('committed state identity changed during rename')
       }
       await this.#syncRoot()
+      await this.#assertRoot()
     } finally {
       if (temporaryExists) await unlink(temporary).catch(() => undefined)
       await this.#releaseLock(lockToken)
@@ -146,29 +161,56 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
     }
   }
 
-  async #initializeRoot(): Promise<RootIdentity> {
-    await mkdir(this.root, { recursive: true, mode: 0o700 })
-    let info = await lstat(this.root)
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new TypeError('Coordinator trusted root must be a real directory')
-    if (typeof process.getuid === 'function' && info.uid !== process.getuid()) {
-      throw new TypeError('Coordinator trusted root must be owned by the host user')
+  async #initializeRoot(): Promise<readonly RootIdentity[]> {
+    const identities: RootIdentity[] = [await this.#directoryIdentity(this.#trustedBoundary, false)]
+    let current = this.#trustedBoundary
+    for (const part of relative(this.#trustedBoundary, this.root).split(/[\\/]+/)) {
+      current = join(current, part)
+      try {
+        await mkdir(current, { mode: 0o700 })
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error
+      }
+      identities.push(await this.#directoryIdentity(current, true))
     }
-    if (process.platform !== 'win32') {
-      await chmod(this.root, 0o700)
-      info = await lstat(this.root)
-    }
-    if (process.platform !== 'win32' && (info.mode & 0o077) !== 0) {
-      throw new TypeError('Coordinator trusted root must be owner-only')
-    }
-    return { canonical: await realpath(this.root), dev: info.dev, ino: info.ino }
+    await this.#assertIdentities(identities)
+    return Object.freeze(identities)
   }
 
   async #assertRoot(): Promise<void> {
-    const expected = await this.#ready
-    const info = await lstat(this.root)
-    if (!info.isDirectory() || info.isSymbolicLink() || !sameIdentity(info, expected)
-      || await realpath(this.root) !== expected.canonical) {
-      throw new ModuleCoordinatorError('STORE_CORRUPT', 'Coordinator trusted root changed')
+    await this.#assertIdentities(await this.#ready)
+  }
+
+  async #directoryIdentity(path: string, enforceOwnerOnly: boolean): Promise<RootIdentity> {
+    let info = await lstat(path)
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new TypeError('Coordinator trust path must be a real directory')
+    if (typeof process.getuid === 'function' && info.uid !== process.getuid()) {
+      throw new TypeError('Coordinator trust path must be owned by the host user')
+    }
+    if (process.platform !== 'win32' && enforceOwnerOnly) {
+      await chmod(path, 0o700)
+      info = await lstat(path)
+    }
+    if (process.platform !== 'win32' && (info.mode & 0o077) !== 0) {
+      throw new TypeError('Coordinator trusted boundary and descendants must be owner-only')
+    }
+    return { path, canonical: await realpath(path), dev: info.dev, ino: info.ino }
+  }
+
+  async #assertIdentities(expected: readonly RootIdentity[]): Promise<void> {
+    for (const identity of expected) {
+      let info
+      try {
+        info = await lstat(identity.path)
+      } catch {
+        throw new ModuleCoordinatorError('STORE_CORRUPT', 'Coordinator trusted ancestor changed')
+      }
+      if (!info.isDirectory() || info.isSymbolicLink() || !sameIdentity(info, identity)
+        || await realpath(identity.path) !== identity.canonical
+        || (typeof process.getuid === 'function' && info.uid !== process.getuid())
+        || (process.platform !== 'win32' && (info.mode & 0o077) !== 0)) {
+        throw new ModuleCoordinatorError('STORE_CORRUPT', 'Coordinator trusted ancestor changed')
+      }
     }
   }
 

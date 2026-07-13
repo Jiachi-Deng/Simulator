@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { NodeFilesystemModuleCoordinatorStore } from './node-store.ts'
@@ -13,8 +13,10 @@ const EMPTY_STATE: ModuleCoordinatorState = Object.freeze({
 })
 
 async function root(): Promise<string> {
-  const value = await mkdtemp(join(tmpdir(), 'simulator-module-coordinator-store-'))
-  roots.push(value)
+  const parent = await mkdtemp(join(tmpdir(), 'simulator-module-coordinator-store-'))
+  const value = join(parent, 'state')
+  await mkdir(value, { mode: 0o700 })
+  roots.push(parent)
   return value
 }
 
@@ -96,6 +98,32 @@ describe('NodeFilesystemModuleCoordinatorStore', () => {
     await rename(directory, displaced)
     await mkdir(directory, { mode: 0o700 })
     await expect(store.load()).rejects.toMatchObject({ code: 'STORE_CORRUPT' })
+  })
+
+  it('pins every ancestor below an explicit host-owned trust boundary', async () => {
+    const boundary = await mkdtemp(join(tmpdir(), 'simulator-module-coordinator-boundary-'))
+    roots.push(boundary)
+    const ancestor = join(boundary, 'owned-parent')
+    const directory = join(ancestor, 'state')
+    const displaced = join(boundary, 'owned-parent-displaced')
+    await mkdir(directory, { recursive: true, mode: 0o700 })
+    const store = new NodeFilesystemModuleCoordinatorStore(directory, { trustedBoundary: boundary })
+    await store.save(EMPTY_STATE)
+
+    await rename(ancestor, displaced)
+    await mkdir(directory, { recursive: true, mode: 0o700 })
+
+    await expect(store.load()).rejects.toMatchObject({ code: 'STORE_CORRUPT' })
+  })
+
+  it('rejects a writable trust boundary instead of silently trusting it', async () => {
+    if (process.platform === 'win32') return
+    const boundary = await mkdtemp(join(tmpdir(), 'simulator-module-coordinator-boundary-'))
+    roots.push(boundary)
+    const directory = join(boundary, 'state')
+    await chmod(boundary, 0o777)
+    const store = new NodeFilesystemModuleCoordinatorStore(directory, { trustedBoundary: boundary })
+    await expect(store.load()).rejects.toThrow('owner-only')
   })
 
   it('serializes writers across store instances', async () => {

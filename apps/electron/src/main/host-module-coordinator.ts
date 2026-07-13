@@ -1,3 +1,4 @@
+import { chmodSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
 import { lstat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { BrowserWindow } from 'electron'
@@ -55,6 +56,20 @@ export function currentModulePlatform(): ModulePlatform {
 }
 
 export function createHostModuleCoordinator(options: HostModuleCoordinatorOptions): HostModuleCoordinatorRuntime {
+  mkdirSync(options.root, { recursive: true, mode: 0o700 })
+  let trustBoundary = lstatSync(options.root)
+  if (!trustBoundary.isDirectory() || trustBoundary.isSymbolicLink()
+    || (typeof process.getuid === 'function' && trustBoundary.uid !== process.getuid())) {
+    throw new TypeError('Host module root must be a host-owned real directory')
+  }
+  if (process.platform !== 'win32') {
+    chmodSync(options.root, 0o700)
+    trustBoundary = lstatSync(options.root)
+  }
+  realpathSync(options.root)
+  if (process.platform !== 'win32' && (trustBoundary.mode & 0o077) !== 0) {
+    throw new TypeError('Host module root must be an owner-only canonical trust boundary')
+  }
   const cacheRoot = join(options.root, 'download-cache')
   const installedRoot = join(options.root, 'installed')
   const clock = options.clock ?? new HostModuleClock()
@@ -100,7 +115,9 @@ export function createHostModuleCoordinator(options: HostModuleCoordinatorOption
         }
       },
     },
-    store: new NodeFilesystemModuleCoordinatorStore(join(options.root, 'coordinator')),
+    store: new NodeFilesystemModuleCoordinatorStore(join(options.root, 'coordinator'), {
+      trustedBoundary: options.root,
+    }),
     view,
     usage,
   })
