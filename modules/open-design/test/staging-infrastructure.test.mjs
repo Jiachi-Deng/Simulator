@@ -57,14 +57,14 @@ test("rejects symlink and hard-link staging sources", async (t) => {
 });
 
 test("build plan invokes exact pnpm through exact Node in a private checkout and records order", async () => {
-  const workspace = { checkoutRoot: "/private/build/checkout", homeRoot: "/private/build/home", tempRoot: "/private/build/tmp", cacheRoot: "/private/build/cache", storeRoot: "/private/build/store", daemonDeployRoot: "/private/build/daemon", webDeployRoot: "/private/build/web" };
+  const workspace = { checkoutRoot: "/private/build/checkout", homeRoot: "/private/build/home", tempRoot: "/private/build/tmp", cacheRoot: "/private/build/cache", storeRoot: "/private/build/store", daemonDeployRoot: "/private/build/daemon", webDeployRoot: "/private/build/web", normalizedRoot: "/private/build/normalized" };
   const provenance = { buildContract: { environmentPolicy: { inherit: [], force: { CI: "1", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0", npm_config_update_notifier: "false", OD_WEB_OUTPUT_MODE: "standalone" } } } };
   const plan = createBuildPlan({ workspace, stagingRoot: "/stage", nodeBin: "/toolchain/node", pnpmBin: "/toolchain/pnpm.cjs", provenance });
   assert.equal(plan.commands[0].command, "/toolchain/node");
   assert.deepEqual(plan.commands[0].args, ["/toolchain/pnpm.cjs", "install", "--frozen-lockfile"]);
   assert.equal(plan.commands.find((entry) => entry.args.includes("@open-design/web") && entry.args.includes("build")).env.OD_WEB_OUTPUT_MODE, "standalone");
-  assert.deepEqual(plan.commands.at(-2).args, ["/toolchain/pnpm.cjs", "--filter", "@open-design/daemon", "deploy", "--prod", "--legacy", "/private/build/daemon"]);
-  assert.deepEqual(plan.commands.at(-1).args, ["/toolchain/pnpm.cjs", "--filter", "@open-design/web", "deploy", "--prod", "--legacy", "/private/build/web"]);
+  assert.deepEqual(plan.commands.at(-2).args, ["/toolchain/pnpm.cjs", "--offline", "--frozen-lockfile", "--ignore-scripts", "--filter", "@open-design/daemon", "deploy", "--prod", "--legacy", "/private/build/daemon"]);
+  assert.deepEqual(plan.commands.at(-1).args, ["/toolchain/pnpm.cjs", "--offline", "--frozen-lockfile", "--ignore-scripts", "--filter", "@open-design/web", "deploy", "--prod", "--legacy", "/private/build/web"]);
   const seen = [];
   await runBuildPlan(plan, async (command, args, options) => { seen.push({ command, args, options }); });
   assert.deepEqual(seen.map((entry) => entry.args), plan.commands.map((entry) => entry.args));

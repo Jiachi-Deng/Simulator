@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
-import { digestInventory, loadRuntimeSchemas, validateArtifact } from "../src/validate-artifact.mjs";
+import { digestCanonicalJson, digestInventory, loadRuntimeSchemas, validateArtifact } from "../src/validate-artifact.mjs";
 
 const root = new URL("../", import.meta.url);
 const load = async (name) => JSON.parse(await readFile(new URL(name, root), "utf8"));
@@ -55,6 +55,11 @@ function approveResource(input, { id, category, sourcePath, license = "MIT" }) {
 
 function refreshManifestDigest(inventory) {
   inventory.files.find((file) => file.path === "artifact-manifest.json").sha256 = digestInventory(inventory);
+}
+
+function refreshAttestationAndManifest(input) {
+  input.inventory.files.find((file) => file.path === "build-attestation.json").sha256 = digestCanonicalJson(input.attestation);
+  refreshManifestDigest(input.inventory);
 }
 
 test("accepts the minimal pinned artifact inventory", () => assert.deepEqual(validateArtifact(base), { ok: true, errors: [] }));
@@ -185,8 +190,11 @@ test("models native targets by kind and matches the artifact target", () => {
   }), "NATIVE_ABI_MISSING");
   assert.equal(mutate((input) => {
     approveResource(input, { id: "tool", category: "native-binaries", sourcePath: "packages/tool.exe" });
-    input.inventory.files.push(runtimeFile("runtime/packages/tool.exe", { artifactKind: "native-binary", resourceCategory: "native-binaries", decisionId: "tool", sourcePath: "packages/tool.exe", nativeTarget: { format: "executable", platform: "darwin", arch: "arm64", libc: "none" } }));
-    refreshManifestDigest(input.inventory);
+    const file = runtimeFile("runtime/packages/tool.exe", { artifactKind: "native-binary", resourceCategory: "native-binaries", decisionId: "tool", sourcePath: "packages/tool.exe", nativeTarget: { format: "executable", platform: "darwin", arch: "arm64", libc: "none" } });
+    input.inventory.files.push(file);
+    input.attestation.native.push({ packageName: "sharp", path: file.path, format: "executable", platform: "darwin", arch: "arm64", nodeAbi: "137", libc: "none", binaryFormat: "mach-o", sha256: file.sha256, sourceCtime: "2026-07-13T00:00:00.000Z", freshFromBuild: true, load: null });
+    input.attestation.build.normalization.nativeOrigins.push({ path: file.path, sha256: file.sha256, sourceCtime: "2026-07-13T00:00:00.000Z" });
+    refreshAttestationAndManifest(input);
   }).ok, true, "non-Node executable must not require nodeAbi");
   has(mutate((input) => {
     approveResource(input, { id: "addon", category: "native-binaries", sourcePath: "packages/addon.node" });
@@ -219,4 +227,5 @@ test("binds patch, exact toolchain, target and every staged Node addon to attest
       nativeTarget: { format: "node-addon", platform: "darwin", arch: "arm64", libc: "none", nodeAbi: "137" },
     }));
   }), "ATTESTATION_NATIVE_MISMATCH");
+  has(mutate(({ attestation }) => { attestation.smoke.daemon.status.pid += 1; }), "ATTESTATION_SMOKE_MISMATCH");
 });

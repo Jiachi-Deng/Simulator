@@ -34,9 +34,18 @@
       "args": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string", "maxLength": 4096}}, "cwdRole": {"const": "private-detached-checkout"},
       "environmentSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "startedAt": {"type": "string", "minLength": 20, "maxLength": 64}, "finishedAt": {"type": "string", "minLength": 20, "maxLength": 64}
     }, "additionalProperties": false}},
-    "build": {"type": "object", "required": ["startedAt", "finishedAt", "privateDetachedCheckout", "postBuildVerified", "freshOutputs"], "properties": {
+    "build": {"type": "object", "required": ["startedAt", "finishedAt", "privateDetachedCheckout", "postBuildVerified", "freshOutputs", "normalization"], "properties": {
       "startedAt": {"type": "string", "minLength": 20, "maxLength": 64}, "finishedAt": {"type": "string", "minLength": 20, "maxLength": 64},
-      "privateDetachedCheckout": {"const": true}, "postBuildVerified": {"const": true}, "freshOutputs": {"type": "array", "minItems": 4, "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 256}}
+      "privateDetachedCheckout": {"const": true}, "postBuildVerified": {"const": true}, "freshOutputs": {"type": "array", "minItems": 4, "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 256}},
+      "normalization": {"type": "object", "required": ["method", "artifactSymlinksForbidden", "outputs", "nativeOrigins"], "properties": {
+        "method": {"const": "contained-symlink-materialization-v1"}, "artifactSymlinksForbidden": {"const": true},
+        "outputs": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "object", "required": ["role", "symlinksMaterialized"], "properties": {
+          "role": {"enum": ["next-standalone", "daemon-production-closure", "web-sidecar-closure"]}, "symlinksMaterialized": {"type": "integer", "minimum": 0}
+        }, "additionalProperties": false}},
+        "nativeOrigins": {"type": "array", "maxItems": 10000, "items": {"type": "object", "required": ["path", "sha256", "sourceCtime"], "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1024}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "sourceCtime": {"type": "string", "minLength": 20, "maxLength": 64}
+        }, "additionalProperties": false}}
+      }, "additionalProperties": false}
     }, "additionalProperties": false},
     "native": {"type": "array", "maxItems": 10000, "items": {"type": "object", "required": ["packageName", "path", "format", "platform", "arch", "nodeAbi", "libc", "binaryFormat", "sha256", "sourceCtime", "freshFromBuild", "load"], "properties": {
       "packageName": {"enum": ["better-sqlite3", "node-pty", "sharp"]}, "path": {"type": "string", "minLength": 1, "maxLength": 1024}, "format": {"type": "string", "minLength": 1, "maxLength": 32},
@@ -46,7 +55,20 @@
     }, "additionalProperties": false}},
     "smoke": {"type": "object", "required": ["ok", "namespace", "tokenSha256", "daemon", "web", "functional"], "properties": {
       "ok": {"const": true}, "namespace": {"type": "string", "minLength": 1, "maxLength": 128}, "tokenSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-      "daemon": {"type": "object"}, "web": {"type": "object"}, "functional": {"type": "object"}
+      "daemon": {"$ref": "#/$defs/smokeChild"}, "web": {"$ref": "#/$defs/smokeChild"},
+      "functional": {"type": "object", "required": ["ok", "daemonVersion", "webStatus"], "properties": {
+        "ok": {"const": true}, "daemonVersion": {"type": "string", "minLength": 1, "maxLength": 128}, "webStatus": {"type": "integer", "minimum": 200}
+      }, "additionalProperties": false}
+    }, "additionalProperties": false}
+  },
+  "$defs": {
+    "smokeChild": {"type": "object", "required": ["pid", "status", "entryPath", "entrySha256", "args", "startedAt"], "properties": {
+      "pid": {"type": "integer", "minimum": 1},
+      "status": {"type": "object", "required": ["pid", "state", "url"], "properties": {
+        "pid": {"type": "integer", "minimum": 1}, "state": {"const": "running"}, "url": {"type": "string", "pattern": "^http://127\\.0\\.0\\.1:[0-9]{1,5}$"}
+      }, "additionalProperties": false},
+      "entryPath": {"type": "string", "minLength": 1, "maxLength": 1024}, "entrySha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+      "args": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string", "maxLength": 4096}}, "startedAt": {"type": "string", "minLength": 20, "maxLength": 64}
     }, "additionalProperties": false}
   },
   "additionalProperties": false

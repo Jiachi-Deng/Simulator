@@ -3,13 +3,14 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { lstat, open, readFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { createAtomicStagingTarget, sealAndPublish, writeExclusiveCanonicalJson } from "./atomic-publisher.mjs";
 import { inspectNativeRuntime } from "./native-inventory.mjs";
+import { materializeBuildOutput } from "./materialize-build-output.mjs";
 import { createHermeticBuildEnvironment, createPrivateBuildWorkspace, verifyPostBuildWorkspace } from "./private-build-workspace.mjs";
 import { produceInventory } from "./produce-inventory.mjs";
 import { copyStagingInputs } from "./staging-copier.mjs";
@@ -46,8 +47,8 @@ export function createBuildPlan({ workspace, stagingRoot, nodeBin, pnpmBin, prov
     ...BUILD_PACKAGES.map((packageName) => invokePnpm(["--filter", packageName, "build"])),
     invokePnpm(["--filter", "@open-design/web", "build"], { OD_WEB_OUTPUT_MODE: "standalone" }),
     invokePnpm(["--filter", "@open-design/web", "build:sidecar"]),
-    invokePnpm(["--filter", "@open-design/daemon", "deploy", "--prod", "--legacy", workspace.daemonDeployRoot]),
-    invokePnpm(["--filter", "@open-design/web", "deploy", "--prod", "--legacy", workspace.webDeployRoot]),
+    invokePnpm(["--offline", "--frozen-lockfile", "--ignore-scripts", "--filter", "@open-design/daemon", "deploy", "--prod", "--legacy", workspace.daemonDeployRoot]),
+    invokePnpm(["--offline", "--frozen-lockfile", "--ignore-scripts", "--filter", "@open-design/web", "deploy", "--prod", "--legacy", workspace.webDeployRoot]),
   ];
   return { stagingRoot, workspace, nodeBin, pnpmBin, environment, commands };
 }
@@ -89,18 +90,19 @@ export async function prepareProductionStaging({
 
     const buildStartedAtMs = Date.now();
     const commandEvidence = await runBuildPlan(plan, runCommand, verification.toolchain.nodeExecutableSha256);
+    const normalization = await materializeBuildOutputs({ workspace, buildStartedAtMs });
     const postBuild = await verifyPostBuildWorkspace({ workspace, provenance, buildStartedAtMs, run });
     const copied = await copyStagingInputs({
       stagingRoot: plan.stagingRoot,
       policy,
       inputs: [
-        { label: "next-standalone", source: path.join(workspace.checkoutRoot, "apps/web/.next/standalone"), destination: "web/standalone" },
+        { label: "next-standalone", source: normalization.standalone.root, destination: "web/standalone" },
         { label: "next-static", source: path.join(workspace.checkoutRoot, "apps/web/.next/static"), destination: "web/standalone/apps/web/.next/static" },
         { label: "next-public", source: path.join(workspace.checkoutRoot, "apps/web/public"), destination: "web/standalone/apps/web/public" },
-        { label: "daemon-production-closure", source: workspace.daemonDeployRoot, destination: "runtime/daemon" },
-        { label: "web-sidecar-dist", source: path.join(workspace.webDeployRoot, "dist"), destination: "runtime/packages/web-sidecar/dist" },
-        { label: "web-sidecar-node-modules", source: path.join(workspace.webDeployRoot, "node_modules"), destination: "runtime/packages/web-sidecar/node_modules" },
-        { label: "web-sidecar-manifest", source: path.join(workspace.webDeployRoot, "package.json"), destination: "runtime/packages/web-sidecar/package.json" },
+        { label: "daemon-production-closure", source: normalization.daemon.root, destination: "runtime/daemon" },
+        { label: "web-sidecar-dist", source: path.join(normalization.web.root, "dist"), destination: "runtime/packages/web-sidecar/dist" },
+        { label: "web-sidecar-node-modules", source: path.join(normalization.web.root, "node_modules"), destination: "runtime/packages/web-sidecar/node_modules" },
+        { label: "web-sidecar-manifest", source: path.join(normalization.web.root, "package.json"), destination: "runtime/packages/web-sidecar/package.json" },
         { label: "license", source: path.join(workspace.checkoutRoot, provenance.license.sourceFile), destination: "legal/LICENSE" },
         { label: "sbom", source: sbomPath, destination: "legal/SBOM.spdx.json" },
         { label: "provenance", source: path.join(moduleRoot, "provenance.json"), destination: "provenance.json" },
@@ -122,6 +124,7 @@ export async function prepareProductionStaging({
       environment: plan.environment,
       commandEvidence,
       postBuild,
+      normalization,
       buildStartedAtMs,
       buildFinishedAt,
       nativeInventory,
@@ -169,7 +172,7 @@ export async function runBuildPlan(plan, runCommand = defaultCommandRunner, exec
   return evidence;
 }
 
-export function createBuildAttestation({ provenance, verification, environment, commandEvidence, postBuild, buildStartedAtMs, buildFinishedAt, nativeInventory, smoke, externalInputs }) {
+export function createBuildAttestation({ provenance, verification, environment, commandEvidence, postBuild, normalization, buildStartedAtMs, buildFinishedAt, nativeInventory, smoke, externalInputs }) {
   const toolchain = verification.toolchain;
   return {
     schemaVersion: 1,
@@ -200,10 +203,37 @@ export function createBuildAttestation({ provenance, verification, environment, 
       privateDetachedCheckout: true,
       postBuildVerified: true,
       freshOutputs: postBuild.requiredOutputs.map((entry) => path.basename(entry) === "standalone" || path.basename(entry) === "static" ? `apps/web/.next/${path.basename(entry)}` : path.basename(entry)),
+      normalization: publicNormalizationEvidence(normalization),
     },
     native: nativeInventory,
     smoke,
   };
+}
+
+export async function materializeBuildOutputs({ workspace, buildStartedAtMs } = {}) {
+  stagingAssert(path.isAbsolute(workspace?.normalizedRoot ?? ""), "MATERIALIZE_ROOT_INVALID", "private normalization root is required");
+  await mkdir(workspace.normalizedRoot, { mode: 0o700 });
+  const definitions = [
+    { role: "next-standalone", prefix: "web/standalone", source: path.join(workspace.checkoutRoot, "apps/web/.next/standalone"), destination: path.join(workspace.normalizedRoot, "next-standalone") },
+    { role: "daemon-production-closure", prefix: "runtime/daemon", source: workspace.daemonDeployRoot, destination: path.join(workspace.normalizedRoot, "daemon") },
+    { role: "web-sidecar-closure", prefix: "runtime/packages/web-sidecar", source: workspace.webDeployRoot, destination: path.join(workspace.normalizedRoot, "web-sidecar") },
+  ];
+  const results = [];
+  for (const definition of definitions) {
+    const result = await materializeBuildOutput({ sourceRoot: definition.source, destinationRoot: definition.destination, buildStartedAtMs });
+    results.push({ ...definition, ...result });
+  }
+  return Object.assign({ outputs: results }, Object.fromEntries(results.map((entry) => [entry.role === "next-standalone" ? "standalone" : entry.role === "daemon-production-closure" ? "daemon" : "web", entry])));
+}
+
+function publicNormalizationEvidence(normalization) {
+  const outputs = normalization.outputs.map((entry) => ({ role: entry.role, symlinksMaterialized: entry.symlinksMaterialized }));
+  const nativeOrigins = normalization.outputs.flatMap((entry) => entry.nativeOrigins.map((origin) => ({
+    path: `${entry.prefix}/${origin.path}`,
+    sha256: origin.sha256,
+    sourceCtime: origin.sourceCtime,
+  }))).sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)));
+  return { method: "contained-symlink-materialization-v1", artifactSymlinksForbidden: true, outputs, nativeOrigins };
 }
 
 export async function writeArtifactManifest(stagingRoot, produced) {

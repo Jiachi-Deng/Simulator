@@ -24,6 +24,7 @@ export async function createPrivateBuildWorkspace({ sourceRoot, workParent, prov
   const storeRoot = path.join(root, "pnpm-store");
   const daemonDeployRoot = path.join(root, "daemon-deploy");
   const webDeployRoot = path.join(root, "web-sidecar-deploy");
+  const normalizedRoot = path.join(root, "normalized");
   await Promise.all([homeRoot, tempRoot, cacheRoot, storeRoot].map(async (directory) => {
     await mkdir(directory, { mode: 0o700 });
     await assertPrivateDirectory(directory, "BUILD_ROOT_INVALID");
@@ -46,6 +47,7 @@ export async function createPrivateBuildWorkspace({ sourceRoot, workParent, prov
       storeRoot,
       daemonDeployRoot,
       webDeployRoot,
+      normalizedRoot,
       appliedPatch,
       async cleanup() {
         await chmod(root, 0o700).catch(() => undefined);
