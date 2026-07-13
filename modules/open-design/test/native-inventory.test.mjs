@@ -50,6 +50,24 @@ test("records target platform, architecture, and Node ABI for required native pa
   assert.ok(inventory.every((entry) => entry.freshFromBuild && entry.load?.nodeVersion === "v24.14.1"));
 });
 
+test("reports every missing exact native metadata key in one fail-closed preflight", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "open-design-native-metadata-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const files = [
+    "runtime/daemon/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
+    "runtime/daemon/node_modules/node-pty/build/Release/pty.node",
+    "runtime/packages/web-sidecar/node_modules/@img/sharp-darwin-arm64/lib/sharp.node",
+  ];
+  await Promise.all(files.map(async (relative) => {
+    await mkdir(path.dirname(path.join(root, relative)), { recursive: true });
+    await writeFile(path.join(root, relative), arm64MachO());
+  }));
+  await assert.rejects(
+    inspectNativeRuntime({ artifactRoot: root, metadata: {}, target, runtime, buildEvidence: { buildStartedAtMs: Date.now() - 1000, copied: [] }, loadAddon: async () => loaded }),
+    (error) => error.code === "NATIVE_METADATA_MISSING" && files.every((relative) => error.message.includes(relative)),
+  );
+});
+
 test("rejects hard-linked native output and recognizes Mach-O architecture", async (t) => {
   const header = parseNativeHeader(arm64MachO(), "fixture.node");
   assert.deepEqual(header, { format: "mach-o", platform: "darwin", arch: "arm64" });

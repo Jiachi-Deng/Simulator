@@ -47,7 +47,9 @@ export async function inspectNativeRuntime({
 
   const entries = [];
   const seenPackages = new Set();
+  const missingMetadata = [];
   await visitDirectory(root, "");
+  if (missingMetadata.length > 0) stagingFail("NATIVE_METADATA_MISSING", `nativeTarget metadata is required for: ${missingMetadata.sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right))).join(", ")}`);
   for (const packageName of REQUIRED_NATIVE_PACKAGES) {
     stagingAssert(seenPackages.has(packageName), "NATIVE_PACKAGE_MISSING", `${packageName} has no staged native binary`);
   }
@@ -73,6 +75,10 @@ export async function inspectNativeRuntime({
       const packageName = packageNameForArtifactPath(relativePath);
       stagingAssert(packageName != null, "NATIVE_PACKAGE_UNKNOWN", `native binary is outside a known package path: ${relativePath}`);
       const nativeTarget = metadata[relativePath]?.nativeTarget;
+      if (!isPlainObject(nativeTarget)) {
+        missingMetadata.push(relativePath);
+        continue;
+      }
       validateNativeMetadata(nativeTarget, target, relativePath);
       const binary = await inspectNativeBinary(absolutePath, relativePath);
       stagingAssert(binary.platform === target.platform, "NATIVE_PLATFORM_MISMATCH", `${relativePath} is ${binary.platform}, expected ${target.platform}`);
