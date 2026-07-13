@@ -274,7 +274,7 @@ export class ModuleInstaller {
         await this.#fault('after-extraction')
         await normalizeAndVerifyModes(payload, descriptor.artifact.entrypoint)
 
-        const tree = await hashExtractedTree(payload, this.#limits, request.signal, report)
+        const tree = await hashExtractedTree(payload, this.#limits, request.signal, report, descriptor.artifact.entrypoint)
         if (tree.sha256 !== descriptor.extractedManifestSha256) {
           throw new ModuleInstallerError('TREE_HASH_MISMATCH', 'Extracted file manifest SHA-256 does not match verified descriptor')
         }

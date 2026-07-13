@@ -136,6 +136,7 @@ export async function hashExtractedTree(
   limits: InstallLimits,
   signal: AbortSignal | undefined,
   report: ProgressReporter,
+  entrypoint?: string,
 ): Promise<TreeManifestResult> {
   const records: TreeRecord[] = []
   const files = new Map<string, { size: number; executable: boolean; sha256: string }>()
@@ -176,7 +177,9 @@ export async function hashExtractedTree(
         throw new ModuleInstallerError('ARCHIVE_LIMIT_EXCEEDED', 'Extracted tree exceeds byte limits')
       }
       const sha256 = await hashFile(absolute)
-      const executable = (info.mode & 0o111) !== 0
+      const executable = path === entrypoint
+        ? process.platform === 'win32' || (info.mode & 0o111) !== 0
+        : (info.mode & 0o111) !== 0
       files.set(path, { size: info.size, executable, sha256 })
       records.push({ path, value: `F\t${JSON.stringify(path)}\t${info.size}\t${executable ? 1 : 0}\t${sha256}` })
       report({
@@ -221,7 +224,7 @@ export async function normalizeAndVerifyModes(root: string, entrypoint: string):
     await visit(root)
     const entrypointPath = join(root, ...entrypoint.split('/'))
     const info = await lstat(entrypointPath)
-    if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o100) === 0) {
+    if (!info.isFile() || info.isSymbolicLink() || (process.platform !== 'win32' && (info.mode & 0o100) === 0)) {
       throw new ModuleInstallerError('ENTRYPOINT_INVALID', 'Extracted entrypoint is not an owner-executable regular file')
     }
     await access(entrypointPath, constants.X_OK)
