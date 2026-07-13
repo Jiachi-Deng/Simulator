@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { NodeFilesystemModuleCoordinatorStore } from './node-store.ts'
@@ -25,6 +25,17 @@ afterEach(async () => {
 })
 
 describe('NodeFilesystemModuleCoordinatorStore', () => {
+  it('defers root creation until an operation awaits initialization', async () => {
+    const parent = await mkdtemp(join(tmpdir(), 'simulator-module-coordinator-store-lazy-'))
+    roots.push(parent)
+    const directory = join(parent, 'state')
+    const store = new NodeFilesystemModuleCoordinatorStore(directory)
+    await expect(lstat(directory)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await store.load()).toBeUndefined()
+    await store.save(EMPTY_STATE)
+    expect(await store.load()).toEqual(EMPTY_STATE)
+  })
+
   it('requires a trusted absolute root and persists a validated state atomically', async () => {
     expect(() => new NodeFilesystemModuleCoordinatorStore('relative')).toThrow(TypeError)
     const directory = await root()

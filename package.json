@@ -34,7 +34,7 @@
     "typecheck:shared": "cd packages/shared && bun run tsc --noEmit",
     "typecheck:all": "bun run scripts/typecheck-all.ts",
     "test:module-contract": "cd packages/module-contract && bun test",
-    "test:module-coordinator": "cd packages/module-coordinator && bun test",
+    "test:module-coordinator": "cd packages/module-coordinator && bun run test",
     "test:module-coordinator:packaged": "cd packages/module-coordinator && bun run test:packaged",
     "test:module-coordinator:electron": "cd apps/electron && bun run smoke:module-coordinator",
     "test:module-registry": "cd packages/module-registry && bun test",

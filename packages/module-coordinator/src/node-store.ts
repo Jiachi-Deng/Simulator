@@ -54,7 +54,7 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
   readonly root: string
   readonly path: string
   readonly #trustedBoundary: string
-  readonly #ready: Promise<readonly RootIdentity[]>
+  #ready?: Promise<readonly RootIdentity[]>
   readonly #fault?: NodeFilesystemModuleCoordinatorStoreOptions['faultInjector']
 
   constructor(trustedRoot: string, options: NodeFilesystemModuleCoordinatorStoreOptions = {}) {
@@ -67,7 +67,6 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
     }
     this.path = join(this.root, STATE_FILE)
     this.#fault = options.faultInjector
-    this.#ready = this.#initializeRoot()
   }
 
   async load(): Promise<ModuleCoordinatorState | undefined> {
@@ -178,7 +177,8 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
   }
 
   async #assertRoot(): Promise<void> {
-    await this.#assertIdentities(await this.#ready)
+    const identities = await (this.#ready ??= this.#initializeRoot())
+    await this.#assertIdentities(identities)
   }
 
   async #directoryIdentity(path: string, enforceOwnerOnly: boolean): Promise<RootIdentity> {
@@ -206,7 +206,7 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
         throw new ModuleCoordinatorError('STORE_CORRUPT', 'Coordinator trusted ancestor changed')
       }
       if (!info.isDirectory() || info.isSymbolicLink() || !sameIdentity(info, identity)
-        || await realpath(identity.path) !== identity.canonical
+        || (process.platform !== 'win32' && await realpath(identity.path) !== identity.canonical)
         || (typeof process.getuid === 'function' && info.uid !== process.getuid())
         || (process.platform !== 'win32' && (info.mode & 0o077) !== 0)) {
         throw new ModuleCoordinatorError('STORE_CORRUPT', 'Coordinator trusted ancestor changed')
