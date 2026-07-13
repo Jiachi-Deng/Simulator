@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { constants } from 'node:fs'
 import {
-  chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, rmdir,
+  chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, rmdir, unlink,
 } from 'node:fs/promises'
 import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import type { ModuleReleaseTrustState } from '@simulator/module-release-trust'
@@ -73,10 +73,19 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     if (!key || key.length > 1024 || /[\0\r\n]/.test(key)) throw new TypeError('Invalid cache lease key')
     const base = join(this.root, 'leases', 'claims', createHash('sha256').update(key).digest('hex'))
     let recoveries = 0
+    let cleanupFailures = 0
     while (true) {
       if (signal.aborted) throw signal.reason
       const state = await this.#reconcileLease(base)
+      if (state === 'cleanup-blocked') {
+        if (++cleanupFailures > this.#maxRecoveries) {
+          throw Object.assign(new Error('Released lease marker cleanup remained blocked'), { code: 'LEASE_CLEANUP_BLOCKED' })
+        }
+        await sleep(this.#pollMs, signal)
+        continue
+      }
       if (state === 'blocked') { await sleep(this.#pollMs, signal); continue }
+      cleanupFailures = 0
       const owner = await this.#newOwner()
       const ownerPath = this.#leaseOwner(owner.token)
       await this.#immutableJson(ownerPath, owner)
@@ -312,7 +321,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     const path = join(this.root, name); await assertDirectory(path); await assertContained(this.root, path)
   }
 
-  async #reconcileLease(base: string): Promise<'clear' | 'blocked'> {
+  async #reconcileLease(base: string): Promise<'clear' | 'blocked' | 'cleanup-blocked'> {
     const parent = dirname(base); const prefix = `${baseName(base)}.recover-`
     for (const name of (await directoryNames(parent)).filter((value) => value.startsWith(prefix))) {
       const quarantine = join(parent, name); const token = await claimToken(quarantine, this.root)
@@ -324,7 +333,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     }
     const lock = `${base}.lock`; const info = await lstat(lock).catch(() => undefined)
     if (!info) {
-      if (process.platform === 'win32' && !await this.#clearReleasedLeaseMarkers(base)) return 'blocked'
+      if (process.platform === 'win32' && !await this.#clearReleasedLeaseMarkers(base)) return 'cleanup-blocked'
       return 'clear'
     }
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Unsafe lease claim')
@@ -385,8 +394,8 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
         throw cause
       }
       await this.#syncDirectory(dirname(base))
-      await safeRemoveFile(marker, this.root).catch((cause) => {
-        if (!hasCode(cause, 'ENOENT') && !hasCode(cause, 'EPERM')) throw cause
+      await this.#faultAt('cleanup', marker).then(() => safeRemoveFile(marker, this.root)).catch((cause) => {
+        if (!hasCode(cause, 'ENOENT') && !isDeferredWindowsCleanup(cause)) throw cause
       })
       return
     }
@@ -417,18 +426,19 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   }
   async #clearReleasedLeaseMarkers(base: string): Promise<boolean> {
     for (const token of await this.#releasedLeaseTokens(base)) {
-      try { await safeRemoveFile(this.#leaseReleaseMarker(base, token), this.root) }
+      const marker = this.#leaseReleaseMarker(base, token)
+      try { await this.#faultAt('cleanup', marker); await safeRemoveFile(marker, this.root) }
       catch (cause) {
         if (hasCode(cause, 'ENOENT')) continue
-        if (hasCode(cause, 'EPERM')) return false
+        if (isDeferredWindowsCleanup(cause)) return false
         throw cause
       }
     }
     return true
   }
-  async #releasedLeaseCleared(base: string, lock: string): Promise<'clear' | 'blocked'> {
+  async #releasedLeaseCleared(base: string, lock: string): Promise<'clear' | 'blocked' | 'cleanup-blocked'> {
     if (await exists(lock)) return 'blocked'
-    if (process.platform === 'win32' && !await this.#clearReleasedLeaseMarkers(base)) return 'blocked'
+    if (process.platform === 'win32' && !await this.#clearReleasedLeaseMarkers(base)) return 'cleanup-blocked'
     return 'clear'
   }
 
@@ -466,7 +476,10 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
       if (this.#now() - info.mtimeMs > this.#staleMs) { await safeRemoveFile(path, this.root); remaining -= 1 }
     }
     const claims = join(this.root, 'leases', 'claims')
-    const bases = new Set((await directoryNames(claims)).map((name) => name.match(/^([a-f0-9]{64})\.(?:lock|recover-)/)?.[1]).filter((v): v is string => Boolean(v)))
+    const leaseClaimPattern = process.platform === 'win32'
+      ? /^([a-f0-9]{64})\.(?:lock|recover-|released-)/
+      : /^([a-f0-9]{64})\.(?:lock|recover-)/
+    const bases = new Set((await directoryNames(claims)).map((name) => name.match(leaseClaimPattern)?.[1]).filter((v): v is string => Boolean(v)))
     for (const name of bases) { if (!remaining--) return; await this.#reconcileLease(join(claims, name)) }
     const artifactClaims = join(this.root, 'artifacts', 'claims')
     for (const name of await directoryNames(artifactClaims)) {
@@ -605,6 +618,7 @@ function validateId(value: string): void { if (!UUID.test(value)) throw new Type
 function validPartial(value: ArtifactPartialRecord): boolean { return UUID.test(value.id) && HASH.test(value.sha256) && Number.isSafeInteger(value.bytesWritten) && value.bytesWritten >= 0 }
 function positive(value: number | undefined, fallback: number, name: string): number { const result = value ?? fallback; if (!Number.isSafeInteger(result) || result <= 0) throw new TypeError(`${name} must be positive`); return result }
 function hasCode(cause: unknown, code: string): boolean { return cause instanceof Error && 'code' in cause && cause.code === code }
+function isDeferredWindowsCleanup(cause: unknown): boolean { return process.platform === 'win32' && ['EFAULT', 'EBUSY', 'EPERM'].some((code) => hasCode(cause, code)) }
 function isLivePid(pid: number): boolean { if (!Number.isSafeInteger(pid) || pid <= 0) return false; try { process.kill(pid, 0); return true } catch (cause) { return hasCode(cause, 'EPERM') } }
 function sha256(bytes: Uint8Array): string { return createHash('sha256').update(bytes).digest('hex') }
 function baseName(path: string): string { return path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1) }
@@ -624,7 +638,7 @@ async function safeOpen(path: string, flags: number, root: string) {
 async function safeReadFile(path: string, root: string): Promise<Buffer> { const handle = await safeOpen(path, constants.O_RDONLY, root); try { return await handle.readFile() } finally { await handle.close() } }
 async function safeReadJson<T>(path: string, root: string): Promise<T | undefined> { try { return JSON.parse((await safeReadFile(path, root)).toString('utf8')) as T } catch (cause) { if (hasCode(cause, 'ENOENT')) return undefined; throw cause } }
 async function safeStatFile(path: string, root: string) { const handle = await safeOpen(path, constants.O_RDONLY, root); try { return await handle.stat() } finally { await handle.close() } }
-async function safeRemoveFile(path: string, root: string): Promise<void> { const info = await lstat(path).catch(() => undefined); if (!info) return; if (!info.isFile() || info.isSymbolicLink()) throw new Error('Refusing to remove unsafe cache leaf'); await assertContained(root, path); await rm(path) }
+async function safeRemoveFile(path: string, root: string): Promise<void> { const info = await lstat(path).catch(() => undefined); if (!info) return; if (!info.isFile() || info.isSymbolicLink()) throw new Error('Refusing to remove unsafe cache leaf'); await assertContained(root, path); await unlink(path) }
 async function hashFile(path: string, root: string): Promise<string> { const handle = await safeOpen(path, constants.O_RDONLY, root); const hash = createHash('sha256'); try { for await (const chunk of readChunks(handle, false)) hash.update(chunk); return hash.digest('hex') } finally { await handle.close() } }
 async function claimToken(path: string, root: string): Promise<string | undefined> { const value = await safeReadJson<{ token?: string }>(join(path, 'claim.json'), root).catch(() => undefined); return value?.token && UUID.test(value.token) ? value.token : undefined }
 async function copyVerified(source: string, destination: string, root: string): Promise<void> { const input = await safeOpen(source, constants.O_RDONLY, root); const output = await open(destination, exclusiveWriteFlags(), FILE_MODE); try { let position = 0; for await (const chunk of readChunks(input, false)) { await writeAll(output, chunk, position); position += chunk.byteLength } await output.sync() } finally { await Promise.all([input.close(), output.close()]) } }
