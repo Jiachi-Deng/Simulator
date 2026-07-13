@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
+import { createHash } from 'node:crypto'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -61,8 +62,9 @@ describe('filesystem-like cache adapter conformance', () => {
 
   it('creates unique partials and compare-absent publishes one artifact winner', async () => {
     const [left, right] = await pair()
+    const bytes = new Uint8Array([1, 2, 3])
     const base = {
-      sha256: 'a'.repeat(64),
+      sha256: createHash('sha256').update(bytes).digest('hex'),
       sourceUrl: 'https://modules.example.test/a.tar.gz',
       expectedSize: 3,
       updatedAt: 1,
@@ -70,8 +72,8 @@ describe('filesystem-like cache adapter conformance', () => {
     const first = await left.createPartial(base)
     const second = await right.createPartial(base)
     expect(first.id).not.toBe(second.id)
-    await left.appendPartial(first.id, new Uint8Array([1, 2, 3]), 2)
-    await right.appendPartial(second.id, new Uint8Array([1, 2, 3]), 2)
+    await left.appendPartial(first.id, bytes, 2)
+    await right.appendPartial(second.id, bytes, 2)
     const artifact = { sha256: base.sha256, size: 3, committedAt: 3 }
     expect(await left.publishPartial(first.id, artifact)).toBe('published')
     expect(await right.publishPartial(second.id, artifact)).toBe('already-present')
