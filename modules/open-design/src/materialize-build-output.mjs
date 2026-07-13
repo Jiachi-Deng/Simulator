@@ -21,10 +21,11 @@ export async function materializeBuildOutput({ sourceRoot, destinationRoot, buil
 
   let entries = 0;
   let symlinksMaterialized = 0;
+  let hardlinksMaterialized = 0;
   const nativeOrigins = [];
   try {
     await copyDirectory(sourceReal, destinationRoot, "", new Set(), 0);
-    return { root: destinationRoot, symlinksMaterialized, nativeOrigins: nativeOrigins.sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path))) };
+    return { root: destinationRoot, symlinksMaterialized, hardlinksMaterialized, nativeOrigins: nativeOrigins.sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path))) };
   } catch (error) {
     await rm(destinationRoot, { recursive: true, force: true }).catch(() => undefined);
     throw error;
@@ -83,13 +84,14 @@ export async function materializeBuildOutput({ sourceRoot, destinationRoot, buil
   }
 
   async function copyFile(sourcePath, destinationPath, relativePath, expected) {
-    stagingAssert(expected.nlink === 1, "MATERIALIZE_HARD_LINK_FORBIDDEN", `hard-linked source is forbidden: ${relativePath}`);
+    stagingAssert(expected.nlink >= 1, "MATERIALIZE_SOURCE_INVALID", `source link count is invalid: ${relativePath}`);
+    if (expected.nlink > 1) hardlinksMaterialized += 1;
     stagingAssert(expected.uid === currentUid(), "MATERIALIZE_OWNER_MISMATCH", `source is not owned by the current user: ${relativePath}`);
     const input = await open(sourcePath, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)).catch((error) => stagingFail("MATERIALIZE_SOURCE_INVALID", error.message));
     let output;
     try {
       const before = await input.stat();
-      stagingAssert(before.isFile() && before.nlink === 1 && sameIdentity(before, expected), "MATERIALIZE_SOURCE_CHANGED", `file changed before copying: ${relativePath}`);
+      stagingAssert(before.isFile() && sameIdentity(before, expected), "MATERIALIZE_SOURCE_CHANGED", `file changed before copying: ${relativePath}`);
       output = await open(destinationPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), 0o600);
       const hash = createHash("sha256");
       const buffer = Buffer.allocUnsafe(64 * 1024);
@@ -109,6 +111,8 @@ export async function materializeBuildOutput({ sourceRoot, destinationRoot, buil
       const after = await input.stat();
       const afterPath = await lstat(sourcePath);
       stagingAssert(sameIdentity(before, after) && sameIdentity(before, afterPath) && after.size === position, "MATERIALIZE_SOURCE_CHANGED", `file changed while copying: ${relativePath}`);
+      const destinationStat = await output.stat();
+      stagingAssert(destinationStat.isFile() && destinationStat.nlink === 1 && destinationStat.uid === currentUid() && destinationStat.size === position, "MATERIALIZE_DESTINATION_INVALID", `destination is not an owner-built unlinked regular file: ${relativePath}`);
       await chmod(destinationPath, before.mode & 0o111 ? 0o755 : 0o644);
       const sha256 = hash.digest("hex");
       if (NATIVE_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) {

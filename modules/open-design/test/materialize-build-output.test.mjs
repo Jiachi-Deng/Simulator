@@ -31,7 +31,7 @@ test("materializes contained package links and records the original native diges
   assert.match(result.nativeOrigins[0].sha256, /^[0-9a-f]{64}$/u);
 });
 
-test("rejects escaping symlinks, hard links, and stale native sources", async (t) => {
+test("rejects escaping symlinks and stale native sources while unlinking private hard links", async (t) => {
   const escaping = await fixture(t);
   await writeFile(path.join(escaping.parent, "outside"), "outside");
   await symlink("../outside", path.join(escaping.source, "escape"));
@@ -41,7 +41,10 @@ test("rejects escaping symlinks, hard links, and stale native sources", async (t
   const original = path.join(hardlinked.source, "file.js");
   await writeFile(original, "content");
   await link(original, path.join(hardlinked.source, "alias.js"));
-  await assert.rejects(materializeBuildOutput({ sourceRoot: hardlinked.source, destinationRoot: hardlinked.destination, buildStartedAtMs: 0 }), { code: "MATERIALIZE_HARD_LINK_FORBIDDEN" });
+  const hardlinkResult = await materializeBuildOutput({ sourceRoot: hardlinked.source, destinationRoot: hardlinked.destination, buildStartedAtMs: 0 });
+  assert.equal(hardlinkResult.hardlinksMaterialized, 2);
+  assert.equal((await lstat(path.join(hardlinked.destination, "file.js"))).nlink, 1);
+  assert.equal((await lstat(path.join(hardlinked.destination, "alias.js"))).nlink, 1);
 
   const stale = await fixture(t);
   await writeFile(path.join(stale.source, "stale.node"), "native");

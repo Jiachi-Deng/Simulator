@@ -227,7 +227,7 @@ export async function materializeBuildOutputs({ workspace, buildStartedAtMs } = 
 }
 
 function publicNormalizationEvidence(normalization) {
-  const outputs = normalization.outputs.map((entry) => ({ role: entry.role, symlinksMaterialized: entry.symlinksMaterialized }));
+  const outputs = normalization.outputs.map((entry) => ({ role: entry.role, symlinksMaterialized: entry.symlinksMaterialized, hardlinksMaterialized: entry.hardlinksMaterialized }));
   const nativeOrigins = normalization.outputs.flatMap((entry) => entry.nativeOrigins.map((origin) => ({
     path: `${entry.prefix}/${origin.path}`,
     sha256: origin.sha256,
