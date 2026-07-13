@@ -10,13 +10,14 @@ const SHA40 = /^[0-9a-f]{40}$/;
 const textEncoder = new TextEncoder();
 const moduleRoot = new URL("../", import.meta.url);
 
-export function validateArtifact({ provenance, policy, decisions, inventory, schemas }) {
+export function validateArtifact({ provenance, policy, decisions, attestation, inventory, schemas }) {
   const errors = [];
   const fail = (code, message) => errors.push({ code, message });
   const schemaInputs = [
     ["provenance", provenance, schemas?.provenance],
     ["policy", policy, schemas?.policy],
     ["decisions", decisions, schemas?.decisions],
+    ["attestation", attestation, schemas?.attestation],
     ["inventory", inventory, schemas?.inventory]
   ];
   for (const [name, value, schema] of schemaInputs) {
@@ -30,8 +31,9 @@ export function validateArtifact({ provenance, policy, decisions, inventory, sch
   const pinned = provenance.source;
   if (!SHA40.test(pinned.commit) || /^(HEAD|main|master|develop)$/i.test(pinned.ref)) fail("SOURCE_NOT_PINNED", "source must use a pinned tag/commit and full SHA");
   if (inventory.source.commit !== pinned.commit || inventory.source.ref !== pinned.ref) fail("SOURCE_MISMATCH", "inventory source must match pinned provenance exactly");
+  validateAttestation({ attestation, provenance, inventory }, fail);
 
-  validateLimits({ provenance, policy, decisions, inventory }, policy.limits, fail);
+  validateLimits({ provenance, policy, decisions, attestation, inventory }, policy.limits, fail);
   validateTarget(inventory.target, fail);
 
   const decisionById = new Map();
@@ -92,9 +94,30 @@ export function validateArtifact({ provenance, policy, decisions, inventory, sch
   if (!Number.isSafeInteger(totalBytes) || totalBytes > policy.limits.maxTotalBytes) fail("TOTAL_SIZE_EXCEEDED", "inventory exceeds maxTotalBytes");
 
   const filesByPath = new Map(inventory.files.map((file) => [file.path, file]));
-  for (const required of policy.requiredFiles) validateRequiredFile(filesByPath.get(required.path), required, pinned.commit, { provenance, inventory }, fail);
+  for (const required of policy.requiredFiles) validateRequiredFile(filesByPath.get(required.path), required, pinned.commit, { provenance, attestation, inventory }, fail);
 
   return { ok: errors.length === 0, errors };
+}
+
+function validateAttestation({ attestation, provenance, inventory }, fail) {
+  if (attestation.sourceCommit !== provenance.source.commit) fail("ATTESTATION_SOURCE_MISMATCH", "build attestation source commit does not match provenance");
+  if (attestation.patch.sha256 !== provenance.simulatorPatch.sha256 || attestation.patch.postimageSha256 !== provenance.simulatorPatch.postimageSha256) {
+    fail("ATTESTATION_PATCH_MISMATCH", "build attestation patch does not match provenance");
+  }
+  const expected = provenance.buildToolchainExpectations;
+  const actual = attestation.toolchain;
+  for (const [attestationKey, provenanceKey] of [["nodeVersion", "node"], ["nodeAbi", "nodeAbi"], ["platform", "platform"], ["arch", "arch"], ["nodeExecutableSha256", "nodeExecutableSha256"], ["pnpmVersion", "pnpm"], ["pnpmExecutableSha256", "pnpmExecutableSha256"]]) {
+    if (actual[attestationKey] !== expected[provenanceKey]) fail("ATTESTATION_TOOLCHAIN_MISMATCH", `build attestation ${attestationKey} does not match provenance`);
+  }
+  if (inventory.target.platform !== actual.platform || inventory.target.arch !== actual.arch || inventory.target.nodeAbi !== actual.nodeAbi) fail("ATTESTATION_TARGET_MISMATCH", "artifact target does not match attested toolchain");
+  const nativeByPath = new Map(attestation.native.map((entry) => [entry.path, entry]));
+  for (const file of inventory.files) {
+    if (path.posix.extname(file.path).toLowerCase() !== ".node") continue;
+    const native = nativeByPath.get(file.path);
+    if (!native || native.sha256 !== file.sha256 || native.load?.ok !== true || native.load.nodeAbi !== inventory.target.nodeAbi) {
+      fail("ATTESTATION_NATIVE_MISMATCH", `Node addon is not bound to a successful exact-runtime load: ${file.path}`);
+    }
+  }
 }
 
 function validateSchema(value, schema, location, fail) {
@@ -231,6 +254,7 @@ function validateRequiredFile(file, required, sourceCommit, inputs, fail) {
   if (file.mediaType !== required.mediaType || file.schemaId !== required.schemaId) fail("CONTENT_BINDING_INVALID", `required file has incorrect media/schema binding: ${required.path}`);
   if (required.path !== "legal/LICENSE" && (file.contentSchemaVersion !== required.schemaVersion || file.sourceCommit !== sourceCommit)) fail("CONTENT_BINDING_INVALID", `required JSON document lacks expected schemaVersion/sourceCommit binding: ${required.path}`);
   if (required.path === "provenance.json" && file.sha256 !== digestCanonicalJson(inputs.provenance)) fail("CONTENT_DIGEST_MISMATCH", "provenance digest does not bind the supplied provenance document");
+  if (required.path === "build-attestation.json" && file.sha256 !== digestCanonicalJson(inputs.attestation)) fail("CONTENT_DIGEST_MISMATCH", "attestation digest does not bind the supplied build attestation document");
   if (required.path === "artifact-manifest.json" && file.sha256 !== digestInventory(inputs.inventory)) fail("CONTENT_DIGEST_MISMATCH", "manifest digest does not bind the supplied inventory document");
 }
 
@@ -256,13 +280,13 @@ async function readJson(filename) {
 }
 
 export async function loadRuntimeSchemas() {
-  const names = { provenance: "provenance.schema.json", policy: "policy.schema.json", decisions: "resource-decisions.schema.json", inventory: "inventory.schema.json", inventoryFile: "inventory-file.schema.json" };
+  const names = { provenance: "provenance.schema.json", policy: "policy.schema.json", decisions: "resource-decisions.schema.json", attestation: "build-attestation.schema.json", inventory: "inventory.schema.json", inventoryFile: "inventory-file.schema.json" };
   return Object.fromEntries(await Promise.all(Object.entries(names).map(async ([name, filename]) => [name, await readJson(new URL(filename, moduleRoot))])));
 }
 
 async function main(argv) {
   const options = parseArguments(argv);
-  const names = ["provenance", "policy", "decisions", "inventory"];
+  const names = ["provenance", "policy", "decisions", "attestation", "inventory"];
   const inputs = Object.fromEntries(await Promise.all(names.map(async (name) => [name, await readJson(options[name])])));
   inputs.schemas = await loadRuntimeSchemas();
   const result = validateArtifact(inputs);
@@ -273,7 +297,7 @@ async function main(argv) {
 }
 
 function parseArguments(argv) {
-  const allowed = new Set(["provenance", "policy", "decisions", "inventory"]);
+  const allowed = new Set(["provenance", "policy", "decisions", "attestation", "inventory"]);
   const options = {};
   for (let index = 0; index < argv.length; index += 2) {
     const token = argv[index];

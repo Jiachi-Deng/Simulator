@@ -18,6 +18,7 @@ const base = {
   provenance: await load("provenance.json"),
   policy: await load("artifact-policy.json"),
   decisions: await load("resource-decisions.json"),
+  attestation: await load("fixtures/minimal-build-attestation.json"),
   schemas: await loadRuntimeSchemas(),
   target: { platform: "darwin", arch: "arm64", nodeAbi: "137", libc: "none" }
 };
@@ -34,7 +35,8 @@ async function fixture() {
     writeFile(path.join(root, "runtime/daemon/dist/cli.js"), "daemon\n"),
     writeFile(path.join(root, "legal/LICENSE"), "Apache License\n"),
     writeFile(path.join(root, "legal/SBOM.spdx.json"), "{}\n"),
-    writeFile(path.join(root, "provenance.json"), canonicalJson(base.provenance))
+    writeFile(path.join(root, "provenance.json"), canonicalJson(base.provenance)),
+    writeFile(path.join(root, "build-attestation.json"), canonicalJson(base.attestation))
   ]);
   return root;
 }

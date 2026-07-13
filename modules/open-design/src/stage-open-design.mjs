@@ -1,15 +1,21 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { lstat, open, readFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { assertNativeBuildsAllowed, inspectNativeRuntime } from "./native-inventory.mjs";
+import { createAtomicStagingTarget, sealAndPublish, writeExclusiveCanonicalJson } from "./atomic-publisher.mjs";
+import { inspectNativeRuntime } from "./native-inventory.mjs";
+import { createHermeticBuildEnvironment, createPrivateBuildWorkspace, verifyPostBuildWorkspace } from "./private-build-workspace.mjs";
 import { produceInventory } from "./produce-inventory.mjs";
 import { copyStagingInputs } from "./staging-copier.mjs";
+import { smokeStagedRuntime } from "./staged-runtime-smoke.mjs";
 import { stagingAssert, stagingFail } from "./staging-error.mjs";
+import { digestCanonicalJson } from "./validate-artifact.mjs";
 import { verifyUpstream } from "./verify-upstream.mjs";
 
 const moduleRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -29,77 +35,175 @@ const BUILD_PACKAGES = Object.freeze([
   "@open-design/daemon",
 ]);
 
-export function createBuildPlan({ sourceRoot, stagingRoot, workRoot = defaultWorkRoot(stagingRoot), pnpmBin = "pnpm" } = {}) {
-  stagingAssert(path.isAbsolute(sourceRoot ?? ""), "SOURCE_ROOT_INVALID", "source root must be an absolute path");
-  stagingAssert(path.isAbsolute(stagingRoot ?? ""), "STAGING_ROOT_INVALID", "staging root must be an absolute path");
-  stagingAssert(path.isAbsolute(workRoot ?? ""), "WORK_ROOT_INVALID", "work root must be an absolute path");
-  stagingAssert(workRoot !== stagingRoot && !workRoot.startsWith(`${stagingRoot}${path.sep}`), "WORK_ROOT_INVALID", "work root must not be inside staging root");
-  const daemonDeployRoot = path.join(workRoot, "daemon-deploy");
-  const webDeployRoot = path.join(workRoot, "web-sidecar-deploy");
+export function createBuildPlan({ workspace, stagingRoot, nodeBin, pnpmBin, provenance } = {}) {
+  stagingAssert(path.isAbsolute(workspace?.checkoutRoot ?? ""), "BUILD_WORKSPACE_INVALID", "private checkout is required");
+  stagingAssert(path.isAbsolute(stagingRoot ?? ""), "STAGING_ROOT_INVALID", "staging root must be absolute");
+  stagingAssert(path.isAbsolute(nodeBin ?? "") && path.isAbsolute(pnpmBin ?? ""), "TOOLCHAIN_PATH_INVALID", "exact Node and pnpm executable paths are required");
+  const environment = createHermeticBuildEnvironment({ workspace, nodeBin, provenance });
+  const invokePnpm = (args, extraEnv = {}) => command(nodeBin, [pnpmBin, ...args], workspace.checkoutRoot, { ...environment, ...extraEnv });
   const commands = [
-    command(pnpmBin, ["install", "--frozen-lockfile"], sourceRoot),
-    ...BUILD_PACKAGES.map((packageName) => command(pnpmBin, ["--filter", packageName, "build"], sourceRoot)),
-    command(pnpmBin, ["--filter", "@open-design/web", "build"], sourceRoot, { OD_WEB_OUTPUT_MODE: "standalone" }),
-    command(pnpmBin, ["--filter", "@open-design/web", "build:sidecar"], sourceRoot),
-    command(pnpmBin, ["--filter", "@open-design/daemon", "deploy", "--prod", daemonDeployRoot], sourceRoot),
-    command(pnpmBin, ["--filter", "@open-design/web", "deploy", "--prod", webDeployRoot], sourceRoot),
+    invokePnpm(["install", "--frozen-lockfile"]),
+    ...BUILD_PACKAGES.map((packageName) => invokePnpm(["--filter", packageName, "build"])),
+    invokePnpm(["--filter", "@open-design/web", "build"], { OD_WEB_OUTPUT_MODE: "standalone" }),
+    invokePnpm(["--filter", "@open-design/web", "build:sidecar"]),
+    invokePnpm(["--filter", "@open-design/daemon", "deploy", "--prod", workspace.daemonDeployRoot]),
+    invokePnpm(["--filter", "@open-design/web", "deploy", "--prod", workspace.webDeployRoot]),
   ];
-  return { sourceRoot, stagingRoot, workRoot, daemonDeployRoot, webDeployRoot, commands };
+  return { stagingRoot, workspace, nodeBin, pnpmBin, environment, commands };
 }
 
 export async function prepareProductionStaging({
   sourceRoot,
   stagingRoot,
+  workParent,
   sbomPath,
   metadataPath,
   targetPath,
-  workRoot,
-  pnpmBin = "pnpm",
-  nodeVersion,
-  pnpmVersion,
+  nodeBin,
+  pnpmBin,
   dryRun = false,
   run,
   runCommand = defaultCommandRunner,
 } = {}) {
-  const [provenance, policy, decisions, metadata, target, sbom] = await Promise.all([
-    readJsonRegular(path.join(moduleRoot, "provenance.json"), "PROVENANCE_INVALID"),
-    readJsonRegular(path.join(moduleRoot, "artifact-policy.json"), "STAGING_POLICY_INVALID"),
-    readJsonRegular(path.join(moduleRoot, "resource-decisions.json"), "RESOURCE_DECISIONS_INVALID"),
-    readJsonRegular(metadataPath, "METADATA_INPUT_INVALID"),
-    readJsonRegular(targetPath, "TARGET_INPUT_INVALID"),
-    readJsonRegular(sbomPath, "SBOM_INPUT_INVALID"),
+  const [provenanceInput, policyInput, decisionsInput, metadataInput, targetInput, sbomInput] = await Promise.all([
+    readJsonInput(path.join(moduleRoot, "provenance.json"), "PROVENANCE_INVALID"),
+    readJsonInput(path.join(moduleRoot, "artifact-policy.json"), "STAGING_POLICY_INVALID"),
+    readJsonInput(path.join(moduleRoot, "resource-decisions.json"), "RESOURCE_DECISIONS_INVALID"),
+    readJsonInput(metadataPath, "METADATA_INPUT_INVALID"),
+    readJsonInput(targetPath, "TARGET_INPUT_INVALID"),
+    readJsonInput(sbomPath, "SBOM_INPUT_INVALID"),
   ]);
-  validateSbom(sbom);
-  const verification = await verifyUpstream({ sourceRoot, provenance, nodeVersion, pnpmVersion, pnpmBin, run });
-  assertNativeBuildsAllowed(verification.manifest);
-  const plan = createBuildPlan({ sourceRoot: verification.sourceRoot, stagingRoot, workRoot, pnpmBin });
-  if (dryRun) return { dryRun: true, verification, plan };
+  const provenance = provenanceInput.value;
+  const policy = policyInput.value;
+  const decisions = decisionsInput.value;
+  const metadata = metadataInput.value;
+  const target = targetInput.value;
+  validateSbom(sbomInput.value);
+  const verification = await verifyUpstream({ sourceRoot, provenance, nodeBin, pnpmBin, run });
+  const atomicTarget = await createAtomicStagingTarget(stagingRoot);
+  let workspace;
+  try {
+    workspace = await createPrivateBuildWorkspace({ sourceRoot: verification.sourceRoot, workParent, provenance, run });
+    const plan = createBuildPlan({ workspace, stagingRoot: atomicTarget.tempRoot, nodeBin: verification.toolchain.nodeExecutable, pnpmBin: verification.toolchain.pnpmExecutable, provenance });
+    if (dryRun) return { dryRun: true, verification, plan: publicPlan(plan), patch: workspace.appliedPatch };
 
-  await runBuildPlan(plan, runCommand);
-  const copied = await copyStagingInputs({
-    stagingRoot: plan.stagingRoot,
-    policy,
-    inputs: [
-      { label: "next-standalone", source: path.join(plan.sourceRoot, "apps/web/.next/standalone"), destination: "web/standalone" },
-      { label: "next-static", source: path.join(plan.sourceRoot, "apps/web/.next/static"), destination: "web/standalone/apps/web/.next/static" },
-      { label: "next-public", source: path.join(plan.sourceRoot, "apps/web/public"), destination: "web/standalone/apps/web/public" },
-      { label: "daemon-production-closure", source: plan.daemonDeployRoot, destination: "runtime/daemon" },
-      { label: "web-sidecar-dist", source: path.join(plan.webDeployRoot, "dist"), destination: "runtime/packages/web-sidecar/dist" },
-      { label: "web-sidecar-node-modules", source: path.join(plan.webDeployRoot, "node_modules"), destination: "runtime/packages/web-sidecar/node_modules" },
-      { label: "web-sidecar-manifest", source: path.join(plan.webDeployRoot, "package.json"), destination: "runtime/packages/web-sidecar/package.json" },
-      { label: "license", source: path.join(plan.sourceRoot, provenance.license.sourceFile), destination: "legal/LICENSE" },
-      { label: "sbom", source: sbomPath, destination: "legal/SBOM.spdx.json" },
-      { label: "provenance", source: path.join(moduleRoot, "provenance.json"), destination: "provenance.json" },
-    ],
-  });
-  const nativeInventory = await inspectNativeRuntime({ artifactRoot: copied.root, metadata, target });
-  const produced = await produceInventory({ stagingRoot: copied.root, metadata, provenance, policy, decisions, target });
-  await writeArtifactManifest(copied.root, produced);
-  return { dryRun: false, verification, plan, copied, nativeInventory, inventory: produced.inventory };
+    const buildStartedAtMs = Date.now();
+    const commandEvidence = await runBuildPlan(plan, runCommand, verification.toolchain.nodeExecutableSha256);
+    const postBuild = await verifyPostBuildWorkspace({ workspace, provenance, buildStartedAtMs, run });
+    const copied = await copyStagingInputs({
+      stagingRoot: plan.stagingRoot,
+      policy,
+      inputs: [
+        { label: "next-standalone", source: path.join(workspace.checkoutRoot, "apps/web/.next/standalone"), destination: "web/standalone" },
+        { label: "next-static", source: path.join(workspace.checkoutRoot, "apps/web/.next/static"), destination: "web/standalone/apps/web/.next/static" },
+        { label: "next-public", source: path.join(workspace.checkoutRoot, "apps/web/public"), destination: "web/standalone/apps/web/public" },
+        { label: "daemon-production-closure", source: workspace.daemonDeployRoot, destination: "runtime/daemon" },
+        { label: "web-sidecar-dist", source: path.join(workspace.webDeployRoot, "dist"), destination: "runtime/packages/web-sidecar/dist" },
+        { label: "web-sidecar-node-modules", source: path.join(workspace.webDeployRoot, "node_modules"), destination: "runtime/packages/web-sidecar/node_modules" },
+        { label: "web-sidecar-manifest", source: path.join(workspace.webDeployRoot, "package.json"), destination: "runtime/packages/web-sidecar/package.json" },
+        { label: "license", source: path.join(workspace.checkoutRoot, provenance.license.sourceFile), destination: "legal/LICENSE" },
+        { label: "sbom", source: sbomPath, destination: "legal/SBOM.spdx.json" },
+        { label: "provenance", source: path.join(moduleRoot, "provenance.json"), destination: "provenance.json" },
+      ],
+    });
+    const nativeInventory = await inspectNativeRuntime({
+      artifactRoot: copied.root,
+      metadata,
+      target,
+      nodeBin: verification.toolchain.nodeExecutable,
+      runtime: { platform: verification.toolchain.platform, arch: verification.toolchain.arch, nodeAbi: verification.toolchain.nodeAbi },
+      buildEvidence: { buildStartedAtMs, copied: copied.copied },
+    });
+    const smoke = await smokeStagedRuntime({ artifactRoot: copied.root, nodeBin: verification.toolchain.nodeExecutable });
+    const buildFinishedAt = new Date().toISOString();
+    const attestation = createBuildAttestation({
+      provenance,
+      verification,
+      environment: plan.environment,
+      commandEvidence,
+      postBuild,
+      buildStartedAtMs,
+      buildFinishedAt,
+      nativeInventory,
+      smoke,
+      externalInputs: [
+        ...verification.inputs.map((input) => ({ name: input.path, sha256: input.sha256 })),
+        { name: "legal/SBOM.spdx.json", sha256: sbomInput.sha256 },
+        { name: "resource-metadata.json", sha256: metadataInput.sha256 },
+        { name: "target.json", sha256: targetInput.sha256 },
+        { name: "provenance.json", sha256: provenanceInput.sha256 },
+        { name: "artifact-policy.json", sha256: policyInput.sha256 },
+        { name: "resource-decisions.json", sha256: decisionsInput.sha256 },
+      ],
+    });
+    await writeExclusiveCanonicalJson(path.join(copied.root, "build-attestation.json"), attestation);
+    const produced = await produceInventory({ stagingRoot: copied.root, metadata, provenance, policy, decisions, attestation, target });
+    await writeArtifactManifest(copied.root, produced);
+    const publish = await sealAndPublish({ target: atomicTarget, inventory: produced.inventory });
+    return { dryRun: false, verification, plan: publicPlan(plan), copied, nativeInventory, attestation, inventory: produced.inventory, publish };
+  } finally {
+    await workspace?.cleanup().catch((error) => {
+      if (!atomicTarget.published) throw error;
+    });
+    await atomicTarget.cleanup();
+  }
 }
 
-export async function runBuildPlan(plan, runCommand = defaultCommandRunner) {
-  for (const entry of plan.commands) await runCommand(entry.command, entry.args, { cwd: entry.cwd, env: entry.env });
+export async function runBuildPlan(plan, runCommand = defaultCommandRunner, executableSha256 = "") {
+  const evidence = [];
+  const environmentSha256 = digestCanonicalJson(plan.environment);
+  for (const [ordinal, entry] of plan.commands.entries()) {
+    const startedAt = new Date().toISOString();
+    await runCommand(entry.command, entry.args, { cwd: entry.cwd, env: entry.env });
+    evidence.push({
+      ordinal,
+      executable: entry.command,
+      executableSha256,
+      args: [...entry.args],
+      cwdRole: "private-detached-checkout",
+      environmentSha256,
+      startedAt,
+      finishedAt: new Date().toISOString(),
+    });
+  }
+  return evidence;
+}
+
+export function createBuildAttestation({ provenance, verification, environment, commandEvidence, postBuild, buildStartedAtMs, buildFinishedAt, nativeInventory, smoke, externalInputs }) {
+  const toolchain = verification.toolchain;
+  return {
+    schemaVersion: 1,
+    sourceCommit: provenance.source.commit,
+    createdAt: buildFinishedAt,
+    patch: {
+      path: provenance.simulatorPatch.path,
+      sha256: provenance.simulatorPatch.sha256,
+      postimageSha256: provenance.simulatorPatch.postimageSha256,
+      changedPaths: [...provenance.simulatorPatch.changedPaths],
+    },
+    toolchain: {
+      nodeVersion: toolchain.nodeVersion.replace(/^v/u, ""),
+      nodeAbi: toolchain.nodeAbi,
+      platform: toolchain.platform,
+      arch: toolchain.arch,
+      nodeExecutableSha256: toolchain.nodeExecutableSha256,
+      pnpmVersion: toolchain.pnpmVersion,
+      pnpmExecutableSha256: toolchain.pnpmExecutableSha256,
+    },
+    host: { platform: os.platform(), arch: os.arch(), release: os.release(), type: os.type() },
+    environment: { ...environment },
+    inputs: [...externalInputs].sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name))),
+    commands: commandEvidence,
+    build: {
+      startedAt: new Date(buildStartedAtMs).toISOString(),
+      finishedAt: buildFinishedAt,
+      privateDetachedCheckout: true,
+      postBuildVerified: true,
+      freshOutputs: postBuild.requiredOutputs.map((entry) => path.basename(entry) === "standalone" || path.basename(entry) === "static" ? `apps/web/.next/${path.basename(entry)}` : path.basename(entry)),
+    },
+    native: nativeInventory,
+    smoke,
+  };
 }
 
 export async function writeArtifactManifest(stagingRoot, produced) {
@@ -107,7 +211,7 @@ export async function writeArtifactManifest(stagingRoot, produced) {
   const manifest = produced.inventory.files.find((file) => file.path === "artifact-manifest.json");
   stagingAssert(manifest != null && manifest.bytes === Buffer.byteLength(produced.json), "MANIFEST_INVALID", "manifest bytes do not bind the producer JSON output");
   const outputPath = path.join(stagingRoot, "artifact-manifest.json");
-  const handle = await open(outputPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), 0o644).catch((error) => stagingFail("MANIFEST_WRITE_FAILED", error.message));
+  const handle = await open(outputPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), 0o600).catch((error) => stagingFail("MANIFEST_WRITE_FAILED", error.message));
   try {
     const payload = Buffer.from(produced.json, "utf8");
     let offset = 0;
@@ -117,19 +221,23 @@ export async function writeArtifactManifest(stagingRoot, produced) {
       offset += result.bytesWritten;
     }
     const stat = await handle.stat();
-    stagingAssert(stat.isFile() && stat.nlink === 1 && stat.size === payload.length, "MANIFEST_WRITE_FAILED", "manifest output did not remain an unlinked regular file");
+    stagingAssert(stat.isFile() && stat.nlink === 1 && stat.uid === currentUid() && stat.size === payload.length, "MANIFEST_WRITE_FAILED", "manifest output did not remain an owner-built unlinked regular file");
+    await handle.sync().catch((error) => stagingFail("PUBLISH_DURABILITY_UNSUPPORTED", error.message));
   } finally {
     await handle.close().catch(() => undefined);
   }
 }
 
-function command(commandName, args, cwd, env = {}) {
+function command(commandName, args, cwd, env) {
   return Object.freeze({ command: commandName, args: Object.freeze([...args]), cwd, env: Object.freeze({ ...env }) });
 }
 
-function defaultWorkRoot(stagingRoot) {
-  if (!path.isAbsolute(stagingRoot ?? "")) return "";
-  return path.join(path.dirname(stagingRoot), `${path.basename(stagingRoot)}.build`);
+function publicPlan(plan) {
+  return {
+    stagingRoot: plan.stagingRoot,
+    checkoutRoot: plan.workspace.checkoutRoot,
+    commands: plan.commands.map((entry) => ({ command: entry.command, args: [...entry.args], cwd: entry.cwd, env: { ...entry.env } })),
+  };
 }
 
 function validateSbom(sbom) {
@@ -138,12 +246,13 @@ function validateSbom(sbom) {
   for (const key of ["SPDXID", "name", "documentNamespace"]) stagingAssert(typeof sbom[key] === "string" && sbom[key].length > 0, "SBOM_INPUT_INVALID", `SBOM ${key} is required`);
 }
 
-async function readJsonRegular(filename, code) {
+async function readJsonInput(filename, code) {
   stagingAssert(typeof filename === "string" && path.isAbsolute(filename), code, "input path must be absolute");
   const stat = await lstat(filename).catch((error) => stagingFail(code, error.message));
-  stagingAssert(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1, code, "input must be an unlinked regular file");
+  stagingAssert(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && stat.uid === currentUid(), code, "input must be an owner-built unlinked regular file");
+  const bytes = await readFile(filename).catch((error) => stagingFail(code, error.message));
   try {
-    return JSON.parse(await readFile(filename, "utf8"));
+    return { value: JSON.parse(bytes), sha256: createHash("sha256").update(bytes).digest("hex") };
   } catch (error) {
     stagingFail(code, `invalid JSON: ${error.message}`);
   }
@@ -172,33 +281,39 @@ function parseArguments(argv) {
     }
     stagingAssert(token?.startsWith("--"), "ARGUMENT_UNKNOWN", `unknown argument: ${token}`);
     const name = token.slice(2);
-    stagingAssert(["source", "staging-root", "work-root", "sbom", "metadata", "target", "pnpm-bin"].includes(name), "ARGUMENT_UNKNOWN", `unknown argument: ${token}`);
+    stagingAssert(["source", "staging-root", "work-parent", "sbom", "metadata", "target", "node-bin", "pnpm-bin"].includes(name), "ARGUMENT_UNKNOWN", `unknown argument: ${token}`);
     stagingAssert(options[name] === undefined, "ARGUMENT_DUPLICATE", `duplicate argument: ${token}`);
     const value = argv[index + 1];
     stagingAssert(typeof value === "string" && value.length > 0 && !value.startsWith("--"), "ARGUMENT_MISSING", `missing value for ${token}`);
     options[name] = value;
     index += 1;
   }
-  for (const name of ["source", "staging-root", "sbom", "metadata", "target"]) stagingAssert(options[name] !== undefined, "ARGUMENT_MISSING", `required argument: --${name}`);
+  for (const name of ["source", "staging-root", "work-parent", "sbom", "metadata", "target", "node-bin", "pnpm-bin"]) stagingAssert(options[name] !== undefined, "ARGUMENT_MISSING", `required argument: --${name}`);
   return options;
 }
 
 async function main(argv) {
   const options = parseArguments(argv);
   const result = await prepareProductionStaging({
-    sourceRoot: options.source,
-    stagingRoot: options["staging-root"],
-    workRoot: options["work-root"],
-    sbomPath: options.sbom,
-    metadataPath: options.metadata,
-    targetPath: options.target,
-    pnpmBin: options["pnpm-bin"],
+    sourceRoot: path.resolve(options.source),
+    stagingRoot: path.resolve(options["staging-root"]),
+    workParent: path.resolve(options["work-parent"]),
+    sbomPath: path.resolve(options.sbom),
+    metadataPath: path.resolve(options.metadata),
+    targetPath: path.resolve(options.target),
+    nodeBin: path.resolve(options["node-bin"]),
+    pnpmBin: path.resolve(options["pnpm-bin"]),
     dryRun: options.dryRun === true,
   });
   const output = result.dryRun
-    ? { dryRun: true, verification: result.verification, commands: result.plan.commands }
-    : { dryRun: false, stagingRoot: result.copied.root, files: result.inventory.files.length, nativeEntries: result.nativeInventory.length };
+    ? { dryRun: true, verification: result.verification, patch: { path: result.patch.path, sha256: result.patch.sha256 }, commands: result.plan.commands }
+    : { dryRun: false, stagingRoot: result.publish.root, files: result.inventory.files.length, nativeEntries: result.nativeInventory.length, smoke: result.attestation.smoke.ok, publish: result.publish };
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+}
+
+function currentUid() {
+  stagingAssert(typeof process.getuid === "function", "OWNER_CHECK_UNSUPPORTED", "current platform cannot verify filesystem ownership");
+  return process.getuid();
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {

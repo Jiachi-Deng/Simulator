@@ -30,7 +30,7 @@ export async function createPrivateBuildWorkspace({ sourceRoot, workParent, prov
   }));
 
   try {
-    await run("git", ["clone", "--quiet", "--no-local", "--no-checkout", sourceRoot, checkoutRoot], { cwd: root });
+    await run("git", ["clone", "--quiet", "--no-hardlinks", "--no-checkout", sourceRoot, checkoutRoot], { cwd: root });
     await chmod(checkoutRoot, 0o700).catch((error) => stagingFail("BUILD_CHECKOUT_INVALID", error.message));
     await run("git", ["-c", "advice.detachedHead=false", "checkout", "--quiet", "--detach", provenance.source.commit], { cwd: checkoutRoot });
     await assertCheckoutIdentity({ checkoutRoot, provenance, run, phase: "pre-patch" });

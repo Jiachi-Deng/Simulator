@@ -22,7 +22,7 @@ export class InventoryProductionError extends Error {
 
 const fail = (code, message) => { throw new InventoryProductionError(code, message); };
 
-export async function produceInventory({ stagingRoot, metadata = {}, provenance, policy, decisions, target, schemas, hook }) {
+export async function produceInventory({ stagingRoot, metadata = {}, provenance, policy, decisions, attestation, target, schemas, hook }) {
   if (!path.isAbsolute(stagingRoot)) fail("STAGING_ROOT_INVALID", "staging root must be absolute");
   if (!isPlainObject(metadata)) fail("METADATA_INVALID", "metadata map must be an object keyed by exact artifact path");
 
@@ -99,7 +99,7 @@ export async function produceInventory({ stagingRoot, metadata = {}, provenance,
     manifest.bytes = encoder.encode(`${canonicalJson(inventory)}\n`).length;
   }
   manifest.sha256 = digestInventory(inventory);
-  const result = validateArtifact({ provenance, policy, decisions, inventory, schemas: schemas ?? await loadRuntimeSchemas() });
+  const result = validateArtifact({ provenance, policy, decisions, attestation, inventory, schemas: schemas ?? await loadRuntimeSchemas() });
   if (!result.ok) fail("ARTIFACT_INVALID", result.errors.map((error) => `${error.code}: ${error.message}`).join("; "));
   return { inventory, json: `${canonicalJson(inventory)}\n` };
 }
@@ -269,10 +269,10 @@ async function main(argv) {
   const stagingRoot = options["staging-root"];
   const metadataPath = options.metadata;
   const targetPath = options.target;
-  const [metadata, target, provenance, policy, decisions] = await Promise.all([
-    readJson(metadataPath), readJson(targetPath), readJson(new URL("provenance.json", moduleRoot)), readJson(new URL("artifact-policy.json", moduleRoot)), readJson(new URL("resource-decisions.json", moduleRoot))
+  const [metadata, target, provenance, policy, decisions, attestation] = await Promise.all([
+    readJson(metadataPath), readJson(targetPath), readJson(new URL("provenance.json", moduleRoot)), readJson(new URL("artifact-policy.json", moduleRoot)), readJson(new URL("resource-decisions.json", moduleRoot)), readJson(path.join(stagingRoot, "build-attestation.json"))
   ]);
-  const { json } = await produceInventory({ stagingRoot, metadata, target, provenance, policy, decisions });
+  const { json } = await produceInventory({ stagingRoot, metadata, target, provenance, policy, decisions, attestation });
   process.stdout.write(json);
 }
 

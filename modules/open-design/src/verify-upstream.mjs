@@ -225,8 +225,9 @@ async function readJsonRegular(filename, code) {
 }
 
 async function hashRegularFile(filename, code) {
-  const text = await readRegularFile(filename, code);
-  return createHash("sha256").update(text).digest("hex");
+  const stat = await lstat(filename).catch((error) => stagingFail(code, error.message));
+  stagingAssert(stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1, code, `${filename} must be an unlinked regular file`);
+  return createHash("sha256").update(await readFile(filename)).digest("hex");
 }
 
 async function readRegularFile(filename, code) {

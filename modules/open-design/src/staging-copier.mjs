@@ -79,6 +79,7 @@ export async function copyStagingInputs({ stagingRoot, inputs, policy } = {}) {
     const sourceStat = await lstat(sourcePath).catch((error) => stagingFail("STAGING_SOURCE_INVALID", `${label}: ${error.message}`));
     stagingAssert(sourceStat.isFile() && !sourceStat.isSymbolicLink(), "STAGING_SPECIAL_FILE_FORBIDDEN", `${label} contains a non-regular file: ${sourcePath}`);
     stagingAssert(sourceStat.nlink === 1, "STAGING_HARD_LINK_FORBIDDEN", `${label} contains a hard-linked file: ${sourcePath}`);
+    stagingAssert(sourceStat.uid === currentUid(), "STAGING_OWNER_MISMATCH", `${label} source is not owned by the current user: ${sourcePath}`);
     stagingAssert(sourceStat.size <= policy.limits.maxFileBytes, "FILE_LIMIT_EXCEEDED", `${destinationPath} exceeds maxFileBytes`);
     stagingAssert(Number.isSafeInteger(totalBytes + sourceStat.size) && totalBytes + sourceStat.size <= policy.limits.maxTotalBytes, "TOTAL_SIZE_EXCEEDED", "staging inputs exceed maxTotalBytes");
 
@@ -86,7 +87,7 @@ export async function copyStagingInputs({ stagingRoot, inputs, policy } = {}) {
     await ensureDestinationDirectory(path.dirname(destinationAbsolute), root);
     const copiedFile = await copyUnlinkedRegularFile(sourcePath, destinationAbsolute, sourceStat, destinationPath);
     totalBytes += copiedFile.bytes;
-    copied.push({ input: label, path: destinationPath, bytes: copiedFile.bytes, sha256: copiedFile.sha256 });
+    copied.push({ input: label, path: destinationPath, bytes: copiedFile.bytes, sha256: copiedFile.sha256, sourceCtimeMs: sourceStat.ctimeMs, sourceMtimeMs: sourceStat.mtimeMs });
   }
 }
 
@@ -116,7 +117,7 @@ async function copyUnlinkedRegularFile(sourcePath, destinationPath, expected, la
     const afterPath = await lstat(sourcePath);
     stagingAssert(sameIdentity(before, after) && sameIdentity(before, afterPath) && after.size === position, "STAGING_SOURCE_CHANGED", `${label} changed while copying`);
     const destinationStat = await output.stat();
-    stagingAssert(destinationStat.isFile() && destinationStat.nlink === 1 && destinationStat.size === position, "STAGING_DESTINATION_INVALID", `${label} destination did not remain an unlinked regular file`);
+    stagingAssert(destinationStat.isFile() && destinationStat.nlink === 1 && destinationStat.uid === currentUid() && destinationStat.size === position, "STAGING_DESTINATION_INVALID", `${label} destination did not remain an owner-built unlinked regular file`);
     await chmod(destinationPath, before.mode & 0o111 ? 0o755 : 0o644);
     return { bytes: position, sha256: hash.digest("hex") };
   } catch (error) {
@@ -196,4 +197,9 @@ function sameIdentity(left, right) {
 
 function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function currentUid() {
+  stagingAssert(typeof process.getuid === "function", "OWNER_CHECK_UNSUPPORTED", "current platform cannot verify filesystem ownership");
+  return process.getuid();
 }

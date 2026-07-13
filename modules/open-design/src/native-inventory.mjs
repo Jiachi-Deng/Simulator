@@ -1,11 +1,17 @@
+import { createHash } from "node:crypto";
+import { execFile as execFileCallback } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
-import { lstat, open, opendir, realpath } from "node:fs/promises";
+import { lstat, open, opendir, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
 import { stagingAssert, stagingFail } from "./staging-error.mjs";
 
 export const REQUIRED_NATIVE_PACKAGES = Object.freeze(["better-sqlite3", "node-pty", "sharp"]);
 const NATIVE_EXTENSIONS = new Set([".node", ".so", ".dylib", ".dll", ".exe"]);
+const execFile = promisify(execFileCallback);
+const addonLoader = fileURLToPath(new URL("load-native-addon.mjs", import.meta.url));
 
 export function assertNativeBuildsAllowed(manifest) {
   const pnpm = manifest?.pnpm;
@@ -23,11 +29,17 @@ export async function inspectNativeRuntime({
   artifactRoot,
   metadata,
   target,
+  nodeBin,
+  buildEvidence,
+  loadAddon = defaultLoadAddon,
   runtime = { platform: process.platform, arch: process.arch, nodeAbi: process.versions.modules },
 } = {}) {
   stagingAssert(path.isAbsolute(artifactRoot ?? ""), "NATIVE_ROOT_INVALID", "artifact root must be an absolute path");
   stagingAssert(isPlainObject(metadata), "NATIVE_METADATA_INVALID", "metadata must be an object keyed by artifact path");
   validateTarget(target, runtime);
+  stagingAssert(path.isAbsolute(nodeBin ?? "") || loadAddon !== defaultLoadAddon, "NATIVE_NODE_INVALID", "exact Node executable path is required for native loading");
+  stagingAssert(Number.isFinite(buildEvidence?.buildStartedAtMs) && Array.isArray(buildEvidence?.copied), "NATIVE_BUILD_EVIDENCE_INVALID", "native inspection requires build start and copy evidence");
+  const copyByPath = new Map(buildEvidence.copied.map((entry) => [entry.path, entry]));
 
   const root = await realpath(artifactRoot).catch((error) => stagingFail("NATIVE_ROOT_INVALID", error.message));
   const rootStat = await lstat(root).catch((error) => stagingFail("NATIVE_ROOT_INVALID", error.message));
@@ -67,6 +79,17 @@ export async function inspectNativeRuntime({
       stagingAssert(binary.arch === target.arch, "NATIVE_ARCH_MISMATCH", `${relativePath} is ${binary.arch}, expected ${target.arch}`);
       const expectedFormat = artifactFormat(relativePath);
       stagingAssert(nativeTarget.format === expectedFormat, "NATIVE_FORMAT_MISMATCH", `${relativePath} has metadata format ${nativeTarget.format}, expected ${expectedFormat}`);
+      const copyEvidence = copyByPath.get(relativePath);
+      stagingAssert(copyEvidence != null && typeof copyEvidence.sha256 === "string", "NATIVE_BUILD_EVIDENCE_INVALID", `copy evidence is missing: ${relativePath}`);
+      stagingAssert(copyEvidence.sourceCtimeMs >= buildEvidence.buildStartedAtMs, "NATIVE_OUTPUT_STALE", `${relativePath} source native output predates this build`);
+      const sha256 = createHash("sha256").update(await readFile(absolutePath)).digest("hex");
+      stagingAssert(sha256 === copyEvidence.sha256, "NATIVE_BUILD_EVIDENCE_INVALID", `${relativePath} digest differs from copy evidence`);
+      let load = null;
+      if (expectedFormat === "node-addon") {
+        load = await loadAddon({ nodeBin, addonPath: absolutePath, relativePath });
+        stagingAssert(load?.ok === true, "NATIVE_LOAD_FAILED", `${relativePath} did not load under the exact target Node runtime`);
+        stagingAssert(load.nodeVersion === `v${target.nodeVersion ?? "24.14.1"}` && load.nodeAbi === target.nodeAbi && load.platform === target.platform && load.arch === target.arch, "NATIVE_LOAD_RUNTIME_MISMATCH", `${relativePath} loaded under a different Node runtime`);
+      }
       entries.push({
         packageName,
         path: relativePath,
@@ -76,11 +99,29 @@ export async function inspectNativeRuntime({
         nodeAbi: target.nodeAbi,
         libc: target.libc,
         binaryFormat: binary.format,
+        sha256,
+        sourceCtime: new Date(copyEvidence.sourceCtimeMs).toISOString(),
+        freshFromBuild: true,
+        load,
       });
       seenPackages.add(packageName);
     }
     const after = await lstat(absoluteDirectory).catch((error) => stagingFail("NATIVE_FILESYSTEM_ERROR", error.message));
     stagingAssert(sameIdentity(before, after), "NATIVE_RUNTIME_CHANGED", `directory changed during native inspection: ${relativeDirectory || "."}`);
+  }
+}
+
+async function defaultLoadAddon({ nodeBin, addonPath, relativePath }) {
+  let result;
+  try {
+    result = await execFile(nodeBin, [addonLoader, addonPath], { maxBuffer: 4 * 1024 * 1024 });
+  } catch (error) {
+    stagingFail("NATIVE_LOAD_FAILED", `${relativePath}: ${error.stderr || error.message}`);
+  }
+  try {
+    return JSON.parse(result.stdout);
+  } catch (error) {
+    stagingFail("NATIVE_LOAD_FAILED", `${relativePath} loader returned invalid JSON: ${error.message}`);
   }
 }
 

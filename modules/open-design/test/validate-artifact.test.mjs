@@ -12,6 +12,7 @@ const base = {
   provenance: await load("provenance.json"),
   policy: await load("artifact-policy.json"),
   decisions: await load("resource-decisions.json"),
+  attestation: await load("fixtures/minimal-build-attestation.json"),
   inventory: await load("fixtures/minimal-valid.inventory.json"),
   schemas: await loadRuntimeSchemas()
 };
@@ -22,6 +23,7 @@ const cliArgs = [
   "--provenance", fileURLToPath(new URL("../provenance.json", import.meta.url)),
   "--policy", fileURLToPath(new URL("../artifact-policy.json", import.meta.url)),
   "--decisions", fileURLToPath(new URL("../resource-decisions.json", import.meta.url)),
+  "--attestation", fileURLToPath(new URL("../fixtures/minimal-build-attestation.json", import.meta.url)),
   "--inventory", fileURLToPath(new URL("../fixtures/minimal-valid.inventory.json", import.meta.url))
 ];
 
@@ -67,7 +69,7 @@ test("validator CLI rejects unknown, duplicate and missing-value arguments", asy
 });
 
 test("executes strict schemas for every document and inventory file", () => {
-  for (const name of ["provenance", "policy", "decisions", "inventory"]) {
+  for (const name of ["provenance", "policy", "decisions", "attestation", "inventory"]) {
     has(mutate((input) => { input[name].unknownField = true; }), "SCHEMA_INVALID");
     has(mutate((input) => { input[name].schemaVersion = 2; }), "SCHEMA_INVALID");
   }
@@ -204,4 +206,17 @@ test("enforces entry, path, string, file and total byte limits", () => {
 test("rejects non-pinned and mismatched source refs", () => {
   has(mutate(({ provenance }) => { provenance.source.ref = "main"; }), "SOURCE_NOT_PINNED");
   has(mutate(({ inventory }) => { inventory.source.commit = "b".repeat(40); }), "SOURCE_MISMATCH");
+});
+
+test("binds patch, exact toolchain, target and every staged Node addon to attestation", () => {
+  has(mutate(({ attestation }) => { attestation.patch.sha256 = "f".repeat(64); }), "ATTESTATION_PATCH_MISMATCH");
+  has(mutate(({ attestation }) => { attestation.toolchain.nodeExecutableSha256 = "f".repeat(64); }), "ATTESTATION_TOOLCHAIN_MISMATCH");
+  has(mutate(({ attestation }) => { attestation.sourceCommit = "f".repeat(40); }), "ATTESTATION_SOURCE_MISMATCH");
+  has(mutate((input) => {
+    approveResource(input, { id: "addon-attestation", category: "native-binaries", sourcePath: "packages/addon.node" });
+    input.inventory.files.push(runtimeFile("runtime/packages/addon.node", {
+      artifactKind: "native-binary", resourceCategory: "native-binaries", decisionId: "addon-attestation", sourcePath: "packages/addon.node",
+      nativeTarget: { format: "node-addon", platform: "darwin", arch: "arm64", libc: "none", nodeAbi: "137" },
+    }));
+  }), "ATTESTATION_NATIVE_MISMATCH");
 });

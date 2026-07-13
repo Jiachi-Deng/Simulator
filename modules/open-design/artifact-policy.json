@@ -19,12 +19,14 @@
   ],
   "exactPathRules": [
     {"path": "artifact-manifest.json", "artifactKind": "metadata", "component": "metadata"},
+    {"path": "build-attestation.json", "artifactKind": "metadata", "component": "metadata"},
     {"path": "provenance.json", "artifactKind": "metadata", "component": "metadata"}
   ],
   "requiredFiles": [
     {"path": "legal/LICENSE", "artifactKind": "legal", "component": "legal", "mediaType": "text/plain", "schemaId": "apache-2.0-license-text"},
     {"path": "legal/SBOM.spdx.json", "artifactKind": "legal", "component": "legal", "mediaType": "application/spdx+json", "schemaId": "spdx-2.3", "schemaVersion": "SPDX-2.3"},
     {"path": "provenance.json", "artifactKind": "metadata", "component": "metadata", "mediaType": "application/json", "schemaId": "open-design-provenance-v1", "schemaVersion": 1},
+    {"path": "build-attestation.json", "artifactKind": "metadata", "component": "metadata", "mediaType": "application/json", "schemaId": "open-design-build-attestation-v1", "schemaVersion": 1},
     {"path": "artifact-manifest.json", "artifactKind": "metadata", "component": "metadata", "mediaType": "application/json", "schemaId": "open-design-artifact-inventory-v1", "schemaVersion": 1}
   ],
   "forbiddenSegmentPatterns": [

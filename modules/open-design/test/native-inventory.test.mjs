@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { link, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { link, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -8,6 +9,7 @@ import { assertNativeBuildsAllowed, inspectNativeRuntime, parseNativeHeader } fr
 
 const target = { platform: "darwin", arch: "arm64", nodeAbi: "137", libc: "none" };
 const runtime = { platform: "darwin", arch: "arm64", nodeAbi: "137" };
+const loaded = { ok: true, nodeVersion: "v24.14.1", nodeAbi: "137", platform: "darwin", arch: "arm64" };
 
 function arm64MachO() {
   const buffer = Buffer.alloc(32);
@@ -37,9 +39,15 @@ test("records target platform, architecture, and Node ABI for required native pa
     await writeFile(path.join(root, relative), arm64MachO());
   }));
   const metadata = Object.fromEntries(files.map((relative) => [relative, { nativeTarget: { format: "node-addon", ...target } }]));
-  const inventory = await inspectNativeRuntime({ artifactRoot: root, metadata, target, runtime });
+  const copied = await Promise.all(files.map(async (relative) => ({
+    path: relative,
+    sha256: createHash("sha256").update(await readFile(path.join(root, relative))).digest("hex"),
+    sourceCtimeMs: Date.now(),
+  })));
+  const inventory = await inspectNativeRuntime({ artifactRoot: root, metadata, target, runtime, buildEvidence: { buildStartedAtMs: Date.now() - 1000, copied }, loadAddon: async () => loaded });
   assert.deepEqual(inventory.map((entry) => entry.packageName), ["better-sqlite3", "node-pty", "sharp"]);
   assert.ok(inventory.every((entry) => entry.platform === "darwin" && entry.arch === "arm64" && entry.nodeAbi === "137"));
+  assert.ok(inventory.every((entry) => entry.freshFromBuild && entry.load?.nodeVersion === "v24.14.1"));
 });
 
 test("rejects hard-linked native output and recognizes Mach-O architecture", async (t) => {
@@ -51,7 +59,7 @@ test("rejects hard-linked native output and recognizes Mach-O architecture", asy
   await writeFile(source, arm64MachO());
   await link(source, path.join(root, "alias.node"));
   await assert.rejects(
-    inspectNativeRuntime({ artifactRoot: root, metadata: {}, target, runtime }),
+    inspectNativeRuntime({ artifactRoot: root, metadata: {}, target, runtime, buildEvidence: { buildStartedAtMs: Date.now() - 1000, copied: [] }, loadAddon: async () => loaded }),
     { code: "NATIVE_HARD_LINK_FORBIDDEN" },
   );
 });
