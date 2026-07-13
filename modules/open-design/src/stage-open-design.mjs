@@ -48,7 +48,7 @@ export function createBuildPlan({ workspace, stagingRoot, nodeBin, pnpmBin, prov
     invokePnpm(["--filter", "@open-design/web", "build"], { OD_WEB_OUTPUT_MODE: "standalone" }),
     invokePnpm(["--filter", "@open-design/web", "build:sidecar"]),
     invokePnpm(["--config.inject-workspace-packages=true", "--prefer-offline", "--frozen-lockfile", "--ignore-scripts", "--filter", "@open-design/daemon", "deploy", "--prod", workspace.daemonDeployRoot]),
-    invokePnpm(["--filter", "@open-design/packaged", "exec", "esbuild", "apps/web/dist/sidecar/index.js", "--bundle", "--platform=node", "--format=esm", "--target=node24", `--outfile=${path.join(workspace.webDeployRoot, "dist/sidecar/index.js")}`, `--metafile=${path.join(workspace.webDeployRoot, "esbuild-meta.json")}`]),
+    invokePnpm(["--filter", "@open-design/packaged", "exec", "esbuild", path.join(workspace.checkoutRoot, "apps/web/dist/sidecar/index.js"), "--bundle", "--platform=node", "--format=esm", "--target=node24", `--outfile=${path.join(workspace.webDeployRoot, "dist/sidecar/index.js")}`, `--metafile=${path.join(workspace.webDeployRoot, "esbuild-meta.json")}`]),
   ];
   return { stagingRoot, workspace, nodeBin, pnpmBin, environment, commands };
 }
