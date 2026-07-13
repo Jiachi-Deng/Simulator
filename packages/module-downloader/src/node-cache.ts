@@ -88,7 +88,8 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
         await this.#syncDirectory(candidate)
         try { await this.#rename(candidate, `${base}.lock`) }
         catch (cause) {
-          if (!hasCode(cause, 'EEXIST') && !hasCode(cause, 'ENOTEMPTY')) throw cause
+          const destinationExists = hasCode(cause, 'EPERM') && await exists(`${base}.lock`)
+          if (!hasCode(cause, 'EEXIST') && !hasCode(cause, 'ENOTEMPTY') && !destinationExists) throw cause
           await rm(candidate, { recursive: true, force: true })
           if (recoveries++ < this.#maxRecoveries) await this.#reconcileLease(base)
           await sleep(this.#pollMs, signal); continue

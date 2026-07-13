@@ -292,7 +292,7 @@ describe('production filesystem cache', () => {
       const directory = await root(); await killAtCheckpoint(fixture, directory, mode)
       expect((await new NodeFilesystemModuleDownloaderCache(directory).readCatalog())?.trustState.highestSequence).toBe(2)
     }
-  })
+  }, process.platform === 'win32' ? 20_000 : 5_000)
 
   it('treats catalog generation hard-link EEXIST as success only for the same digest', async () => {
     for (const sameDigest of [true, false]) {
