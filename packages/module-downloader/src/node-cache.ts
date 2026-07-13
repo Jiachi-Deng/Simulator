@@ -10,6 +10,7 @@ import type {
   ArtifactPartialRecord, ArtifactPublishResult, CachedArtifactRecord, CachedCatalogRecord,
   ModuleDownloaderCacheAdapter, ModuleDownloaderCacheLease,
 } from './types.ts'
+import { writeAll } from './node-file-io.ts'
 
 const OWNER_MODE = 0o700
 const FILE_MODE = 0o600
@@ -198,7 +199,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     const record = await this.#requiredPartial(id)
     if (bytes.byteLength) {
       const handle = await safeOpen(this.#partialData(id), constants.O_WRONLY, this.root)
-      try { await handle.write(bytes, 0, bytes.byteLength, record.bytesWritten); await handle.sync() } finally { await handle.close() }
+      try { await writeAll(handle, bytes, record.bytesWritten); await handle.sync() } finally { await handle.close() }
     }
     const next = { ...record, bytesWritten: record.bytesWritten + bytes.byteLength, updatedAt, ...(validator ? { validator } : {}) }
     await this.#atomicJson(this.#partialRecord(id), next, 'partials')
@@ -434,9 +435,9 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     await this.#faultAt('temp-write', temp)
     const handle = await open(temp, exclusiveWriteFlags(), FILE_MODE)
     try {
-      const midpoint = Math.max(1, Math.floor(bytes.byteLength / 2)); await handle.write(bytes.subarray(0, midpoint))
+      const midpoint = Math.max(1, Math.floor(bytes.byteLength / 2)); await writeAll(handle, bytes.subarray(0, midpoint), 0)
       await this.#checkpoint('catalog-generation-mid-write', temp)
-      await handle.write(bytes.subarray(midpoint)); await this.#faultAt('file-sync', temp); await handle.sync()
+      await writeAll(handle, bytes.subarray(midpoint), midpoint); await this.#faultAt('file-sync', temp); await handle.sync()
     } finally { await handle.close() }
     try {
       if (sha256(await safeReadFile(temp, this.root)) !== digest) throw new Error('Catalog generation temp verification failed')
@@ -515,7 +516,7 @@ async function safeStatFile(path: string, root: string) { const handle = await s
 async function safeRemoveFile(path: string, root: string): Promise<void> { const info = await lstat(path).catch(() => undefined); if (!info) return; if (!info.isFile() || info.isSymbolicLink()) throw new Error('Refusing to remove unsafe cache leaf'); await assertContained(root, path); await rm(path) }
 async function hashFile(path: string, root: string): Promise<string> { const handle = await safeOpen(path, constants.O_RDONLY, root); const hash = createHash('sha256'); try { for await (const chunk of readChunks(handle, false)) hash.update(chunk); return hash.digest('hex') } finally { await handle.close() } }
 async function claimToken(path: string, root: string): Promise<string | undefined> { const value = await safeReadJson<{ token?: string }>(join(path, 'claim.json'), root).catch(() => undefined); return value?.token && UUID.test(value.token) ? value.token : undefined }
-async function copyVerified(source: string, destination: string, root: string): Promise<void> { const input = await safeOpen(source, constants.O_RDONLY, root); const output = await open(destination, exclusiveWriteFlags(), FILE_MODE); try { let position = 0; for await (const chunk of readChunks(input, false)) { let offset = 0; while (offset < chunk.byteLength) { const { bytesWritten } = await output.write(chunk, offset, chunk.byteLength - offset, position + offset); if (bytesWritten === 0) throw new Error('Artifact copy made no progress'); offset += bytesWritten } position += chunk.byteLength } await output.sync() } finally { await Promise.all([input.close(), output.close()]) } }
+async function copyVerified(source: string, destination: string, root: string): Promise<void> { const input = await safeOpen(source, constants.O_RDONLY, root); const output = await open(destination, exclusiveWriteFlags(), FILE_MODE); try { let position = 0; for await (const chunk of readChunks(input, false)) { await writeAll(output, chunk, position); position += chunk.byteLength } await output.sync() } finally { await Promise.all([input.close(), output.close()]) } }
 function exclusiveWriteFlags(): 'wx' | number { return process.platform === 'win32' ? 'wx' : constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY }
 async function* readChunks(handle: Awaited<ReturnType<typeof open>>, close = true): AsyncGenerator<Uint8Array> { const buffer = Buffer.allocUnsafe(64 * 1024); let position = 0; try { while (true) { const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, position); if (bytesRead === 0) return; position += bytesRead; yield Uint8Array.from(buffer.subarray(0, bytesRead)) } } finally { if (close) await handle.close() } }
 function sleep(ms: number, signal: AbortSignal): Promise<void> { return new Promise((resolveSleep, reject) => { const timer = setTimeout(done, ms); const abort = () => { clearTimeout(timer); signal.removeEventListener('abort', abort); reject(signal.reason) }; function done() { signal.removeEventListener('abort', abort); resolveSleep() } signal.addEventListener('abort', abort, { once: true }) }) }
