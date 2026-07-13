@@ -8,8 +8,10 @@
   },
   "scripts": {
     "build": "node ./src/validate-artifact.mjs --provenance ./provenance.json --policy ./artifact-policy.json --decisions ./resource-decisions.json --inventory ./fixtures/minimal-valid.inventory.json",
+    "diff-check": "git diff --check -- .",
+    "inventory": "node ./src/produce-inventory.mjs",
     "test": "node --test",
-    "typecheck": "node --check ./src/validate-artifact.mjs && node --check ./test/validate-artifact.test.mjs"
+    "typecheck": "node --check ./src/validate-artifact.mjs && node --check ./src/produce-inventory.mjs && node --check ./test/validate-artifact.test.mjs && node --check ./test/produce-inventory.test.mjs"
   },
   "engines": {
     "node": ">=20"
