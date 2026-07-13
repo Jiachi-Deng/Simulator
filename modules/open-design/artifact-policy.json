@@ -40,5 +40,13 @@
     "fonts": [".woff", ".woff2", ".ttf", ".otf"],
     "images": [".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg"]
   },
+  "resourcePathCategories": {
+    "plugins": "plugins",
+    "skills": "skills",
+    "templates": "templates",
+    "design-templates": "templates",
+    "design-systems": null,
+    "assets": null
+  },
   "nativeBinaryExtensions": [".node", ".so", ".dylib", ".dll", ".exe"]
 }

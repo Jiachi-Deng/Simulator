@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "network": {
+    "listen": "dynamic-loopback-only",
+    "allowedHosts": ["127.0.0.1", "[::1]"],
+    "requireHostValidation": true,
+    "requireOriginValidation": true
+  },
+  "isolation": {
+    "xdgDataHome": "${SIMULATOR_OPENSCIENCE_ROOT}/data",
+    "xdgConfigHome": "${SIMULATOR_OPENSCIENCE_ROOT}/config",
+    "xdgCacheHome": "${SIMULATOR_OPENSCIENCE_ROOT}/cache",
+    "xdgStateHome": "${SIMULATOR_OPENSCIENCE_ROOT}/state"
+  },
+  "nativeControls": {
+    "agent": "preserve",
+    "mcp": "preserve",
+    "permissions": "preserve"
+  },
+  "credentials": {
+    "productionPersistence": "forbidden",
+    "futurePersistence": "host-bridge-required"
+  }
+}

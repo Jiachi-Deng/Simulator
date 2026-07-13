@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import test from "node:test";
 import { digestInventory, loadRuntimeSchemas, validateArtifact } from "../src/validate-artifact.mjs";
 
@@ -13,6 +16,14 @@ const base = {
   schemas: await loadRuntimeSchemas()
 };
 const digest = "a".repeat(64);
+const execFileAsync = promisify(execFile);
+const validatorPath = fileURLToPath(new URL("../src/validate-artifact.mjs", import.meta.url));
+const cliArgs = [
+  "--provenance", fileURLToPath(new URL("../provenance.json", import.meta.url)),
+  "--policy", fileURLToPath(new URL("../artifact-policy.json", import.meta.url)),
+  "--decisions", fileURLToPath(new URL("../resource-decisions.json", import.meta.url)),
+  "--inventory", fileURLToPath(new URL("../fixtures/minimal-valid.inventory.json", import.meta.url))
+];
 
 function mutate(mutator) {
   const input = structuredClone(base);
@@ -29,6 +40,10 @@ function runtimeFile(path, overrides = {}) {
   return { schemaVersion: 1, path, type: "file", artifactKind: "runtime-package", component: "runtime-package", dependencyScope: "production", bytes: 10, sha256: digest, ...overrides };
 }
 
+function publicFile(path, overrides = {}) {
+  return { schemaVersion: 1, path, type: "file", artifactKind: "web-static", component: "next-public", dependencyScope: "artifact", bytes: 10, sha256: digest, ...overrides };
+}
+
 function approveResource(input, { id, category, sourcePath, license = "MIT" }) {
   input.decisions.decisions.push({
     id, category, sourcePath, status: "include", rightsStatus: "cleared", license,
@@ -41,6 +56,15 @@ function refreshManifestDigest(inventory) {
 }
 
 test("accepts the minimal pinned artifact inventory", () => assert.deepEqual(validateArtifact(base), { ok: true, errors: [] }));
+
+test("validator CLI rejects unknown, duplicate and missing-value arguments", async () => {
+  const rejectsCli = async (args, code) => {
+    await assert.rejects(execFileAsync(process.execPath, [validatorPath, ...args]), (error) => error.stderr.includes(`${code}:`));
+  };
+  await rejectsCli([...cliArgs, "--unknown", "value"], "ARGUMENT_UNKNOWN");
+  await rejectsCli([...cliArgs, "--policy", cliArgs[3]], "ARGUMENT_DUPLICATE");
+  await rejectsCli([...cliArgs.slice(0, -2), "--inventory"], "ARGUMENT_MISSING");
+});
 
 test("executes strict schemas for every document and inventory file", () => {
   for (const name of ["provenance", "policy", "decisions", "inventory"]) {
@@ -80,6 +104,24 @@ test("binds a resource decision to exact normalized sourcePath and category", ()
     input.inventory.files.push(runtimeFile("web/public/logo.png", { artifactKind: "web-static", component: "next-public", dependencyScope: "artifact", resourceCategory: "fonts", decisionId: "image", sourcePath: "assets/logo.png" }));
   }), "RESOURCE_DECISION_MISMATCH");
   has(mutate(({ decisions }) => { decisions.decisions[0].sourcePath = "design-templates/**"; }), "DECISION_SOURCE_INVALID");
+});
+
+test("requires exact approved metadata decisions for resource-category paths", () => {
+  const cases = [
+    ["web/public/plugins/tool.txt", "plugins"],
+    ["web/public/skills/guide.txt", "skills"],
+    ["web/public/templates/base.txt", "templates"],
+    ["web/public/design-systems/tokens.json", "images"],
+    ["web/public/assets/data.txt", "images"]
+  ];
+  for (const [artifactPath, category] of cases) {
+    has(mutate(({ inventory }) => { inventory.files.push(publicFile(artifactPath)); }), "UNEXPECTED_RESOURCE");
+    has(mutate((input) => {
+      const sourcePath = `review/${artifactPath}`;
+      input.decisions.decisions.push({ id: `pending-${category}`, category, sourcePath, status: "review", rightsStatus: "pending", license: null, rightsEvidence: null, reason: "Not approved" });
+      input.inventory.files.push(publicFile(artifactPath, { resourceCategory: category, sourcePath, decisionId: `pending-${category}` }));
+    }), "RESOURCE_EXCLUDED");
+  }
 });
 
 test("include+cleared decisions require a license and rights evidence", () => {
