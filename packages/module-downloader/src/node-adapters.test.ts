@@ -61,6 +61,41 @@ describe('production filesystem cache', () => {
     expect((await readdir(join(directory, 'leases', 'claims'))).some((name) => name.includes('.released-'))).toBe(false)
   })
 
+  for (const code of ['EFAULT', 'EBUSY', 'EPERM'] as const) {
+    it.skipIf(process.platform !== 'win32')(`fails finitely without granting a new owner when marker cleanup stays ${code}`, async () => {
+      const directory = await root()
+      const cache = new NodeFilesystemModuleDownloaderCache(directory, {
+        leasePollMs: 1,
+        maxStaleRecoveries: 2,
+        faultInjector(point, path) {
+          if (point === 'cleanup' && path.includes('.released-')) {
+            throw Object.assign(new Error(`persistent ${code}`), { code })
+          }
+        },
+      })
+      const lease = await cache.acquireLease(`persistent cleanup ${code}`, new AbortController().signal)
+      await expect(lease.release()).resolves.toBeUndefined()
+      await expect(cache.acquireLease(`persistent cleanup ${code}`, AbortSignal.timeout(5_000))).rejects.toMatchObject({
+        code: 'LEASE_CLEANUP_BLOCKED',
+      })
+    })
+  }
+
+  it.skipIf(process.platform !== 'win32')('prunes an orphan released marker during bounded startup recovery', async () => {
+    const directory = await root()
+    const setup = new NodeFilesystemModuleDownloaderCache(directory)
+    await setup.readCatalog()
+    const key = 'startup released marker'
+    const base = createHash('sha256').update(key).digest('hex')
+    const token = '00000000-0000-4000-8000-000000000000'
+    const marker = join(directory, 'leases', 'claims', `${base}.released-${token}`)
+    await writeFile(marker, token)
+
+    const recovered = new NodeFilesystemModuleDownloaderCache(directory, { maxStartupPrunes: 1 })
+    await recovered.readCatalog()
+    await expect(stat(marker)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('elects one cross-process artifact publisher and one verified reader', async () => {
     const directory = await root()
     const fixture = join(import.meta.dir, 'testing', 'artifact-child.ts')

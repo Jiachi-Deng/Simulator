@@ -73,10 +73,19 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     if (!key || key.length > 1024 || /[\0\r\n]/.test(key)) throw new TypeError('Invalid cache lease key')
     const base = join(this.root, 'leases', 'claims', createHash('sha256').update(key).digest('hex'))
     let recoveries = 0
+    let cleanupFailures = 0
     while (true) {
       if (signal.aborted) throw signal.reason
       const state = await this.#reconcileLease(base)
+      if (state === 'cleanup-blocked') {
+        if (++cleanupFailures > this.#maxRecoveries) {
+          throw Object.assign(new Error('Released lease marker cleanup remained blocked'), { code: 'LEASE_CLEANUP_BLOCKED' })
+        }
+        await sleep(this.#pollMs, signal)
+        continue
+      }
       if (state === 'blocked') { await sleep(this.#pollMs, signal); continue }
+      cleanupFailures = 0
       const owner = await this.#newOwner()
       const ownerPath = this.#leaseOwner(owner.token)
       await this.#immutableJson(ownerPath, owner)
@@ -312,7 +321,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     const path = join(this.root, name); await assertDirectory(path); await assertContained(this.root, path)
   }
 
-  async #reconcileLease(base: string): Promise<'clear' | 'blocked'> {
+  async #reconcileLease(base: string): Promise<'clear' | 'blocked' | 'cleanup-blocked'> {
     const parent = dirname(base); const prefix = `${baseName(base)}.recover-`
     for (const name of (await directoryNames(parent)).filter((value) => value.startsWith(prefix))) {
       const quarantine = join(parent, name); const token = await claimToken(quarantine, this.root)
@@ -324,7 +333,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     }
     const lock = `${base}.lock`; const info = await lstat(lock).catch(() => undefined)
     if (!info) {
-      if (process.platform === 'win32' && !await this.#clearReleasedLeaseMarkers(base)) return 'blocked'
+      if (process.platform === 'win32' && !await this.#clearReleasedLeaseMarkers(base)) return 'cleanup-blocked'
       return 'clear'
     }
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Unsafe lease claim')
@@ -427,9 +436,9 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     }
     return true
   }
-  async #releasedLeaseCleared(base: string, lock: string): Promise<'clear' | 'blocked'> {
+  async #releasedLeaseCleared(base: string, lock: string): Promise<'clear' | 'blocked' | 'cleanup-blocked'> {
     if (await exists(lock)) return 'blocked'
-    if (process.platform === 'win32' && !await this.#clearReleasedLeaseMarkers(base)) return 'blocked'
+    if (process.platform === 'win32' && !await this.#clearReleasedLeaseMarkers(base)) return 'cleanup-blocked'
     return 'clear'
   }
 
@@ -467,7 +476,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
       if (this.#now() - info.mtimeMs > this.#staleMs) { await safeRemoveFile(path, this.root); remaining -= 1 }
     }
     const claims = join(this.root, 'leases', 'claims')
-    const bases = new Set((await directoryNames(claims)).map((name) => name.match(/^([a-f0-9]{64})\.(?:lock|recover-)/)?.[1]).filter((v): v is string => Boolean(v)))
+    const bases = new Set((await directoryNames(claims)).map((name) => name.match(/^([a-f0-9]{64})\.(?:lock|recover-|released-)/)?.[1]).filter((v): v is string => Boolean(v)))
     for (const name of bases) { if (!remaining--) return; await this.#reconcileLease(join(claims, name)) }
     const artifactClaims = join(this.root, 'artifacts', 'claims')
     for (const name of await directoryNames(artifactClaims)) {
