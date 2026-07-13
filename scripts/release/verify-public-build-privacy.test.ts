@@ -41,11 +41,13 @@ describe("public build privacy verification", () => {
     )
   })
 
-  test("does not follow symlinks outside the packaged app", () => {
+  test("fails closed on symlinks in packaged dist", () => {
     const app = fixture()
     const outside = join(root, "outside")
     writeFileSync(outside, sentinel)
-    symlinkSync(outside, join(app, "Contents", "Resources", "outside-link"))
-    expect(verifyPublicBuildPrivacy(app, [sentinel]).forbiddenMatches).toEqual([])
+    symlinkSync(outside, join(app, "Contents", "Resources", "app", "dist", "outside-link"))
+    expect(() => verifyPublicBuildPrivacy(app, [sentinel])).toThrow(
+      "Packaged dist must not contain symlinks",
+    )
   })
 })

@@ -16,5 +16,7 @@ describe("DMG packaging", () => {
     expect(script).toContain("SIMULATOR_PUBLIC_BUILD=1")
     expect(script).toContain("SIMULATOR_DISABLE_UPDATES=1")
     expect(script).toContain('verify-public-build-privacy.ts')
+    expect(script).toContain('APP_ROOT="$ELECTRON_DIR/release/mac-arm64/Simulator.app"')
+    expect(script).toContain('APP_ROOT="$ELECTRON_DIR/release/mac/Simulator.app"')
   })
 })

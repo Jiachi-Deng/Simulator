@@ -49,7 +49,7 @@ bun scripts/release/verify-bundle-policy.ts recovered-rc
 
 ### 3. Host rollback
 
-在合成 macOS 用户中安装候选 DMG，保留上一版 DMG 和数据目录只读备份；制造可控的启动失败后卸载候选 app bundle、重新安装上一版并验证原会话只读打开。当前 Engineering RC updater 被禁用，因此不得用自动更新模拟回滚。预期：旧 app 可启动，数据目录 hash 除明确的日志文件外不变化。正式数据迁移尚未冻结时，此场景必须标记 `Not run` 并链接 Bundle ID/data migration ADR blocker。
+正式 Bundle ID、数据目录和 migration ADR 尚未冻结，因此本场景当前必须记录为 `Not run (blocked by product identity decision)`。不得在真实用户目录手工猜测路径。决策完成后，runbook 必须补充专用测试用户、候选/上一版 DMG、数据 snapshot/hash、安装/恢复命令与允许变化的日志清单，才能把本项改为可执行。
 
 ### 4. Module rollback
 
@@ -57,11 +57,18 @@ Issue #71 的 packaged Fake Module gate 合并前，本场景必须标记为 `No
 
 ### 5. Credential backend loss
 
-只使用合成 profile：关闭应用，移动测试 profile 的 encrypted credential file，重新启动并执行需要 provider 的操作。预期：操作 fail closed、UI 要求重新认证、日志不出现 secret；测试结束后销毁整个合成 profile，不把真实 credential 文件用于演练。
+当前 credential backend 没有可注入的 profile root，直接设置 `HOME` 仍可能误触系统路径；本场景必须记录为 `Not run (blocked by credential isolation test seam)`。先建立可注入 storage root 和合成 credential fixture，再补充自动命令。不得移动真实 `~/.craft-agent/credentials.enc` 作为演练。
 
 ### 6. Network loss
 
-在干净设备上先确认没有活动写操作，再通过 macOS 系统设置断开网络；分别执行 Artifact 下载和合成 provider request。预期：有限时失败、可取消/重试、没有 partial Artifact 被激活。恢复网络后验证 last-known-good 仍可用。Catalog/Module 下载的正式 E2E 依赖 Issue #71，未合并前标为 `Not run`。
+当前可执行的 downloader 网络失败/timeout/cancel 门：
+
+```bash
+bun test packages/module-downloader/src/downloader.test.ts \
+  packages/module-downloader/src/node-adapters.test.ts
+```
+
+预期：全部测试通过，并证明 retry、timeout、cancel、partial cleanup 和 last-known-good cache 语义。真实 packaged App 的断网与 provider request 尚无隔离 fixture，必须记录为 `Not run (blocked by packaged network fixture)`；Catalog/Module 的完整 packaged E2E 同时依赖 Issue #71。
 
 ### 7. Maintainer recovery
 
