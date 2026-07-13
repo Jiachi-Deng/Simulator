@@ -10,6 +10,8 @@ describe("release static validation workflow", () => {
     expect(workflow).toContain(".github/workflows/engineering-rc.yml")
     expect(workflow).toContain("scripts/release/**")
     expect(workflow).toContain("scripts/build-policy.ts")
+    expect(workflow).toContain("apps/electron/scripts/build-dmg.sh")
+    expect(workflow).toContain("apps/electron/package.json")
     expect(workflow).toContain("apps/electron/src/main/auto-update.ts")
     expect(workflow).toContain("apps/electron/src/main/update-policy.ts")
   })

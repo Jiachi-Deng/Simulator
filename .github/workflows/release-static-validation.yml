@@ -12,7 +12,9 @@ on:
       - scripts/build-environment.test.ts
       - scripts/electron-build-main.ts
       - scripts/build/**
+      - apps/electron/scripts/build-dmg.sh
       - apps/electron/scripts/build-win.ps1
+      - apps/electron/package.json
       - apps/electron/electron-builder.yml
       - apps/electron/src/main/auto-update.ts
       - apps/electron/src/main/update-policy.ts
