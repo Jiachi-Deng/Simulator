@@ -91,6 +91,25 @@ describe('production filesystem cache', () => {
     await expect(lease.release()).resolves.toBeUndefined()
   })
 
+  it.skipIf(process.platform !== 'win32')('completes release when cleanup removes a marker before publication chmod', async () => {
+    const directory = await root(); let removed = false
+    const cache = new NodeFilesystemModuleDownloaderCache(directory, {
+      faultInjector(point, path) {
+        if (point === 'before-chmod' && path.includes('.released-') && !removed) {
+          removed = true
+          return rm(path, { force: true })
+        }
+      },
+    })
+    const lease = await cache.acquireLease('marker publication race', new AbortController().signal)
+    await expect(lease.release()).resolves.toBeUndefined()
+    expect(removed).toBe(true)
+
+    const replacement = new NodeFilesystemModuleDownloaderCache(directory, { leasePollMs: 1 })
+    const next = await replacement.acquireLease('marker publication race', AbortSignal.timeout(5_000))
+    await expect(next.release()).resolves.toBeUndefined()
+  })
+
   for (const code of ['EFAULT', 'EBUSY', 'EPERM'] as const) {
     it.skipIf(process.platform !== 'win32')(`fails finitely without granting a new owner when marker cleanup stays ${code}`, async () => {
       const directory = await root()
