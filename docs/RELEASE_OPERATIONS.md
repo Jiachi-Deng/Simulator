@@ -68,7 +68,7 @@ Deferred risks and owner:
 
 1. 版本必须是合法的 `MAJOR.MINOR.PATCH-rc.N`，并在所有 distributable workspace 中一致。
 2. Release notes 必须对应精确 commit，包含已知限制、隐私/权限变化和回滚说明。
-3. 从受保护的 `main` 或明确批准的 release branch 构建；禁止从脏工作区发布。
+3. 当前 Engineering RC 必须从受保护的 `origin/main` tip 构建；禁止从 release branch 或脏工作区发布。未来如需 release branch，必须先单独修改并 Review workflow、validator 与 Versioning Policy。
 4. 生成并验证 DMG/ZIP、`SHA256SUMS`、SPDX SBOM 和 provenance/attestation。
 5. unsigned Engineering RC 必须明确标记 unsigned、禁用生产 updater，且不能冒充可自动更新的稳定发行版。
 6. 签名发行必须验证 Developer ID、notarization、stapling、Gatekeeper 和干净设备安装。

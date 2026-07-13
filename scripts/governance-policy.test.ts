@@ -31,6 +31,7 @@ describe("governance documentation contract", () => {
 
   test("binds versions, immutable RCs, modules, and release evidence", () => {
     const policy = read("docs/VERSIONING.md")
+    const operations = read("docs/RELEASE_OPERATIONS.md")
     const rcValidator = read("scripts/release/engineering-rc.ts")
 
     expect(policy).toContain("根目录 `package.json` 的 `version` 是 Host App 构建的版本事实源")
@@ -41,9 +42,11 @@ describe("governance documentation contract", () => {
     expect(policy).toContain("production updater disabled")
     expect(rcValidator).toContain("origin/main tip")
     expect(rcValidator).toContain("-rc\\.([1-9]\\d*)")
+    expect(operations).toContain("必须从受保护的 `origin/main` tip 构建")
+    expect(operations).toContain("禁止从 release branch")
     expect(read("README.md")).toContain("docs/VERSIONING.md")
     expect(read("CONTRIBUTING.md")).toContain("docs/adr/README.md")
-    expect(read("docs/RELEASE_OPERATIONS.md")).toContain("VERSIONING.md")
+    expect(operations).toContain("VERSIONING.md")
   })
 
   test("keeps every new local governance link resolvable", () => {
