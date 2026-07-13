@@ -100,7 +100,7 @@ export class FilesystemModuleRegistryPersistence implements ModuleRegistryPersis
       this.#fault?.('after-pending-sync')
       const serialized = this.#serialize(state)
       temporary = this.#path(`.${STATE_FILE}.${randomUUID()}.tmp`)
-      const descriptor = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW, 0o600)
+      const descriptor = openSync(temporary, exclusiveWriteFlags(), 0o600)
       let temporaryIdentity: FilesystemIdentity
       try {
         writeFileSync(descriptor, serialized)
@@ -175,7 +175,7 @@ export class FilesystemModuleRegistryPersistence implements ModuleRegistryPersis
   }
 
   #writeExclusive(name: string, state: PersistedModuleRegistryStateV1): void {
-    const descriptor = openSync(this.#path(name), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW, 0o600)
+    const descriptor = openSync(this.#path(name), exclusiveWriteFlags(), 0o600)
     try {
       writeFileSync(descriptor, this.#serialize(state))
       fsyncSync(descriptor)
@@ -188,7 +188,7 @@ export class FilesystemModuleRegistryPersistence implements ModuleRegistryPersis
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const token = randomUUID()
       const candidate = this.#path(`.${LOCK_FILE}.${token}.tmp`)
-      const descriptor = openSync(candidate, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW, 0o600)
+      const descriptor = openSync(candidate, exclusiveWriteFlags(), 0o600)
       try {
         writeFileSync(descriptor, `${JSON.stringify({ pid: process.pid, token })}\n`, 'utf8')
         fsyncSync(descriptor)
@@ -308,4 +308,10 @@ export class FilesystemModuleRegistryPersistence implements ModuleRegistryPersis
   #path(name: string): string {
     return join(this.root, name)
   }
+}
+
+function exclusiveWriteFlags(): 'wx' | number {
+  return process.platform === 'win32'
+    ? 'wx'
+    : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW
 }
