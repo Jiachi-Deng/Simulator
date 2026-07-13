@@ -64,11 +64,11 @@ export function validateArtifact({ provenance, policy, decisions, attestation, i
     const rule = policy.exactPathRules.find((candidate) => candidate.path === file.path)
       ?? policy.pathRules.find((candidate) => file.path.startsWith(candidate.prefix));
     const extension = path.posix.extname(file.path).toLowerCase();
-    const native = policy.nativeBinaryExtensions.includes(extension);
+    const runtimeClass = runtimeBinaryClass(file.path, policy);
     if (!rule) fail("PATH_NOT_ALLOWED", `path is outside the feature profile: ${file.path}`);
     else {
       const expectedKind = rule.artifactKind;
-      const kindAllowed = file.artifactKind === expectedKind || (native && expectedKind === "runtime-package" && file.artifactKind === "native-binary");
+      const kindAllowed = file.artifactKind === expectedKind || (runtimeClass && ["runtime-package", "daemon-runtime"].includes(expectedKind) && file.artifactKind === runtimeClass);
       const componentAllowed = rule.component ? file.component === rule.component : rule.components.includes(file.component);
       if (!kindAllowed || !componentAllowed) fail("PROFILE_MISMATCH", `artifact kind/component does not match its path rule: ${file.path}`);
     }
@@ -79,7 +79,7 @@ export function validateArtifact({ provenance, policy, decisions, attestation, i
       if (!file.symlinkTarget || !validateSymlinkTarget(file.path, file.symlinkTarget)) fail("SYMLINK_ESCAPE", `symlink target must stay inside artifact root: ${file.path}`);
     } else if (file.symlinkTarget !== undefined) fail("FILE_METADATA_INVALID", `regular file cannot declare symlinkTarget: ${file.path}`);
 
-    const inferredCategory = native ? "native-binaries" : inferResourceCategory(extension, policy);
+    const inferredCategory = runtimeClass ? "native-binaries" : inferResourceCategory(extension, policy);
     const pathCategory = inferResourcePathCategory(file.path, policy);
     if (inferredCategory && file.resourceCategory !== inferredCategory) fail("UNEXPECTED_RESOURCE", `${inferredCategory} resource lacks its category/decision: ${file.path}`);
     if (pathCategory && file.resourceCategory !== pathCategory) fail("UNEXPECTED_RESOURCE", `${pathCategory} resource lacks its category/decision: ${file.path}`);
@@ -87,7 +87,7 @@ export function validateArtifact({ provenance, policy, decisions, attestation, i
     if (file.resourceCategory) validateResource(file, decisionById, fail);
     else if (file.sourcePath !== undefined || file.decisionId !== undefined) fail("UNEXPECTED_RESOURCE", `resource metadata is incomplete: ${file.path}`);
 
-    if (native) validateNative(file, extension, inventory.target, fail);
+    if (runtimeClass) validateNative(file, extension, runtimeClass, inventory.target, fail);
     else if (file.nativeTarget !== undefined || file.artifactKind === "native-binary") fail("NATIVE_METADATA_INVALID", `non-native file declares native metadata: ${file.path}`);
   }
   if (inventory.files.length > policy.limits.maxEntries) fail("ENTRY_LIMIT_EXCEEDED", "inventory exceeds maxEntries");
@@ -122,10 +122,10 @@ function validateAttestation({ attestation, provenance, inventory }, fail) {
   const originByPath = new Map(attestation.build.normalization.nativeOrigins.map((entry) => [entry.path, entry]));
   const nativeByPath = new Map(attestation.native.map((entry) => [entry.path, entry]));
   for (const file of inventory.files) {
-    if (file.artifactKind !== "native-binary") continue;
+    if (!["native-binary", "executable-native", "wasm-resource"].includes(file.artifactKind)) continue;
     const native = nativeByPath.get(file.path);
     const origin = originByPath.get(file.path);
-    if (!native || native.sha256 !== file.sha256 || !origin || origin.sha256 !== file.sha256 || !Number.isFinite(Date.parse(origin.sourceCtime)) || Date.parse(origin.sourceCtime) < buildStartedAt) {
+    if (!native || native.sha256 !== file.sha256 || native.resourceClass !== file.artifactKind || native.mode !== file.fileMode || !origin || origin.sha256 !== file.sha256 || origin.mode !== file.fileMode || !Number.isFinite(Date.parse(origin.sourceCtime)) || Date.parse(origin.sourceCtime) < buildStartedAt) {
       fail("ATTESTATION_NATIVE_MISMATCH", `native output is not bound to fresh normalized build evidence: ${file.path}`);
     } else if (path.posix.extname(file.path).toLowerCase() === ".node" && (native.load?.ok !== true || native.load.nodeAbi !== inventory.target.nodeAbi)) {
       fail("ATTESTATION_NATIVE_MISMATCH", `Node addon is not bound to a successful exact-runtime load: ${file.path}`);
@@ -269,19 +269,28 @@ function validateResource(file, decisions, fail) {
   }
 }
 
-function validateNative(file, extension, target, fail) {
-  if (file.artifactKind !== "native-binary" || file.resourceCategory !== "native-binaries" || !file.nativeTarget) {
+function validateNative(file, extension, runtimeClass, target, fail) {
+  if (file.artifactKind !== runtimeClass || file.resourceCategory !== "native-binaries" || !file.nativeTarget) {
     fail("NATIVE_METADATA_INVALID", `native binary requires native artifact/resource metadata: ${file.path}`);
     return;
   }
-  const expectedFormat = extension === ".node" ? "node-addon" : extension === ".exe" ? "executable" : "shared-library";
+  const expectedFormat = runtimeClass === "wasm-resource" ? "wasm-module" : runtimeClass === "executable-native" || extension === ".exe" ? "executable" : extension === ".node" ? "node-addon" : "shared-library";
   if (file.nativeTarget.format !== expectedFormat) fail("NATIVE_METADATA_INVALID", `native format does not match extension: ${file.path}`);
   for (const key of ["platform", "arch", "libc"]) if (file.nativeTarget[key] !== target[key]) fail("NATIVE_TARGET_MISMATCH", `${key} does not match artifact target: ${file.path}`);
   if (file.nativeTarget.nodeAbi !== undefined && file.nativeTarget.nodeAbi !== target.nodeAbi) fail("NATIVE_TARGET_MISMATCH", `nodeAbi does not match artifact target: ${file.path}`);
   if (expectedFormat === "node-addon" && !file.nativeTarget.nodeAbi) fail("NATIVE_ABI_MISSING", `Node addon requires nodeAbi: ${file.path}`);
+  const expectedMode = runtimeClass === "executable-native" ? "0755" : "0644";
+  if (file.fileMode !== expectedMode) fail("NATIVE_MODE_MISMATCH", `${runtimeClass} requires mode ${expectedMode}: ${file.path}`);
   if (target.platform === "darwin" && target.libc !== "none") fail("NATIVE_TARGET_INVALID", "darwin target libc must be none");
   if (target.platform === "win32" && target.libc !== "msvcrt") fail("NATIVE_TARGET_INVALID", "win32 target libc must be msvcrt");
   if (target.platform === "linux" && !["glibc", "musl"].includes(target.libc)) fail("NATIVE_TARGET_INVALID", "linux target libc must be glibc or musl");
+}
+
+function runtimeBinaryClass(artifactPath, policy) {
+  const extension = path.posix.extname(artifactPath).toLowerCase();
+  if (extension === ".wasm") return "wasm-resource";
+  if (artifactPath.endsWith("/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper")) return "executable-native";
+  return policy.nativeBinaryExtensions.includes(extension) ? "native-binary" : null;
 }
 
 function validateTarget(target, fail) {

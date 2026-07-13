@@ -252,6 +252,7 @@ function publicNormalizationEvidence(normalization) {
     path: `${entry.prefix}/${origin.path}`,
     sha256: origin.sha256,
     sourceCtime: origin.sourceCtime,
+    mode: origin.mode,
   }))).sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)));
   return {
     method: "daemon-esm-bundle-external-closure-v1",
@@ -262,6 +263,8 @@ function publicNormalizationEvidence(normalization) {
       method: "esbuild-node24-esm-create-require-banner-v1",
       bundleSha256: normalization.daemonClosure.bundleSha256,
       metafileSha256: normalization.daemonClosure.metafileSha256,
+      metafileInputCount: normalization.daemonClosure.metafileInputCount,
+      metafileOutput: "runtime/daemon/dist/sidecar/index.js",
       externalAllowlist: [...normalization.daemonClosure.externalAllowlist],
       files: normalization.daemonClosure.files.map((entry) => ({ path: `runtime/daemon/${entry.path}`, sha256: entry.sha256 })),
     },

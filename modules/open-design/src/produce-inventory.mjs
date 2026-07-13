@@ -59,16 +59,17 @@ export async function produceInventory({ stagingRoot, metadata = {}, provenance,
     if (!Number.isSafeInteger(totalBytes) || totalBytes > policy.limits.maxTotalBytes) fail("TOTAL_SIZE_EXCEEDED", "staged files exceed maxTotalBytes");
 
     const required = policy.requiredFiles.find((candidate) => candidate.path === artifactPath);
-    const native = policy.nativeBinaryExtensions.includes(path.posix.extname(artifactPath).toLowerCase());
+    const runtimeClass = runtimeBinaryClass(artifactPath, policy);
     files.push({
       schemaVersion: 1,
       path: artifactPath,
       type: "file",
-      artifactKind: native ? "native-binary" : rule.artifactKind,
+      artifactKind: runtimeClass ?? rule.artifactKind,
       component: rule.component ?? rule.components[0],
       dependencyScope: rule.artifactKind === "runtime-package" || rule.artifactKind === "daemon-runtime" ? "production" : "artifact",
       bytes: collected.bytes,
       sha256: collected.sha256,
+      ...(runtimeClass && { fileMode: modeString(collected.stat.mode) }),
       ...(required && { mediaType: required.mediaType, schemaId: required.schemaId }),
       ...(required?.schemaVersion !== undefined && { contentSchemaVersion: required.schemaVersion, sourceCommit: provenance.source.commit }),
       ...special
@@ -225,7 +226,7 @@ function validateArtifactPath(value, policy) {
 function validateMetadata(artifactPath, value, policy) {
   const extension = path.posix.extname(artifactPath).toLowerCase();
   const pathCategory = inferResourcePathCategory(artifactPath, policy);
-  const inferredCategory = policy.nativeBinaryExtensions.includes(extension) ? "native-binaries" : Object.entries(policy.resourceExtensions).find(([, extensions]) => extensions.includes(extension))?.[0];
+  const inferredCategory = runtimeBinaryClass(artifactPath, policy) ? "native-binaries" : Object.entries(policy.resourceExtensions).find(([, extensions]) => extensions.includes(extension))?.[0];
   if (value === undefined) {
     if (inferredCategory || pathCategory !== undefined) fail("METADATA_MISSING", `resource/native metadata is required for exact path: ${artifactPath}`);
     return {};
@@ -237,6 +238,17 @@ function validateMetadata(artifactPath, value, policy) {
   if (value.resourceCategory === "native-binaries" && !isPlainObject(value.nativeTarget)) fail("METADATA_MISSING", `nativeTarget is required: ${artifactPath}`);
   if (value.resourceCategory !== "native-binaries" && value.nativeTarget !== undefined) fail("METADATA_INVALID", `nativeTarget is only valid for native binaries: ${artifactPath}`);
   return structuredClone(value);
+}
+
+function runtimeBinaryClass(artifactPath, policy) {
+  const extension = path.posix.extname(artifactPath).toLowerCase();
+  if (extension === ".wasm") return "wasm-resource";
+  if (artifactPath.endsWith("/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper")) return "executable-native";
+  return policy.nativeBinaryExtensions.includes(extension) ? "native-binary" : null;
+}
+
+function modeString(mode) {
+  return Number(mode & 0o777n).toString(8).padStart(4, "0");
 }
 
 function findRule(artifactPath, policy) {

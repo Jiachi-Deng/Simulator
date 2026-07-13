@@ -48,19 +48,19 @@
         "outputs": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "object", "required": ["role", "symlinksMaterialized", "hardlinksMaterialized", "virtualStorePackagesHoisted"], "properties": {
           "role": {"enum": ["next-standalone", "daemon-esm-bundle-external-closure", "web-sidecar-closure"]}, "symlinksMaterialized": {"type": "integer", "minimum": 0}, "hardlinksMaterialized": {"type": "integer", "minimum": 0}, "virtualStorePackagesHoisted": {"type": "integer", "minimum": 0}
         }, "additionalProperties": false}},
-        "nativeOrigins": {"type": "array", "maxItems": 10000, "items": {"type": "object", "required": ["path", "sha256", "sourceCtime"], "properties": {
-          "path": {"type": "string", "minLength": 1, "maxLength": 1024}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "sourceCtime": {"type": "string", "minLength": 20, "maxLength": 64}
+        "nativeOrigins": {"type": "array", "maxItems": 10000, "items": {"type": "object", "required": ["path", "sha256", "sourceCtime", "mode"], "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1024}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "sourceCtime": {"type": "string", "minLength": 20, "maxLength": 64}, "mode": {"enum": ["0644", "0755"]}
         }, "additionalProperties": false}},
-        "daemonClosure": {"type": "object", "required": ["method", "bundleSha256", "metafileSha256", "externalAllowlist", "files"], "properties": {
-          "method": {"const": "esbuild-node24-esm-create-require-banner-v1"}, "bundleSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "metafileSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "daemonClosure": {"type": "object", "required": ["method", "bundleSha256", "metafileSha256", "metafileInputCount", "metafileOutput", "externalAllowlist", "files"], "properties": {
+          "method": {"const": "esbuild-node24-esm-create-require-banner-v1"}, "bundleSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "metafileSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "metafileInputCount": {"type": "integer", "minimum": 1}, "metafileOutput": {"const": "runtime/daemon/dist/sidecar/index.js"},
           "externalAllowlist": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"enum": ["better-sqlite3", "node-pty", "blake3-wasm"]}},
           "files": {"type": "array", "minItems": 1, "maxItems": 1000, "items": {"type": "object", "required": ["path", "sha256"], "properties": {"path": {"type": "string", "pattern": "^runtime/daemon/", "maxLength": 1024}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, "additionalProperties": false}}
         }, "additionalProperties": false}
       }, "additionalProperties": false}
     }, "additionalProperties": false},
-    "native": {"type": "array", "maxItems": 10000, "items": {"type": "object", "required": ["packageName", "path", "format", "platform", "arch", "nodeAbi", "libc", "binaryFormat", "sha256", "sourceCtime", "freshFromBuild", "load"], "properties": {
-      "packageName": {"enum": ["better-sqlite3", "node-pty", "sharp"]}, "path": {"type": "string", "minLength": 1, "maxLength": 1024}, "format": {"type": "string", "minLength": 1, "maxLength": 32},
-      "platform": {"const": "darwin"}, "arch": {"const": "arm64"}, "nodeAbi": {"const": "137"}, "libc": {"const": "none"}, "binaryFormat": {"const": "mach-o"},
+    "native": {"type": "array", "maxItems": 10000, "items": {"type": "object", "required": ["packageName", "path", "format", "platform", "arch", "nodeAbi", "libc", "binaryFormat", "resourceClass", "mode", "sha256", "sourceCtime", "freshFromBuild", "load"], "properties": {
+      "packageName": {"enum": ["better-sqlite3", "node-pty", "sharp", "blake3-wasm"]}, "path": {"type": "string", "minLength": 1, "maxLength": 1024}, "format": {"enum": ["node-addon", "executable", "shared-library", "wasm-module"]},
+      "platform": {"const": "darwin"}, "arch": {"const": "arm64"}, "nodeAbi": {"const": "137"}, "libc": {"const": "none"}, "binaryFormat": {"enum": ["mach-o", "wasm"]}, "resourceClass": {"enum": ["native-binary", "executable-native", "wasm-resource"]}, "mode": {"enum": ["0644", "0755"]},
       "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "sourceCtime": {"type": "string", "minLength": 20, "maxLength": 64}, "freshFromBuild": {"const": true},
       "load": {"type": ["object", "null"], "required": ["ok", "nodeVersion", "nodeAbi", "platform", "arch"], "properties": {"ok": {"const": true}, "nodeVersion": {"const": "v24.14.1"}, "nodeAbi": {"const": "137"}, "platform": {"const": "darwin"}, "arch": {"const": "arm64"}}, "additionalProperties": false}
     }, "additionalProperties": false}},

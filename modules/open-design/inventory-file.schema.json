@@ -5,11 +5,12 @@
     "schemaVersion": {"const": 1},
     "path": {"type": "string", "minLength": 1, "maxLength": 1024},
     "type": {"enum": ["file", "symlink"]},
-    "artifactKind": {"enum": ["web-server", "web-static", "daemon-runtime", "runtime-package", "legal", "metadata", "native-binary"]},
+    "artifactKind": {"enum": ["web-server", "web-static", "daemon-runtime", "runtime-package", "legal", "metadata", "native-binary", "executable-native", "wasm-resource"]},
     "component": {"enum": ["next-standalone", "next-static", "next-public", "daemon", "runtime-package", "legal", "metadata"]},
     "dependencyScope": {"enum": ["production", "artifact", "development"]},
     "bytes": {"type": "integer", "minimum": 0},
     "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "fileMode": {"enum": ["0644", "0755"]},
     "symlinkTarget": {"type": "string", "minLength": 1, "maxLength": 1024},
     "mediaType": {"type": "string", "minLength": 1, "maxLength": 128},
     "schemaId": {"type": "string", "minLength": 1, "maxLength": 128},
@@ -21,7 +22,7 @@
     "nativeTarget": {
       "type": "object", "required": ["format", "platform", "arch", "libc"],
       "properties": {
-        "format": {"enum": ["node-addon", "executable", "shared-library"]},
+        "format": {"enum": ["node-addon", "executable", "shared-library", "wasm-module"]},
         "platform": {"enum": ["darwin", "linux", "win32"]},
         "arch": {"enum": ["arm64", "x64"]},
         "libc": {"enum": ["none", "glibc", "musl", "msvcrt"]},

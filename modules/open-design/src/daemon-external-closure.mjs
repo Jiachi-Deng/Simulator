@@ -25,7 +25,8 @@ export async function buildDaemonExternalClosure({ checkoutRoot, bundlePath, met
   stagingAssert(Number.isFinite(buildStartedAtMs), "DAEMON_CLOSURE_TIME_INVALID", "build start time is required");
   stagingAssert(target?.platform === "darwin" && target.arch === "arm64", "DAEMON_CLOSURE_TARGET_UNSUPPORTED", "only darwin-arm64 daemon closure is supported");
   const checkoutReal = await realpath(checkoutRoot).catch((error) => stagingFail("DAEMON_CLOSURE_ROOT_INVALID", error.message));
-  const metafile = await validateDaemonMetafile({ metafilePath });
+  const bundleReal = await realpath(bundlePath).catch((error) => stagingFail("DAEMON_CLOSURE_REQUIRED_FILE_MISSING", error.message));
+  const metafile = await validateDaemonMetafile({ metafilePath, checkoutRoot: checkoutReal, bundlePath: bundleReal });
   await mkdir(destinationRoot, { mode: 0o700 }).catch((error) => stagingFail("DAEMON_CLOSURE_DESTINATION_INVALID", error.message));
   const destinationStat = await lstat(destinationRoot).catch((error) => stagingFail("DAEMON_CLOSURE_DESTINATION_INVALID", error.message));
   stagingAssert(destinationStat.isDirectory() && !destinationStat.isSymbolicLink() && destinationStat.uid === currentUid(), "DAEMON_CLOSURE_DESTINATION_INVALID", "closure destination must be an owner-built real directory");
@@ -48,6 +49,8 @@ export async function buildDaemonExternalClosure({ checkoutRoot, bundlePath, met
       root: destinationRoot,
       bundleSha256: files.find((entry) => entry.path === "dist/sidecar/index.js").sha256,
       metafileSha256: metafile.sha256,
+      metafileInputCount: metafile.inputCount,
+      metafileOutput: "dist/sidecar/index.js",
       externalAllowlist: [...DAEMON_EXTERNAL_ALLOWLIST],
       files: files.sort(comparePath),
       nativeOrigins: nativeOrigins.sort(comparePath),
@@ -61,8 +64,12 @@ export async function buildDaemonExternalClosure({ checkoutRoot, bundlePath, met
   }
 }
 
-export async function validateDaemonMetafile({ metafilePath } = {}) {
-  stagingAssert(path.isAbsolute(metafilePath ?? ""), "DAEMON_METAFILE_INVALID", "metafile path must be absolute");
+export async function validateDaemonMetafile({ metafilePath, checkoutRoot, bundlePath } = {}) {
+  stagingAssert(path.isAbsolute(metafilePath ?? "") && path.isAbsolute(checkoutRoot ?? "") && path.isAbsolute(bundlePath ?? ""), "DAEMON_METAFILE_INVALID", "metafile, checkout and bundle paths must be absolute");
+  const [checkoutReal, bundleReal] = await Promise.all([
+    realpath(checkoutRoot).catch((error) => stagingFail("DAEMON_METAFILE_INVALID", error.message)),
+    realpath(bundlePath).catch((error) => stagingFail("DAEMON_METAFILE_INVALID", error.message)),
+  ]);
   const bytes = await readRegularFile(metafilePath, "DAEMON_METAFILE_INVALID");
   let metafile;
   try {
@@ -70,7 +77,17 @@ export async function validateDaemonMetafile({ metafilePath } = {}) {
   } catch (error) {
     stagingFail("DAEMON_METAFILE_INVALID", `metafile is not JSON: ${error.message}`);
   }
-  stagingAssert(isPlainObject(metafile) && isPlainObject(metafile.outputs), "DAEMON_METAFILE_INVALID", "metafile outputs are required");
+  stagingAssert(isPlainObject(metafile) && isPlainObject(metafile.inputs) && Object.keys(metafile.inputs).length > 0 && isPlainObject(metafile.outputs), "DAEMON_METAFILE_INVALID", "metafile inputs and outputs are required");
+  const outputPaths = Object.keys(metafile.outputs);
+  stagingAssert(outputPaths.length === 1 && path.resolve(checkoutReal, outputPaths[0]) === bundleReal, "DAEMON_METAFILE_OUTPUT_INVALID", "metafile must contain exactly the expected daemon bundle output");
+  for (const inputPath of Object.keys(metafile.inputs)) {
+    stagingAssert(typeof inputPath === "string" && inputPath.length > 0 && !path.isAbsolute(inputPath), "DAEMON_METAFILE_INPUT_ESCAPE", `metafile input path is invalid: ${inputPath}`);
+    const candidate = path.resolve(checkoutReal, inputPath);
+    assertContained(checkoutReal, candidate, inputPath);
+    const resolved = await realpath(candidate).catch((error) => stagingFail("DAEMON_METAFILE_INPUT_MISSING", `${inputPath}: ${error.message}`));
+    assertContained(checkoutReal, resolved, inputPath);
+    await readRegularFile(resolved, "DAEMON_METAFILE_INPUT_INVALID");
+  }
   const externals = new Set();
   for (const output of Object.values(metafile.outputs)) {
     stagingAssert(isPlainObject(output) && Array.isArray(output.imports), "DAEMON_METAFILE_INVALID", "metafile output imports are required");
@@ -81,7 +98,7 @@ export async function validateDaemonMetafile({ metafilePath } = {}) {
   }
   const packages = [...externals].filter((specifier) => !isNodeBuiltin(specifier)).sort();
   stagingAssert(JSON.stringify(packages) === JSON.stringify([...DAEMON_EXTERNAL_ALLOWLIST].sort()), "DAEMON_EXTERNAL_UNEXPECTED", `daemon bundle externals must be exactly ${DAEMON_EXTERNAL_ALLOWLIST.join(", ")}; got ${packages.join(", ") || "none"}`);
-  return { sha256: createHash("sha256").update(bytes).digest("hex"), externalImports: [...externals].sort() };
+  return { sha256: createHash("sha256").update(bytes).digest("hex"), inputCount: Object.keys(metafile.inputs).length, externalImports: [...externals].sort() };
 }
 
 async function resolvePackageRoots({ checkoutRoot, packageRoots }) {
@@ -136,8 +153,8 @@ function closureDefinitions(roots) {
     { source: roots["better-sqlite3"], destination: "better-sqlite3", files: ["package.json", "build/Release/better_sqlite3.node"], directories: ["lib"] },
     { source: roots.bindings, destination: "bindings", files: ["package.json", "bindings.js"], directories: [] },
     { source: roots["file-uri-to-path"], destination: "file-uri-to-path", files: ["package.json", "index.js"], directories: [] },
-    { source: roots["node-pty"], destination: "node-pty", files: ["package.json", "prebuilds/darwin-arm64/pty.node", "prebuilds/darwin-arm64/spawn-helper"], directories: ["lib"] },
-    { source: roots["blake3-wasm"], destination: "blake3-wasm", files: ["package.json", "dist/index.js", "dist/wasm/nodejs/blake3_js.js", "dist/wasm/nodejs/blake3_js_bg.wasm", "dist/wasm/nodejs/package.json"], directories: ["dist/base", "dist/node"] },
+    { source: roots["node-pty"], destination: "node-pty", files: ["package.json", "lib/eventEmitter2.js", "lib/index.js", "lib/interfaces.js", "lib/terminal.js", "lib/types.js", "lib/unixTerminal.js", "lib/utils.js", "prebuilds/darwin-arm64/pty.node", "prebuilds/darwin-arm64/spawn-helper"], directories: [] },
+    { source: roots["blake3-wasm"], destination: "blake3-wasm", files: ["package.json", "dist/index.js", "dist/base/disposable.js", "dist/base/hash-fn.js", "dist/base/hash-instance.js", "dist/base/hash-reader.js", "dist/base/index.js", "dist/node/hash-fn.js", "dist/node/hash-instance.js", "dist/node/hash-reader.js", "dist/node/index.js", "dist/node/wasm.js", "dist/wasm/nodejs/blake3_js.js", "dist/wasm/nodejs/blake3_js_bg.wasm", "dist/wasm/nodejs/package.json"], directories: [] },
   ];
 }
 
@@ -166,7 +183,7 @@ async function copyRuntimeJavaScriptTree({ source, destination, artifactPrefix, 
 async function copyFile({ source, destination, artifactPath, buildStartedAtMs, files, nativeOrigins }) {
   const bytes = await readRegularFile(source, "DAEMON_CLOSURE_REQUIRED_FILE_MISSING");
   const stat = await lstat(source).catch((error) => stagingFail("DAEMON_CLOSURE_FILE_INVALID", error.message));
-  stagingAssert(stat.ctimeMs >= buildStartedAtMs || !isNative(artifactPath), "NATIVE_OUTPUT_STALE", `native source predates this build: ${artifactPath}`);
+  stagingAssert(stat.ctimeMs >= buildStartedAtMs || !isRuntimeBinary(artifactPath), "NATIVE_OUTPUT_STALE", `runtime binary source predates this build: ${artifactPath}`);
   await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 }).catch((error) => stagingFail("DAEMON_CLOSURE_DESTINATION_INVALID", error.message));
   const handle = await open(destination, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), 0o600).catch((error) => stagingFail("DAEMON_CLOSURE_DESTINATION_INVALID", error.message));
   try {
@@ -178,7 +195,7 @@ async function copyFile({ source, destination, artifactPath, buildStartedAtMs, f
   }
   const sha256 = createHash("sha256").update(bytes).digest("hex");
   files.push({ path: artifactPath, sha256 });
-  if (nativeOrigins && isNative(artifactPath)) nativeOrigins.push({ path: artifactPath, sha256, sourceCtime: new Date(stat.ctimeMs).toISOString() });
+  if (nativeOrigins && isRuntimeBinary(artifactPath)) nativeOrigins.push({ path: artifactPath, sha256, sourceCtime: new Date(stat.ctimeMs).toISOString(), mode: fileMode(artifactPath) });
 }
 
 async function readRegularFile(filename, code) {
@@ -221,8 +238,12 @@ function isNodeBuiltin(specifier) {
   return BUILTIN_MODULES.has(specifier);
 }
 
-function isNative(artifactPath) {
-  return artifactPath.endsWith(".node");
+function isRuntimeBinary(artifactPath) {
+  return artifactPath.endsWith(".node") || artifactPath.endsWith(".wasm") || artifactPath.endsWith("/node-pty/prebuilds/darwin-arm64/spawn-helper");
+}
+
+function fileMode(artifactPath) {
+  return artifactPath.endsWith("/spawn-helper") ? "0755" : "0644";
 }
 
 function isPlainObject(value) {

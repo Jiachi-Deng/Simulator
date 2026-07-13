@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { link, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, link, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -29,10 +29,10 @@ test("requires node-pty to be explicitly allowed to build", () => {
 });
 
 test("pins every real target-native path while keeping redistribution decisions pending", () => {
-  assert.equal(Object.keys(pendingMetadata).length, 11);
+  assert.equal(Object.keys(pendingMetadata).length, 13);
   const decisionById = new Map(resourceDecisions.decisions.map((decision) => [decision.id, decision]));
   for (const [artifactPath, metadata] of Object.entries(pendingMetadata)) {
-    assert.match(artifactPath, /(?:better_sqlite3|pty|sharp-darwin-arm64|libvips-cpp).*(?:\.node|\.dylib)$/u);
+    assert.match(artifactPath, /(?:better_sqlite3|pty|spawn-helper|sharp-darwin-arm64|libvips-cpp|blake3_js_bg)/u);
     assert.equal(metadata.resourceCategory, "native-binaries");
     assert.deepEqual({ platform: metadata.nativeTarget.platform, arch: metadata.nativeTarget.arch, nodeAbi: metadata.nativeTarget.nodeAbi, libc: metadata.nativeTarget.libc }, target);
     const decision = decisionById.get(metadata.decisionId);
@@ -46,24 +46,30 @@ test("records target platform, architecture, and Node ABI for required native pa
   const root = await mkdtemp(path.join(os.tmpdir(), "open-design-native-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const files = [
-    "runtime/daemon/node_modules/better-sqlite3/build/Release/better_sqlite3.node",
-    "runtime/daemon/node_modules/node-pty/build/Release/pty.node",
-    "runtime/packages/web-sidecar/node_modules/@img/sharp-darwin-arm64/lib/sharp.node",
+    { path: "runtime/daemon/node_modules/better-sqlite3/build/Release/better_sqlite3.node", format: "node-addon", bytes: arm64MachO(), mode: 0o644 },
+    { path: "runtime/daemon/node_modules/blake3-wasm/dist/wasm/nodejs/blake3_js_bg.wasm", format: "wasm-module", bytes: Buffer.from([0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0]), mode: 0o644 },
+    { path: "runtime/daemon/node_modules/node-pty/prebuilds/darwin-arm64/pty.node", format: "node-addon", bytes: arm64MachO(), mode: 0o644 },
+    { path: "runtime/daemon/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper", format: "executable", bytes: arm64MachO(), mode: 0o755 },
+    { path: "runtime/packages/web-sidecar/node_modules/@img/sharp-darwin-arm64/lib/sharp.node", format: "node-addon", bytes: arm64MachO(), mode: 0o644 },
   ];
-  await Promise.all(files.map(async (relative) => {
-    await mkdir(path.dirname(path.join(root, relative)), { recursive: true });
-    await writeFile(path.join(root, relative), arm64MachO());
+  await Promise.all(files.map(async (file) => {
+    await mkdir(path.dirname(path.join(root, file.path)), { recursive: true });
+    await writeFile(path.join(root, file.path), file.bytes);
+    await chmod(path.join(root, file.path), file.mode);
   }));
-  const metadata = Object.fromEntries(files.map((relative) => [relative, { nativeTarget: { format: "node-addon", ...target } }]));
-  const copied = await Promise.all(files.map(async (relative) => ({
-    path: relative,
-    sha256: createHash("sha256").update(await readFile(path.join(root, relative))).digest("hex"),
+  const metadata = Object.fromEntries(files.map((file) => [file.path, { nativeTarget: { format: file.format, ...target } }]));
+  const copied = await Promise.all(files.map(async (file) => ({
+    path: file.path,
+    sha256: createHash("sha256").update(await readFile(path.join(root, file.path))).digest("hex"),
+    mode: file.mode.toString(8).padStart(4, "0"),
     sourceCtimeMs: Date.now(),
   })));
   const inventory = await inspectNativeRuntime({ artifactRoot: root, metadata, target, runtime, buildEvidence: { buildStartedAtMs: Date.now() - 1000, copied }, loadAddon: async () => loaded });
-  assert.deepEqual(inventory.map((entry) => entry.packageName), ["better-sqlite3", "node-pty", "sharp"]);
+  assert.deepEqual(inventory.map((entry) => entry.resourceClass), ["native-binary", "wasm-resource", "native-binary", "executable-native", "native-binary"]);
   assert.ok(inventory.every((entry) => entry.platform === "darwin" && entry.arch === "arm64" && entry.nodeAbi === "137"));
-  assert.ok(inventory.every((entry) => entry.freshFromBuild && entry.load?.nodeVersion === "v24.14.1"));
+  assert.ok(inventory.every((entry) => entry.freshFromBuild));
+  assert.ok(inventory.filter((entry) => entry.format === "node-addon").every((entry) => entry.load?.nodeVersion === "v24.14.1"));
+  assert.equal(inventory.find((entry) => entry.resourceClass === "executable-native").mode, "0755");
 });
 
 test("reports every missing exact native metadata key in one fail-closed preflight", async (t) => {

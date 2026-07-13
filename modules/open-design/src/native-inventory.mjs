@@ -10,6 +10,7 @@ import { stagingAssert, stagingFail } from "./staging-error.mjs";
 
 export const REQUIRED_NATIVE_PACKAGES = Object.freeze(["better-sqlite3", "node-pty", "sharp"]);
 const NATIVE_EXTENSIONS = new Set([".node", ".so", ".dylib", ".dll", ".exe"]);
+const NODE_PTY_HELPER_SUFFIX = "/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper";
 const execFile = promisify(execFileCallback);
 const addonLoader = fileURLToPath(new URL("load-native-addon.mjs", import.meta.url));
 
@@ -70,7 +71,8 @@ export async function inspectNativeRuntime({
       }
       stagingAssert(stat.isFile(), "NATIVE_SPECIAL_FILE_FORBIDDEN", `only regular files are allowed: ${relativePath}`);
       stagingAssert(stat.nlink === 1, "NATIVE_HARD_LINK_FORBIDDEN", `hard-linked file is forbidden: ${relativePath}`);
-      if (!NATIVE_EXTENSIONS.has(path.posix.extname(relativePath).toLowerCase())) continue;
+      const runtimeClass = runtimeBinaryClass(relativePath);
+      if (runtimeClass == null) continue;
 
       const packageName = packageNameForArtifactPath(relativePath);
       stagingAssert(packageName != null, "NATIVE_PACKAGE_UNKNOWN", `native binary is outside a known package path: ${relativePath}`);
@@ -80,9 +82,11 @@ export async function inspectNativeRuntime({
         continue;
       }
       validateNativeMetadata(nativeTarget, target, relativePath);
-      const binary = await inspectNativeBinary(absolutePath, relativePath);
-      stagingAssert(binary.platform === target.platform, "NATIVE_PLATFORM_MISMATCH", `${relativePath} is ${binary.platform}, expected ${target.platform}`);
-      stagingAssert(binary.arch === target.arch, "NATIVE_ARCH_MISMATCH", `${relativePath} is ${binary.arch}, expected ${target.arch}`);
+      const binary = runtimeClass === "wasm-resource" ? await inspectWasmBinary(absolutePath, relativePath) : await inspectNativeBinary(absolutePath, relativePath);
+      if (runtimeClass !== "wasm-resource") {
+        stagingAssert(binary.platform === target.platform, "NATIVE_PLATFORM_MISMATCH", `${relativePath} is ${binary.platform}, expected ${target.platform}`);
+        stagingAssert(binary.arch === target.arch, "NATIVE_ARCH_MISMATCH", `${relativePath} is ${binary.arch}, expected ${target.arch}`);
+      }
       const expectedFormat = artifactFormat(relativePath);
       stagingAssert(nativeTarget.format === expectedFormat, "NATIVE_FORMAT_MISMATCH", `${relativePath} has metadata format ${nativeTarget.format}, expected ${expectedFormat}`);
       const copyEvidence = copyByPath.get(relativePath);
@@ -90,6 +94,8 @@ export async function inspectNativeRuntime({
       stagingAssert(copyEvidence.sourceCtimeMs >= buildEvidence.buildStartedAtMs, "NATIVE_OUTPUT_STALE", `${relativePath} source native output predates this build`);
       const sha256 = createHash("sha256").update(await readFile(absolutePath)).digest("hex");
       stagingAssert(sha256 === copyEvidence.sha256, "NATIVE_BUILD_EVIDENCE_INVALID", `${relativePath} digest differs from copy evidence`);
+      const expectedMode = runtimeClass === "executable-native" ? "0755" : "0644";
+      stagingAssert(copyEvidence.mode === expectedMode && (stat.mode & 0o777).toString(8).padStart(4, "0") === expectedMode, "NATIVE_MODE_MISMATCH", `${relativePath} must be mode ${expectedMode}`);
       let load = null;
       if (expectedFormat === "node-addon") {
         load = await loadAddon({ nodeBin, addonPath: absolutePath, relativePath });
@@ -105,6 +111,8 @@ export async function inspectNativeRuntime({
         nodeAbi: target.nodeAbi,
         libc: target.libc,
         binaryFormat: binary.format,
+        resourceClass: runtimeClass,
+        mode: expectedMode,
         sha256,
         sourceCtime: new Date(copyEvidence.sourceCtimeMs).toISOString(),
         freshFromBuild: true,
@@ -142,6 +150,22 @@ export async function inspectNativeBinary(filename, label = filename) {
     stagingAssert(sameIdentity(before, after), "NATIVE_RUNTIME_CHANGED", `${label} changed while inspecting binary header`);
     const header = buffer.subarray(0, bytesRead);
     return parseNativeHeader(header, label);
+  } finally {
+    await handle.close();
+  }
+}
+
+async function inspectWasmBinary(filename, label) {
+  const handle = await open(filename, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0)).catch((error) => stagingFail("NATIVE_FILESYSTEM_ERROR", error.message));
+  try {
+    const before = await handle.stat();
+    stagingAssert(before.isFile() && before.nlink === 1, "NATIVE_HARD_LINK_FORBIDDEN", `${label} must be an unlinked regular file`);
+    const magic = Buffer.alloc(4);
+    const { bytesRead } = await handle.read(magic, 0, magic.length, 0);
+    const after = await handle.stat();
+    stagingAssert(sameIdentity(before, after), "NATIVE_RUNTIME_CHANGED", `${label} changed while inspecting WASM header`);
+    stagingAssert(bytesRead === 4 && magic.equals(Buffer.from([0x00, 0x61, 0x73, 0x6d])), "NATIVE_FORMAT_UNRECOGNIZED", `${label} is not a WebAssembly module`);
+    return { format: "wasm" };
   } finally {
     await handle.close();
   }
@@ -192,7 +216,7 @@ function packageNameForArtifactPath(relativePath) {
     if (parts[index] !== "node_modules") continue;
     const scopeOrName = parts[index + 1];
     const name = scopeOrName?.startsWith("@") ? `${scopeOrName}/${parts[index + 2] ?? ""}` : scopeOrName;
-    if (name === "better-sqlite3" || name === "node-pty" || name === "sharp") return name;
+    if (name === "better-sqlite3" || name === "node-pty" || name === "sharp" || name === "blake3-wasm") return name;
     if (scopeOrName === "@img" && parts[index + 2]?.startsWith("sharp-")) return "sharp";
   }
   return null;
@@ -216,7 +240,14 @@ function validateNativeMetadata(nativeTarget, target, relativePath) {
 
 function artifactFormat(relativePath) {
   const extension = path.posix.extname(relativePath).toLowerCase();
-  return extension === ".node" ? "node-addon" : extension === ".exe" ? "executable" : "shared-library";
+  return extension === ".node" ? "node-addon" : extension === ".wasm" ? "wasm-module" : extension === ".exe" || relativePath.endsWith(NODE_PTY_HELPER_SUFFIX) ? "executable" : "shared-library";
+}
+
+function runtimeBinaryClass(relativePath) {
+  const extension = path.posix.extname(relativePath).toLowerCase();
+  if (extension === ".wasm") return "wasm-resource";
+  if (relativePath.endsWith(NODE_PTY_HELPER_SUFFIX)) return "executable-native";
+  return NATIVE_EXTENSIONS.has(extension) ? "native-binary" : null;
 }
 
 function sameIdentity(left, right) {

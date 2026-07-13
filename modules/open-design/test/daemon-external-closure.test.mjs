@@ -29,12 +29,29 @@ async function fixture(t) {
     "packages/bindings/bindings.js": "module.exports = () => {};\n",
     "packages/file-uri-to-path/index.js": "module.exports = () => '';\n",
     "packages/node-pty/lib/index.js": "module.exports = {};\n",
+    "packages/node-pty/lib/eventEmitter2.js": "module.exports = {};\n",
+    "packages/node-pty/lib/interfaces.js": "module.exports = {};\n",
+    "packages/node-pty/lib/terminal.js": "module.exports = {};\n",
+    "packages/node-pty/lib/types.js": "module.exports = {};\n",
+    "packages/node-pty/lib/unixTerminal.js": "module.exports = {};\n",
+    "packages/node-pty/lib/utils.js": "module.exports = {};\n",
+    "packages/node-pty/lib/windowsTerminal.js": "must-not-copy",
     "packages/node-pty/lib/index.js.map": "must-not-copy",
     "packages/node-pty/prebuilds/darwin-arm64/pty.node": "pty-native",
     "packages/node-pty/prebuilds/darwin-arm64/spawn-helper": "helper",
     "packages/blake3-wasm/dist/index.js": "module.exports = require('./node');\n",
     "packages/blake3-wasm/dist/base/index.js": "module.exports = {};\n",
+    "packages/blake3-wasm/dist/base/disposable.js": "module.exports = {};\n",
+    "packages/blake3-wasm/dist/base/hash-fn.js": "module.exports = {};\n",
+    "packages/blake3-wasm/dist/base/hash-instance.js": "module.exports = {};\n",
+    "packages/blake3-wasm/dist/base/hash-reader.js": "module.exports = {};\n",
+    "packages/blake3-wasm/dist/base/test-helpers.js": "must-not-copy",
     "packages/blake3-wasm/dist/node/index.js": "module.exports = {};\n",
+    "packages/blake3-wasm/dist/node/hash-fn.js": "module.exports = {};\n",
+    "packages/blake3-wasm/dist/node/hash-instance.js": "module.exports = {};\n",
+    "packages/blake3-wasm/dist/node/hash-reader.js": "module.exports = {};\n",
+    "packages/blake3-wasm/dist/node/wasm.js": "module.exports = {};\n",
+    "packages/blake3-wasm/dist/browser/index.js": "must-not-copy",
     "packages/blake3-wasm/dist/wasm/nodejs/blake3_js.js": "module.exports = {};\n",
     "packages/blake3-wasm/dist/wasm/nodejs/blake3_js_bg.wasm": "wasm",
     "packages/blake3-wasm/dist/wasm/nodejs/package.json": "{}\n",
@@ -49,9 +66,10 @@ test("creates a fixed ordinary-file daemon external closure with native and WASM
   const result = await buildDaemonExternalClosure({ checkoutRoot: input.checkout, bundlePath: input.bundle, metafilePath: input.metafile, destinationRoot: input.output, buildStartedAtMs: input.buildStartedAtMs, target, packageRoots: input.roots });
   assert.deepEqual(result.externalAllowlist, DAEMON_EXTERNAL_ALLOWLIST);
   assert.equal(result.files.some((entry) => entry.path.includes("htmlparser2") || entry.path.includes("entities")), false);
+  assert.equal(result.files.some((entry) => entry.path.includes("test-helpers") || entry.path.includes("windowsTerminal") || entry.path.includes("/browser/")), false);
   assert.equal(result.files.some((entry) => entry.path === "node_modules/@open-design/daemon/package.json"), true);
   assert.equal(result.files.some((entry) => entry.path.endsWith(".map")), false);
-  assert.deepEqual(result.nativeOrigins.map((entry) => entry.path), ["node_modules/better-sqlite3/build/Release/better_sqlite3.node", "node_modules/node-pty/prebuilds/darwin-arm64/pty.node"]);
+  assert.deepEqual(result.nativeOrigins.map((entry) => entry.path), ["node_modules/better-sqlite3/build/Release/better_sqlite3.node", "node_modules/blake3-wasm/dist/wasm/nodejs/blake3_js_bg.wasm", "node_modules/node-pty/prebuilds/darwin-arm64/pty.node", "node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper"]);
   assert.equal((await lstat(path.join(input.output, "node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper"))).mode & 0o777, 0o755);
   assert.equal(await readFile(path.join(input.output, "node_modules/blake3-wasm/dist/wasm/nodejs/blake3_js_bg.wasm"), "utf8"), "wasm");
   assert.match(result.metafileSha256, /^[0-9a-f]{64}$/u);
@@ -60,11 +78,19 @@ test("creates a fixed ordinary-file daemon external closure with native and WASM
 test("rejects metafile tampering and unexpected package externals", async (t) => {
   const input = await fixture(t);
   await writeFile(input.metafile, JSON.stringify(metafileFor([...DAEMON_EXTERNAL_ALLOWLIST, "entities"])));
-  await assert.rejects(validateDaemonMetafile({ metafilePath: input.metafile }), { code: "DAEMON_EXTERNAL_UNEXPECTED" });
+  await assert.rejects(validate(input), { code: "DAEMON_EXTERNAL_UNEXPECTED" });
   await writeFile(input.metafile, "not-json");
-  await assert.rejects(validateDaemonMetafile({ metafilePath: input.metafile }), { code: "DAEMON_METAFILE_INVALID" });
+  await assert.rejects(validate(input), { code: "DAEMON_METAFILE_INVALID" });
   await writeFile(input.metafile, JSON.stringify(metafileFor([...DAEMON_EXTERNAL_ALLOWLIST, "node:not-a-builtin"])));
-  await assert.rejects(validateDaemonMetafile({ metafilePath: input.metafile }), { code: "DAEMON_EXTERNAL_UNEXPECTED" });
+  await assert.rejects(validate(input), { code: "DAEMON_EXTERNAL_UNEXPECTED" });
+
+  await writeFile(input.metafile, JSON.stringify({ ...metafileFor(DAEMON_EXTERNAL_ALLOWLIST), inputs: { "../outside.js": {} } }));
+  await assert.rejects(validate(input), { code: "DAEMON_CLOSURE_ESCAPE" });
+
+  const multiple = metafileFor(DAEMON_EXTERNAL_ALLOWLIST);
+  multiple.outputs["other.js"] = { imports: [] };
+  await writeFile(input.metafile, JSON.stringify(multiple));
+  await assert.rejects(validate(input), { code: "DAEMON_METAFILE_OUTPUT_INVALID" });
 });
 
 test("fails closed for missing runtime payloads, links, and unsupported target", async (t) => {
@@ -98,7 +124,11 @@ async function build(input, buildTarget = target) {
 }
 
 function metafileFor(externals) {
-  return { outputs: { "daemon-bundle/dist/sidecar/index.js": { imports: [...externals.map((specifier) => ({ path: specifier, external: true })), { path: "node:fs", external: true }, { path: "node:sqlite", external: true }] } } };
+  return { inputs: { "daemon-bundle/dist/sidecar/index.js": { bytes: 1, imports: [] } }, outputs: { "daemon-bundle/dist/sidecar/index.js": { imports: [...externals.map((specifier) => ({ path: specifier, external: true })), { path: "node:fs", external: true }, { path: "node:sqlite", external: true }] } } };
+}
+
+async function validate(input) {
+  return await validateDaemonMetafile({ metafilePath: input.metafile, checkoutRoot: input.checkout, bundlePath: input.bundle });
 }
 
 async function writeFiles(root, files) {

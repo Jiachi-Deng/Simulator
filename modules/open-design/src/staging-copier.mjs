@@ -87,7 +87,7 @@ export async function copyStagingInputs({ stagingRoot, inputs, policy, target } 
     await ensureDestinationDirectory(path.dirname(destinationAbsolute), root);
     const copiedFile = await copyUnlinkedRegularFile(sourcePath, destinationAbsolute, sourceStat, destinationPath);
     totalBytes += copiedFile.bytes;
-    copied.push({ input: label, path: destinationPath, bytes: copiedFile.bytes, sha256: copiedFile.sha256, sourceCtimeMs: sourceStat.ctimeMs, sourceMtimeMs: sourceStat.mtimeMs });
+    copied.push({ input: label, path: destinationPath, bytes: copiedFile.bytes, sha256: copiedFile.sha256, mode: copiedFile.mode, sourceCtimeMs: sourceStat.ctimeMs, sourceMtimeMs: sourceStat.mtimeMs });
   }
 }
 
@@ -118,8 +118,9 @@ async function copyUnlinkedRegularFile(sourcePath, destinationPath, expected, la
     stagingAssert(sameIdentity(before, after) && sameIdentity(before, afterPath) && after.size === position, "STAGING_SOURCE_CHANGED", `${label} changed while copying`);
     const destinationStat = await output.stat();
     stagingAssert(destinationStat.isFile() && destinationStat.nlink === 1 && destinationStat.uid === currentUid() && destinationStat.size === position, "STAGING_DESTINATION_INVALID", `${label} destination did not remain an owner-built unlinked regular file`);
-    await chmod(destinationPath, before.mode & 0o111 ? 0o755 : 0o644);
-    return { bytes: position, sha256: hash.digest("hex") };
+    const mode = before.mode & 0o111 ? 0o755 : 0o644;
+    await chmod(destinationPath, mode);
+    return { bytes: position, sha256: hash.digest("hex"), mode: mode.toString(8).padStart(4, "0") };
   } catch (error) {
     await output?.close().catch(() => undefined);
     output = undefined;

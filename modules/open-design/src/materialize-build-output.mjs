@@ -117,7 +117,7 @@ export async function materializeBuildOutput({ sourceRoot, destinationRoot, buil
       const sha256 = hash.digest("hex");
       if (NATIVE_EXTENSIONS.has(path.extname(relativePath).toLowerCase())) {
         stagingAssert(before.ctimeMs >= buildStartedAtMs, "NATIVE_OUTPUT_STALE", `native source predates this build: ${relativePath}`);
-        nativeOrigins.push({ path: relativePath, sha256, sourceCtime: new Date(before.ctimeMs).toISOString() });
+        nativeOrigins.push({ path: relativePath, sha256, sourceCtime: new Date(before.ctimeMs).toISOString(), mode: before.mode & 0o111 ? "0755" : "0644" });
       }
     } finally {
       await output?.close().catch(() => undefined);
@@ -150,7 +150,7 @@ export async function hoistMaterializedPnpmAliases({ materialized, buildStartedA
       const sourcePath = `node_modules/.pnpm/node_modules/${packagePath}/${origin.path}`;
       const original = originByPath.get(sourcePath);
       stagingAssert(original?.sha256 === origin.sha256 && Date.parse(original.sourceCtime) >= buildStartedAtMs, "NATIVE_BUILD_EVIDENCE_INVALID", `hoisted native alias lacks original build evidence: ${sourcePath}`);
-      nativeOrigins.push({ path: `node_modules/${packagePath}/${origin.path}`, sha256: original.sha256, sourceCtime: original.sourceCtime });
+      nativeOrigins.push({ path: `node_modules/${packagePath}/${origin.path}`, sha256: original.sha256, sourceCtime: original.sourceCtime, mode: original.mode });
     }
     packagesHoisted += 1;
   }
