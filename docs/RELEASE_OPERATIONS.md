@@ -2,6 +2,8 @@
 
 本手册用于单一维护者执行可审计的月度维护与 Release 准备。它不会替代签名、公证或用户验收。
 
+版本号、RC 不可变性、tag 和 Module 独立版本规则以 [Simulator Versioning Policy](VERSIONING.md) 为准。
+
 ## 每月依赖与上游审查
 
 1. 建立当月 evidence 目录，并记录当前状态：
