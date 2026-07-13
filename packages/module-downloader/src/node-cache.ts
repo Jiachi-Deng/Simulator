@@ -476,7 +476,10 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
       if (this.#now() - info.mtimeMs > this.#staleMs) { await safeRemoveFile(path, this.root); remaining -= 1 }
     }
     const claims = join(this.root, 'leases', 'claims')
-    const bases = new Set((await directoryNames(claims)).map((name) => name.match(/^([a-f0-9]{64})\.(?:lock|recover-|released-)/)?.[1]).filter((v): v is string => Boolean(v)))
+    const leaseClaimPattern = process.platform === 'win32'
+      ? /^([a-f0-9]{64})\.(?:lock|recover-|released-)/
+      : /^([a-f0-9]{64})\.(?:lock|recover-)/
+    const bases = new Set((await directoryNames(claims)).map((name) => name.match(leaseClaimPattern)?.[1]).filter((v): v is string => Boolean(v)))
     for (const name of bases) { if (!remaining--) return; await this.#reconcileLease(join(claims, name)) }
     const artifactClaims = join(this.root, 'artifacts', 'claims')
     for (const name of await directoryNames(artifactClaims)) {

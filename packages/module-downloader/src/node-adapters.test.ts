@@ -359,6 +359,25 @@ describe('production filesystem cache', () => {
     expect(await readdirNames(owners)).toHaveLength(1)
   })
 
+  it.skipIf(process.platform === 'win32')('does not spend POSIX startup recovery budget on released lease quarantine', async () => {
+    const directory = await root()
+    const initial = new NodeFilesystemModuleDownloaderCache(directory)
+    await initial.readCatalog()
+    const released = `${createHash('sha256').update('released quarantine').digest('hex')}.released-00000000-0000-4000-8000-000000000000`
+    await mkdir(join(directory, 'leases', 'claims', released))
+    const token = '00000000-0000-4000-8000-000000000001'
+    const owner = join(directory, 'artifacts', 'owners', `${token}.json`)
+    await writeFile(owner, JSON.stringify({ token, pid: 999_999_999, processInstanceId: token, acquiredAt: 0 }))
+
+    const recovered = new NodeFilesystemModuleDownloaderCache(directory, {
+      staleLeaseMs: 1,
+      maxStartupPrunes: 1,
+      now: () => 10_000,
+    })
+    await recovered.readCatalog()
+    await expect(stat(owner)).rejects.toMatchObject({ code: 'ENOENT' })
+  })
+
   it('fails closed on artifact owner and claim leaf symlinks during startup', async () => {
     for (const leaf of ['owner', 'claim']) {
       const directory = await root(); const initial = new NodeFilesystemModuleDownloaderCache(directory); await initial.readCatalog()
