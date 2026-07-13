@@ -272,12 +272,42 @@
         "typescript": "^5.8.2",
       },
     },
+    "packages/module-daemon": {
+      "name": "@simulator/module-daemon",
+      "version": "0.11.1",
+      "dependencies": {
+        "@simulator/module-contract": "workspace:*",
+        "koffi": "^3.1.1",
+      },
+      "devDependencies": {
+        "typescript": "^5.8.2",
+      },
+    },
     "packages/module-downloader": {
       "name": "@simulator/module-downloader",
       "version": "0.11.1",
       "dependencies": {
         "@simulator/module-contract": "workspace:*",
         "@simulator/module-release-trust": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^25.0.8",
+        "typescript": "^5.8.2",
+      },
+    },
+    "packages/module-host-bridge": {
+      "name": "@simulator/module-host-bridge",
+      "version": "0.11.1",
+      "devDependencies": {
+        "typescript": "^5.8.2",
+      },
+    },
+    "packages/module-installer": {
+      "name": "@simulator/module-installer",
+      "version": "0.11.1",
+      "dependencies": {
+        "@simulator/module-contract": "workspace:*",
+        "tar": "^7.5.20",
       },
       "devDependencies": {
         "@types/node": "^25.0.8",
@@ -301,29 +331,6 @@
       "version": "0.11.1",
       "dependencies": {
         "@simulator/module-contract": "workspace:*",
-      },
-      "devDependencies": {
-        "@types/node": "^25.0.8",
-        "typescript": "^5.8.2",
-      },
-    },
-    "packages/module-daemon": {
-      "name": "@simulator/module-daemon",
-      "version": "0.11.1",
-      "dependencies": {
-        "@simulator/module-contract": "workspace:*",
-        "koffi": "^3.1.1",
-      },
-      "devDependencies": {
-        "typescript": "^5.8.2",
-      },
-    },
-    "packages/module-installer": {
-      "name": "@simulator/module-installer",
-      "version": "0.11.1",
-      "dependencies": {
-        "@simulator/module-contract": "workspace:*",
-        "tar": "^7.5.20",
       },
       "devDependencies": {
         "@types/node": "^25.0.8",
@@ -1381,10 +1388,16 @@
     "@simulator/module-contract": ["@simulator/module-contract@workspace:packages/module-contract"],
 
     "@simulator/module-daemon": ["@simulator/module-daemon@workspace:packages/module-daemon"],
+
     "@simulator/module-downloader": ["@simulator/module-downloader@workspace:packages/module-downloader"],
+
+    "@simulator/module-host-bridge": ["@simulator/module-host-bridge@workspace:packages/module-host-bridge"],
+
     "@simulator/module-installer": ["@simulator/module-installer@workspace:packages/module-installer"],
-    "@simulator/module-release-trust": ["@simulator/module-release-trust@workspace:packages/module-release-trust"],
+
     "@simulator/module-registry": ["@simulator/module-registry@workspace:packages/module-registry"],
+
+    "@simulator/module-release-trust": ["@simulator/module-release-trust@workspace:packages/module-release-trust"],
 
     "@sinclair/typebox": ["@sinclair/typebox@0.34.48", "", {}, "sha512-kKJTNuK3AQOrgjjotVxMrCn1sUJwM76wMszfq1kdU4uYVJjvEWuFQ6HgvLt4Xz3fSmZlTOxJ/Ie13KnIcWQXFA=="],
 
