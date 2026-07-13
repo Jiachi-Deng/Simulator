@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { spawn } from 'node:child_process'
 import { createServer, type RequestListener, type Server } from 'node:http'
-import { lstat, mkdir, mkdtemp, readFile, rename, rm, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, stat, symlink, unlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { NodeFetchAdapter } from './node-fetch.ts'
@@ -37,6 +37,28 @@ describe('production filesystem cache', () => {
     await first.done
     await second.done
     expect(second.output()).toContain('acquired:')
+  })
+
+  it.skipIf(process.platform !== 'win32')('defers transient released-marker cleanup without failing logical release', async () => {
+    const directory = await root(); let cleanupFaults = 2
+    const cache = new NodeFilesystemModuleDownloaderCache(directory, {
+      leasePollMs: 5,
+      faultInjector(point, path) {
+        if (point === 'cleanup' && path.includes('.released-') && cleanupFaults > 0) {
+          cleanupFaults -= 1
+          throw Object.assign(new Error('transient Windows cleanup contention'), { code: 'EFAULT' })
+        }
+      },
+    })
+    const lease = await cache.acquireLease('deferred cleanup', new AbortController().signal)
+    await expect(lease.release()).resolves.toBeUndefined()
+    expect(cleanupFaults).toBe(0)
+    expect((await readdir(join(directory, 'leases', 'claims'))).some((name) => name.includes('.released-'))).toBe(true)
+
+    const replacement = new NodeFilesystemModuleDownloaderCache(directory, { leasePollMs: 5 })
+    const next = await replacement.acquireLease('deferred cleanup', AbortSignal.timeout(5_000))
+    await next.release()
+    expect((await readdir(join(directory, 'leases', 'claims'))).some((name) => name.includes('.released-'))).toBe(false)
   })
 
   it('elects one cross-process artifact publisher and one verified reader', async () => {
