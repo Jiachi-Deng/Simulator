@@ -46,8 +46,8 @@ export function createBuildPlan({ workspace, stagingRoot, nodeBin, pnpmBin, prov
     ...BUILD_PACKAGES.map((packageName) => invokePnpm(["--filter", packageName, "build"])),
     invokePnpm(["--filter", "@open-design/web", "build"], { OD_WEB_OUTPUT_MODE: "standalone" }),
     invokePnpm(["--filter", "@open-design/web", "build:sidecar"]),
-    invokePnpm(["--filter", "@open-design/daemon", "deploy", "--prod", workspace.daemonDeployRoot]),
-    invokePnpm(["--filter", "@open-design/web", "deploy", "--prod", workspace.webDeployRoot]),
+    invokePnpm(["--filter", "@open-design/daemon", "deploy", "--prod", "--legacy", workspace.daemonDeployRoot]),
+    invokePnpm(["--filter", "@open-design/web", "deploy", "--prod", "--legacy", workspace.webDeployRoot]),
   ];
   return { stagingRoot, workspace, nodeBin, pnpmBin, environment, commands };
 }

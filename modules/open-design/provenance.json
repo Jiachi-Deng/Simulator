@@ -73,8 +73,8 @@
       "<node> <pnpm> --filter <runtime-package> build",
       "<node> <pnpm> --filter @open-design/web build",
       "<node> <pnpm> --filter @open-design/web build:sidecar",
-      "<node> <pnpm> --filter @open-design/daemon deploy --prod <daemon-deploy>",
-      "<node> <pnpm> --filter @open-design/web deploy --prod <web-sidecar-deploy>"
+      "<node> <pnpm> --filter @open-design/daemon deploy --prod --legacy <daemon-deploy>",
+      "<node> <pnpm> --filter @open-design/web deploy --prod --legacy <web-sidecar-deploy>"
     ]
   }
 }

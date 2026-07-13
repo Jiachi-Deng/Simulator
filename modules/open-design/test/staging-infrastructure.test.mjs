@@ -63,7 +63,8 @@ test("build plan invokes exact pnpm through exact Node in a private checkout and
   assert.equal(plan.commands[0].command, "/toolchain/node");
   assert.deepEqual(plan.commands[0].args, ["/toolchain/pnpm.cjs", "install", "--frozen-lockfile"]);
   assert.equal(plan.commands.find((entry) => entry.args.includes("@open-design/web") && entry.args.includes("build")).env.OD_WEB_OUTPUT_MODE, "standalone");
-  assert.deepEqual(plan.commands.at(-1).args.slice(1, 5), ["--filter", "@open-design/web", "deploy", "--prod"]);
+  assert.deepEqual(plan.commands.at(-2).args, ["/toolchain/pnpm.cjs", "--filter", "@open-design/daemon", "deploy", "--prod", "--legacy", "/private/build/daemon"]);
+  assert.deepEqual(plan.commands.at(-1).args, ["/toolchain/pnpm.cjs", "--filter", "@open-design/web", "deploy", "--prod", "--legacy", "/private/build/web"]);
   const seen = [];
   await runBuildPlan(plan, async (command, args, options) => { seen.push({ command, args, options }); });
   assert.deepEqual(seen.map((entry) => entry.args), plan.commands.map((entry) => entry.args));
