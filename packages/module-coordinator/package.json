@@ -8,12 +8,13 @@
   "types": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./node": "./src/node.ts",
     "./testing": "./src/testing/index.ts"
   },
   "scripts": {
     "test": "bun test src",
     "typecheck": "tsc --noEmit",
-    "build": "bun build src/index.ts src/testing/index.ts --outdir dist --target node --format esm --external @simulator/module-contract --external @simulator/module-downloader --external @simulator/module-installer --external @simulator/module-registry --external @simulator/module-daemon"
+    "build": "bun build src/index.ts src/testing/index.ts --outdir dist --target browser --format esm --external @simulator/module-contract --external @simulator/module-downloader --external @simulator/module-installer --external @simulator/module-registry --external @simulator/module-daemon && bun build src/node.ts --outfile dist/node.js --target node --format esm --external @simulator/module-contract --external @simulator/module-downloader --external @simulator/module-installer --external @simulator/module-registry --external @simulator/module-daemon"
   },
   "dependencies": {
     "@simulator/module-contract": "workspace:*",

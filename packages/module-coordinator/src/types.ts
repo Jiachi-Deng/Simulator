@@ -1,49 +1,99 @@
-import type { ModuleDaemonSnapshot } from '@simulator/module-daemon'
+import type { ModuleDaemonSnapshot, StartModuleDaemonRequest } from '@simulator/module-daemon'
 import type { ModuleId, ModuleManifest, ModulePlatform, ModuleSha256, ModuleVersion } from '@simulator/module-contract'
-import type { VerifiedArtifactDescriptor } from '@simulator/module-installer'
+import type { ModuleInstaller, VerifiedArtifactDescriptor } from '@simulator/module-installer'
+import type { ModuleDownloader } from '@simulator/module-downloader'
+import type { ModuleRegistry } from '@simulator/module-registry'
 
-export const MODULE_COORDINATOR_STATE_SCHEMA_VERSION = 1 as const
+export const MODULE_COORDINATOR_STATE_SCHEMA_VERSION = 2 as const
 
 export type ModuleCoordinatorOperationKind = 'install' | 'update' | 'rollback' | 'start' | 'restart' | 'stop' | 'uninstall'
+export type ModuleCoordinatorOperationPhase = 'forward' | 'compensating'
 
 export type ModuleCoordinatorCheckpoint =
   | 'intent-recorded'
+  | 'runtime-detached'
+  | 'daemon-stopped'
   | 'catalog-verified'
   | 'artifact-downloaded'
   | 'installed'
   | 'registered'
-  | 'activated'
-  | 'daemon-stopped'
-  | 'rolled-back'
+  | 'activation-restored'
+  | 'registry-restored'
   | 'daemon-started'
-  | 'uninstalled'
+  | 'view-attached'
+  | 'version-uninstalled'
+  | 'registry-removed'
+  | 'compensation-started'
+  | 'compensation-runtime-detached'
+  | 'compensation-daemon-stopped'
+  | 'compensation-activation-restored'
+  | 'compensation-registry-restored'
+  | 'compensation-daemon-started'
+  | 'compensation-view-attached'
   | 'completed'
+  | 'compensated'
 
-export interface ModuleCoordinatorInstallRequest {
+export interface ModuleOperationIdentity {
+  readonly operationId?: string
+}
+
+export interface ModuleCoordinatorInstallRequest extends ModuleOperationIdentity {
   readonly catalogUrl: string
   readonly descriptor: VerifiedArtifactDescriptor
   readonly hostVersionRange: string
 }
 
-export interface ModuleCoordinatorRollbackRequest {
+export interface ModuleCoordinatorModuleRequest extends ModuleOperationIdentity {
   readonly moduleId: ModuleId
-  readonly restartAfterRollback: boolean
 }
 
-export interface ModuleCoordinatorUninstallRequest {
-  readonly moduleId: ModuleId
+export interface ModuleCoordinatorRollbackRequest extends ModuleCoordinatorModuleRequest {
+  readonly restartAfterRollback?: boolean
+}
+
+export interface ModuleCoordinatorUninstallRequest extends ModuleCoordinatorModuleRequest {
   readonly version: ModuleVersion
+}
+
+export type ModuleCoordinatorRequest =
+  | ModuleCoordinatorInstallRequest
+  | ModuleCoordinatorModuleRequest
+  | ModuleCoordinatorRollbackRequest
+  | ModuleCoordinatorUninstallRequest
+
+export interface ModuleCoordinatorTargetState {
+  readonly activeVersion: ModuleVersion | null
+  readonly lastKnownGoodVersion: ModuleVersion | null
+  readonly running: boolean
+  readonly viewAttached: boolean
+  readonly registryPresent: boolean
+}
+
+export interface ModuleCoordinatorOperationResult {
+  readonly operationId: string
+  readonly moduleId: ModuleId
+  readonly kind: ModuleCoordinatorOperationKind
+  readonly ok: boolean
+  readonly source: ModuleCoordinatorTargetState
+  readonly target: ModuleCoordinatorTargetState
+  readonly completedAt: number
+  readonly error?: string
 }
 
 export interface ModuleCoordinatorOperation {
   readonly id: string
   readonly moduleId: ModuleId
   readonly kind: ModuleCoordinatorOperationKind
+  readonly fingerprint: string
+  readonly phase: ModuleCoordinatorOperationPhase
   readonly checkpoint: ModuleCoordinatorCheckpoint
   readonly status: 'pending' | 'completed' | 'failed'
   readonly createdAt: number
   readonly updatedAt: number
-  readonly request?: ModuleCoordinatorInstallRequest | ModuleCoordinatorRollbackRequest | ModuleCoordinatorUninstallRequest
+  readonly request: ModuleCoordinatorRequest
+  readonly source: ModuleCoordinatorTargetState
+  readonly target: ModuleCoordinatorTargetState
+  readonly result?: ModuleCoordinatorOperationResult
   readonly error?: string
 }
 
@@ -69,14 +119,55 @@ export interface ModuleArchiveLocator {
   locate(sha256: ModuleSha256): Promise<string>
 }
 
-/** Resolves the activated version root without coupling the coordinator to a filesystem layout. */
+/** Resolves and queries immutable installed versions without exposing installer layout assumptions. */
 export interface ModuleActivationLocator {
   locate(moduleId: ModuleId, version: ModuleVersion): Promise<string>
+  isInstalled(moduleId: ModuleId, version: ModuleVersion): Promise<boolean>
 }
 
-/** Electron and other hosts adapt their module-view API through this lifecycle-only port. */
+export interface ModuleViewSnapshot {
+  readonly moduleId: ModuleId
+  readonly version: ModuleVersion
+  readonly state: 'attaching' | 'attached' | 'detached' | 'crashed'
+}
+
+export interface ModuleViewAttachRequest {
+  readonly moduleId: ModuleId
+  readonly version: ModuleVersion
+  readonly daemon: ModuleDaemonSnapshot
+}
+
+/** Runtime-neutral shape implemented by Electron ModuleViewManager adapters and production test hosts. */
 export interface ModuleViewPort {
-  onDaemonSnapshot?(snapshot: ModuleDaemonSnapshot): void | Promise<void>
+  attach(request: ModuleViewAttachRequest): Promise<ModuleViewSnapshot>
+  detach(moduleId: ModuleId): Promise<void>
+  query(moduleId: ModuleId): Promise<ModuleViewSnapshot | undefined>
+}
+
+export interface ModuleRuntimeLeaseManager {
+  acquireReference(moduleId: ModuleId, version: ModuleVersion): Promise<() => void>
+}
+
+export type ModuleCoordinatorFaultPoint = `before-checkpoint:${ModuleCoordinatorCheckpoint}`
+
+export interface ModuleCoordinatorDependencies {
+  readonly downloader: Pick<ModuleDownloader, 'fetchCatalog' | 'downloadArtifact'>
+  readonly installer: Pick<ModuleInstaller, 'install' | 'getState' | 'restoreState' | 'uninstall' | 'recoverAll'>
+  readonly registry: ModuleRegistry
+  readonly daemon: {
+    start(request: StartModuleDaemonRequest): Promise<ModuleDaemonSnapshot>
+    stop(moduleId: ModuleId): Promise<ModuleDaemonSnapshot | undefined>
+    get(moduleId: ModuleId): ModuleDaemonSnapshot | undefined
+    subscribe(listener: (snapshot: ModuleDaemonSnapshot) => void): () => void
+  }
+  readonly platform: ModulePlatform
+  readonly archiveLocator: ModuleArchiveLocator
+  readonly activationLocator: ModuleActivationLocator
+  readonly store: ModuleCoordinatorStore
+  readonly view: ModuleViewPort
+  readonly usage: ModuleRuntimeLeaseManager
+  readonly now?: () => number
+  readonly faultInjector?: (point: ModuleCoordinatorFaultPoint) => void | Promise<void>
 }
 
 export type ModuleCoordinatorErrorCode =
@@ -85,8 +176,11 @@ export type ModuleCoordinatorErrorCode =
   | 'CATALOG_RELEASE_MISSING'
   | 'CATALOG_RELEASE_MISMATCH'
   | 'INVALID_OPERATION'
+  | 'OPERATION_ID_CONFLICT'
   | 'REGISTRY_MUTATION_FAILED'
+  | 'STATE_DIVERGED'
   | 'STORE_CORRUPT'
+  | 'VIEW_STATE_INVALID'
 
 export class ModuleCoordinatorError extends Error {
   readonly code: ModuleCoordinatorErrorCode
@@ -98,7 +192,7 @@ export class ModuleCoordinatorError extends Error {
   }
 }
 
-/** Test-only sentinel for simulating a process death after a durable checkpoint. */
+/** Test-only sentinel for simulating a process death after a side effect or durable checkpoint. */
 export class SimulatedCoordinatorCrash extends Error {
   constructor(message = 'Simulated coordinator crash') {
     super(message)
