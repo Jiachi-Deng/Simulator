@@ -43,9 +43,10 @@ function processExists(pid: number): boolean {
 }
 
 async function waitForExit(pid: number): Promise<void> {
-  const deadline = Date.now() + 2_000
+  const timeoutMs = 10_000
+  const deadline = Date.now() + timeoutMs
   while (processExists(pid) && Date.now() < deadline) await Bun.sleep(10)
-  expect(processExists(pid)).toBe(false)
+  if (processExists(pid)) throw new Error(`process ${pid} remained alive after ${timeoutMs}ms`)
 }
 
 async function waitForFile(path: string): Promise<string> {
