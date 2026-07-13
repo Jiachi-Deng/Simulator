@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "open-design-provenance-v1", "type": "object",
+  "required": ["schemaVersion", "repository", "source", "license", "upstreamManifest", "buildToolchainExpectations"],
+  "properties": {
+    "schemaVersion": {"const": 1},
+    "repository": {"const": "https://github.com/nexu-io/open-design"},
+    "source": {"type": "object", "required": ["refType", "ref", "commit", "sourceDate", "observedHead", "auditedAt"], "properties": {
+      "refType": {"enum": ["tag", "commit"]}, "ref": {"type": "string", "minLength": 1, "maxLength": 256},
+      "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "sourceDate": {"type": "string", "minLength": 1, "maxLength": 64},
+      "observedHead": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "auditedAt": {"type": "string", "minLength": 1, "maxLength": 64}
+    }, "additionalProperties": false},
+    "license": {"type": "object", "required": ["spdxId", "sourceFile"], "properties": {"spdxId": {"const": "Apache-2.0"}, "sourceFile": {"const": "LICENSE"}}, "additionalProperties": false},
+    "upstreamManifest": {"type": "object", "required": ["path", "name", "version", "packageManager"], "properties": {"path": {"const": "package.json"}, "name": {"const": "open-design"}, "version": {"type": "string", "minLength": 1, "maxLength": 64}, "packageManager": {"type": "string", "minLength": 1, "maxLength": 64}}, "additionalProperties": false},
+    "buildToolchainExpectations": {"type": "object", "required": ["node", "pnpm", "typescript", "next", "artifactTargets", "reproducibility"], "properties": {
+      "node": {"type": "string", "minLength": 1, "maxLength": 64}, "pnpm": {"type": "string", "minLength": 1, "maxLength": 64},
+      "typescript": {"type": "string", "minLength": 1, "maxLength": 256}, "next": {"type": "string", "minLength": 1, "maxLength": 64},
+      "artifactTargets": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 256}},
+      "reproducibility": {"type": "string", "minLength": 1, "maxLength": 1024}
+    }, "additionalProperties": false}
+  }, "additionalProperties": false
+}

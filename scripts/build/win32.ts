@@ -9,6 +9,7 @@ import { execSync } from 'child_process';
 import { existsSync, mkdirSync, rmSync, readdirSync, statSync, cpSync } from 'fs';
 import { join } from 'path';
 import type { BuildConfig } from './common';
+import { resolveBuildPolicy, writeBuildPolicy, type SimulatorBuildPolicy } from '../build-policy';
 
 /**
  * Verify SDK native binary is bundled in the packaged Windows app.
@@ -114,7 +115,7 @@ async function safeRmDir(dir: string, maxRetries = 5): Promise<void> {
 /**
  * Build main process with OAuth defines (Windows-specific inline build)
  */
-function buildMainProcess(config: BuildConfig): void {
+function buildMainProcess(config: BuildConfig): SimulatorBuildPolicy {
   const { rootDir } = config;
 
   console.log('  Building main process...');
@@ -139,6 +140,8 @@ function buildMainProcess(config: BuildConfig): void {
     '--alias:node-fetch=./apps/electron/src/main/shims/node-fetch.cjs',
     '--alias:abort-controller=./apps/electron/src/main/shims/abort-controller.cjs',
   ];
+  const buildPolicy = resolveBuildPolicy();
+  mainArgs.push(`--define:process.env.SIMULATOR_DISABLE_UPDATES="'${buildPolicy.updatesDisabled ? '1' : '0'}'"`);
 
   // Add OAuth defines if env vars are set
   const oauthDefines = [
@@ -157,6 +160,7 @@ function buildMainProcess(config: BuildConfig): void {
 
   // Use node to run esbuild directly
   run(`node ./node_modules/esbuild/bin/esbuild ${mainArgs.join(' ')}`, rootDir);
+  return buildPolicy;
 }
 
 /**
@@ -168,7 +172,7 @@ export async function buildElectronAppWindows(config: BuildConfig): Promise<void
   console.log('Building Electron app...');
 
   // Build main process with OAuth defines
-  buildMainProcess(config);
+  const buildPolicy = buildMainProcess(config);
 
   // Build unified network interceptor (--require hook for tool metadata)
   console.log('  Building interceptor...');
@@ -206,6 +210,7 @@ export async function buildElectronAppWindows(config: BuildConfig): Promise<void
     rmSync(resourcesDst, { recursive: true, force: true });
   }
   cpSync(resourcesSrc, resourcesDst, { recursive: true });
+  writeBuildPolicy(resourcesDst, buildPolicy);
 
   // Copy doc assets (matches electron:build:assets step used by Mac/Linux builds)
   // Without this, loadBundledDocs() can't find the docs and falls back to placeholders

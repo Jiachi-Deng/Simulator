@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "artifact": {
+    "name": "openscience",
+    "version": "1.3.4",
+    "platform": "darwin",
+    "arch": "arm64",
+    "format": "bun-compiled-binary",
+    "capabilities": ["embedded-web", "rdkit"]
+  },
+  "requiredFiles": [
+    "bin/openscience-darwin-arm64",
+    "LICENSE",
+    "NOTICE",
+    "THIRD_PARTY_NOTICES",
+    "sbom.cdx.json",
+    "checksums.txt",
+    "runtime-policy.json",
+    "provenance.json",
+    "third-party-decisions.json",
+    "models-dev-api.json",
+    "build-attestation.json",
+    "runtime-conformance.json"
+  ],
+  "inventoryLimits": {
+    "maxFileBytes": 268435456,
+    "maxTotalBytes": 402653184,
+    "maxPathCharacters": 240
+  }
+}

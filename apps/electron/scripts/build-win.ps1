@@ -260,6 +260,8 @@ $MainArgs = @(
     # Must stay in sync with package.json build:main and scripts/electron-dev.ts.
     "--external:@anthropic-ai/claude-agent-sdk"
 )
+$UpdatesDisabled = if ($env:SIMULATOR_DISABLE_UPDATES -eq "1") { "1" } else { "0" }
+$MainArgs += "--define:process.env.SIMULATOR_DISABLE_UPDATES=`"'$UpdatesDisabled'`""
 # Add OAuth defines if env vars are set
 if ($env:GOOGLE_OAUTH_CLIENT_ID) {
     $MainArgs += "--define:process.env.GOOGLE_OAUTH_CLIENT_ID=`"'$env:GOOGLE_OAUTH_CLIENT_ID'`""
@@ -324,6 +326,14 @@ try {
     bun scripts/copy-assets.ts
     if ($LASTEXITCODE -ne 0) { throw "Asset copy failed" }
     Write-Host "  Assets copied" -ForegroundColor Green
+} finally {
+    Pop-Location
+}
+
+Push-Location $RootDir
+try {
+    bun run scripts/build-policy.ts "$ElectronDir\dist\resources"
+    if ($LASTEXITCODE -ne 0) { throw "Build policy marker generation failed" }
 } finally {
     Pop-Location
 }
