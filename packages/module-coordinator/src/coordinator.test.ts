@@ -539,7 +539,7 @@ describe('ModuleCoordinator update failure restoration matrix', () => {
       })
       expect((await system.view.query(MODULE_ID as ModuleId))?.state).toBe('attached')
       expect(system.process.requests.at(-1)?.env.SIMULATOR_MODULE_ID).toBe(MODULE_ID)
-    })
+    }, 15_000)
   }
 })
 

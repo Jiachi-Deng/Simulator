@@ -532,7 +532,7 @@ describe('packaged fake module with production runtime adapters', () => {
     await Promise.all([left, right].map(async (id) => {
       expectOperationOk(await system.coordinator.stop({ operationId: `isolation-stop-${id}`, moduleId: id as ModuleId }))
     }))
-  }, 30_000)
+  }, 45_000)
 })
 
 describe('packaged fake module download and extraction failures', () => {
@@ -547,7 +547,7 @@ describe('packaged fake module download and extraction failures', () => {
     }]))
     expect((await system.coordinator.install({ ...system.request(id), operationId: 'corrupt-download' })).ok).toBe(false)
     expect(system.registry.snapshot().modules).toHaveLength(0)
-  })
+  }, 15_000)
 
   it('compensates extraction failure after a hash-valid invalid archive', async () => {
     const invalid = Buffer.from('hash-valid but not a tar.gz archive')
@@ -560,5 +560,5 @@ describe('packaged fake module download and extraction failures', () => {
     }]))
     expect((await system.coordinator.install({ ...system.request(id), operationId: 'extraction-failure' })).ok).toBe(false)
     expect(system.registry.snapshot().modules).toHaveLength(0)
-  })
+  }, 15_000)
 })

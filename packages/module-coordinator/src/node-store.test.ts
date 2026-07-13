@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it } from 'bun:test'
 import { execFile } from 'node:child_process'
 import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join } from 'node:path'
+import { join, win32 } from 'node:path'
 import { promisify } from 'node:util'
 import { NodeFilesystemModuleCoordinatorStore } from './node-store.ts'
 import { MODULE_COORDINATOR_STATE_SCHEMA_VERSION, ModuleCoordinatorError, type ModuleCoordinatorState } from './types.ts'
@@ -26,9 +26,9 @@ async function root(): Promise<string> {
 async function shortPath(path: string): Promise<string | undefined> {
   if (process.platform !== 'win32') return undefined
   const { stdout } = await execFileAsync('cmd.exe', ['/d', '/c', `for %I in ("${path}") do @echo %~sI`])
-  const value = stdout.trim()
+  const value = stdout.trim().replace(/^"|"$/g, '')
   if (value.length === 0 || value === path) return undefined
-  if (!isAbsolute(value)) throw new Error(`cmd.exe returned an invalid short path: ${JSON.stringify(value)}`)
+  if (!win32.isAbsolute(value)) throw new Error(`cmd.exe returned an invalid short path: ${JSON.stringify(value)}`)
   return value
 }
 
