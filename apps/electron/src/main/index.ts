@@ -110,7 +110,17 @@ import { setPowerShellValidatorRoot } from '@craft-agent/shared/agent'
 import { handleDeepLink } from './deep-link'
 import { BrowserPaneManager } from './browser-pane-manager'
 import { ModuleViewManager } from './module-view-manager'
+import {
+  createHostModuleCoordinator,
+  currentModulePlatform,
+  type HostModuleCoordinatorRuntime,
+} from './host-module-coordinator'
 import { isModuleViewSmokeRequested, runModuleViewSmokeIfRequested } from './module-view-smoke'
+import {
+  isHostModuleCoordinatorSmokeRequested,
+  runHostModuleCoordinatorSmokeIfRequested,
+  writeHostModuleCoordinatorSmokeBootMarker,
+} from './host-module-coordinator-smoke'
 import { OAuthFlowStore } from '@craft-agent/shared/auth'
 import { registerThumbnailScheme, registerThumbnailHandler } from './thumbnail-protocol'
 import log, { isDebugMode, mainLog, getLogFilePath, getMessagingGatewayLogFilePath, messagingGatewayLog, autoUpdateLog } from './logger'
@@ -213,6 +223,7 @@ let windowManager: WindowManager | null = null
 let sessionManager: SessionManager | null = null
 let browserPaneManager: BrowserPaneManager | null = null
 let moduleViewManager: ModuleViewManager | null = null
+let hostModuleCoordinator: HostModuleCoordinatorRuntime | null = null
 let oauthFlowStore: OAuthFlowStore | null = null
 let moduleSink: EventSink | null = null
 let moduleClientResolver: ((webContentsId: number) => string | undefined) | null = null
@@ -267,7 +278,8 @@ app.on('open-url', (event, url) => {
 })
 
 // Handle deeplink on Windows/Linux (single instance check)
-const gotTheLock = isModuleViewSmokeRequested() || app.requestSingleInstanceLock()
+writeHostModuleCoordinatorSmokeBootMarker()
+const gotTheLock = isModuleViewSmokeRequested() || isHostModuleCoordinatorSmokeRequested() || app.requestSingleInstanceLock()
 if (!gotTheLock) {
   app.quit()
 } else {
@@ -351,6 +363,7 @@ app.whenReady().then(async () => {
 
   // The smoke path is intentionally isolated from normal workspace/server startup.
   if (await runModuleViewSmokeIfRequested()) return
+  if (await runHostModuleCoordinatorSmokeIfRequested()) return
 
   // Register bundled assets root so all seeding functions can find their files
   // (docs, permissions, themes, tool-icons resolve via getBundledAssetsDir)
@@ -447,8 +460,8 @@ app.whenReady().then(async () => {
     browserPaneManager.registerToolbarIpc()
     browserPaneManager.registerCapabilityIpc()
 
-    // Register the isolated optional-module transport. Real Module lifecycle and
-    // frontend attachment are intentionally owned by later integration slices.
+    // Register the isolated optional-module transport before constructing the
+    // coordinator runtime after the first host window exists.
     moduleViewManager = new ModuleViewManager()
 
     // Build real PlatformServices from Electron APIs
@@ -1010,6 +1023,18 @@ app.whenReady().then(async () => {
     // In headless mode the server runs without any UI — skip window creation.
     if (!isHeadless) {
       await createInitialWindows()
+      hostModuleCoordinator = createHostModuleCoordinator({
+        root: join(app.getPath('userData'), 'optional-modules'),
+        hostVersion: app.getVersion(),
+        platform: currentModulePlatform(),
+        // Product release keys are injected when a catalog source is configured.
+        // An empty set keeps network installation fail-closed while recovery of
+        // already verified and installed modules remains available.
+        trustedKeys: [],
+        moduleViewManager,
+        hostWindow: () => windowManager?.getLastActiveWindow() ?? undefined,
+      })
+      await hostModuleCoordinator.coordinator.recover()
     }
 
     // Run credential health check at startup to detect issues early
@@ -1148,6 +1173,8 @@ app.on('before-quit', async (event) => {
 
   // Ensure Cmd+Q/app quit bypasses layered window close interception (Cmd+W behavior).
   windowManager?.setAppQuitting(true)
+  await hostModuleCoordinator?.dispose()
+  hostModuleCoordinator = null
   moduleViewManager?.dispose()
   moduleViewManager = null
 
