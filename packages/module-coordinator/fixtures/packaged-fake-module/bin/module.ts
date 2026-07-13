@@ -1,5 +1,4 @@
-#!/usr/bin/env bun
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 const host = process.env.SIMULATOR_MODULE_HEALTH_HOST
 const port = Number(process.env.SIMULATOR_MODULE_HEALTH_PORT)
@@ -8,7 +7,7 @@ const mode = process.env.SIMULATOR_PACKAGED_FAKE_MODE ?? 'healthy'
 if (host !== '127.0.0.1' || !Number.isSafeInteger(port) || port < 1 || port > 65_535) process.exit(64)
 
 let exitScheduled = false
-const moduleRoot = join(import.meta.dir, '..')
+const moduleRoot = join(dirname(process.execPath), '..')
 const server = Bun.serve({
   hostname: host,
   port,

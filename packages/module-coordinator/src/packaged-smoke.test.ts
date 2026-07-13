@@ -1,6 +1,6 @@
-import { afterEach, describe, expect, it } from 'bun:test'
+import { afterAll, afterEach, describe, expect, it } from 'bun:test'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
-import { mkdtemp, readFile, rm } from 'node:fs/promises'
+import { chmod, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { gzipSync } from 'node:zlib'
@@ -20,6 +20,8 @@ import { ModuleRuntimeUseGate } from './usage-gate.ts'
 const NOW = Date.parse('2026-07-13T12:00:00.000Z')
 const CATALOG_URL = 'https://modules.example.test/packaged/catalog.json'
 const systems: PackagedSystem[] = []
+let compiledFixture: Promise<{ bytes: Buffer; entrypoint: string }> | undefined
+let compiledFixtureRoot: string | undefined
 
 function currentPlatform(): ModulePlatform {
   return `${process.platform}-${process.arch}` as ModulePlatform
@@ -34,7 +36,7 @@ function writeOctal(buffer: Buffer, offset: number, length: number, value: numbe
   buffer[offset + length - 1] = 0
 }
 
-function tarEntry(path: string, type: '0' | '5', mode: number, content = Buffer.alloc(0)): Buffer {
+function tarEntry(path: string, type: '0' | '5', mode: number, content: Uint8Array = Buffer.alloc(0)): Buffer {
   const body = Buffer.isBuffer(content) ? content : Buffer.from(content)
   const header = Buffer.alloc(512)
   Buffer.from(path).copy(header)
@@ -55,13 +57,36 @@ function tarEntry(path: string, type: '0' | '5', mode: number, content = Buffer.
 
 async function packagedArchive(): Promise<{ archive: Buffer; treeHash: ModuleSha256 }> {
   const fixture = join(import.meta.dir, '..', 'fixtures', 'packaged-fake-module')
-  const executable = await readFile(join(fixture, 'bin', 'module'))
+  compiledFixture ??= (async () => {
+    compiledFixtureRoot = await mkdtemp(join(tmpdir(), 'simulator-module-fixture-build-'))
+    const entrypoint = process.platform === 'win32' ? 'bin/module.exe' : 'bin/module'
+    const output = join(compiledFixtureRoot, process.platform === 'win32' ? 'module.exe' : 'module')
+    const build = Bun.spawn([
+      process.execPath,
+      'build',
+      '--compile',
+      '--minify',
+      join(fixture, 'bin', 'module.ts'),
+      '--outfile',
+      output,
+    ], { stdout: 'pipe', stderr: 'pipe' })
+    const [exitCode, stdout, stderr] = await Promise.all([
+      build.exited,
+      new Response(build.stdout).text(),
+      new Response(build.stderr).text(),
+    ])
+    if (exitCode !== 0) throw new Error(`Could not compile packaged fixture (${exitCode}): ${stdout}\n${stderr}`)
+    if (process.platform !== 'win32') await chmod(output, 0o700)
+    return { bytes: await readFile(output), entrypoint }
+  })()
+  const executableFixture = await compiledFixture
+  const executable = executableFixture.bytes
   const frontend = await readFile(join(fixture, 'frontend', 'index.html'))
   const data = await readFile(join(fixture, 'data.txt'))
   const archive = gzipSync(Buffer.concat([
     tarEntry('module/', '5', 0o755),
     tarEntry('module/bin/', '5', 0o755),
-    tarEntry('module/bin/module', '0', 0o755, executable),
+    tarEntry(`module/${executableFixture.entrypoint}`, '0', 0o755, executable),
     tarEntry('module/data.txt', '0', 0o644, data),
     tarEntry('module/frontend/', '5', 0o755),
     tarEntry('module/frontend/index.html', '0', 0o644, frontend),
@@ -69,7 +94,7 @@ async function packagedArchive(): Promise<{ archive: Buffer; treeHash: ModuleSha
   ]))
   const records = [
     { path: 'bin', value: `D\t${JSON.stringify('bin')}` },
-    { path: 'bin/module', value: `F\t${JSON.stringify('bin/module')}\t${executable.byteLength}\t1\t${sha256(executable)}` },
+    { path: executableFixture.entrypoint, value: `F\t${JSON.stringify(executableFixture.entrypoint)}\t${executable.byteLength}\t1\t${sha256(executable)}` },
     { path: 'data.txt', value: `F\t${JSON.stringify('data.txt')}\t${data.byteLength}\t0\t${sha256(data)}` },
     { path: 'frontend', value: `D\t${JSON.stringify('frontend')}` },
     { path: 'frontend/index.html', value: `F\t${JSON.stringify('frontend/index.html')}\t${frontend.byteLength}\t0\t${sha256(frontend)}` },
@@ -105,7 +130,12 @@ function bundle(specs: readonly ReleaseSpec[]): PackagedBundle {
       schemaVersion: 1,
       id: spec.id,
       version: spec.version,
-      artifacts: [{ platform: currentPlatform(), entrypoint: 'bin/module', url, sha256: sha256(spec.archive) }],
+      artifacts: [{
+        platform: currentPlatform(),
+        entrypoint: process.platform === 'win32' ? 'bin/module.exe' : 'bin/module',
+        url,
+        sha256: sha256(spec.archive),
+      }],
       capabilities: ['workspace.read'],
     })
     if (!parsed.ok) throw new Error(JSON.stringify(parsed.errors))
@@ -258,7 +288,11 @@ afterEach(async () => {
   }
 })
 
-describe.skipIf(process.platform === 'win32')('packaged fake module with production runtime adapters', () => {
+afterAll(async () => {
+  if (compiledFixtureRoot) await rm(compiledFixtureRoot, { recursive: true, force: true })
+})
+
+describe('packaged fake module with production runtime adapters', () => {
   it('serves frontend and installed resources, reattaches after daemon and renderer crashes, and leaves built-in Agent state independent', async () => {
     const packaged = await packagedArchive()
     const id = 'org.simulator.packaged-production'
