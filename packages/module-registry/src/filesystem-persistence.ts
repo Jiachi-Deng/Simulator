@@ -54,13 +54,14 @@ export class FilesystemModuleRegistryPersistence implements ModuleRegistryPersis
 
   read(): RegistryPersistenceRead {
     this.#assertRoot()
+    const writerActive = this.#safeExists(LOCK_FILE) && !this.#reclaimStaleLock()
     const pending = this.#safeExists(PENDING_FILE)
     const committed = this.#readJson(STATE_FILE)
-    if (pending) {
+    if (pending && !writerActive) {
       unlinkSync(this.#path(PENDING_FILE))
       this.#syncRoot()
     }
-    return { committed, interruptedCommit: pending }
+    return { committed, interruptedCommit: pending && !writerActive }
   }
 
   commit(state: PersistedModuleRegistryStateV1): void {

@@ -97,6 +97,8 @@ describe('FilesystemModuleRegistryPersistence', () => {
         if (point !== 'after-pending-sync' || checked) return
         checked = true
         expect(() => second.commit({ schemaVersion: 1, host: HOST, modules: [] })).toThrow('writer is active')
+        expect(new ModuleRegistry(HOST, second).snapshot()).toMatchObject({ modules: [], diagnostics: [] })
+        expect(readFileSync(join(directory, 'module-registry.pending.json'), 'utf8')).toContain('schemaVersion')
       },
     })
     first.commit({ schemaVersion: 1, host: HOST, modules: [] })
