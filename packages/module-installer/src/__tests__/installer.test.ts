@@ -653,6 +653,32 @@ describe('transaction fault injection and recovery', () => {
     releaseReference()
   })
 
+  it('restores an exact activation target idempotently and rejects live version references', async () => {
+    const root = await tempRoot()
+    const usageGuard = new TestUsageGuard()
+    const installer = new ModuleInstaller(join(root, 'modules-root'), { usageGuard })
+    const source = await artifactAt(root)
+    await installer.install({ descriptor: descriptor(source.archive, VALID_ENTRIES, '1.0.0'), archivePath: source.path })
+    await installer.install({ descriptor: descriptor(source.archive, VALID_ENTRIES, '2.0.0'), archivePath: source.path })
+
+    usageGuard.inUse.add('2.0.0')
+    await expect(installer.restoreState({
+      moduleId: MODULE_ID,
+      activeVersion: '1.0.0' as ModuleVersion,
+      lastKnownGoodVersion: null,
+    })).rejects.toMatchObject({ code: 'PROTECTED_VERSION' })
+    usageGuard.inUse.clear()
+
+    const target = {
+      moduleId: MODULE_ID,
+      activeVersion: '1.0.0' as ModuleVersion,
+      lastKnownGoodVersion: null,
+    }
+    expect(await installer.restoreState(target)).toMatchObject(target)
+    expect(await installer.restoreState(target)).toMatchObject(target)
+    expect(await installer.getState(MODULE_ID)).toEqual(target)
+  })
+
   it('treats a durable state switch as committed when cleanup is interrupted', async () => {
     const root = await tempRoot()
     const source = await artifactAt(root)
