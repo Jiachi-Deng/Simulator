@@ -404,7 +404,13 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     for (const name of (await directoryNames(dirname(base))).filter((value) => value.startsWith(prefix))) {
       const token = name.slice(prefix.length)
       if (!UUID.test(token)) continue
-      if ((await safeReadFile(join(dirname(base), name), this.root)).toString() !== token) throw new Error('Invalid released lease marker')
+      let bytes: Buffer
+      try { bytes = await safeReadFile(join(dirname(base), name), this.root) }
+      catch (cause) {
+        if (hasCode(cause, 'ENOENT')) continue
+        throw cause
+      }
+      if (bytes.toString() !== token) throw new Error('Invalid released lease marker')
       tokens.push(token)
     }
     return tokens
