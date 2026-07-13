@@ -3,7 +3,7 @@ import { constants as fsConstants } from "node:fs";
 import { chmod, lstat, mkdtemp, open, opendir, readFile, realpath, rename, rm } from "node:fs/promises";
 import path from "node:path";
 
-import { canonicalJson, digestInventory } from "./validate-artifact.mjs";
+import { canonicalJsonBytes, digestInventory } from "./validate-artifact.mjs";
 import { ensurePrivateDirectory } from "./private-build-workspace.mjs";
 import { stagingAssert, stagingFail } from "./staging-error.mjs";
 
@@ -64,7 +64,7 @@ export async function sealAndPublish({ target, inventory } = {}) {
 }
 
 export async function writeExclusiveCanonicalJson(filename, value) {
-  const payload = Buffer.from(`${canonicalJson(value)}\n`, "utf8");
+  const payload = canonicalJsonBytes(value);
   const handle = await open(filename, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0), 0o600)
     .catch((error) => stagingFail("ATTESTATION_WRITE_FAILED", error.message));
   try {
@@ -94,7 +94,7 @@ export async function verifyFinalInventory(root, inventory) {
     const bytes = await readFile(absolutePath);
     stagingAssert(bytes.length === file.bytes, "PUBLISH_INVENTORY_MISMATCH", `byte count changed after inventory: ${relativePath}`);
     if (relativePath === "artifact-manifest.json") {
-      stagingAssert(bytes.equals(Buffer.from(`${canonicalJson(inventory)}\n`)), "PUBLISH_INVENTORY_MISMATCH", "artifact manifest bytes do not equal final canonical inventory");
+      stagingAssert(bytes.equals(canonicalJsonBytes(inventory)), "PUBLISH_INVENTORY_MISMATCH", "artifact manifest bytes do not equal final canonical inventory");
       stagingAssert(file.sha256 === digestInventory(inventory), "PUBLISH_INVENTORY_MISMATCH", "artifact manifest self digest is invalid");
     } else {
       const sha256 = createHash("sha256").update(bytes).digest("hex");

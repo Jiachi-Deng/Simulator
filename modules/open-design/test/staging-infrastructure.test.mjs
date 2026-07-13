@@ -5,10 +5,12 @@ import path from "node:path";
 import test from "node:test";
 
 import { copyStagingInputs } from "../src/staging-copier.mjs";
-import { createBuildPlan, runBuildPlan, writeArtifactManifest } from "../src/stage-open-design.mjs";
+import { createBuildPlan, runBuildPlan, validateSbom, writeArtifactManifest } from "../src/stage-open-design.mjs";
 
 const moduleRoot = new URL("../", import.meta.url);
 const policy = JSON.parse(await readFile(new URL("artifact-policy.json", moduleRoot), "utf8"));
+const provenance = JSON.parse(await readFile(new URL("provenance.json", moduleRoot), "utf8"));
+const sbom = JSON.parse(await readFile(new URL("fixtures/minimal-sbom.spdx.json", moduleRoot), "utf8"));
 
 async function roots(t) {
   const root = await mkdtemp(path.join(os.tmpdir(), "open-design-copier-"));
@@ -106,4 +108,21 @@ test("writes the producer-owned artifact manifest with O_EXCL semantics", async 
   await writeArtifactManifest(root, produced);
   assert.equal(await readFile(path.join(root, "artifact-manifest.json"), "utf8"), json);
   await assert.rejects(writeArtifactManifest(root, produced), { code: "MANIFEST_WRITE_FAILED" });
+});
+
+test("requires exact SBOM package, lock, checksum, license and notice coverage", () => {
+  const valid = validateSbom({ sbom, sha256: "a".repeat(64), provenance, policy });
+  assert.equal(valid.packages.length, 8);
+  assert.equal(valid.documentSha256, "a".repeat(64));
+  for (const mutate of [
+    (value) => { value.packages = []; },
+    (value) => { value.packages[0].checksums[0].checksumValue = "0".repeat(128); },
+    (value) => { value.packages[0].licenseDeclared = "NOASSERTION"; },
+    (value) => { value.packages[0].comment = "notice=UNKNOWN"; },
+    (value) => { value.annotations[0].comment = "pnpm-lock.yaml sha256:unknown"; },
+  ]) {
+    const changed = structuredClone(sbom);
+    mutate(changed);
+    assert.throws(() => validateSbom({ sbom: changed, sha256: "a".repeat(64), provenance, policy }));
+  }
 });

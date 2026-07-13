@@ -37,6 +37,7 @@
     "*.test.*", "*.spec.*", "*.map", "latest*.yml", "electron-builder.*", "tsc", "tsx", "eslint", "jest", "vite", "vitest"
   ],
   "allowedDependencyScopes": ["production", "artifact"],
+  "sbomRequirements": {"requireExactPackageSet": true, "requireLockResolution": true, "requireContentChecksum": true, "requireLicenseDeclared": true, "requireNoticeStatus": true},
   "resourceCategories": ["templates", "fonts", "images", "plugins", "skills", "native-binaries"],
   "resourceExtensions": {
     "fonts": [".woff", ".woff2", ".ttf", ".otf"],

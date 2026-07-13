@@ -6,7 +6,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createAtomicStagingTarget, sealAndPublish, writeExclusiveCanonicalJson } from "../src/atomic-publisher.mjs";
-import { canonicalJson, digestInventory } from "../src/validate-artifact.mjs";
+import { canonicalJson, digestCanonicalJson, digestInventory } from "../src/validate-artifact.mjs";
 
 async function parentFixture(t) {
   const parent = await mkdtemp(path.join(os.tmpdir(), "open-design-publish-"));
@@ -85,6 +85,8 @@ test("rejects a group-readable publish parent and uses exclusive canonical JSON 
   await chmod(parent, 0o700);
   const output = path.join(parent, "attestation.json");
   await writeExclusiveCanonicalJson(output, { z: 1, a: 2 });
-  assert.equal(await readFile(output, "utf8"), '{"a":2,"z":1}\n');
+  const bytes = await readFile(output);
+  assert.equal(bytes.toString("utf8"), '{"a":2,"z":1}\n');
+  assert.equal(createHash("sha256").update(bytes).digest("hex"), digestCanonicalJson({ z: 1, a: 2 }));
   await assert.rejects(writeExclusiveCanonicalJson(output, { a: 2 }), { code: "ATTESTATION_WRITE_FAILED" });
 });

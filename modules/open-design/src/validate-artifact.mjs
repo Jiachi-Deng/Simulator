@@ -110,6 +110,7 @@ function validateAttestation({ attestation, provenance, inventory }, fail) {
     if (actual[attestationKey] !== expected[provenanceKey]) fail("ATTESTATION_TOOLCHAIN_MISMATCH", `build attestation ${attestationKey} does not match provenance`);
   }
   if (inventory.target.platform !== actual.platform || inventory.target.arch !== actual.arch || inventory.target.nodeAbi !== actual.nodeAbi) fail("ATTESTATION_TARGET_MISMATCH", "artifact target does not match attested toolchain");
+  validateSbomEvidence(attestation.sbom, provenance, fail);
   const buildStartedAt = Date.parse(attestation.build.startedAt);
   const closure = attestation.build.normalization.daemonClosure;
   const expectedExternals = ["better-sqlite3", "node-pty", "blake3-wasm"];
@@ -132,6 +133,23 @@ function validateAttestation({ attestation, provenance, inventory }, fail) {
   }
   if (attestation.smoke.daemon.pid !== attestation.smoke.daemon.status.pid || attestation.smoke.web.pid !== attestation.smoke.web.status.pid) fail("ATTESTATION_SMOKE_MISMATCH", "smoke status PID must match each spawned child");
   if (attestation.smoke.daemon.entryPath !== "runtime/daemon/dist/sidecar/index.js" || attestation.smoke.web.entryPath !== "runtime/packages/web-sidecar/dist/sidecar/index.js") fail("ATTESTATION_SMOKE_MISMATCH", "smoke entries must bind the staged daemon and web sidecar");
+}
+
+function validateSbomEvidence(sbom, provenance, fail) {
+  if (sbom?.lockfileSha256 !== provenance.lockfile.sha256) fail("ATTESTATION_SBOM_MISMATCH", "SBOM evidence does not bind the pinned lockfile");
+  const expected = provenance.sbom.requiredPackages;
+  const actual = sbom?.packages ?? [];
+  if (actual.length !== expected.length) {
+    fail("ATTESTATION_SBOM_MISMATCH", "SBOM evidence does not cover the exact required runtime package set");
+    return;
+  }
+  for (let index = 0; index < expected.length; index += 1) {
+    const left = expected[index];
+    const right = actual[index];
+    for (const key of ["name", "version", "contentSha512", "licenseDeclared", "noticeStatus"]) {
+      if (right?.[key] !== left[key]) fail("ATTESTATION_SBOM_MISMATCH", `SBOM package ${left.name}@${left.version} has mismatched ${key}`);
+    }
+  }
 }
 
 function validateSchema(value, schema, location, fail, rootSchema = schema) {
@@ -282,11 +300,15 @@ function validateRequiredFile(file, required, sourceCommit, inputs, fail) {
   if (required.path !== "legal/LICENSE" && (file.contentSchemaVersion !== required.schemaVersion || file.sourceCommit !== sourceCommit)) fail("CONTENT_BINDING_INVALID", `required JSON document lacks expected schemaVersion/sourceCommit binding: ${required.path}`);
   if (required.path === "provenance.json" && file.sha256 !== digestCanonicalJson(inputs.provenance)) fail("CONTENT_DIGEST_MISMATCH", "provenance digest does not bind the supplied provenance document");
   if (required.path === "build-attestation.json" && file.sha256 !== digestCanonicalJson(inputs.attestation)) fail("CONTENT_DIGEST_MISMATCH", "attestation digest does not bind the supplied build attestation document");
+  if (required.path === "legal/SBOM.spdx.json") {
+    const sbomInput = inputs.attestation.inputs.find((entry) => entry.name === "legal/SBOM.spdx.json");
+    if (!sbomInput || file.sha256 !== sbomInput.sha256 || file.sha256 !== inputs.attestation.sbom.documentSha256) fail("CONTENT_DIGEST_MISMATCH", "staged SBOM bytes do not bind the hashed SBOM input and attestation evidence");
+  }
   if (required.path === "artifact-manifest.json" && file.sha256 !== digestInventory(inputs.inventory)) fail("CONTENT_DIGEST_MISMATCH", "manifest digest does not bind the supplied inventory document");
 }
 
 export function digestCanonicalJson(value) {
-  return createHash("sha256").update(canonicalJson(value)).digest("hex");
+  return createHash("sha256").update(canonicalJsonBytes(value)).digest("hex");
 }
 
 export function digestInventory(inventory) {
@@ -300,6 +322,10 @@ export function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (isPlainObject(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
   return JSON.stringify(value);
+}
+
+export function canonicalJsonBytes(value) {
+  return Buffer.from(`${canonicalJson(value)}\n`, "utf8");
 }
 
 async function readJson(filename) {

@@ -6,7 +6,7 @@ import { lstat, open, opendir, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { caseFold } from "unicode-case-folding";
-import { canonicalJson, digestInventory, inferResourcePathCategory, loadRuntimeSchemas, validateArtifact } from "./validate-artifact.mjs";
+import { canonicalJsonBytes, digestInventory, inferResourcePathCategory, loadRuntimeSchemas, validateArtifact } from "./validate-artifact.mjs";
 
 const moduleRoot = new URL("../", import.meta.url);
 const encoder = new TextEncoder();
@@ -96,12 +96,12 @@ export async function produceInventory({ stagingRoot, metadata = {}, provenance,
   const manifest = files.find((file) => file.path === "artifact-manifest.json");
   for (let previousBytes = -1; manifest.bytes !== previousBytes;) {
     previousBytes = manifest.bytes;
-    manifest.bytes = encoder.encode(`${canonicalJson(inventory)}\n`).length;
+    manifest.bytes = canonicalJsonBytes(inventory).length;
   }
   manifest.sha256 = digestInventory(inventory);
   const result = validateArtifact({ provenance, policy, decisions, attestation, inventory, schemas: schemas ?? await loadRuntimeSchemas() });
   if (!result.ok) fail("ARTIFACT_INVALID", result.errors.map((error) => `${error.code}: ${error.message}`).join("; "));
-  return { inventory, json: `${canonicalJson(inventory)}\n` };
+  return { inventory, json: canonicalJsonBytes(inventory).toString("utf8") };
 }
 
 async function snapshotDirectory(stagingRoot, rootReal, policy, { hashFiles = false } = {}) {

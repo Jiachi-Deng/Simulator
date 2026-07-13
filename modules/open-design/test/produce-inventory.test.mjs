@@ -6,7 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
-import { canonicalJson, loadRuntimeSchemas } from "../src/validate-artifact.mjs";
+import { canonicalJsonBytes, loadRuntimeSchemas } from "../src/validate-artifact.mjs";
 import { InventoryProductionError, produceInventory } from "../src/produce-inventory.mjs";
 import { readFile } from "node:fs/promises";
 
@@ -22,6 +22,7 @@ const base = {
   schemas: await loadRuntimeSchemas(),
   target: { platform: "darwin", arch: "arm64", nodeAbi: "137", libc: "none" }
 };
+const sbomBytes = await readFile(new URL("fixtures/minimal-sbom.spdx.json", moduleRoot));
 
 async function fixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), "open-design-inventory-"));
@@ -34,9 +35,9 @@ async function fixture() {
     writeFile(path.join(root, "web/standalone/server.js"), "server\n"),
     writeFile(path.join(root, "runtime/daemon/dist/cli.js"), "daemon\n"),
     writeFile(path.join(root, "legal/LICENSE"), "Apache License\n"),
-    writeFile(path.join(root, "legal/SBOM.spdx.json"), "{}\n"),
-    writeFile(path.join(root, "provenance.json"), canonicalJson(base.provenance)),
-    writeFile(path.join(root, "build-attestation.json"), canonicalJson(base.attestation))
+    writeFile(path.join(root, "legal/SBOM.spdx.json"), sbomBytes),
+    writeFile(path.join(root, "provenance.json"), canonicalJsonBytes(base.provenance)),
+    writeFile(path.join(root, "build-attestation.json"), canonicalJsonBytes(base.attestation))
   ]);
   return root;
 }

@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "open-design-provenance-v1", "type": "object",
-  "required": ["schemaVersion", "repository", "source", "license", "upstreamManifest", "simulatorPatch", "lockfile", "buildInputs", "buildToolchainExpectations", "buildContract"],
+  "required": ["schemaVersion", "repository", "source", "license", "upstreamManifest", "simulatorPatch", "lockfile", "sbom", "buildInputs", "buildToolchainExpectations", "buildContract"],
   "properties": {
     "schemaVersion": {"const": 1},
     "repository": {"const": "https://github.com/nexu-io/open-design"},
@@ -18,6 +18,9 @@
       "purpose": {"type": "string", "minLength": 1, "maxLength": 512}
     }, "additionalProperties": false},
     "lockfile": {"type": "object", "required": ["path", "sha256"], "properties": {"path": {"const": "pnpm-lock.yaml"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, "additionalProperties": false},
+    "sbom": {"type": "object", "required": ["requiredPackages"], "properties": {"requiredPackages": {"type": "array", "minItems": 8, "maxItems": 8, "items": {"type": "object", "required": ["name", "version", "contentSha512", "licenseDeclared", "noticeStatus"], "properties": {
+      "name": {"type": "string", "minLength": 1, "maxLength": 128}, "version": {"type": "string", "minLength": 1, "maxLength": 64}, "contentSha512": {"type": "string", "pattern": "^[0-9a-f]{128}$"}, "licenseDeclared": {"type": "string", "minLength": 1, "maxLength": 128}, "noticeStatus": {"enum": ["NONE", "PRESENT"]}
+    }, "additionalProperties": false}}}, "additionalProperties": false},
     "buildInputs": {"type": "array", "minItems": 5, "maxItems": 16, "items": {"type": "object", "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1, "maxLength": 256}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, "additionalProperties": false}},
     "buildToolchainExpectations": {"type": "object", "required": ["node", "nodeAbi", "platform", "arch", "nodeDistributionUrl", "nodeDistributionSha256", "nodeExecutableSha256", "pnpm", "pnpmPackageIntegrity", "pnpmExecutableSha256", "typescript", "next", "artifactTargets", "reproducibility"], "properties": {
       "node": {"const": "24.14.1"}, "nodeAbi": {"const": "137"}, "platform": {"const": "darwin"}, "arch": {"const": "arm64"},

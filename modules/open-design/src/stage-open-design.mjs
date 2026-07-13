@@ -81,7 +81,7 @@ export async function prepareProductionStaging({
   const decisions = decisionsInput.value;
   const metadata = metadataInput.value;
   const target = targetInput.value;
-  validateSbom(sbomInput.value);
+  const sbomEvidence = validateSbom({ sbom: sbomInput.value, sha256: sbomInput.sha256, provenance, policy });
   const verification = await verifyUpstream({ sourceRoot, provenance, nodeBin, pnpmBin, run });
   const atomicTarget = await createAtomicStagingTarget(stagingRoot);
   let workspace;
@@ -117,9 +117,9 @@ export async function prepareProductionStaging({
         { label: "web-sidecar-manifest", source: path.join(normalization.web.root, "package.json"), destination: "runtime/packages/web-sidecar/package.json" },
         { label: "license", source: path.join(workspace.checkoutRoot, provenance.license.sourceFile), destination: "legal/LICENSE" },
         { label: "sbom", source: sbomPath, destination: "legal/SBOM.spdx.json" },
-        { label: "provenance", source: path.join(moduleRoot, "provenance.json"), destination: "provenance.json" },
       ],
     });
+    await writeExclusiveCanonicalJson(path.join(copied.root, "provenance.json"), provenance);
     const nativeInventory = await inspectNativeRuntime({
       artifactRoot: copied.root,
       metadata,
@@ -141,12 +141,13 @@ export async function prepareProductionStaging({
       buildFinishedAt,
       nativeInventory,
       smoke,
+      sbomEvidence,
       externalInputs: [
         ...verification.inputs.map((input) => ({ name: input.path, sha256: input.sha256 })),
         { name: "legal/SBOM.spdx.json", sha256: sbomInput.sha256 },
         { name: "resource-metadata.json", sha256: metadataInput.sha256 },
         { name: "target.json", sha256: targetInput.sha256 },
-        { name: "provenance.json", sha256: provenanceInput.sha256 },
+        { name: "provenance.json", sha256: digestCanonicalJson(provenance) },
         { name: "artifact-policy.json", sha256: policyInput.sha256 },
         { name: "resource-decisions.json", sha256: decisionsInput.sha256 },
       ],
@@ -187,7 +188,7 @@ export async function runBuildPlan(plan, runCommand = defaultCommandRunner, exec
   return evidence;
 }
 
-export function createBuildAttestation({ provenance, verification, environment, commandEvidence, postBuild, normalization, buildStartedAtMs, buildFinishedAt, nativeInventory, smoke, externalInputs }) {
+export function createBuildAttestation({ provenance, verification, environment, commandEvidence, postBuild, normalization, buildStartedAtMs, buildFinishedAt, nativeInventory, smoke, sbomEvidence, externalInputs }) {
   const toolchain = verification.toolchain;
   return {
     schemaVersion: 1,
@@ -211,6 +212,7 @@ export function createBuildAttestation({ provenance, verification, environment, 
     host: { platform: os.platform(), arch: os.arch(), release: os.release(), type: os.type() },
     environment: { ...environment },
     inputs: [...externalInputs].sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name))),
+    sbom: structuredClone(sbomEvidence),
     commands: commandEvidence,
     build: {
       startedAt: new Date(buildStartedAtMs).toISOString(),
@@ -300,10 +302,44 @@ function publicPlan(plan) {
   };
 }
 
-function validateSbom(sbom) {
+export function validateSbom({ sbom, sha256, provenance, policy } = {}) {
   stagingAssert(isPlainObject(sbom), "SBOM_INPUT_INVALID", "SBOM must be a JSON object");
   stagingAssert(sbom.spdxVersion === "SPDX-2.3", "SBOM_INPUT_INVALID", "SBOM must declare SPDX-2.3");
   for (const key of ["SPDXID", "name", "documentNamespace"]) stagingAssert(typeof sbom[key] === "string" && sbom[key].length > 0, "SBOM_INPUT_INVALID", `SBOM ${key} is required`);
+  stagingAssert(policy?.sbomRequirements && Object.values(policy.sbomRequirements).every((value) => value === true), "SBOM_POLICY_INVALID", "SBOM package, lock, checksum, license and notice coverage must all be required");
+  stagingAssert(Array.isArray(sbom.packages) && sbom.packages.length > 0, "SBOM_INPUT_INVALID", "SBOM packages must not be empty");
+  stagingAssert(Array.isArray(sbom.documentDescribes), "SBOM_INPUT_INVALID", "SBOM documentDescribes is required");
+  const lockAnnotation = sbom.annotations?.find((entry) => entry?.annotationType === "OTHER" && entry.comment === `pnpm-lock.yaml sha256:${provenance.lockfile.sha256}`);
+  stagingAssert(lockAnnotation != null, "SBOM_LOCK_MISMATCH", "SBOM must bind the pinned pnpm lockfile digest");
+
+  const expected = [...provenance.sbom.requiredPackages].sort(comparePackage);
+  const actual = [...sbom.packages].sort(comparePackage);
+  stagingAssert(actual.length === expected.length, "SBOM_PACKAGE_COVERAGE_MISSING", "SBOM must cover the exact pinned runtime package set");
+  const evidence = [];
+  const described = new Set(sbom.documentDescribes);
+  for (let index = 0; index < expected.length; index += 1) {
+    const pinned = expected[index];
+    const entry = actual[index];
+    stagingAssert(entry?.name === pinned.name && entry.versionInfo === pinned.version, "SBOM_PACKAGE_COVERAGE_MISSING", `SBOM package/version mismatch at ${pinned.name}@${pinned.version}`);
+    stagingAssert(typeof entry.SPDXID === "string" && described.has(entry.SPDXID), "SBOM_PACKAGE_COVERAGE_MISSING", `SBOM package is not described: ${pinned.name}@${pinned.version}`);
+    stagingAssert(entry.filesAnalyzed === false && entry.downloadLocation === "NOASSERTION", "SBOM_PACKAGE_INVALID", `SBOM package analysis mode is invalid: ${pinned.name}@${pinned.version}`);
+    const checksum = entry.checksums?.find((candidate) => candidate?.algorithm === "SHA512")?.checksumValue;
+    stagingAssert(checksum === pinned.contentSha512, "SBOM_CONTENT_DIGEST_MISMATCH", `SBOM content digest mismatch: ${pinned.name}@${pinned.version}`);
+    stagingAssert(entry.licenseDeclared === pinned.licenseDeclared && entry.licenseConcluded === pinned.licenseDeclared, "SBOM_LICENSE_MISSING", `SBOM license coverage mismatch: ${pinned.name}@${pinned.version}`);
+    stagingAssert(entry.comment === `notice=${pinned.noticeStatus}`, "SBOM_NOTICE_MISSING", `SBOM notice coverage mismatch: ${pinned.name}@${pinned.version}`);
+    const expectedPurl = packagePurl(pinned.name, pinned.version);
+    stagingAssert(entry.externalRefs?.some((reference) => reference?.referenceCategory === "PACKAGE-MANAGER" && reference.referenceType === "purl" && reference.referenceLocator === expectedPurl), "SBOM_LOCK_MISMATCH", `SBOM package lacks exact lock resolution identity: ${pinned.name}@${pinned.version}`);
+    evidence.push({ name: pinned.name, version: pinned.version, contentSha512: pinned.contentSha512, licenseDeclared: pinned.licenseDeclared, noticeStatus: pinned.noticeStatus });
+  }
+  return { documentSha256: sha256, lockfileSha256: provenance.lockfile.sha256, packages: evidence };
+}
+
+function packagePurl(name, version) {
+  return `pkg:npm/${name.startsWith("@") ? `%40${name.slice(1)}` : name}@${version}`;
+}
+
+function comparePackage(left, right) {
+  return Buffer.compare(Buffer.from(`${left.name}@${left.version ?? left.versionInfo}`), Buffer.from(`${right.name}@${right.version ?? right.versionInfo}`));
 }
 
 async function readJsonInput(filename, code) {
