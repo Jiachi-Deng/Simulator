@@ -4,6 +4,8 @@
 
 Simulator 目前尚未发布正式版本，因此暂时没有可列入安全支持范围的稳定版本。此政策适用于本仓库当前代码，以及未来由本仓库正式发布的 Simulator 版本。
 
+版本窗口、Release Candidate 和 End of Support 规则见 [支持与版本政策](SUPPORT.md)。
+
 ## 报告安全漏洞
 
 请仅通过 GitHub 的 [Private Vulnerability Reporting](https://github.com/Jiachi-Deng/Simulator/security/advisories/new) 私密报告安全漏洞。

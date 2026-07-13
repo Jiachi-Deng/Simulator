@@ -10,6 +10,7 @@ on:
       - "apps/electron/resources/**"
       - "scripts/electron-build-*.ts"
       - "scripts/build-environment.ts"
+      - "scripts/release/verify-public-build-privacy.ts"
       - "package.json"
       - "bun.lock"
   workflow_dispatch:
