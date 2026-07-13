@@ -39,7 +39,7 @@
    bun run webui:build 2>&1 | tee "release-evidence/$MONTH/webui-build.log"
    ```
 
-5. macOS arm64 packaged smoke 必须通过 GitHub 的 `macOS Package Smoke` workflow 执行；当前没有 Windows/Linux packaged Release gate，因此对应项必须记为 `Not run`，不能用普通 build 代替：
+5. macOS arm64 packaged smoke 必须通过 GitHub 的 `macOS Package Smoke` workflow 执行；macOS x64 当前只有 shell path contract test，没有真实 runner proof。macOS x64、Windows 和 Linux packaged Release 均必须记为 `Not run`，不能用普通 build 代替：
 
    ```bash
    gh workflow run package-macos.yml --repo Jiachi-Deng/Simulator --ref BRANCH_OR_SHA

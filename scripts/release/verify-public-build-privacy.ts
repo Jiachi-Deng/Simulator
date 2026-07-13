@@ -15,6 +15,11 @@ interface BuildPolicy {
   readonly updatesDisabled: boolean
 }
 
+interface ForbiddenNeedle {
+  readonly text: string
+  readonly bytes: Buffer
+}
+
 export interface PublicBuildPrivacyVerification {
   readonly scannedFiles: number
   readonly forbiddenMatches: readonly string[]
@@ -50,10 +55,30 @@ function readStableRegularFile(path: string): Buffer {
   }
 }
 
-function parseBuildPolicy(contentRoot: string): BuildPolicy {
+function forbiddenMatchesIn(path: string, contents: Buffer, needles: readonly ForbiddenNeedle[]): string[] {
+  return needles
+    .filter((needle) => contents.indexOf(needle.bytes) !== -1)
+    .map((needle) => `${path}: ${needle.text}`)
+}
+
+function parseBuildPolicy(contentRoot: string, needles: readonly ForbiddenNeedle[]): BuildPolicy {
   const path = join(contentRoot, "resources", "build-policy.json")
-  const value = JSON.parse(readStableRegularFile(path).toString("utf8")) as Partial<BuildPolicy>
-  if (value.schemaVersion !== 1 || value.updatesDisabled !== true) {
+  const contents = readStableRegularFile(path)
+  const forbiddenMatches = forbiddenMatchesIn(path, contents, needles)
+  if (forbiddenMatches.length > 0) {
+    throw new Error(`Public build contains forbidden embedded values:\n${forbiddenMatches.join("\n")}`)
+  }
+  const value = JSON.parse(contents.toString("utf8")) as Partial<BuildPolicy>
+  const keys = value && typeof value === "object" && !Array.isArray(value)
+    ? Object.keys(value).sort()
+    : []
+  if (
+    keys.length !== 2
+    || keys[0] !== "schemaVersion"
+    || keys[1] !== "updatesDisabled"
+    || value.schemaVersion !== 1
+    || value.updatesDisabled !== true
+  ) {
     throw new Error(`Public build must carry an updates-disabled build policy: ${path}`)
   }
   return { schemaVersion: 1, updatesDisabled: true }
@@ -74,17 +99,22 @@ export function verifyPublicBuildPrivacy(
   if (!contentStat.isDirectory() || contentStat.isSymbolicLink() || realpathSync(contentRoot) !== contentRoot) {
     throw new Error(`Packaged dist root must be a real directory: ${contentRoot}`)
   }
-  parseBuildPolicy(contentRoot)
-
   const needles = [...new Set(forbiddenValues.filter((value) => value.length > 0))].map((value) => ({
     text: value,
     bytes: Buffer.from(value),
   }))
   const forbiddenMatches: string[] = []
   let scannedFiles = 0
+  parseBuildPolicy(contentRoot, needles)
 
   const visit = (directory: string): void => {
-    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const before = lstatSync(directory)
+    const beforeRealPath = realpathSync(directory)
+    if (!before.isDirectory() || before.isSymbolicLink() || beforeRealPath !== directory) {
+      throw new Error(`Packaged dist directory changed during verification: ${directory}`)
+    }
+    const entries = readdirSync(directory, { withFileTypes: true })
+    for (const entry of entries) {
       const path = join(directory, entry.name)
       const stat = lstatSync(path)
       if (stat.isSymbolicLink()) {
@@ -98,11 +128,18 @@ export function verifyPublicBuildPrivacy(
       if (!stat.isFile()) continue
       scannedFiles += 1
       const contents = readStableRegularFile(path)
-      for (const needle of needles) {
-        if (contents.indexOf(needle.bytes) !== -1) {
-          forbiddenMatches.push(`${path}: ${needle.text}`)
-        }
-      }
+      forbiddenMatches.push(...forbiddenMatchesIn(path, contents, needles))
+    }
+    const after = lstatSync(directory)
+    if (
+      !after.isDirectory()
+      || after.isSymbolicLink()
+      || before.dev !== after.dev
+      || before.ino !== after.ino
+      || before.mtimeMs !== after.mtimeMs
+      || realpathSync(directory) !== beforeRealPath
+    ) {
+      throw new Error(`Packaged dist directory changed during verification: ${directory}`)
     }
   }
   visit(contentRoot)

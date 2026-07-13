@@ -41,6 +41,17 @@ describe("public build privacy verification", () => {
     )
   })
 
+  test("scans the build policy bytes before parsing its schema", () => {
+    const app = fixture()
+    writeFileSync(
+      join(app, "Contents", "Resources", "app", "dist", "resources", "build-policy.json"),
+      JSON.stringify({ schemaVersion: 1, updatesDisabled: true, ingest: sentinel }),
+    )
+    expect(() => verifyPublicBuildPrivacy(app, [sentinel])).toThrow(
+      "Public build contains forbidden embedded values",
+    )
+  })
+
   test("fails closed on symlinks in packaged dist", () => {
     const app = fixture()
     const outside = join(root, "outside")
