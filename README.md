@@ -24,6 +24,8 @@ It's built with Agent Native software principles in mind, and is highly customis
 
 Simulator is open source under the Apache 2.0 license. See [NOTICE](NOTICE), [LICENSE](LICENSE), and [TRADEMARK.md](TRADEMARK.md) for upstream attribution and applicable terms.
 
+项目政策：[隐私政策](PRIVACY.md) · [支持与版本政策](SUPPORT.md) · [安全政策](SECURITY.md) · [贡献指南](CONTRIBUTING.md)
+
 <img width="1578" height="894" alt="image" src="https://github.com/user-attachments/assets/3f1f2fe8-7cf6-4487-99ff-76f6c8c0a3fb" />
 
 ## Things that are hard to believe "just work"
