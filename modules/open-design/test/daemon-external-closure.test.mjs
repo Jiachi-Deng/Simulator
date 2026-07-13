@@ -12,18 +12,21 @@ async function fixture(t) {
   const parent = await mkdtemp(path.join(os.tmpdir(), "open-design-daemon-closure-"));
   const checkout = path.join(parent, "checkout");
   const output = path.join(parent, "closure");
-  const bundle = path.join(checkout, "daemon-bundle/dist/sidecar/index.js");
-  const metafile = path.join(checkout, "daemon-bundle/esbuild-meta.json");
+  const workingDirectory = path.join(checkout, "apps/packaged");
+  const bundle = path.join(parent, "daemon-bundle/dist/sidecar/index.js");
+  const metafile = path.join(parent, "daemon-bundle/esbuild-meta.json");
   const roots = Object.fromEntries(["better-sqlite3", "bindings", "file-uri-to-path", "node-pty", "blake3-wasm", "daemon"].map((name) => [name, path.join(checkout, "packages", name)]));
   t.after(() => rm(parent, { recursive: true, force: true }));
+  await mkdir(workingDirectory, { recursive: true });
   await Promise.all(Object.entries(roots).map(async ([name, root]) => {
     await mkdir(root, { recursive: true });
     await writeFile(path.join(root, "package.json"), JSON.stringify({ name: name === "daemon" ? "@open-design/daemon" : name, version: { "better-sqlite3": "12.10.0", bindings: "1.5.0", "file-uri-to-path": "1.0.0", "node-pty": "1.1.0", "blake3-wasm": "2.1.5", daemon: "0.14.1" }[name] }));
   }));
   const buildStartedAtMs = Date.now() - 1_000;
   await writeFiles(checkout, {
-    "daemon-bundle/dist/sidecar/index.js": "import 'better-sqlite3';\n",
-    "daemon-bundle/esbuild-meta.json": JSON.stringify(metafileFor(DAEMON_EXTERNAL_ALLOWLIST)),
+    "../daemon-bundle/dist/sidecar/index.js": "import 'better-sqlite3';\n",
+    "../daemon-bundle/esbuild-meta.json": JSON.stringify(metafileFor(DAEMON_EXTERNAL_ALLOWLIST)),
+    "apps/daemon/dist/sidecar/index.js": "import 'better-sqlite3';\n",
     "packages/better-sqlite3/lib/index.js": "module.exports = {};\n",
     "packages/better-sqlite3/build/Release/better_sqlite3.node": "better-native",
     "packages/bindings/bindings.js": "module.exports = () => {};\n",
@@ -58,7 +61,7 @@ async function fixture(t) {
     "packages/htmlparser2/index.js": "must-not-copy",
     "packages/entities/index.js": "must-not-copy",
   });
-  return { checkout, output, bundle, metafile, roots, buildStartedAtMs };
+  return { checkout, output, bundle, metafile, workingDirectory, roots, buildStartedAtMs };
 }
 
 test("creates a fixed ordinary-file daemon external closure with native and WASM runtime evidence", async (t) => {
@@ -84,7 +87,7 @@ test("rejects metafile tampering and unexpected package externals", async (t) =>
   await writeFile(input.metafile, JSON.stringify(metafileFor([...DAEMON_EXTERNAL_ALLOWLIST, "node:not-a-builtin"])));
   await assert.rejects(validate(input), { code: "DAEMON_EXTERNAL_UNEXPECTED" });
 
-  await writeFile(input.metafile, JSON.stringify({ ...metafileFor(DAEMON_EXTERNAL_ALLOWLIST), inputs: { "../outside.js": {} } }));
+  await writeFile(input.metafile, JSON.stringify({ ...metafileFor(DAEMON_EXTERNAL_ALLOWLIST), inputs: { "../../../outside.js": {} } }));
   await assert.rejects(validate(input), { code: "DAEMON_CLOSURE_ESCAPE" });
 
   const multiple = metafileFor(DAEMON_EXTERNAL_ALLOWLIST);
@@ -124,11 +127,11 @@ async function build(input, buildTarget = target) {
 }
 
 function metafileFor(externals) {
-  return { inputs: { "daemon-bundle/dist/sidecar/index.js": { bytes: 1, imports: [] } }, outputs: { "daemon-bundle/dist/sidecar/index.js": { imports: [...externals.map((specifier) => ({ path: specifier, external: true })), { path: "node:fs", external: true }, { path: "node:sqlite", external: true }] } } };
+  return { inputs: { "../daemon/dist/sidecar/index.js": { bytes: 1, imports: [] } }, outputs: { "../../../daemon-bundle/dist/sidecar/index.js": { imports: [...externals.map((specifier) => ({ path: specifier, external: true })), { path: "node:fs", external: true }, { path: "node:sqlite", external: true }] } } };
 }
 
 async function validate(input) {
-  return await validateDaemonMetafile({ metafilePath: input.metafile, checkoutRoot: input.checkout, bundlePath: input.bundle });
+  return await validateDaemonMetafile({ metafilePath: input.metafile, checkoutRoot: input.checkout, bundlePath: input.bundle, workingDirectory: input.workingDirectory });
 }
 
 async function writeFiles(root, files) {

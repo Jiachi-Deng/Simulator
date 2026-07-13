@@ -26,7 +26,7 @@ export async function buildDaemonExternalClosure({ checkoutRoot, bundlePath, met
   stagingAssert(target?.platform === "darwin" && target.arch === "arm64", "DAEMON_CLOSURE_TARGET_UNSUPPORTED", "only darwin-arm64 daemon closure is supported");
   const checkoutReal = await realpath(checkoutRoot).catch((error) => stagingFail("DAEMON_CLOSURE_ROOT_INVALID", error.message));
   const bundleReal = await realpath(bundlePath).catch((error) => stagingFail("DAEMON_CLOSURE_REQUIRED_FILE_MISSING", error.message));
-  const metafile = await validateDaemonMetafile({ metafilePath, checkoutRoot: checkoutReal, bundlePath: bundleReal });
+  const metafile = await validateDaemonMetafile({ metafilePath, checkoutRoot: checkoutReal, bundlePath: bundleReal, workingDirectory: path.join(checkoutReal, "apps/packaged") });
   await mkdir(destinationRoot, { mode: 0o700 }).catch((error) => stagingFail("DAEMON_CLOSURE_DESTINATION_INVALID", error.message));
   const destinationStat = await lstat(destinationRoot).catch((error) => stagingFail("DAEMON_CLOSURE_DESTINATION_INVALID", error.message));
   stagingAssert(destinationStat.isDirectory() && !destinationStat.isSymbolicLink() && destinationStat.uid === currentUid(), "DAEMON_CLOSURE_DESTINATION_INVALID", "closure destination must be an owner-built real directory");
@@ -64,12 +64,14 @@ export async function buildDaemonExternalClosure({ checkoutRoot, bundlePath, met
   }
 }
 
-export async function validateDaemonMetafile({ metafilePath, checkoutRoot, bundlePath } = {}) {
+export async function validateDaemonMetafile({ metafilePath, checkoutRoot, bundlePath, workingDirectory = checkoutRoot } = {}) {
   stagingAssert(path.isAbsolute(metafilePath ?? "") && path.isAbsolute(checkoutRoot ?? "") && path.isAbsolute(bundlePath ?? ""), "DAEMON_METAFILE_INVALID", "metafile, checkout and bundle paths must be absolute");
-  const [checkoutReal, bundleReal] = await Promise.all([
+  const [checkoutReal, bundleReal, workingReal] = await Promise.all([
     realpath(checkoutRoot).catch((error) => stagingFail("DAEMON_METAFILE_INVALID", error.message)),
     realpath(bundlePath).catch((error) => stagingFail("DAEMON_METAFILE_INVALID", error.message)),
+    realpath(workingDirectory).catch((error) => stagingFail("DAEMON_METAFILE_INVALID", error.message)),
   ]);
+  assertContained(checkoutReal, workingReal, "metafile working directory");
   const bytes = await readRegularFile(metafilePath, "DAEMON_METAFILE_INVALID");
   let metafile;
   try {
@@ -79,10 +81,10 @@ export async function validateDaemonMetafile({ metafilePath, checkoutRoot, bundl
   }
   stagingAssert(isPlainObject(metafile) && isPlainObject(metafile.inputs) && Object.keys(metafile.inputs).length > 0 && isPlainObject(metafile.outputs), "DAEMON_METAFILE_INVALID", "metafile inputs and outputs are required");
   const outputPaths = Object.keys(metafile.outputs);
-  stagingAssert(outputPaths.length === 1 && path.resolve(checkoutReal, outputPaths[0]) === bundleReal, "DAEMON_METAFILE_OUTPUT_INVALID", "metafile must contain exactly the expected daemon bundle output");
+  stagingAssert(outputPaths.length === 1 && path.resolve(workingReal, outputPaths[0]) === bundleReal, "DAEMON_METAFILE_OUTPUT_INVALID", "metafile must contain exactly the expected daemon bundle output");
   for (const inputPath of Object.keys(metafile.inputs)) {
     stagingAssert(typeof inputPath === "string" && inputPath.length > 0 && !path.isAbsolute(inputPath), "DAEMON_METAFILE_INPUT_ESCAPE", `metafile input path is invalid: ${inputPath}`);
-    const candidate = path.resolve(checkoutReal, inputPath);
+    const candidate = path.resolve(workingReal, inputPath);
     assertContained(checkoutReal, candidate, inputPath);
     const resolved = await realpath(candidate).catch((error) => stagingFail("DAEMON_METAFILE_INPUT_MISSING", `${inputPath}: ${error.message}`));
     assertContained(checkoutReal, resolved, inputPath);
