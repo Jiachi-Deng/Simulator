@@ -72,6 +72,7 @@ jobs:
       - run: bun install --frozen-lockfile
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: bun run test:module-registry
       - run: bun run validate:module-coordinator
 
   module-coordinator-gate:

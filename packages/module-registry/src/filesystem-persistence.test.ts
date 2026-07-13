@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseModuleManifest } from '@simulator/module-contract'
@@ -43,6 +43,20 @@ afterEach(() => {
 })
 
 describe('FilesystemModuleRegistryPersistence', () => {
+  it.skipIf(process.platform !== 'win32')('commits and atomically replaces registry state on Windows', () => {
+    const directory = root()
+    const persistence = new FilesystemModuleRegistryPersistence(directory)
+    const firstState = { schemaVersion: 1 as const, host: HOST, modules: [] }
+    const secondState = { ...firstState, host: { ...HOST, version: '0.11.2' } }
+
+    const first = persistence.commit(firstState, persistence.read().revision)
+    expect(first.ok).toBe(true)
+    const second = persistence.commit(secondState, first.revision)
+    expect(second.ok).toBe(true)
+    expect(persistence.read().committed).toEqual(secondState)
+    expect(readdirSync(directory)).toEqual(['module-registry.json'])
+  })
+
   it('restores committed registry state in a new registry instance', () => {
     const directory = root()
     const first = new ModuleRegistry(HOST, new FilesystemModuleRegistryPersistence(directory))
