@@ -4,7 +4,7 @@
 
 ## 版本事实源
 
-根目录 `package.json` 的 `version` 是 Host App 构建的版本事实源。`bun run check-version` 要求所有可分发 workspace 与它一致；测试 fixture、独立 Module 和明确排除的文档应用不共享 Host 版本。
+根目录 `package.json` 的 `version` 是 Host App 构建的版本事实源。`bun run check-version` 当前要求根目录及 `apps/*`、`packages/*` 下的 package manifest 与它一致；测试 fixture 和明确排除的文档应用不共享 Host 版本。仓库中的 `packages/module-*` 是 Host 实现 package，因此仍跟随 Host 版本。
 
 修改版本必须通过独立 PR，连同对应的 `CHANGELOG.md` 和 Release notes 一起 Review。构建脚本、CI input、tag 或文件名不得单独覆盖 manifest 中的版本。
 
@@ -15,7 +15,7 @@ Simulator 使用 `MAJOR.MINOR.PATCH`：
 - `MAJOR`：稳定版本中的不兼容 API、数据或用户工作流变化；
 - `MINOR`：向后兼容的功能，或 `0.x` 阶段明确记录迁移方式的不兼容变化；
 - `PATCH`：向后兼容的 Bug、安全或打包修复；
-- `-rc.N`：不可变的 Release Candidate，`N` 从 1 单调递增。
+- `-rc.N`：不可变的 Release Candidate，`N` 是从 1 开始的正整数。
 
 稳定版发布前，`0.x` 不等于可以静默破坏用户数据。任何不兼容变化仍必须写入 CHANGELOG、提供迁移或回滚说明，并通过 ADR 记录长期兼容性决定。
 
@@ -23,10 +23,10 @@ Simulator 使用 `MAJOR.MINOR.PATCH`：
 
 RC 必须使用 `X.Y.Z-rc.N`，并满足以下条件：
 
-- source commit 来自受保护的 `main`，或来自明确批准的 release branch；
+- source commit 必须等于受保护的 `origin/main` tip；当前 Engineering RC 不接受 release branch，未来如需支持必须先单独修改并 Review workflow、validator 和本文；
 - manifest、DMG/ZIP、Checksum、SBOM、Provenance 和 Release notes 使用同一版本与 commit；
 - 同一版本/tag/artifact 名称不得覆盖或重新上传不同 bytes；
-- 新修复产生新的 commit 和新的 `rc.N`；
+- 新修复产生新的 commit 和新的 `rc.N`；同一基础版本的后续候选应递增 `N`，当前自动 gate 会拒绝 `rc.0` 和已存在的同名 tag，但维护者仍需在 Release evidence 中核对未创建 tag 的历史 Engineering RC；
 - unsigned Engineering RC 必须明确标记 unsigned，并保持 production updater disabled。
 
 当前 workflow 只生成工程验证 artifact，不会自动创建 tag 或 GitHub Release。正式发布仍受签名、公证、托管和 Go/No-Go 决策约束。
@@ -39,7 +39,7 @@ RC 必须使用 `X.Y.Z-rc.N`，并满足以下条件：
 
 ## Module 版本
 
-可下载 Module 拥有独立 SemVer，不跟随 Host App 强制同步。每个 Module catalog entry 必须声明 Host compatibility、platform、immutable artifact hash 和签名身份；Module 更新失败不能改变 Host 版本或 Built-in Agent 的可用性。
+通过 catalog 分发和安装的 Module artifact 拥有独立 SemVer，不跟随 Host App 强制同步；这与仓库中跟随 Host 版本的 `packages/module-*` 实现 package 是两个不同边界。每个 Module catalog entry 必须声明 Host compatibility、platform、immutable artifact hash 和签名身份；Module 更新失败不能改变 Host 版本或 Built-in Agent 的可用性。
 
 ## Changelog
 

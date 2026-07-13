@@ -1,11 +1,18 @@
 import { describe, expect, test } from "bun:test"
-import { readFileSync } from "node:fs"
-import { join } from "node:path"
+import { existsSync, readFileSync } from "node:fs"
+import { dirname, join, resolve } from "node:path"
 
 const root = join(import.meta.dir, "..")
 
 function read(relativePath: string): string {
   return readFileSync(join(root, relativePath), "utf8")
+}
+
+function localMarkdownLinks(relativePath: string): string[] {
+  return [...read(relativePath).matchAll(/\[[^\]]+\]\(([^)]+)\)/g)]
+    .map((match) => match[1]!.split("#", 1)[0]!)
+    .filter((target) => target.length > 0 && !/^[a-z][a-z0-9+.-]*:/i.test(target))
+    .map((target) => resolve(root, dirname(relativePath), target))
 }
 
 describe("governance documentation contract", () => {
@@ -24,13 +31,26 @@ describe("governance documentation contract", () => {
 
   test("binds versions, immutable RCs, modules, and release evidence", () => {
     const policy = read("docs/VERSIONING.md")
+    const rcValidator = read("scripts/release/engineering-rc.ts")
 
     expect(policy).toContain("根目录 `package.json` 的 `version` 是 Host App 构建的版本事实源")
+    expect(policy).toContain("当前 Engineering RC 不接受 release branch")
     expect(policy).toContain("同一版本/tag/artifact 名称不得覆盖或重新上传不同 bytes")
-    expect(policy).toContain("可下载 Module 拥有独立 SemVer")
+    expect(policy).toContain("通过 catalog 分发和安装的 Module artifact 拥有独立 SemVer")
+    expect(policy).toContain("`packages/module-*` 实现 package")
     expect(policy).toContain("production updater disabled")
+    expect(rcValidator).toContain("origin/main tip")
+    expect(rcValidator).toContain("-rc\\.([1-9]\\d*)")
     expect(read("README.md")).toContain("docs/VERSIONING.md")
     expect(read("CONTRIBUTING.md")).toContain("docs/adr/README.md")
     expect(read("docs/RELEASE_OPERATIONS.md")).toContain("VERSIONING.md")
+  })
+
+  test("keeps every new local governance link resolvable", () => {
+    for (const source of ["README.md", "CONTRIBUTING.md", "docs/VERSIONING.md", "docs/RELEASE_OPERATIONS.md", "docs/adr/README.md"]) {
+      for (const target of localMarkdownLinks(source)) {
+        expect(existsSync(target), `${source} links to missing ${target}`).toBeTrue()
+      }
+    }
   })
 })
