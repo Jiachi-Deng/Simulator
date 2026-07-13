@@ -64,7 +64,9 @@ test("build plan invokes exact pnpm through exact Node in a private checkout and
   assert.deepEqual(plan.commands[0].args, ["/toolchain/pnpm.cjs", "install", "--frozen-lockfile"]);
   assert.equal(plan.commands.find((entry) => entry.args.includes("@open-design/web") && entry.args.includes("build")).env.OD_WEB_OUTPUT_MODE, "standalone");
   assert.deepEqual(plan.commands.at(-2).args, ["/toolchain/pnpm.cjs", "--config.inject-workspace-packages=true", "--prefer-offline", "--frozen-lockfile", "--ignore-scripts", "--filter", "@open-design/daemon", "deploy", "--prod", "/private/build/daemon"]);
-  assert.deepEqual(plan.commands.at(-1).args, ["/toolchain/pnpm.cjs", "--config.inject-workspace-packages=true", "--prefer-offline", "--frozen-lockfile", "--ignore-scripts", "--filter", "@open-design/web", "deploy", "--prod", "/private/build/web"]);
+  assert.deepEqual(plan.commands.at(-1).args.slice(0, 10), ["/toolchain/pnpm.cjs", "--filter", "@open-design/packaged", "exec", "esbuild", "apps/web/dist/sidecar/index.js", "--bundle", "--platform=node", "--format=esm", "--target=node24"]);
+  assert.equal(plan.commands.at(-1).args.at(-2), "--outfile=/private/build/web/dist/sidecar/index.js");
+  assert.equal(plan.commands.at(-1).args.at(-1), "--metafile=/private/build/web/esbuild-meta.json");
   const seen = [];
   await runBuildPlan(plan, async (command, args, options) => { seen.push({ command, args, options }); });
   assert.deepEqual(seen.map((entry) => entry.args), plan.commands.map((entry) => entry.args));

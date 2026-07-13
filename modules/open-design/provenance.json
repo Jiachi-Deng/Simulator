@@ -74,7 +74,7 @@
       "<node> <pnpm> --filter @open-design/web build",
       "<node> <pnpm> --filter @open-design/web build:sidecar",
       "<node> <pnpm> --config.inject-workspace-packages=true --prefer-offline --frozen-lockfile --ignore-scripts --filter @open-design/daemon deploy --prod <daemon-deploy>",
-      "<node> <pnpm> --config.inject-workspace-packages=true --prefer-offline --frozen-lockfile --ignore-scripts --filter @open-design/web deploy --prod <web-sidecar-deploy>"
+      "<node> <pnpm> --filter @open-design/packaged exec esbuild apps/web/dist/sidecar/index.js --bundle --platform=node --format=esm --target=node24 --outfile=<web-sidecar>/dist/sidecar/index.js --metafile=<web-sidecar>/esbuild-meta.json"
     ]
   }
 }

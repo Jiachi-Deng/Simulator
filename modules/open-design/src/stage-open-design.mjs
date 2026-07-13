@@ -48,7 +48,7 @@ export function createBuildPlan({ workspace, stagingRoot, nodeBin, pnpmBin, prov
     invokePnpm(["--filter", "@open-design/web", "build"], { OD_WEB_OUTPUT_MODE: "standalone" }),
     invokePnpm(["--filter", "@open-design/web", "build:sidecar"]),
     invokePnpm(["--config.inject-workspace-packages=true", "--prefer-offline", "--frozen-lockfile", "--ignore-scripts", "--filter", "@open-design/daemon", "deploy", "--prod", workspace.daemonDeployRoot]),
-    invokePnpm(["--config.inject-workspace-packages=true", "--prefer-offline", "--frozen-lockfile", "--ignore-scripts", "--filter", "@open-design/web", "deploy", "--prod", workspace.webDeployRoot]),
+    invokePnpm(["--filter", "@open-design/packaged", "exec", "esbuild", "apps/web/dist/sidecar/index.js", "--bundle", "--platform=node", "--format=esm", "--target=node24", `--outfile=${path.join(workspace.webDeployRoot, "dist/sidecar/index.js")}`, `--metafile=${path.join(workspace.webDeployRoot, "esbuild-meta.json")}`]),
   ];
   return { stagingRoot, workspace, nodeBin, pnpmBin, environment, commands };
 }
@@ -90,6 +90,7 @@ export async function prepareProductionStaging({
 
     const buildStartedAtMs = Date.now();
     const commandEvidence = await runBuildPlan(plan, runCommand, verification.toolchain.nodeExecutableSha256);
+    await writeExclusiveCanonicalJson(path.join(workspace.webDeployRoot, "package.json"), { name: "@open-design/web-sidecar-staging", private: true, type: "module" });
     const normalization = await materializeBuildOutputs({ workspace, buildStartedAtMs });
     const postBuild = await verifyPostBuildWorkspace({ workspace, provenance, buildStartedAtMs, run });
     const copied = await copyStagingInputs({
@@ -101,7 +102,6 @@ export async function prepareProductionStaging({
         { label: "next-public", source: path.join(workspace.checkoutRoot, "apps/web/public"), destination: "web/standalone/apps/web/public" },
         { label: "daemon-production-closure", source: normalization.daemon.root, destination: "runtime/daemon" },
         { label: "web-sidecar-dist", source: path.join(normalization.web.root, "dist"), destination: "runtime/packages/web-sidecar/dist" },
-        { label: "web-sidecar-node-modules", source: path.join(normalization.web.root, "node_modules"), destination: "runtime/packages/web-sidecar/node_modules" },
         { label: "web-sidecar-manifest", source: path.join(normalization.web.root, "package.json"), destination: "runtime/packages/web-sidecar/package.json" },
         { label: "license", source: path.join(workspace.checkoutRoot, provenance.license.sourceFile), destination: "legal/LICENSE" },
         { label: "sbom", source: sbomPath, destination: "legal/SBOM.spdx.json" },
