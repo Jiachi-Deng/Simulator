@@ -19,9 +19,11 @@ describe("release operations policy", () => {
 
   test("the public unsigned packaging path explicitly enables public-build stripping", () => {
     const buildScript = read("apps/electron/scripts/build-dmg.sh")
+    const packageWorkflow = read(".github/workflows/package-macos.yml")
     expect(buildScript).toContain("SIMULATOR_PUBLIC_BUILD=1")
     expect(buildScript).toContain("SIMULATOR_DISABLE_UPDATES=1")
     expect(buildScript).toContain("verify-public-build-privacy.ts")
+    expect(packageWorkflow).toContain('"scripts/release/verify-public-build-privacy.ts"')
   })
 
   test("public policy documents remain discoverable and contain no invented contact", () => {

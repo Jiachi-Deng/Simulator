@@ -14,7 +14,7 @@
 
 - 使用与日常开发不同的干净 macOS 用户或设备；
 - 记录 OS、CPU、Xcode/CLI tools、Bun 和 commit；
-- 只使用仓库文档和 GitHub Release 中公开的输入；
+- 只使用仓库文档、Engineering RC 的 GitHub Actions artifact，或稳定版上线后的 GitHub Release 公开输入；
 - 使用合成测试数据，不使用真实用户凭据。
 
 ## 演练场景
