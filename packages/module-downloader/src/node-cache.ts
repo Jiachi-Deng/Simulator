@@ -80,6 +80,31 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
       const ownerPath = this.#leaseOwner(owner.token)
       await this.#immutableJson(ownerPath, owner)
       await this.#checkpoint('lease-owner-published', ownerPath)
+      if (process.platform === 'win32') {
+        const lock = `${base}.lock`
+        try { await mkdir(lock, { mode: OWNER_MODE }) }
+        catch (cause) {
+          await safeRemoveFile(ownerPath, this.root).catch(() => undefined)
+          if (!hasCode(cause, 'EEXIST') && !hasCode(cause, 'ENOTEMPTY')) throw cause
+          if (recoveries++ < this.#maxRecoveries) await this.#reconcileLease(base)
+          await sleep(this.#pollMs, signal)
+          continue
+        }
+        await this.#checkpoint('lease-candidate-created', lock)
+        try {
+          await this.#immutableJson(join(lock, 'claim.json'), { token: owner.token })
+          await this.#syncDirectory(lock)
+          await this.#checkpoint('lease-claim-published', lock)
+          if (await this.#hasRecovery(base)) { await this.#releaseOwner(base, owner.token); continue }
+          await this.#syncDirectory(dirname(base))
+          return { release: once(() => this.#releaseOwner(base, owner.token)) }
+        } catch (cause) {
+          const token = await claimToken(lock, this.root)
+          if (token === undefined || token === owner.token) await rm(lock, { recursive: true, force: true }).catch(() => undefined)
+          await safeRemoveFile(ownerPath, this.root).catch(() => undefined)
+          throw cause
+        }
+      }
       const candidate = `${base}.candidate-${owner.token}`
       await mkdir(candidate, { mode: OWNER_MODE })
       await this.#checkpoint('lease-candidate-created', candidate)
@@ -88,8 +113,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
         await this.#syncDirectory(candidate)
         try { await this.#rename(candidate, `${base}.lock`) }
         catch (cause) {
-          const destinationExists = hasCode(cause, 'EPERM') && await exists(`${base}.lock`)
-          if (!hasCode(cause, 'EEXIST') && !hasCode(cause, 'ENOTEMPTY') && !destinationExists) throw cause
+          if (!hasCode(cause, 'EEXIST') && !hasCode(cause, 'ENOTEMPTY')) throw cause
           await rm(candidate, { recursive: true, force: true })
           if (recoveries++ < this.#maxRecoveries) await this.#reconcileLease(base)
           await sleep(this.#pollMs, signal); continue
