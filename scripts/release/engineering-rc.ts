@@ -33,7 +33,7 @@ export interface ValidationResult {
   checks: ValidationCheck[]
 }
 
-const RC_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-rc\.(0|[1-9]\d*)$/
+const RC_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-rc\.([1-9]\d*)$/
 const RELEASE_NOTE_TEMPLATE_LINES = new Set([
   "# Pending Release Notes",
   "## Features",

@@ -19,6 +19,9 @@ const UUID = /^[a-f0-9-]{36}$/
 const TOP_LEVEL = ['catalog', 'artifacts', 'partials', 'leases'] as const
 const PROCESS_INSTANCE_ID = randomUUID()
 
+type ImmutableBytesResult = 'published' | 'missing-after-write'
+type ReleaseMarkerPublication = 'published' | 'concurrent-cleanup-already-completed'
+
 export type NodeCacheFaultPoint = 'temp-write' | 'file-sync' | 'before-chmod' | 'rename' | 'directory-sync' | 'cleanup'
 export type NodeCacheCheckpoint =
   | 'lease-owner-published' | 'lease-candidate-created' | 'lease-claim-published' | 'lease-stale-observed' | 'lease-quarantined'
@@ -384,15 +387,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     if (process.platform === 'win32') {
       if (claimedToken !== undefined && claimedToken !== token) return
       const marker = this.#leaseReleaseMarker(base, token)
-      try { await this.#immutableBytes(marker, Buffer.from(token), { allowMissingAfterWrite: true }) }
-      catch (cause) {
-        if (!hasCode(cause, 'EEXIST')) throw cause
-        try {
-          if ((await safeReadFile(marker, this.root)).toString() !== token) throw cause
-        } catch (markerCause) {
-          if (!hasCode(markerCause, 'ENOENT')) throw markerCause
-        }
-      }
+      if (await this.#publishReleaseMarker(base, token) === 'concurrent-cleanup-already-completed') return
       try { await safeRemoveFile(join(lock, 'claim.json'), this.root) }
       catch (cause) {
         if (hasCode(cause, 'ENOENT') || hasCode(cause, 'EPERM')) return
@@ -417,6 +412,22 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   #leaseOwner(token: string): string { validateId(token); return join(this.root, 'leases', 'owners', `${token}.json`) }
   #leaseReleased(token: string): string { validateId(token); return join(this.root, 'leases', 'owners', `${token}.released`) }
   #leaseReleaseMarker(base: string, token: string): string { validateId(token); return `${base}.released-${token}` }
+  async #publishReleaseMarker(base: string, token: string): Promise<ReleaseMarkerPublication> {
+    const marker = this.#leaseReleaseMarker(base, token)
+    try {
+      const result = await this.#immutableBytes(marker, Buffer.from(token), { allowMissingAfterWrite: true })
+      return result === 'missing-after-write' ? 'concurrent-cleanup-already-completed' : 'published'
+    } catch (cause) {
+      if (!hasCode(cause, 'EEXIST')) throw cause
+      try {
+        if ((await safeReadFile(marker, this.root)).toString() !== token) throw cause
+      } catch (markerCause) {
+        if (hasCode(markerCause, 'ENOENT')) return 'concurrent-cleanup-already-completed'
+        throw markerCause
+      }
+      return 'published'
+    }
+  }
   async #releasedLeaseTokens(base: string): Promise<string[]> {
     const prefix = `${baseName(base)}.released-`
     const tokens: string[] = []
@@ -604,16 +615,16 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   }
 
   async #immutableJson(path: string, value: unknown): Promise<void> { await this.#immutableBytes(path, Buffer.from(JSON.stringify(value))) }
-  async #immutableBytes(path: string, bytes: Uint8Array, options: { allowMissingAfterWrite?: boolean } = {}): Promise<void> {
+  async #immutableBytes(path: string, bytes: Uint8Array, options: { allowMissingAfterWrite?: boolean } = {}): Promise<ImmutableBytesResult> {
     await this.#faultAt('temp-write', path); const handle = await open(path, exclusiveWriteFlags(), FILE_MODE)
     try { await handle.writeFile(bytes); await this.#faultAt('file-sync', path); await handle.sync() } finally { await handle.close() }
     await this.#faultAt('before-chmod', path)
     try { await chmod(path, FILE_MODE) }
     catch (cause) {
       if (!options.allowMissingAfterWrite || !hasCode(cause, 'ENOENT') || await exists(path)) throw cause
-      return
+      return 'missing-after-write'
     }
-    await this.#syncDirectory(dirname(path))
+    await this.#syncDirectory(dirname(path)); return 'published'
   }
   async #atomicJson(path: string, value: unknown, topLevel: typeof TOP_LEVEL[number]): Promise<void> {
     await this.#assertSafeTree(topLevel); const temp = `${path}.${randomUUID()}.tmp`

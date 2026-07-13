@@ -88,7 +88,7 @@ describe("engineering RC contract", () => {
     expect(failedIds(validate())).toContain("manifests.version")
   })
 
-  test.each(["1.2.3-rc", "1.2.3-rc.01", "v1.2.3-rc.1"])("rejects bad RC version %s", (badVersion) => {
+  test.each(["1.2.3-rc", "1.2.3-rc.0", "1.2.3-rc.01", "v1.2.3-rc.1"])("rejects bad RC version %s", (badVersion) => {
     fixture()
     expect(failedIds(validate({ version: badVersion }))).toContain("version.rc-semver")
   })
