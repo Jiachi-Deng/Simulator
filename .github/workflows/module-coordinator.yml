@@ -130,9 +130,12 @@ jobs:
       - run: bun install --frozen-lockfile
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Electron and subprocess bundles
+        run: bun run electron:build
       - name: Stage packaged Electron native resources
-        run: bun apps/electron/scripts/stage-module-coordinator-smoke-resources.ts
-      - run: bun run electron:build
+        run: |
+          test -f packages/pi-agent-server/dist/index.js
+          bun apps/electron/scripts/stage-module-coordinator-smoke-resources.ts
       - name: Build unpacked packaged app
         working-directory: apps/electron
         env:
