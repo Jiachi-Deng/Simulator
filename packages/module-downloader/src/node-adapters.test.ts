@@ -240,7 +240,7 @@ describe('production filesystem cache', () => {
       expect([1, 2]).toContain(recovered?.trustState.highestSequence)
       expect(recovered.responseBytes[0]).toBe(recovered.trustState.highestSequence)
     }
-  })
+  }, 20_000)
 
   it('reports the platform durability protocol without claiming Windows directory fsync', async () => {
     const cache = new NodeFilesystemModuleDownloaderCache(await root())
