@@ -120,7 +120,7 @@ export class ModuleCoordinator {
     this.#ready = this.#load()
     this.#unsubscribeDaemon = dependencies.daemon.subscribe((snapshot) => {
       if (!this.#acceptEvents) return
-      const task = this.#recordDaemonSnapshot(snapshot)
+      const task = this.#handleDaemonSnapshot(snapshot)
       this.#eventTasks.add(task)
       void task.finally(() => this.#eventTasks.delete(task)).catch(() => undefined)
     })
@@ -763,6 +763,25 @@ export class ModuleCoordinator {
     await this.#commit(() => {
       const event: ModuleCoordinatorEvent = { moduleId: snapshot.id, at: this.#now(), snapshot: clone(snapshot) }
       this.#state = { ...this.#state, events: [...this.#state.events, event].slice(-MAX_EVENTS) }
+    })
+  }
+
+  async #handleDaemonSnapshot(snapshot: import('@simulator/module-daemon').ModuleDaemonSnapshot): Promise<void> {
+    await this.#recordDaemonSnapshot(snapshot)
+    if (!this.#acceptEvents || (snapshot.state !== 'crashed' && snapshot.state !== 'stopped'
+      && snapshot.state !== 'healthy' && snapshot.state !== 'degraded')) return
+    await this.#enqueue(snapshot.id, async () => {
+      if (!this.#acceptEvents) return
+      if (snapshot.state === 'crashed' || snapshot.state === 'stopped') {
+        await this.#detach(snapshot.id)
+        return
+      }
+      const operation = [...this.#state.operations].reverse().find((candidate) => candidate.moduleId === snapshot.id)
+      if (!operation) return
+      const desired = operation.status === 'failed' || operation.phase === 'compensating' ? operation.source : operation.target
+      if (desired.running && desired.viewAttached && desired.activeVersion === snapshot.version) {
+        await this.#attach(snapshot.id, desired.activeVersion)
+      }
     })
   }
 
