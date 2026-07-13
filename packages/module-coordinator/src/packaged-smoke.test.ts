@@ -15,10 +15,12 @@ import { encodeCanonicalCatalog, type TrustedReleaseKey } from '@simulator/modul
 import { ModuleCoordinator } from './coordinator.ts'
 import { LoopbackFrontendModuleViewPort } from './loopback-view.ts'
 import { NodeFilesystemModuleCoordinatorStore } from './node-store.ts'
+import type { ModuleCoordinatorOperationResult } from './types.ts'
 import { ModuleRuntimeUseGate } from './usage-gate.ts'
 
 const NOW = Date.parse('2026-07-13T12:00:00.000Z')
 const CATALOG_URL = 'https://modules.example.test/packaged/catalog.json'
+const PACKAGED_RUNTIME_MAX_BYTES = 128 * 1024 * 1024
 const systems: PackagedSystem[] = []
 let compiledFixture: Promise<{ bytes: Buffer; entrypoint: string }> | undefined
 let compiledFixtureRoot: string | undefined
@@ -212,7 +214,10 @@ async function createSystem(fixture: PackagedBundle, mode = 'healthy', restartLi
     trustedKeys: [fixture.key],
     retry: { maxAttempts: 1 },
   })
-  const installer = new ModuleInstaller(moduleRoot, { usageGuard: usage })
+  const installer = new ModuleInstaller(moduleRoot, {
+    usageGuard: usage,
+    limits: { maxFileBytes: PACKAGED_RUNTIME_MAX_BYTES },
+  })
   const registry = new ModuleRegistry(
     { version: '0.11.1', platform: currentPlatform() },
     new FilesystemModuleRegistryPersistence(join(root, 'registry')),
@@ -280,6 +285,10 @@ async function waitFor<T>(read: () => T | undefined | Promise<T | undefined>, ti
   throw new Error('Timed out waiting for packaged fixture state')
 }
 
+function expectOperationOk(result: ModuleCoordinatorOperationResult): void {
+  if (!result.ok) throw new Error(`${result.kind} ${result.operationId} failed: ${result.error ?? 'unknown error'}`)
+}
+
 afterEach(async () => {
   for (const system of systems.splice(0)) {
     await system.daemon.drain().catch(() => undefined)
@@ -300,8 +309,8 @@ describe('packaged fake module with production runtime adapters', () => {
     const builtInAgent = structuredClone({ id: 'builtin-agent', running: true, revision: 7 })
     const expectedAgent = structuredClone(builtInAgent)
 
-    expect((await system.coordinator.install({ ...system.request(id), operationId: 'production-install' })).ok).toBe(true)
-    expect((await system.coordinator.start({ operationId: 'production-start', moduleId: id as ModuleId })).ok).toBe(true)
+    expectOperationOk(await system.coordinator.install({ ...system.request(id), operationId: 'production-install' }))
+    expectOperationOk(await system.coordinator.start({ operationId: 'production-start', moduleId: id as ModuleId }))
     expect(system.view.document(id as ModuleId)?.html).toContain('Packaged Fake Module Frontend')
     const first = system.daemon.get(id as ModuleId)!
     const resource = await fetch(`http://${first.endpoint!.host}:${first.endpoint!.port}/resource/data.txt`)
@@ -314,7 +323,7 @@ describe('packaged fake module with production runtime adapters', () => {
     })
     await waitFor(() => system.view.document(id as ModuleId)?.url.includes(`:${restarted.endpoint!.port}/`) ? true : undefined)
     expect(system.view.markCrashed(id as ModuleId)).toMatchObject({ state: 'crashed' })
-    expect((await system.coordinator.restart({ operationId: 'production-renderer-restart', moduleId: id as ModuleId })).ok).toBe(true)
+    expectOperationOk(await system.coordinator.restart({ operationId: 'production-renderer-restart', moduleId: id as ModuleId }))
     expect(await system.view.query(id as ModuleId)).toMatchObject({ state: 'attached' })
     expect(builtInAgent).toEqual(expectedAgent)
     await system.coordinator.stop({ operationId: 'production-stop', moduleId: id as ModuleId })
@@ -335,7 +344,7 @@ describe('packaged fake module with production runtime adapters', () => {
     const id = 'org.simulator.packaged-restart-budget'
     const system = await createSystem(bundle([{ id, version: '1.0.0', ...packaged }]), 'crash-after-ready', 1)
     await system.coordinator.install({ ...system.request(id), operationId: 'budget-install' })
-    expect((await system.coordinator.start({ operationId: 'budget-start', moduleId: id as ModuleId })).ok).toBe(true)
+    expectOperationOk(await system.coordinator.start({ operationId: 'budget-start', moduleId: id as ModuleId }))
     await waitFor(() => system.daemon.get(id as ModuleId)?.diagnostic?.code === 'RESTART_BUDGET_EXHAUSTED' ? true : undefined)
     await waitFor(async () => (await system.view.query(id as ModuleId))?.state === 'detached' ? true : undefined)
     expect(system.daemon.get(id as ModuleId)).toMatchObject({ state: 'crashed', diagnostic: { code: 'RESTART_BUDGET_EXHAUSTED' } })
