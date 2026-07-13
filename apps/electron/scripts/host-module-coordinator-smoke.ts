@@ -19,6 +19,9 @@ const versionRoot = join(installed, 'versions', version)
 const executable = join(versionRoot, ...entrypoint.split('/'))
 const resultPath = join(temporary, 'result.json')
 const manifestPath = join(temporary, 'manifest.json')
+const configRoot = join(temporary, 'craft-config')
+const homeRoot = join(temporary, 'home')
+mkdirSync(homeRoot, { recursive: true })
 
 mkdirSync(dirname(executable), { recursive: true })
 mkdirSync(join(versionRoot, 'frontend'), { recursive: true })
@@ -76,9 +79,18 @@ const child = Bun.spawn([
   `--host-module-smoke-root=${runtimeRoot}`,
   `--host-module-smoke-manifest=${manifestPath}`,
   `--host-module-smoke-result=${resultPath}`,
+  ...(!packagedApp ? [`--host-module-smoke-node-runtime=${process.execPath}`] : []),
 ], {
   cwd: repoRoot,
-  env: { ...process.env, ELECTRON_ENABLE_LOGGING: '1' },
+  env: {
+    ...process.env,
+    CRAFT_CONFIG_DIR: configRoot,
+    HOME: homeRoot,
+    USERPROFILE: homeRoot,
+    APPDATA: join(homeRoot, 'AppData', 'Roaming'),
+    LOCALAPPDATA: join(homeRoot, 'AppData', 'Local'),
+    ELECTRON_ENABLE_LOGGING: '1',
+  },
   stdout: 'pipe',
   stderr: 'pipe',
 })
@@ -97,8 +109,18 @@ try {
     throw new Error(`Electron host module smoke failed (${exitCode}): ${JSON.stringify(result)}\n${stdout}\n${stderr}`)
   }
   if (result.packaged !== Boolean(packagedApp)) throw new Error(`Unexpected packaged state: ${JSON.stringify(result)}`)
-  if (result.preloadIsolated !== true || result.noOrphanWebContents !== true || result.builtInAgentIndependent !== true) {
+  const cleanup = result.cleanup as Record<string, unknown> | undefined
+  const builtInAgent = result.builtInAgent as Record<string, unknown> | undefined
+  if (result.preloadIsolated !== true || result.noOrphanWebContents !== true || result.builtInAgentIndependent !== true
+    || result.moduleCrashRestarted !== true || result.beforeQuitObserved !== true || result.repeatedBeforeQuitIdempotent !== true
+    || cleanup?.coordinatorDrained !== true || cleanup.sessionFlushed !== true || cleanup.serverStopped !== true || cleanup.viewsDisposed !== true
+    || builtInAgent?.deterministicTurn !== true || builtInAgent.serverHealthyBeforeModule !== true || builtInAgent.serverHealthyAfterModule !== true) {
     throw new Error(`Electron host module smoke assertions failed: ${JSON.stringify(result)}`)
+  }
+  if (existsSync(join(configRoot, '.server.lock'))) throw new Error('Electron before-quit left the embedded server lock behind')
+  const sessionPath = builtInAgent.sessionPath
+  if (typeof sessionPath !== 'string' || !existsSync(join(sessionPath, 'session.jsonl'))) {
+    throw new Error(`Electron before-quit did not flush the built-in Agent session: ${JSON.stringify(result)}`)
   }
   console.log(`Electron host module coordinator smoke passed: ${JSON.stringify(result)}`)
 } finally {

@@ -118,6 +118,10 @@ import {
 import { isModuleViewSmokeRequested, runModuleViewSmokeIfRequested } from './module-view-smoke'
 import {
   isHostModuleCoordinatorSmokeRequested,
+  completeHostModuleCoordinatorSmokeCleanup,
+  getHostModuleCoordinatorSmokeNodeRuntime,
+  getHostModuleCoordinatorSmokeRoot,
+  recordHostModuleCoordinatorBeforeQuitEvent,
   runHostModuleCoordinatorSmokeIfRequested,
   writeHostModuleCoordinatorSmokeBootMarker,
 } from './host-module-coordinator-smoke'
@@ -226,6 +230,7 @@ let browserPaneManager: BrowserPaneManager | null = null
 let moduleViewManager: ModuleViewManager | null = null
 let hostModuleCoordinator: HostModuleCoordinatorRuntime | null = null
 let stopServer: (() => Promise<void>) | null = null
+let embeddedServer: { host: string; port: number } | null = null
 let oauthFlowStore: OAuthFlowStore | null = null
 let moduleSink: EventSink | null = null
 let moduleClientResolver: ((webContentsId: number) => string | undefined) | null = null
@@ -362,10 +367,11 @@ async function createInitialWindows(): Promise<void> {
 app.whenReady().then(async () => {
   // Export packaged state as env var so logger.ts (and headless Bun) don't need 'electron'
   process.env.CRAFT_IS_PACKAGED = app.isPackaged ? 'true' : 'false'
+  const smokeNodeRuntime = getHostModuleCoordinatorSmokeNodeRuntime()
+  if (smokeNodeRuntime) process.env.PATH = `${join(smokeNodeRuntime, '..')}${delimiter}${process.env.PATH ?? ''}`
 
   // The smoke path is intentionally isolated from normal workspace/server startup.
   if (await runModuleViewSmokeIfRequested()) return
-  if (await runHostModuleCoordinatorSmokeIfRequested()) return
 
   // Register bundled assets root so all seeding functions can find their files
   // (docs, permissions, themes, tool-icons resolve via getBundledAssetsDir)
@@ -377,6 +383,7 @@ app.whenReady().then(async () => {
       appRootPath: app.isPackaged ? app.getAppPath() : process.cwd(),
       resourcesPath: process.resourcesPath,
       isPackaged: app.isPackaged,
+      nodeRuntimePath: getHostModuleCoordinatorSmokeNodeRuntime(),
     },
   })
 
@@ -718,6 +725,7 @@ app.whenReady().then(async () => {
       // Capture module-level references for before-quit cleanup and deep-link handlers
       sessionManager = instance.sessionManager
       stopServer = instance.stop
+      embeddedServer = { host: instance.host, port: instance.port }
       oauthFlowStore = instance.oauthFlowStore
       moduleSink = instance.wsServer.push.bind(instance.wsServer)
       moduleClientResolver = resolveClientId
@@ -1027,7 +1035,7 @@ app.whenReady().then(async () => {
     if (!isHeadless) {
       await createInitialWindows()
       hostModuleCoordinator = createHostModuleCoordinator({
-        root: join(app.getPath('userData'), 'optional-modules'),
+        root: getHostModuleCoordinatorSmokeRoot() ?? join(app.getPath('userData'), 'optional-modules'),
         hostVersion: app.getVersion(),
         platform: currentModulePlatform(),
         // Product release keys are injected when a catalog source is configured.
@@ -1038,6 +1046,19 @@ app.whenReady().then(async () => {
         hostWindow: () => windowManager?.getLastActiveWindow() ?? undefined,
       })
       await hostModuleCoordinator.coordinator.recover()
+      if (isHostModuleCoordinatorSmokeRequested()) {
+        const hostWindow = windowManager?.getLastActiveWindow()
+        if (!sessionManager || !embeddedServer || !hostWindow) throw new Error('Built-in runtime was incomplete before module smoke')
+        await runHostModuleCoordinatorSmokeIfRequested({
+          runtime: hostModuleCoordinator,
+          manager: moduleViewManager,
+          sessionManager,
+          hostWindow,
+          serverHost: embeddedServer.host,
+          serverPort: embeddedServer.port,
+        })
+        return
+      }
     }
 
     // Run credential health check at startup to detect issues early
@@ -1166,6 +1187,10 @@ function captureAndSaveWindowState(reason: 'before-quit' | 'pre-update'): number
 }
 
 async function cleanupBeforeQuit(): Promise<void> {
+  let coordinatorDrained = false
+  let sessionFlushed = false
+  let serverStopped = false
+  let viewsDisposed = false
   // Ensure Cmd+Q/app quit bypasses layered window close interception (Cmd+W behavior).
   windowManager?.setAppQuitting(true)
 
@@ -1199,6 +1224,7 @@ async function cleanupBeforeQuit(): Promise<void> {
 
   try {
     await hostModuleCoordinator?.dispose()
+    coordinatorDrained = true
   } catch (error) {
     mainLog.error('Failed to drain host module coordinator:', error)
   } finally {
@@ -1206,6 +1232,7 @@ async function cleanupBeforeQuit(): Promise<void> {
   }
   try {
     moduleViewManager?.dispose()
+    viewsDisposed = true
   } catch (error) {
     mainLog.error('Failed to dispose module views:', error)
   } finally {
@@ -1216,6 +1243,7 @@ async function cleanupBeforeQuit(): Promise<void> {
   if (sessionManager) {
     try {
       await sessionManager.flushAllSessions()
+      sessionFlushed = true
       mainLog.info('Flushed all pending session writes')
     } catch (error) {
       mainLog.error('Failed to flush sessions:', error)
@@ -1273,6 +1301,7 @@ async function cleanupBeforeQuit(): Promise<void> {
     stopServer = null
     try {
       await stop()
+      serverStopped = true
     } catch (error) {
       mainLog.error('Failed to stop embedded server:', error)
       releaseServerLock()
@@ -1281,7 +1310,10 @@ async function cleanupBeforeQuit(): Promise<void> {
     }
   } else {
     releaseServerLock()
+    serverStopped = true
   }
+  embeddedServer = null
+  completeHostModuleCoordinatorSmokeCleanup({ coordinatorDrained, sessionFlushed, serverStopped, viewsDisposed })
 }
 
 const beforeQuitCleanup = new BeforeQuitCleanupController({
@@ -1298,7 +1330,10 @@ const beforeQuitCleanup = new BeforeQuitCleanupController({
 })
 
 // Save state and synchronously cancel Electron's first quit event before async cleanup starts.
-app.on('before-quit', beforeQuitCleanup.handleBeforeQuit)
+app.on('before-quit', (event) => {
+  recordHostModuleCoordinatorBeforeQuitEvent()
+  beforeQuitCleanup.handleBeforeQuit(event)
+})
 
 // Handle uncaught exceptions — forward to Sentry explicitly since registering
 // a custom handler can interfere with @sentry/electron's automatic capture.
