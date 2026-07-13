@@ -196,7 +196,9 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
     const hostWebContentsId = smoke.hostWindow.webContents.id
     const serverHealthyBeforeModule = await canConnect(smoke.serverHost, smoke.serverPort)
     if (!sessionBeforeModule?.messages.some((message) => message.role === 'assistant' && message.content.includes(AGENT_REPLY))) {
-      throw new Error('Deterministic built-in Agent turn did not complete')
+      throw new Error(`Deterministic built-in Agent turn did not complete: ${JSON.stringify(
+        sessionBeforeModule?.messages.map((message) => ({ role: message.role, content: message.content.slice(0, 240) })),
+      )}`)
     }
 
     const parsed = parseModuleManifest(JSON.parse(readFileSync(manifestPath, 'utf8')) as unknown)

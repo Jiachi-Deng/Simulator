@@ -16,6 +16,7 @@ on:
       - "apps/electron/package.json"
       - "apps/electron/electron-builder.yml"
       - "apps/electron/scripts/host-module-coordinator-smoke.ts"
+      - "apps/electron/scripts/stage-module-coordinator-smoke-resources.ts"
       - "apps/electron/src/main/electron-module-view-port.ts"
       - "apps/electron/src/main/host-module-coordinator.ts"
       - "apps/electron/src/main/host-module-coordinator-smoke.ts"
@@ -38,6 +39,7 @@ on:
       - "apps/electron/package.json"
       - "apps/electron/electron-builder.yml"
       - "apps/electron/scripts/host-module-coordinator-smoke.ts"
+      - "apps/electron/scripts/stage-module-coordinator-smoke-resources.ts"
       - "apps/electron/src/main/electron-module-view-port.ts"
       - "apps/electron/src/main/host-module-coordinator.ts"
       - "apps/electron/src/main/host-module-coordinator-smoke.ts"
@@ -129,13 +131,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Stage packaged Electron native resources
-        run: |
-          arch="$(uname -m)"
-          if [[ "$arch" == "x86_64" ]]; then arch="x64"; fi
-          mkdir -p apps/electron/node_modules/@anthropic-ai apps/electron/node_modules/@vscode
-          cp -R node_modules/@anthropic-ai/claude-agent-sdk apps/electron/node_modules/@anthropic-ai/
-          cp -R "node_modules/@anthropic-ai/claude-agent-sdk-darwin-${arch}" apps/electron/node_modules/@anthropic-ai/claude-agent-sdk-binary
-          cp -R node_modules/@vscode/ripgrep apps/electron/node_modules/@vscode/
+        run: bun apps/electron/scripts/stage-module-coordinator-smoke-resources.ts
       - run: bun run electron:build
       - name: Build unpacked packaged app
         working-directory: apps/electron
