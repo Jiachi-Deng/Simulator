@@ -26,6 +26,7 @@ export type RegistryDiagnosticCode =
   | 'MANIFEST_CONFLICT'
   | 'MODULE_DISABLED'
   | 'MODULE_NOT_FOUND'
+  | 'PERSISTENCE_CONFLICT'
   | 'PERSISTENCE_WRITE_FAILED'
   | 'RECOVERY_INTERRUPTED_COMMIT'
   | 'UNSUPPORTED_MANIFEST_SCHEMA'
@@ -98,9 +99,14 @@ export interface PersistedModuleRegistryStateV1 {
 export interface RegistryPersistenceRead {
   readonly committed: unknown | null
   readonly interruptedCommit: boolean
+  readonly revision: string
 }
+
+export type RegistryPersistenceCommit =
+  | { readonly ok: true; readonly revision: string }
+  | { readonly ok: false; readonly revision: string }
 
 export interface ModuleRegistryPersistence {
   read(): RegistryPersistenceRead
-  commit(state: PersistedModuleRegistryStateV1): void
+  commit(state: PersistedModuleRegistryStateV1, expectedRevision: string): RegistryPersistenceCommit
 }

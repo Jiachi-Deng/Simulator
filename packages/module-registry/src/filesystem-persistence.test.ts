@@ -76,6 +76,26 @@ describe('FilesystemModuleRegistryPersistence', () => {
     },
   )
 
+  it('advances the committed revision across a crash after rename so a stale writer cannot overwrite it', () => {
+    const directory = root()
+    const stale = new ModuleRegistry(HOST, new FilesystemModuleRegistryPersistence(directory))
+    let crashed = false
+    const crashing = new ModuleRegistry(HOST, new FilesystemModuleRegistryPersistence(directory, {
+      faultInjector(point) {
+        if (point === 'after-state-rename' && !crashed) {
+          crashed = true
+          throw new Error('simulated process death after durable rename')
+        }
+      },
+    }))
+
+    expect(crashing.install(manifest('1.0.0'), { hostVersionRange: '*' }).diagnostics[0]?.code)
+      .toBe('PERSISTENCE_WRITE_FAILED')
+    const conflict = stale.install(manifest('2.0.0'), { hostVersionRange: '*' })
+    expect(conflict.diagnostics[0]?.code).toBe('PERSISTENCE_CONFLICT')
+    expect(conflict.snapshot.modules[0]?.versions.map((entry) => entry.version)).toEqual(['1.0.0'])
+  })
+
   it('rejects a symlinked committed state instead of following it', () => {
     const directory = root()
     const external = join(root(), 'external.json')
@@ -91,24 +111,81 @@ describe('FilesystemModuleRegistryPersistence', () => {
   it('excludes concurrent writers and reclaims a dead writer lock', () => {
     const directory = root()
     const second = new FilesystemModuleRegistryPersistence(directory)
+    const emptyRevision = second.read().revision
     let checked = false
     const first = new FilesystemModuleRegistryPersistence(directory, {
       faultInjector(point) {
         if (point !== 'after-pending-sync' || checked) return
         checked = true
-        expect(() => second.commit({ schemaVersion: 1, host: HOST, modules: [] })).toThrow('writer is active')
+        expect(() => second.commit({ schemaVersion: 1, host: HOST, modules: [] }, emptyRevision)).toThrow('writer is active')
         expect(new ModuleRegistry(HOST, second).snapshot()).toMatchObject({ modules: [], diagnostics: [] })
         expect(readFileSync(join(directory, 'module-registry.pending.json'), 'utf8')).toContain('schemaVersion')
       },
     })
-    first.commit({ schemaVersion: 1, host: HOST, modules: [] })
+    first.commit({ schemaVersion: 1, host: HOST, modules: [] }, emptyRevision)
 
     writeFileSync(join(directory, 'module-registry.lock'), `${JSON.stringify({
       pid: 2_147_483_647,
       token: '00000000-0000-4000-8000-000000000000',
     })}\n`)
-    second.commit({ schemaVersion: 1, host: HOST, modules: [] })
+    second.commit({ schemaVersion: 1, host: HOST, modules: [] }, second.read().revision)
     expect(new ModuleRegistry(HOST, second).snapshot().modules).toHaveLength(0)
+  })
+
+  it('rejects a sequential stale writer without losing the first committed version', () => {
+    const directory = root()
+    const first = new ModuleRegistry(HOST, new FilesystemModuleRegistryPersistence(directory))
+    const stale = new ModuleRegistry(HOST, new FilesystemModuleRegistryPersistence(directory))
+
+    expect(first.install(manifest('1.0.0'), { hostVersionRange: '*' }).ok).toBe(true)
+    const conflict = stale.install(manifest('2.0.0'), { hostVersionRange: '*' })
+    expect(conflict.diagnostics[0]?.code).toBe('PERSISTENCE_CONFLICT')
+    expect(conflict.snapshot.modules[0]?.versions.map((entry) => entry.version)).toEqual(['1.0.0'])
+
+    expect(stale.install(manifest('2.0.0'), { hostVersionRange: '*' }).ok).toBe(true)
+    expect(new ModuleRegistry(HOST, new FilesystemModuleRegistryPersistence(directory))
+      .snapshot().modules[0]?.versions.map((entry) => entry.version)).toEqual(['1.0.0', '2.0.0'])
+  })
+
+  it('fails closed when stale activate and remove operations conflict with a newer snapshot', () => {
+    const directory = root()
+    const setup = new ModuleRegistry(HOST, new FilesystemModuleRegistryPersistence(directory))
+    expect(setup.install(manifest('1.0.0'), { hostVersionRange: '*' }).ok).toBe(true)
+    expect(setup.install(manifest('2.0.0'), { hostVersionRange: '*' }).ok).toBe(true)
+
+    const activator = new ModuleRegistry(HOST, new FilesystemModuleRegistryPersistence(directory))
+    const staleActivator = new ModuleRegistry(HOST, new FilesystemModuleRegistryPersistence(directory))
+    const staleRemover = new ModuleRegistry(HOST, new FilesystemModuleRegistryPersistence(directory))
+    expect(activator.activate('org.simulator.filesystem-registry', '1.0.0').ok).toBe(true)
+    expect(staleActivator.activate('org.simulator.filesystem-registry', '2.0.0').diagnostics[0]?.code)
+      .toBe('PERSISTENCE_CONFLICT')
+    expect(staleRemover.remove('org.simulator.filesystem-registry', '1.0.0').diagnostics[0]?.code)
+      .toBe('PERSISTENCE_CONFLICT')
+
+    const committed = new ModuleRegistry(HOST, new FilesystemModuleRegistryPersistence(directory)).snapshot().modules[0]
+    expect(committed?.activeVersion).toBe('1.0.0')
+    expect(committed?.versions.map((entry) => entry.version)).toEqual(['1.0.0', '2.0.0'])
+  })
+
+  it('serializes concurrent registry instances and permits an explicit retry from the refreshed snapshot', () => {
+    const directory = root()
+    const second = new ModuleRegistry(HOST, new FilesystemModuleRegistryPersistence(directory))
+    let nested: ReturnType<ModuleRegistry['install']> | undefined
+    const first = new ModuleRegistry(HOST, new FilesystemModuleRegistryPersistence(directory, {
+      faultInjector(point) {
+        if (point === 'after-pending-sync' && !nested) {
+          nested = second.install(manifest('2.0.0'), { hostVersionRange: '*' })
+        }
+      },
+    }))
+
+    expect(first.install(manifest('1.0.0'), { hostVersionRange: '*' }).ok).toBe(true)
+    expect(nested?.diagnostics[0]?.code).toBe('PERSISTENCE_WRITE_FAILED')
+    expect(second.install(manifest('2.0.0'), { hostVersionRange: '*' }).diagnostics[0]?.code)
+      .toBe('PERSISTENCE_CONFLICT')
+    expect(second.install(manifest('2.0.0'), { hostVersionRange: '*' }).ok).toBe(true)
+    expect(new ModuleRegistry(HOST, new FilesystemModuleRegistryPersistence(directory))
+      .snapshot().modules[0]?.versions.map((entry) => entry.version)).toEqual(['1.0.0', '2.0.0'])
   })
 
   it('rejects a lstat/open substitution race via O_NOFOLLOW', () => {

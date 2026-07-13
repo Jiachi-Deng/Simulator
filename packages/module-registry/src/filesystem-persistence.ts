@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import {
   closeSync,
   constants,
@@ -20,6 +20,7 @@ import { isAbsolute, join, resolve } from 'node:path'
 import type {
   ModuleRegistryPersistence,
   PersistedModuleRegistryStateV1,
+  RegistryPersistenceCommit,
   RegistryPersistenceRead,
 } from './types.ts'
 
@@ -56,20 +57,22 @@ export class FilesystemModuleRegistryPersistence implements ModuleRegistryPersis
     this.#assertRoot()
     const writerActive = this.#safeExists(LOCK_FILE) && !this.#reclaimStaleLock()
     const pending = this.#safeExists(PENDING_FILE)
-    const committed = this.#readJson(STATE_FILE)
+    const committed = this.#readCommitted()
     if (pending && !writerActive) {
       unlinkSync(this.#path(PENDING_FILE))
       this.#syncRoot()
     }
-    return { committed, interruptedCommit: pending && !writerActive }
+    return { ...committed, interruptedCommit: pending && !writerActive }
   }
 
-  commit(state: PersistedModuleRegistryStateV1): void {
+  commit(state: PersistedModuleRegistryStateV1, expectedRevision: string): RegistryPersistenceCommit {
     this.#assertRoot()
     const lockToken = this.#acquireLock()
     let temporary: string | undefined
     try {
       this.#assertRoot()
+      const current = this.#readCommitted()
+      if (current.revision !== expectedRevision) return { ok: false, revision: current.revision }
       this.#writeExclusive(PENDING_FILE, state)
       this.#syncRoot()
       this.#fault?.('after-pending-sync')
@@ -91,6 +94,7 @@ export class FilesystemModuleRegistryPersistence implements ModuleRegistryPersis
       this.#fault?.('after-state-rename')
       unlinkSync(this.#path(PENDING_FILE))
       this.#syncRoot()
+      return { ok: true, revision: this.#revision(serialized) }
     } finally {
       if (temporary) rmSync(temporary, { force: true })
       this.#releaseLock(lockToken)
@@ -98,7 +102,16 @@ export class FilesystemModuleRegistryPersistence implements ModuleRegistryPersis
     }
   }
 
-  #readJson(name: string): unknown | null {
+  #readCommitted(): { committed: unknown | null; revision: string } {
+    const bytes = this.#readBytes(STATE_FILE)
+    if (!bytes) return { committed: null, revision: this.#revision(null) }
+    return {
+      committed: JSON.parse(bytes.toString('utf8')) as unknown,
+      revision: this.#revision(bytes),
+    }
+  }
+
+  #readBytes(name: string): Buffer | null {
     if (!this.#safeExists(name)) return null
     const path = this.#path(name)
     const info = lstatSync(path)
@@ -114,10 +127,14 @@ export class FilesystemModuleRegistryPersistence implements ModuleRegistryPersis
       }
       const bytes = readFileSync(descriptor)
       if (bytes.byteLength > MAX_STATE_BYTES) throw new Error('Registry state exceeds size limit')
-      return JSON.parse(bytes.toString('utf8')) as unknown
+      return bytes
     } finally {
       closeSync(descriptor)
     }
+  }
+
+  #revision(bytes: Buffer | null): string {
+    return createHash('sha256').update(bytes ?? 'empty-registry-state').digest('hex')
   }
 
   #writeExclusive(name: string, state: PersistedModuleRegistryStateV1): void {

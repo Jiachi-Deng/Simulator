@@ -196,6 +196,7 @@ export class ModuleRegistry {
   private readonly persistence: ModuleRegistryPersistence
   private modules = new Map<string, InstalledModuleRecord>()
   private recoveryDiagnostics: readonly RegistryDiagnostic[] = freeze([])
+  private persistenceRevision = ''
 
   constructor(host: ModuleRegistryHost, persistence: ModuleRegistryPersistence = new InMemoryModuleRegistryPersistence()) {
     if (valid(host.version) !== host.version) throw new TypeError('Registry host version must be canonical Semantic Versioning')
@@ -414,8 +415,10 @@ export class ModuleRegistry {
       }
       this.modules = recovered.modules
       this.recoveryDiagnostics = freeze(sortedDiagnostics(recovered.diagnostics))
+      this.persistenceRevision = read.revision
     } catch {
       this.modules = new Map()
+      this.persistenceRevision = ''
       this.recoveryDiagnostics = freeze([
         diagnostic('CORRUPT_PERSISTED_STATE', 'Persisted optional-module state is corrupt; recovered an empty registry'),
       ])
@@ -597,7 +600,15 @@ export class ModuleRegistry {
     const next = cloneState(this.modules)
     change(next)
     try {
-      this.persistence.commit(this.serialize(next))
+      const committed = this.persistence.commit(this.serialize(next), this.persistenceRevision)
+      if (!committed.ok) {
+        this.recover()
+        return this.failure(diagnostic(
+          'PERSISTENCE_CONFLICT',
+          'Registry mutation conflicted with a newer committed snapshot; reload and retry',
+        ))
+      }
+      this.persistenceRevision = committed.revision
     } catch {
       return this.failure(diagnostic(
         'PERSISTENCE_WRITE_FAILED',
