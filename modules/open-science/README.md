@@ -1,6 +1,6 @@
 # OpenScience artifact baseline
 
-这是 Issue #73 第一批可合并的 artifact policy baseline，**不包含真实 OpenScience binary、源码 checkout 或 production credentials**。测试 fixture 中的 `TEST-ONLY-NOT-A-REAL-BINARY` 只是不可执行 sentinel，不是可发布 artifact。
+这是 Issue #94 的 OpenScience artifact policy 与 staging 基础设施。仓库不提交真实 OpenScience binary、源码 checkout 或 production credentials；测试 fixture 中的 `TEST-ONLY-NOT-A-REAL-BINARY` 只是 validator sentinel，不是可发布 artifact。
 
 ## 固定来源
 
@@ -12,6 +12,8 @@
 - toolchain：Bun `1.3.5`，首发目标仅 `darwin-arm64`
 
 构建必须预先保存并审核 `https://models.dev/api.json` 响应，以 `MODELS_DEV_API_JSON` 指向该文件，并记录其 SHA-256。禁止构建时回退到网络获取 snapshot。
+
+模块内提交了经审核的离线快照 `policy/models-dev-api.json` 与其 decision。当前固定 digest 为 `bc75bbf216a1519d8b36fada7c1fe21fbc7b01f949998e9208f67f31a762e68b`；替换它需要同时更新 decision 并重新走法律/安全审核。
 
 ## Artifact contract
 
@@ -64,3 +66,27 @@ node dist/src/cli.js \
 CLI 将 `{ evidence, expected }` JSON 写入 verifier stdin，只接受 exit code `0` 且 stdout 为 strict `{ "trusted": true, "subject": string, "source": string, "evidence": string }`，不允许额外字段或 Symbol key。validator 会在调用 verifier 前冻结独立的 `expected` clone，并按调用前保存的 identity 校验该结果。verifier executable 的安装、身份和 trust root 由 Host/发布流水线负责。
 
 validator 完全离线并 fail closed。它拒绝未知 schema 字段、source/profile 不匹配、错误架构或 hash、缺失法律/SBOM/snapshot/evidence 文件、非 loopback policy、共享或可 alias 的 XDG root、源码/dev dependencies、其他架构、明文 auth/credential 文件、路径逃逸或 Unicode/大小写碰撞，以及超限文件。
+
+## Sealed staging
+
+`stage-open-science` 不接受 caller source path。它在 release 输出同级创建权限为 `0700` 的私有 checkout，fetch/detach 到固定 commit，并核对根 `bun.lock` 的 SHA-256：`702eecf22d18e468484f40351ad5f0a7d40fc645784ff93b882c8a63588b4bb1`。
+
+它只接受 Bun `1.3.5`，使用 `sandbox-exec` deny-network profile 执行 `bun install --frozen-lockfile --offline`，随后以 `MODELS_DEV_API_JSON` 和 `--skip-install` 运行上游 build。产物必须是可执行的 thin `darwin-arm64` Mach-O；脚本、fat binary 和其他平台都会失败。源码没有被 copy、flatten 或放入 artifact。
+
+外部 legal evidence 目录必须包含 `legal-review.json`、`THIRD_PARTY_NOTICES`、`sbom.cdx.json` 和 `third-party-decisions.json`。review 必须绑定 exact repo/ref/commit/bun.lock。build attestation 和 runtime conformance 也必须作为外部证据传入，并由现有两个 trusted verifier 验证后才能封存。
+
+```json
+{
+  "releaseRoot": "/private/tmp/openscience-release",
+  "legalEvidenceDirectory": "./legal-review",
+  "buildAttestationPath": "./build-attestation.json",
+  "runtimeConformancePath": "./runtime-conformance.json",
+  "bunExecutable": "/opt/toolchains/bun-1.3.5/bin/bun",
+  "provenanceVerifier": "/opt/trust/verify-provenance",
+  "runtimeVerifier": "/opt/trust/verify-runtime"
+}
+```
+
+运行 `node dist/src/staging-cli.js staging-config.json` 后，release root 会一次性出现：`artifact/`、inventory、tar.gz 及 archive checksum。封存前完整 artifact 已通过 validator；全部文件和目录会改为 owner-read/execute，避免后续修改。任何 snapshot、toolchain、source、lock、legal、build 或 trusted evidence 问题都会清理临时目录，并只留下 `<releaseRoot>.failure.json`，不会产生部分 artifact。
+
+`startStagedBinary` 在启动前再次调用 validator 和 trusted verifier。它为 child 创建独立 `SIMULATOR_OPENSCIENCE_ROOT` 及四个 XDG 根、剥离 credential-shaped 环境变量、以 host 分配的 `127.0.0.1` 动态端口启动，并实际 probe 非法 `Host` 和 `Origin`。停止时会终止整个 process group、检查 credential-shaped 持久化内容并删除隔离根。返回的 runtime probe record 绑定 binary SHA-256，供独立 runtime verifier 签发/验证；它不将 policy JSON 当作 runtime proof。

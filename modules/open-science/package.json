@@ -4,7 +4,8 @@
   "private": true,
   "type": "module",
   "bin": {
-    "validate-open-science-artifact": "dist/src/cli.js"
+    "validate-open-science-artifact": "dist/src/cli.js",
+    "stage-open-science": "dist/src/staging-cli.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
