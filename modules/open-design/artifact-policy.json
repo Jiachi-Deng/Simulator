@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "profile": "next-standalone-plus-daemon-runtime",
+  "description": "Minimum headless OpenDesign profile; Electron desktop/packaged applications are excluded.",
+  "limits": {
+    "maxEntries": 100000,
+    "maxPathBytes": 1024,
+    "maxStringBytes": 8192,
+    "maxFileBytes": 5368709120,
+    "maxTotalBytes": 21474836480
+  },
+  "pathRules": [
+    {"prefix": "web/standalone/", "artifactKind": "web-server", "components": ["next-standalone"]},
+    {"prefix": "web/static/", "artifactKind": "web-static", "components": ["next-static"]},
+    {"prefix": "web/public/", "artifactKind": "web-static", "components": ["next-public"]},
+    {"prefix": "runtime/daemon/", "artifactKind": "daemon-runtime", "components": ["daemon"]},
+    {"prefix": "runtime/packages/", "artifactKind": "runtime-package", "components": ["runtime-package"]},
+    {"prefix": "legal/", "artifactKind": "legal", "components": ["legal"]}
+  ],
+  "exactPathRules": [
+    {"path": "artifact-manifest.json", "artifactKind": "metadata", "component": "metadata"},
+    {"path": "provenance.json", "artifactKind": "metadata", "component": "metadata"}
+  ],
+  "requiredFiles": [
+    {"path": "legal/LICENSE", "artifactKind": "legal", "component": "legal", "mediaType": "text/plain", "schemaId": "apache-2.0-license-text"},
+    {"path": "legal/SBOM.spdx.json", "artifactKind": "legal", "component": "legal", "mediaType": "application/spdx+json", "schemaId": "spdx-2.3", "schemaVersion": "SPDX-2.3"},
+    {"path": "provenance.json", "artifactKind": "metadata", "component": "metadata", "mediaType": "application/json", "schemaId": "open-design-provenance-v1", "schemaVersion": 1},
+    {"path": "artifact-manifest.json", "artifactKind": "metadata", "component": "metadata", "mediaType": "application/json", "schemaId": "open-design-artifact-inventory-v1", "schemaVersion": 1}
+  ],
+  "forbiddenSegmentPatterns": [
+    ".git", ".cache", ".next/cache", ".pnpm-store", ".bin", "cache", "coverage", "test", "tests", "__tests__", "__snapshots__",
+    "installer", "installers", "updater", "updaters", "app-update", "electron", "electron.*", "electron-*", "electron-winstaller"
+  ],
+  "forbiddenBasenamePatterns": [
+    "*.test.*", "*.spec.*", "latest*.yml", "electron-builder.*", "tsc", "tsx", "eslint", "jest", "vite", "vitest"
+  ],
+  "allowedDependencyScopes": ["production", "artifact"],
+  "resourceCategories": ["templates", "fonts", "images", "plugins", "skills", "native-binaries"],
+  "resourceExtensions": {
+    "fonts": [".woff", ".woff2", ".ttf", ".otf"],
+    "images": [".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".svg"]
+  },
+  "nativeBinaryExtensions": [".node", ".so", ".dylib", ".dll", ".exe"]
+}
