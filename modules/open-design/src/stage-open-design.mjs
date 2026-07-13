@@ -84,6 +84,7 @@ export async function prepareProductionStaging({
   const verification = await verifyUpstream({ sourceRoot, provenance, nodeBin, pnpmBin, run });
   const atomicTarget = await createAtomicStagingTarget(stagingRoot);
   let workspace;
+  let primaryError;
   try {
     workspace = await createPrivateBuildWorkspace({ sourceRoot: verification.sourceRoot, workParent, provenance, run });
     const plan = createBuildPlan({ workspace, stagingRoot: atomicTarget.tempRoot, nodeBin: verification.toolchain.nodeExecutable, pnpmBin: verification.toolchain.pnpmExecutable, provenance });
@@ -146,11 +147,14 @@ export async function prepareProductionStaging({
     await writeArtifactManifest(copied.root, produced);
     const publish = await sealAndPublish({ target: atomicTarget, inventory: produced.inventory });
     return { dryRun: false, verification, plan: publicPlan(plan), copied, nativeInventory, attestation, inventory: produced.inventory, publish };
+  } catch (error) {
+    primaryError = error;
+    throw error;
   } finally {
-    await workspace?.cleanup().catch((error) => {
-      if (!atomicTarget.published) throw error;
-    });
-    await atomicTarget.cleanup();
+    const cleanupErrors = [];
+    await workspace?.cleanup().catch((error) => cleanupErrors.push(error));
+    await atomicTarget.cleanup().catch((error) => cleanupErrors.push(error));
+    if (cleanupErrors.length > 0 && primaryError == null) stagingFail("STAGING_CLEANUP_FAILED", cleanupErrors.map((error) => error.message).join("; "));
   }
 }
 

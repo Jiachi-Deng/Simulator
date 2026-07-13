@@ -23,9 +23,9 @@
 3. 真实模式按 upstream `tools/pack` 的 build closure 顺序执行 `pnpm install --frozen-lockfile`、workspace runtime build、Next standalone、web sidecar、daemon 的 prefer-offline/frozen/ignore-scripts 现代 `pnpm deploy --prod` closure、closure 内明确的 `rebuild better-sqlite3 node-pty`，以及 upstream mac production 同型的 no-external web-sidecar esbuild closure。runner 仅对 daemon deploy command 明示 `inject-workspace-packages=true`，使 closure 自包含而不扩大 Simulator patch；deploy/rebuild 仍可能读取 registry metadata，不能宣称 offline/hermetic，但 lockfile 和 integrity 保持 fail-closed。
 4. build-output normalizer 仅在 owner-only private root 内将 contained symlink、pnpm store hardlink 与 virtual-store hoisted aliases 复制为新的普通文件，并记录原始 native digest/ctime；escape/cycle/special file 或失去 native origin binding 会失败。随后 copier 只写入 `artifact-policy.json` 的目标路径，继续拒绝任何 symlink、special file 和 hard link，并排除 source map、test/cache/Electron/updater 等内容。
 5. native inventory 对 staged `better-sqlite3`、`node-pty` 和 `sharp` 的二进制格式、platform、arch、Node ABI、libc 和显式 metadata 做闭包检查。上游 `pnpm.onlyBuiltDependencies` 也必须逐项允许三个 native package；`node-pty` 被 ignored 时立即失败。
-6. 通过现有 producer 生成并校验 inventory 后，runner 用 `O_EXCL` 写入 `artifact-manifest.json`；随后才能执行 loopback smoke、签名、归档或分发。
+6. exact native load 通过后，runner 启动当前 staged daemon/web children 完成 PID、随机端口、entry digest 与 loopback functional smoke。随后才生成并校验 attestation/inventory、以 `O_EXCL` 写 manifest、seal 并 atomic publish。
 
-真实 staging 的所有输入都是显式路径，且必须是普通文件：SPDX `2.3` SBOM、resource metadata 和 target JSON。build scratch `--work-root` 必须与最终 `--staging-root` 分离，避免把临时 closure 混入 artifact。
+真实 staging 的所有输入都是显式路径，且必须是普通文件：SPDX `2.3` SBOM、resource metadata 和 target JSON。owner-only build scratch `--work-parent` 必须与最终 `--staging-root` 的 owner-only publish parent 分离，避免把临时 closure 混入 artifact。
 
 `fixtures/pinned-native-metadata.pending-review.darwin-arm64.json` 来自 pinned upstream 的真实 Node 24 build，只用于验证 exact native load 与后续 smoke。对应 decisions 保持 `review/pending`，因此该 fixture 必须在 inventory rights gate 失败，不能作为 production clearance。
 
@@ -36,22 +36,32 @@ cd modules/open-design
 npm run stage:plan -- \
   --source /absolute/path/to/open-design \
   --staging-root /absolute/path/to/staging \
-  --work-root /absolute/path/to/build-scratch \
+  --work-parent /absolute/path/to/build-scratch-parent \
   --sbom /absolute/path/to/SBOM.spdx.json \
   --metadata /absolute/path/to/resource-metadata.json \
-  --target /absolute/path/to/target.json
+  --target /absolute/path/to/target.json \
+  --node-bin /absolute/path/to/node-24.14.1 \
+  --pnpm-bin /absolute/path/to/pnpm-10.33.2.cjs
 
 # 通过相同预检后执行真实 build、copy 和 inventory。
 npm run stage -- \
   --source /absolute/path/to/open-design \
   --staging-root /absolute/path/to/staging \
-  --work-root /absolute/path/to/build-scratch \
+  --work-parent /absolute/path/to/build-scratch-parent \
   --sbom /absolute/path/to/SBOM.spdx.json \
   --metadata /absolute/path/to/resource-metadata.json \
-  --target /absolute/path/to/target.json
+  --target /absolute/path/to/target.json \
+  --node-bin /absolute/path/to/node-24.14.1 \
+  --pnpm-bin /absolute/path/to/pnpm-10.33.2.cjs
 ```
 
-当前 pinned upstream 的 `pnpm.onlyBuiltDependencies` 没有 `node-pty`，所以这个 runner 会在安装前以 `NATIVE_BUILD_IGNORED` 停止。修复必须来自 upstream 或一个重新审计、重新固定的 source revision；不得通过忽略检查或手工复制未验证 native binary 绕过。任何非 Node 24 的执行环境也会在 build 前以 `NODE_VERSION_MISMATCH` 停止。
+Simulator-owned patch 只在 pinned manifest 的 `pnpm.onlyBuiltDependencies` 增加 `node-pty`，其 digest、preimage 和 postimage 全部固定；真实 build 已证明 `node-pty` 与 `better-sqlite3` lifecycle 执行。任何 patch、exact Node、ABI、pnpm executable 或 input digest drift 都会在 build 前停止。
+
+## Issue #87 当前 blocker
+
+Issue #87 尚未完成，runner 不会发布 artifact。真实 pinned build 已让 13 个目标 native paths 在 Node `24.14.1` / ABI `137` 下完成 load，但随后由 runner 启动的 daemon child 失败：禁止 symlink 后，pnpm 多版本 dependency graph 无法通过通用目录物化保持 package realpath 语义，`htmlparser2` 最终解析到不兼容的 `entities` export。安全后续需要一个单独审计并固定的 daemon bundle/external-package closure，或 upstream 提供不依赖 symlink 的 production closure；不能放宽 symlink policy 或继续任意扁平化。
+
+四项 canonical native redistribution decisions 也仍是 `review/pending`，没有 license/evidence clearance。即使 runtime smoke 后续通过，rights gate 仍必须 fail closed，直到独立法律/provenance 输入完成审核。
 
 ## Loopback readiness
 
@@ -87,6 +97,7 @@ node src/validate-artifact.mjs \
   --provenance provenance.json \
   --policy artifact-policy.json \
   --decisions resource-decisions.json \
+  --attestation fixtures/minimal-build-attestation.json \
   --inventory fixtures/minimal-valid.inventory.json
 ```
 
