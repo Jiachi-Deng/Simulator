@@ -12,6 +12,7 @@ import {
   MODULE_REGISTRY_STATE_SCHEMA_VERSION,
   type InstalledModuleSnapshot,
   type InstalledModuleVersionSnapshot,
+  type ModuleActivationState,
   type ModuleInstallCompatibility,
   type ModuleRegistryHost,
   type ModuleRegistryPersistence,
@@ -195,6 +196,7 @@ export class ModuleRegistry {
   private readonly persistence: ModuleRegistryPersistence
   private modules = new Map<string, InstalledModuleRecord>()
   private recoveryDiagnostics: readonly RegistryDiagnostic[] = freeze([])
+  private persistenceRevision = ''
 
   constructor(host: ModuleRegistryHost, persistence: ModuleRegistryPersistence = new InMemoryModuleRegistryPersistence()) {
     if (valid(host.version) !== host.version) throw new TypeError('Registry host version must be canonical Semantic Versioning')
@@ -288,6 +290,27 @@ export class ModuleRegistry {
     if ('diagnostic' in lookup) return this.failure(lookup.diagnostic)
     return this.mutate((next) => {
       next.get(moduleId)!.lastKnownGoodVersion = version
+    })
+  }
+
+  restoreActivation(moduleId: string, state: ModuleActivationState): RegistryMutationResult {
+    const module = this.modules.get(moduleId)
+    if (!module) return this.failure(diagnostic('MODULE_NOT_FOUND', 'Module is not installed', moduleId))
+    for (const [name, version] of [
+      ['active', state.activeVersion],
+      ['last-known-good', state.lastKnownGoodVersion],
+    ] as const) {
+      if (version === null) continue
+      const lookup = this.compatibleVersion(moduleId, version)
+      if ('diagnostic' in lookup) return this.failure(lookup.diagnostic)
+      if (name === 'active' && module.disabled) {
+        return this.failure(diagnostic('MODULE_DISABLED', 'Disabled module cannot be activated', moduleId, version))
+      }
+    }
+    return this.mutate((next) => {
+      const target = next.get(moduleId)!
+      target.activeVersion = state.activeVersion
+      target.lastKnownGoodVersion = state.lastKnownGoodVersion
     })
   }
 
@@ -392,8 +415,10 @@ export class ModuleRegistry {
       }
       this.modules = recovered.modules
       this.recoveryDiagnostics = freeze(sortedDiagnostics(recovered.diagnostics))
+      this.persistenceRevision = read.revision
     } catch {
       this.modules = new Map()
+      this.persistenceRevision = ''
       this.recoveryDiagnostics = freeze([
         diagnostic('CORRUPT_PERSISTED_STATE', 'Persisted optional-module state is corrupt; recovered an empty registry'),
       ])
@@ -575,7 +600,15 @@ export class ModuleRegistry {
     const next = cloneState(this.modules)
     change(next)
     try {
-      this.persistence.commit(this.serialize(next))
+      const committed = this.persistence.commit(this.serialize(next), this.persistenceRevision)
+      if (!committed.ok) {
+        this.recover()
+        return this.failure(diagnostic(
+          'PERSISTENCE_CONFLICT',
+          'Registry mutation conflicted with a newer committed snapshot; reload and retry',
+        ))
+      }
+      this.persistenceRevision = committed.revision
     } catch {
       return this.failure(diagnostic(
         'PERSISTENCE_WRITE_FAILED',

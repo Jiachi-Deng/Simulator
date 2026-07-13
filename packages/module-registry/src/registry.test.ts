@@ -176,6 +176,23 @@ describe('ModuleRegistry installation and deterministic snapshots', () => {
 })
 
 describe('ModuleRegistry state transitions', () => {
+  it('restores exact active and last-known-good state including null', () => {
+    const registry = new ModuleRegistry(HOST)
+    for (const version of ['1.0.0', '2.0.0']) {
+      registry.install(validatedManifest('org.simulator.restore', version), { hostVersionRange: '*' })
+    }
+    registry.activate('org.simulator.restore', '2.0.0')
+    registry.markLastKnownGood('org.simulator.restore', '1.0.0')
+
+    expect(registry.restoreActivation('org.simulator.restore', {
+      activeVersion: '1.0.0',
+      lastKnownGoodVersion: null,
+    }).ok).toBe(true)
+    expect(registry.snapshot().modules[0]).toMatchObject({
+      activeVersion: '1.0.0',
+      lastKnownGoodVersion: null,
+    })
+  })
   it('activates, marks last-known-good, disables, re-enables, and safely removes versions', () => {
     const registry = new ModuleRegistry(HOST)
     registry.install(validatedManifest('org.simulator.transitions', '1.0.0'), { hostVersionRange: '*' })

@@ -73,6 +73,12 @@ export interface RollbackResult extends InstalledModuleState {
   readonly activePath: string
 }
 
+export interface RestoreModuleStateRequest extends InstalledModuleState {}
+
+export interface RestoreModuleStateResult extends InstalledModuleState {
+  readonly activePath: string | null
+}
+
 export interface InstallRequest {
   readonly descriptor: VerifiedArtifactDescriptor
   readonly archivePath: string
