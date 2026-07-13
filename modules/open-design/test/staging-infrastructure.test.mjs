@@ -56,6 +56,28 @@ test("rejects symlink and hard-link staging sources", async (t) => {
   );
 });
 
+test("copies only the target node-pty prebuild and excludes foreign and third-party payloads", async (t) => {
+  const { source, staging } = await roots(t);
+  const files = [
+    "node_modules/node-pty/prebuilds/darwin-arm64/pty.node",
+    "node_modules/node-pty/prebuilds/darwin-x64/pty.node",
+    "node_modules/node-pty/prebuilds/win32-arm64/pty.node",
+    "node_modules/node-pty/third_party/conpty/win10-arm64/conpty.dll",
+  ];
+  await Promise.all(files.map(async (relative) => {
+    await mkdir(path.dirname(path.join(source, relative)), { recursive: true });
+    await writeFile(path.join(source, relative), relative);
+  }));
+  const result = await copyStagingInputs({
+    stagingRoot: staging,
+    policy,
+    target: { platform: "darwin", arch: "arm64" },
+    inputs: [{ label: "daemon", source, destination: "runtime/daemon" }],
+  });
+  assert.deepEqual(result.copied.map((entry) => entry.path), ["runtime/daemon/node_modules/node-pty/prebuilds/darwin-arm64/pty.node"]);
+  assert.equal(result.excluded.length, 3);
+});
+
 test("build plan invokes exact pnpm through exact Node in a private checkout and records order", async () => {
   const workspace = { checkoutRoot: "/private/build/checkout", homeRoot: "/private/build/home", tempRoot: "/private/build/tmp", cacheRoot: "/private/build/cache", storeRoot: "/private/build/store", daemonDeployRoot: "/private/build/daemon", webDeployRoot: "/private/build/web", normalizedRoot: "/private/build/normalized" };
   const provenance = { buildContract: { environmentPolicy: { inherit: [], force: { CI: "1", COREPACK_ENABLE_DOWNLOAD_PROMPT: "0", npm_config_update_notifier: "false", OD_WEB_OUTPUT_MODE: "standalone" } } } };
@@ -63,7 +85,8 @@ test("build plan invokes exact pnpm through exact Node in a private checkout and
   assert.equal(plan.commands[0].command, "/toolchain/node");
   assert.deepEqual(plan.commands[0].args, ["/toolchain/pnpm.cjs", "install", "--frozen-lockfile"]);
   assert.equal(plan.commands.find((entry) => entry.args.includes("@open-design/web") && entry.args.includes("build")).env.OD_WEB_OUTPUT_MODE, "standalone");
-  assert.deepEqual(plan.commands.at(-2).args, ["/toolchain/pnpm.cjs", "--config.inject-workspace-packages=true", "--prefer-offline", "--frozen-lockfile", "--ignore-scripts", "--filter", "@open-design/daemon", "deploy", "--prod", "/private/build/daemon"]);
+  assert.deepEqual(plan.commands.at(-3).args, ["/toolchain/pnpm.cjs", "--config.inject-workspace-packages=true", "--prefer-offline", "--frozen-lockfile", "--ignore-scripts", "--filter", "@open-design/daemon", "deploy", "--prod", "/private/build/daemon"]);
+  assert.deepEqual(plan.commands.at(-2).args, ["/toolchain/pnpm.cjs", "--dir", "/private/build/daemon", "rebuild", "better-sqlite3", "node-pty"]);
   assert.deepEqual(plan.commands.at(-1).args.slice(0, 10), ["/toolchain/pnpm.cjs", "--filter", "@open-design/packaged", "exec", "esbuild", "/private/build/checkout/apps/web/dist/sidecar/index.js", "--bundle", "--platform=node", "--format=esm", "--target=node24"]);
   assert.equal(plan.commands.at(-1).args.at(-2), "--outfile=/private/build/web/dist/sidecar/index.js");
   assert.equal(plan.commands.at(-1).args.at(-1), "--metafile=/private/build/web/esbuild-meta.json");

@@ -17,7 +17,7 @@ export async function ensureEmptyStagingRoot(stagingRoot) {
   return await realpath(stagingRoot).catch((error) => stagingFail("STAGING_ROOT_INVALID", error.message));
 }
 
-export async function copyStagingInputs({ stagingRoot, inputs, policy } = {}) {
+export async function copyStagingInputs({ stagingRoot, inputs, policy, target } = {}) {
   stagingAssert(Array.isArray(inputs) && inputs.length > 0, "STAGING_INPUTS_INVALID", "at least one explicit staging input is required");
   stagingAssert(isPlainObject(policy), "STAGING_POLICY_INVALID", "artifact policy must be an object");
   const root = await ensureEmptyStagingRoot(stagingRoot);
@@ -53,7 +53,7 @@ export async function copyStagingInputs({ stagingRoot, inputs, policy } = {}) {
       const stat = await lstat(sourcePath).catch((error) => stagingFail("STAGING_SOURCE_INVALID", `${label}: ${error.message}`));
       stagingAssert(!stat.isSymbolicLink(), "STAGING_SYMLINK_FORBIDDEN", `${label} contains a symlink: ${relativeSourcePath}`);
       if (stat.isDirectory()) {
-        if (isExcludedPath(destinationPath, policy)) {
+        if (isExcludedPath(destinationPath, policy, target)) {
           excluded.push({ input: label, path: destinationPath, reason: "policy" });
           continue;
         }
@@ -69,11 +69,11 @@ export async function copyStagingInputs({ stagingRoot, inputs, policy } = {}) {
   }
 
   async function copyRegularFile(sourcePath, destinationPath, label) {
-    if (isExcludedPath(destinationPath, policy)) {
+    if (isExcludedPath(destinationPath, policy, target)) {
       excluded.push({ input: label, path: destinationPath, reason: "policy" });
       return;
     }
-    assertAllowedDestination(destinationPath, policy);
+    assertAllowedDestination(destinationPath, policy, target);
     stagingAssert(!destinations.has(destinationPath), "STAGING_DESTINATION_COLLISION", `multiple inputs resolve to ${destinationPath}`);
     destinations.add(destinationPath);
     const sourceStat = await lstat(sourcePath).catch((error) => stagingFail("STAGING_SOURCE_INVALID", `${label}: ${error.message}`));
@@ -139,17 +139,22 @@ function validateInput(input) {
   stagingAssert(input.destination !== "artifact-manifest.json", "STAGING_DESTINATION_INVALID", "artifact-manifest.json is generated only after inventory validation");
 }
 
-function assertAllowedDestination(value, policy) {
+function assertAllowedDestination(value, policy, target) {
   stagingAssert(isNormalizedArtifactPath(value), "STAGING_DESTINATION_INVALID", `invalid artifact path: ${value}`);
-  stagingAssert(!isExcludedPath(value, policy), "STAGING_DESTINATION_FORBIDDEN", `policy excludes artifact path: ${value}`);
+  stagingAssert(!isExcludedPath(value, policy, target), "STAGING_DESTINATION_FORBIDDEN", `policy excludes artifact path: ${value}`);
   const allowed = policy.exactPathRules?.some((rule) => rule.path === value) || policy.pathRules?.some((rule) => value.startsWith(rule.prefix));
   stagingAssert(allowed, "STAGING_DESTINATION_FORBIDDEN", `artifact path is outside the allowed profile: ${value}`);
 }
 
-function isExcludedPath(value, policy) {
+function isExcludedPath(value, policy, target) {
   const lower = value.toLowerCase();
   if (lower.endsWith(".map")) return true;
   const segments = lower.split("/");
+  if (lower.includes("/node-pty/third_party/")) return true;
+  if (target?.platform && target?.arch) {
+    const expected = `${target.platform}-${target.arch}`;
+    if (segments.some((segment) => /^(darwin|linux|win32)-(arm64|x64)$/u.test(segment) && segment !== expected)) return true;
+  }
   const segmentMatches = (pattern) => {
     const normalized = pattern.toLowerCase();
     if (normalized.includes("/")) return (`/${lower}/`).includes(`/${normalized}/`);
