@@ -78,7 +78,10 @@ export function validateArtifact({ provenance, policy, decisions, inventory, sch
     } else if (file.symlinkTarget !== undefined) fail("FILE_METADATA_INVALID", `regular file cannot declare symlinkTarget: ${file.path}`);
 
     const inferredCategory = native ? "native-binaries" : inferResourceCategory(extension, policy);
+    const pathCategory = inferResourcePathCategory(file.path, policy);
     if (inferredCategory && file.resourceCategory !== inferredCategory) fail("UNEXPECTED_RESOURCE", `${inferredCategory} resource lacks its category/decision: ${file.path}`);
+    if (pathCategory && file.resourceCategory !== pathCategory) fail("UNEXPECTED_RESOURCE", `${pathCategory} resource lacks its category/decision: ${file.path}`);
+    if (pathCategory !== undefined && !file.resourceCategory) fail("UNEXPECTED_RESOURCE", `resource path lacks its category/decision: ${file.path}`);
     if (file.resourceCategory) validateResource(file, decisionById, fail);
     else if (file.sourcePath !== undefined || file.decisionId !== undefined) fail("UNEXPECTED_RESOURCE", `resource metadata is incomplete: ${file.path}`);
 
@@ -181,6 +184,13 @@ function inferResourceCategory(extension, policy) {
   return Object.entries(policy.resourceExtensions).find(([, extensions]) => extensions.includes(extension))?.[0];
 }
 
+export function inferResourcePathCategory(artifactPath, policy) {
+  for (const segment of artifactPath.split("/")) {
+    if (Object.hasOwn(policy.resourcePathCategories, segment)) return policy.resourcePathCategories[segment] ?? null;
+  }
+  return undefined;
+}
+
 function validateResource(file, decisions, fail) {
   if (!file.sourcePath || !validateNormalizedRelativePath(file.sourcePath)) fail("RESOURCE_SOURCE_INVALID", `resource sourcePath must be exact and normalized: ${file.path}`);
   const decision = decisions.get(file.decisionId);
@@ -235,7 +245,7 @@ export function digestInventory(inventory) {
   return digestCanonicalJson(copy);
 }
 
-function canonicalJson(value) {
+export function canonicalJson(value) {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (isPlainObject(value)) return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(",")}}`;
   return JSON.stringify(value);
@@ -251,13 +261,8 @@ export async function loadRuntimeSchemas() {
 }
 
 async function main(argv) {
+  const options = parseArguments(argv);
   const names = ["provenance", "policy", "decisions", "inventory"];
-  const options = Object.fromEntries(names.map((name) => {
-    const index = argv.indexOf(`--${name}`);
-    return [name, index >= 0 ? argv[index + 1] : undefined];
-  }));
-  const missing = names.filter((name) => !options[name]);
-  if (missing.length) throw new Error(`Missing arguments: ${missing.map((name) => `--${name}`).join(", ")}`);
   const inputs = Object.fromEntries(await Promise.all(names.map(async (name) => [name, await readJson(options[name])])));
   inputs.schemas = await loadRuntimeSchemas();
   const result = validateArtifact(inputs);
@@ -265,6 +270,22 @@ async function main(argv) {
     for (const error of result.errors) console.error(`${error.code}: ${error.message}`);
     process.exitCode = 1;
   } else console.log(`Artifact inventory valid (${inputs.inventory.files.length} files).`);
+}
+
+function parseArguments(argv) {
+  const allowed = new Set(["provenance", "policy", "decisions", "inventory"]);
+  const options = {};
+  for (let index = 0; index < argv.length; index += 2) {
+    const token = argv[index];
+    if (!token?.startsWith("--") || !allowed.has(token.slice(2))) throw new Error(`ARGUMENT_UNKNOWN: unknown argument: ${token}`);
+    const name = token.slice(2);
+    if (Object.hasOwn(options, name)) throw new Error(`ARGUMENT_DUPLICATE: duplicate argument: ${token}`);
+    const value = argv[index + 1];
+    if (!value || value.startsWith("--")) throw new Error(`ARGUMENT_MISSING: missing value for ${token}`);
+    options[name] = value;
+  }
+  for (const name of allowed) if (!options[name]) throw new Error(`ARGUMENT_MISSING: required argument: --${name}`);
+  return options;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
