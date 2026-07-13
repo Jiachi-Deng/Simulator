@@ -1,0 +1,57 @@
+name: Release Static Validation
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/engineering-rc.yml
+      - .github/workflows/release-static-validation.yml
+      - scripts/release/**
+      - scripts/build-policy.ts
+      - scripts/build-policy.test.ts
+      - scripts/build-environment.ts
+      - scripts/build-environment.test.ts
+      - scripts/electron-build-main.ts
+      - scripts/build/**
+      - apps/electron/scripts/build-dmg.sh
+      - apps/electron/scripts/build-win.ps1
+      - apps/electron/package.json
+      - apps/electron/electron-builder.yml
+      - apps/electron/src/main/auto-update.ts
+      - apps/electron/src/main/update-policy.ts
+      - apps/electron/src/main/__tests__/auto-update-disabled.isolated.test.ts
+      - apps/electron/src/main/__tests__/update-policy.isolated.test.ts
+      - package.json
+      - bun.lock
+
+permissions:
+  contents: read
+
+jobs:
+  release-static-validation:
+    name: Release static validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.10"
+
+      - name: Run release unit tests
+        run: bun test scripts/release/*.test.ts scripts/build-environment.test.ts scripts/build-policy.test.ts
+
+      - name: Parse release workflow YAML
+        run: >-
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }' .github/workflows/engineering-rc.yml .github/workflows/release-static-validation.yml
+
+      - name: Parse release shell scripts
+        run: find scripts/release -type f -name '*.sh' -print0 | xargs -0 -r -n1 bash -n
+
+      - name: Check whitespace diff
+        run: git diff --check "${{ github.event.pull_request.base.sha }}" HEAD

@@ -233,8 +233,9 @@ else
     export CSC_IDENTITY_AUTO_DISCOVERY=true
 fi
 
-# Build electron-builder arguments
-BUILDER_ARGS="--mac --${ARCH}"
+# Build electron-builder arguments. Engineering RCs must never publish as a
+# side effect of creating their local DMG and ZIP artifacts.
+BUILDER_ARGS=(--mac "--${ARCH}" --publish never)
 
 # Add code signing if identity is available
 if [ "$UNSIGNED" = false ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
@@ -258,7 +259,7 @@ if [ "$UNSIGNED" = false ] && [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [
 fi
 
 # Run electron-builder
-npx electron-builder $BUILDER_ARGS
+npx electron-builder "${BUILDER_ARGS[@]}"
 
 # 8. Verify the DMG was built
 # electron-builder.yml uses artifactName to output: Simulator-${arch}.dmg
