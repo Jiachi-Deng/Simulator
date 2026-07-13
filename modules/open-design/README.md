@@ -23,11 +23,13 @@
 3. 真实模式按 upstream `tools/pack` 的 build closure 顺序执行 `pnpm install --frozen-lockfile`、workspace runtime build、Next standalone、web sidecar、daemon native `rebuild better-sqlite3 node-pty`。daemon sidecar 再由 exact Node+pnpm 的 esbuild 构建为 Node 24 ESM bundle，注入 `createRequire` banner，并且只允许 `better-sqlite3`、`node-pty`、`blake3-wasm` 三个 external。metafile 中出现任何其他 package external 会失败；build/rebuild 仍可能读取 registry metadata，不能宣称 offline/hermetic，但 lockfile 和 integrity 保持 fail-closed。
 4. daemon closure builder 仅按 production allowlist 复制上述三个 runtime package 的固定文件集、`better-sqlite3` 所需的 `bindings@1.5.0` 与 `file-uri-to-path@1.0.0`，以及供 bundle 动态 package resolution 使用的 app-owned `@open-design/daemon/package.json`。该 metadata 不属于 external allowlist；`blake3-wasm` test helpers/browser runtime 与 `node-pty` Windows JS 均不进入 Darwin closure。输出只含普通文件：source 或 output 的 symlink、hard link、special file、escape、错误平台、缺 native/WASM 或非 `0755` 的 `node-pty` helper 都会失败。普通 build-output normalizer 只处理 Next/web 输出；不再 materialize 或 hoist daemon 的 pnpm dependency graph。随后 copier 只写入 `artifact-policy.json` 的目标路径，继续拒绝任何 symlink、special file 和 hard link，并排除 source map、test/cache/Electron/updater 等内容。
 5. native inventory 对 staged `better-sqlite3`、`node-pty` 和 `sharp` 的二进制格式、platform、arch、Node ABI、libc 和显式 metadata 做闭包检查。上游 `pnpm.onlyBuiltDependencies` 也必须逐项允许三个 native package；`node-pty` 被 ignored 时立即失败。
-6. exact native load 通过后，runner 启动当前 staged daemon/web children 完成 PID、随机端口、entry digest 与 loopback functional smoke。随后才生成并校验 attestation/inventory、以 `O_EXCL` 写 manifest、seal 并 atomic publish。
+6. exact native load 通过后，runner 先生成确定性的 attestation/inventory，以 `O_EXCL` 写入 manifest 并 seal candidate。然后只从该只读 candidate 启动 daemon/web children，smoke 前后均要求 entry bytes/digest 与最终 inventory、daemon closure 一致，并完成 PID、随机端口和 loopback functional smoke。stdout/stderr 使用固定总字节上限并持续 drain。smoke 后再次校验整棵 sealed tree，随后才执行 rights gate 和 atomic publish；smoke 后不得修改 runtime bytes。
 
 真实 staging 的所有输入都是显式路径，且必须是普通文件：SPDX `2.3` SBOM、resource metadata 和 target JSON。owner-only build scratch `--work-parent` 必须与最终 `--staging-root` 的 owner-only publish parent 分离，避免把临时 closure 混入 artifact。
 
 `fixtures/pinned-native-metadata.pending-review.darwin-arm64.json` 来自 pinned upstream 的真实 Node 24 build，只用于验证 exact native load 与后续 smoke。对应 decisions 保持 `review/pending`，因此该 fixture 必须在 inventory rights gate 失败，不能作为 production clearance。
+
+artifact 内的 build attestation 只记录可复现输入、规范化命令、bundle/metafile/external closure、SBOM 和最终 entry digest，不写入 private path、host、PID、port 或 wall-clock time。实际 smoke 的 PID、随机 port、namespace 和时间仅作为 runner 返回的外部 `runEvidence`，不参与 artifact inventory bytes。相同输入在不同 private workspace 和时间构建时，attestation canonical bytes 必须一致。
 
 ```sh
 cd modules/open-design

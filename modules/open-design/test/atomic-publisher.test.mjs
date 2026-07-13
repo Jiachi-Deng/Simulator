@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, lstat, mkdir, mkdtemp, opendir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, opendir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { createAtomicStagingTarget, sealAndPublish, writeExclusiveCanonicalJson } from "../src/atomic-publisher.mjs";
+import { createAtomicStagingTarget, publishSealedCandidate, sealAndPublish, sealCandidate, verifySealedCandidate, writeExclusiveCanonicalJson } from "../src/atomic-publisher.mjs";
 import { canonicalJson, digestCanonicalJson, digestInventory } from "../src/validate-artifact.mjs";
 
 async function parentFixture(t) {
@@ -60,7 +60,7 @@ test("seals a verified unique temp tree and atomically publishes without replace
   const target = await createAtomicStagingTarget(finalRoot);
   const inventory = await stagedInventory(target.tempRoot);
   const result = await sealAndPublish({ target, inventory });
-  assert.deepEqual(result, { root: finalRoot, atomic: true, sealed: true, durability: "fsync-complete" });
+  assert.deepEqual(result, { root: target.finalRoot, atomic: true, sealed: true, durability: "fsync-complete" });
   assert.equal((await stat(finalRoot)).mode & 0o222, 0);
   assert.equal((await stat(path.join(finalRoot, "runtime/server.js"))).mode & 0o222, 0);
   assert.equal(await readFile(path.join(finalRoot, "runtime/server.js"), "utf8"), "runtime\n");
@@ -76,6 +76,19 @@ test("fails before publish when final bytes differ from inventory", async (t) =>
   await writeFile(path.join(target.tempRoot, "runtime/server.js"), "tampered\n");
   await assert.rejects(sealAndPublish({ target, inventory }), { code: "PUBLISH_INVENTORY_MISMATCH" });
   await assert.rejects(lstat(finalRoot), { code: "ENOENT" });
+});
+
+test("runs against a sealed candidate and removes the visible target after any post-rename failure", async (t) => {
+  const parent = await parentFixture(t);
+  const finalRoot = path.join(parent, "artifact");
+  const target = await createAtomicStagingTarget(finalRoot);
+  const inventory = await stagedInventory(target.tempRoot);
+  await sealCandidate({ target, inventory });
+  assert.equal((await stat(target.tempRoot)).mode & 0o222, 0);
+  await verifySealedCandidate({ target, inventory });
+  await assert.rejects(publishSealedCandidate({ target, inventory, afterRename: async () => { throw new Error("injected post-rename verification failure"); } }), /injected/u);
+  await assert.rejects(lstat(finalRoot), { code: "ENOENT" });
+  assert.deepEqual(await readdir(parent), []);
 });
 
 test("rejects a group-readable publish parent and uses exclusive canonical JSON writes", async (t) => {

@@ -2,11 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "open-design-build-attestation-v1",
   "type": "object",
-  "required": ["schemaVersion", "sourceCommit", "createdAt", "patch", "toolchain", "host", "environment", "inputs", "sbom", "commands", "build", "native", "smoke"],
+  "required": ["schemaVersion", "sourceCommit", "patch", "toolchain", "environment", "inputs", "sbom", "commands", "build", "native", "runtimeVerification"],
   "properties": {
     "schemaVersion": {"const": 1},
     "sourceCommit": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
-    "createdAt": {"type": "string", "minLength": 20, "maxLength": 64},
     "patch": {"type": "object", "required": ["path", "sha256", "postimageSha256", "changedPaths"], "properties": {
       "path": {"type": "string", "minLength": 1, "maxLength": 256},
       "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -17,14 +16,11 @@
       "nodeVersion": {"const": "24.14.1"}, "nodeAbi": {"const": "137"}, "platform": {"const": "darwin"}, "arch": {"const": "arm64"},
       "nodeExecutableSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "pnpmVersion": {"const": "10.33.2"}, "pnpmExecutableSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
     }, "additionalProperties": false},
-    "host": {"type": "object", "required": ["platform", "arch", "release", "type"], "properties": {
-      "platform": {"const": "darwin"}, "arch": {"const": "arm64"}, "release": {"type": "string", "minLength": 1, "maxLength": 256}, "type": {"type": "string", "minLength": 1, "maxLength": 64}
-    }, "additionalProperties": false},
     "environment": {"type": "object", "required": ["CI", "COREPACK_ENABLE_DOWNLOAD_PROMPT", "HOME", "OD_WEB_OUTPUT_MODE", "PATH", "TMPDIR", "XDG_CACHE_HOME", "npm_config_cache", "npm_config_store_dir", "npm_config_update_notifier"], "properties": {
-      "CI": {"const": "1"}, "COREPACK_ENABLE_DOWNLOAD_PROMPT": {"const": "0"}, "HOME": {"type": "string", "minLength": 1, "maxLength": 4096},
-      "OD_WEB_OUTPUT_MODE": {"const": "standalone"}, "PATH": {"type": "string", "minLength": 1, "maxLength": 4096}, "TMPDIR": {"type": "string", "minLength": 1, "maxLength": 4096},
-      "XDG_CACHE_HOME": {"type": "string", "minLength": 1, "maxLength": 4096}, "npm_config_cache": {"type": "string", "minLength": 1, "maxLength": 4096},
-      "npm_config_store_dir": {"type": "string", "minLength": 1, "maxLength": 4096}, "npm_config_update_notifier": {"const": "false"}
+      "CI": {"const": "1"}, "COREPACK_ENABLE_DOWNLOAD_PROMPT": {"const": "0"}, "HOME": {"const": "<private-home>"},
+      "OD_WEB_OUTPUT_MODE": {"const": "standalone"}, "PATH": {"const": "<node-dir>:/usr/bin:/bin"}, "TMPDIR": {"const": "<private-tmp>/"},
+      "XDG_CACHE_HOME": {"const": "<private-cache>"}, "npm_config_cache": {"const": "<private-cache>/npm"},
+      "npm_config_store_dir": {"const": "<private-store>"}, "npm_config_update_notifier": {"const": "false"}
     }, "additionalProperties": false},
     "inputs": {"type": "array", "minItems": 8, "maxItems": 64, "items": {"type": "object", "required": ["name", "sha256"], "properties": {
       "name": {"type": "string", "minLength": 1, "maxLength": 256}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
@@ -35,21 +31,20 @@
         "name": {"type": "string", "minLength": 1, "maxLength": 128}, "version": {"type": "string", "minLength": 1, "maxLength": 64}, "contentSha512": {"type": "string", "pattern": "^[0-9a-f]{128}$"}, "licenseDeclared": {"type": "string", "minLength": 1, "maxLength": 128}, "noticeStatus": {"enum": ["NONE", "PRESENT"]}
       }, "additionalProperties": false}}
     }, "additionalProperties": false},
-    "commands": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "object", "required": ["ordinal", "executable", "executableSha256", "args", "cwdRole", "environmentSha256", "startedAt", "finishedAt"], "properties": {
-      "ordinal": {"type": "integer", "minimum": 0}, "executable": {"type": "string", "minLength": 1, "maxLength": 4096}, "executableSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "commands": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "object", "required": ["ordinal", "executable", "executableSha256", "args", "cwdRole", "environmentSha256"], "properties": {
+      "ordinal": {"type": "integer", "minimum": 0}, "executable": {"const": "<node>"}, "executableSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
       "args": {"type": "array", "minItems": 1, "maxItems": 64, "items": {"type": "string", "maxLength": 4096}}, "cwdRole": {"const": "private-detached-checkout"},
-      "environmentSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "startedAt": {"type": "string", "minLength": 20, "maxLength": 64}, "finishedAt": {"type": "string", "minLength": 20, "maxLength": 64}
+      "environmentSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
     }, "additionalProperties": false}},
-    "build": {"type": "object", "required": ["startedAt", "finishedAt", "privateDetachedCheckout", "postBuildVerified", "freshOutputs", "normalization"], "properties": {
-      "startedAt": {"type": "string", "minLength": 20, "maxLength": 64}, "finishedAt": {"type": "string", "minLength": 20, "maxLength": 64},
+    "build": {"type": "object", "required": ["privateDetachedCheckout", "postBuildVerified", "freshOutputs", "normalization"], "properties": {
       "privateDetachedCheckout": {"const": true}, "postBuildVerified": {"const": true}, "freshOutputs": {"type": "array", "minItems": 4, "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 256}},
       "normalization": {"type": "object", "required": ["method", "artifactSymlinksForbidden", "outputs", "nativeOrigins", "daemonClosure"], "properties": {
         "method": {"const": "daemon-esm-bundle-external-closure-v1"}, "artifactSymlinksForbidden": {"const": true},
         "outputs": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "object", "required": ["role", "symlinksMaterialized", "hardlinksMaterialized", "virtualStorePackagesHoisted"], "properties": {
           "role": {"enum": ["next-standalone", "daemon-esm-bundle-external-closure", "web-sidecar-closure"]}, "symlinksMaterialized": {"type": "integer", "minimum": 0}, "hardlinksMaterialized": {"type": "integer", "minimum": 0}, "virtualStorePackagesHoisted": {"type": "integer", "minimum": 0}
         }, "additionalProperties": false}},
-        "nativeOrigins": {"type": "array", "maxItems": 10000, "items": {"type": "object", "required": ["path", "sha256", "sourceCtime", "mode"], "properties": {
-          "path": {"type": "string", "minLength": 1, "maxLength": 1024}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "sourceCtime": {"type": "string", "minLength": 20, "maxLength": 64}, "mode": {"enum": ["0644", "0755"]}
+        "nativeOrigins": {"type": "array", "maxItems": 10000, "items": {"type": "object", "required": ["path", "sha256", "freshFromBuild", "mode"], "properties": {
+          "path": {"type": "string", "minLength": 1, "maxLength": 1024}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "freshFromBuild": {"const": true}, "mode": {"enum": ["0644", "0755"]}
         }, "additionalProperties": false}},
         "daemonClosure": {"type": "object", "required": ["method", "bundleSha256", "metafileSha256", "metafileInputCount", "metafileOutput", "externalAllowlist", "files"], "properties": {
           "method": {"const": "esbuild-node24-esm-create-require-banner-v1"}, "bundleSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "metafileSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "metafileInputCount": {"type": "integer", "minimum": 1}, "metafileOutput": {"const": "runtime/daemon/dist/sidecar/index.js"},
@@ -58,28 +53,16 @@
         }, "additionalProperties": false}
       }, "additionalProperties": false}
     }, "additionalProperties": false},
-    "native": {"type": "array", "maxItems": 10000, "items": {"type": "object", "required": ["packageName", "path", "format", "platform", "arch", "nodeAbi", "libc", "binaryFormat", "resourceClass", "mode", "sha256", "sourceCtime", "freshFromBuild", "load"], "properties": {
+    "native": {"type": "array", "maxItems": 10000, "items": {"type": "object", "required": ["packageName", "path", "format", "platform", "arch", "nodeAbi", "libc", "binaryFormat", "resourceClass", "mode", "sha256", "freshFromBuild", "load"], "properties": {
       "packageName": {"enum": ["better-sqlite3", "node-pty", "sharp", "blake3-wasm"]}, "path": {"type": "string", "minLength": 1, "maxLength": 1024}, "format": {"enum": ["node-addon", "executable", "shared-library", "wasm-module"]},
       "platform": {"const": "darwin"}, "arch": {"const": "arm64"}, "nodeAbi": {"const": "137"}, "libc": {"const": "none"}, "binaryFormat": {"enum": ["mach-o", "wasm"]}, "resourceClass": {"enum": ["native-binary", "executable-native", "wasm-resource"]}, "mode": {"enum": ["0644", "0755"]},
-      "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "sourceCtime": {"type": "string", "minLength": 20, "maxLength": 64}, "freshFromBuild": {"const": true},
+      "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "freshFromBuild": {"const": true},
       "load": {"type": ["object", "null"], "required": ["ok", "nodeVersion", "nodeAbi", "platform", "arch"], "properties": {"ok": {"const": true}, "nodeVersion": {"const": "v24.14.1"}, "nodeAbi": {"const": "137"}, "platform": {"const": "darwin"}, "arch": {"const": "arm64"}}, "additionalProperties": false}
     }, "additionalProperties": false}},
-    "smoke": {"type": "object", "required": ["ok", "namespace", "tokenSha256", "daemon", "web", "functional"], "properties": {
-      "ok": {"const": true}, "namespace": {"type": "string", "minLength": 1, "maxLength": 128}, "tokenSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-      "daemon": {"$ref": "#/$defs/smokeChild"}, "web": {"$ref": "#/$defs/smokeChild"},
-      "functional": {"type": "object", "required": ["ok", "daemonVersion", "webStatus"], "properties": {
-        "ok": {"const": true}, "daemonVersion": {"type": "string", "minLength": 1, "maxLength": 128}, "webStatus": {"type": "integer", "minimum": 200}
-      }, "additionalProperties": false}
-    }, "additionalProperties": false}
-  },
-  "$defs": {
-    "smokeChild": {"type": "object", "required": ["pid", "status", "entryPath", "entrySha256", "args", "startedAt"], "properties": {
-      "pid": {"type": "integer", "minimum": 1},
-      "status": {"type": "object", "required": ["pid", "state", "url"], "properties": {
-        "pid": {"type": "integer", "minimum": 1}, "state": {"const": "running"}, "url": {"type": "string", "pattern": "^http://127\\.0\\.0\\.1:[0-9]{1,5}$"}
-      }, "additionalProperties": false},
-      "entryPath": {"type": "string", "minLength": 1, "maxLength": 1024}, "entrySha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-      "args": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string", "maxLength": 4096}}, "startedAt": {"type": "string", "minLength": 20, "maxLength": 64}
+    "runtimeVerification": {"type": "object", "required": ["method", "candidateMustBeSealed", "entries", "expected"], "properties": {
+      "method": {"const": "sealed-candidate-loopback-v1"}, "candidateMustBeSealed": {"const": true},
+      "entries": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "object", "required": ["entryPath", "entrySha256"], "properties": {"entryPath": {"type": "string", "minLength": 1, "maxLength": 1024}, "entrySha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, "additionalProperties": false}},
+      "expected": {"type": "object", "required": ["daemonVersion", "webStatusMinimum"], "properties": {"daemonVersion": {"const": "0.14.1"}, "webStatusMinimum": {"const": 200}}, "additionalProperties": false}
     }, "additionalProperties": false}
   },
   "additionalProperties": false

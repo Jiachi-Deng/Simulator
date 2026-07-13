@@ -4,11 +4,10 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { lstat, mkdir, open, readFile } from "node:fs/promises";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createAtomicStagingTarget, sealAndPublish, writeExclusiveCanonicalJson } from "./atomic-publisher.mjs";
+import { createAtomicStagingTarget, publishSealedCandidate, sealCandidate, verifySealedCandidate, writeExclusiveCanonicalJson } from "./atomic-publisher.mjs";
 import { buildDaemonExternalClosure, DAEMON_BUNDLE_BANNER } from "./daemon-external-closure.mjs";
 import { inspectNativeRuntime } from "./native-inventory.mjs";
 import { hoistMaterializedPnpmAliases, materializeBuildOutput } from "./materialize-build-output.mjs";
@@ -128,8 +127,7 @@ export async function prepareProductionStaging({
       runtime: { platform: verification.toolchain.platform, arch: verification.toolchain.arch, nodeAbi: verification.toolchain.nodeAbi },
       buildEvidence: { buildStartedAtMs, copied: copied.copied },
     });
-    const smoke = await smokeStagedRuntime({ artifactRoot: copied.root, nodeBin: verification.toolchain.nodeExecutable });
-    const buildFinishedAt = new Date().toISOString();
+    const runtimeVerification = createRuntimeVerification(copied.copied);
     const attestation = createBuildAttestation({
       provenance,
       verification,
@@ -137,10 +135,8 @@ export async function prepareProductionStaging({
       commandEvidence,
       postBuild,
       normalization,
-      buildStartedAtMs,
-      buildFinishedAt,
       nativeInventory,
-      smoke,
+      runtimeVerification,
       sbomEvidence,
       externalInputs: [
         ...verification.inputs.map((input) => ({ name: input.path, sha256: input.sha256 })),
@@ -153,10 +149,14 @@ export async function prepareProductionStaging({
       ],
     });
     await writeExclusiveCanonicalJson(path.join(copied.root, "build-attestation.json"), attestation);
-    const produced = await produceInventory({ stagingRoot: copied.root, metadata, provenance, policy, decisions, attestation, target });
+    const produced = await produceInventory({ stagingRoot: copied.root, metadata, provenance, policy, decisions, attestation, target, deferRights: true });
     await writeArtifactManifest(copied.root, produced);
-    const publish = await sealAndPublish({ target: atomicTarget, inventory: produced.inventory });
-    return { dryRun: false, verification, plan: publicPlan(plan), copied, nativeInventory, attestation, inventory: produced.inventory, publish };
+    await sealCandidate({ target: atomicTarget, inventory: produced.inventory });
+    const runEvidence = await smokeStagedRuntime({ artifactRoot: copied.root, nodeBin: verification.toolchain.nodeExecutable, expectedInventory: produced.inventory });
+    await verifySealedCandidate({ target: atomicTarget, inventory: produced.inventory });
+    if (produced.deferredRightsErrors.length > 0) stagingFail("RIGHTS_GATE_FAILED", produced.deferredRightsErrors.map((error) => `${error.code}: ${error.message}`).join("; "));
+    const publish = await publishSealedCandidate({ target: atomicTarget, inventory: produced.inventory });
+    return { dryRun: false, verification, plan: publicPlan(plan), copied, nativeInventory, attestation, inventory: produced.inventory, runEvidence, publish };
   } catch (error) {
     primaryError = error;
     throw error;
@@ -170,30 +170,26 @@ export async function prepareProductionStaging({
 
 export async function runBuildPlan(plan, runCommand = defaultCommandRunner, executableSha256 = "") {
   const evidence = [];
-  const environmentSha256 = digestCanonicalJson(plan.environment);
+  const environmentSha256 = digestCanonicalJson(reproducibleEnvironment(plan.environment));
   for (const [ordinal, entry] of plan.commands.entries()) {
-    const startedAt = new Date().toISOString();
     await runCommand(entry.command, entry.args, { cwd: entry.cwd, env: entry.env });
     evidence.push({
       ordinal,
-      executable: entry.command,
+      executable: "<node>",
       executableSha256,
-      args: [...entry.args],
+      args: entry.args.map((value) => normalizeBuildValue(value, plan)),
       cwdRole: "private-detached-checkout",
       environmentSha256,
-      startedAt,
-      finishedAt: new Date().toISOString(),
     });
   }
   return evidence;
 }
 
-export function createBuildAttestation({ provenance, verification, environment, commandEvidence, postBuild, normalization, buildStartedAtMs, buildFinishedAt, nativeInventory, smoke, sbomEvidence, externalInputs }) {
+export function createBuildAttestation({ provenance, verification, environment, commandEvidence, postBuild, normalization, nativeInventory, runtimeVerification, sbomEvidence, externalInputs }) {
   const toolchain = verification.toolchain;
   return {
     schemaVersion: 1,
     sourceCommit: provenance.source.commit,
-    createdAt: buildFinishedAt,
     patch: {
       path: provenance.simulatorPatch.path,
       sha256: provenance.simulatorPatch.sha256,
@@ -209,22 +205,46 @@ export function createBuildAttestation({ provenance, verification, environment, 
       pnpmVersion: toolchain.pnpmVersion,
       pnpmExecutableSha256: toolchain.pnpmExecutableSha256,
     },
-    host: { platform: os.platform(), arch: os.arch(), release: os.release(), type: os.type() },
-    environment: { ...environment },
+    environment: reproducibleEnvironment(environment),
     inputs: [...externalInputs].sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name))),
     sbom: structuredClone(sbomEvidence),
     commands: commandEvidence,
     build: {
-      startedAt: new Date(buildStartedAtMs).toISOString(),
-      finishedAt: buildFinishedAt,
       privateDetachedCheckout: true,
       postBuildVerified: true,
       freshOutputs: postBuild.requiredOutputs.map((entry) => path.basename(entry) === "standalone" || path.basename(entry) === "static" ? `apps/web/.next/${path.basename(entry)}` : path.basename(entry)),
       normalization: publicNormalizationEvidence(normalization),
     },
-    native: nativeInventory,
-    smoke,
+    native: nativeInventory.map(({ sourceCtime: _sourceCtime, ...entry }) => entry),
+    runtimeVerification: structuredClone(runtimeVerification),
   };
+}
+
+export function createRuntimeVerification(copied) {
+  const byPath = new Map(copied.map((entry) => [entry.path, entry]));
+  const entries = ["runtime/daemon/dist/sidecar/index.js", "runtime/packages/web-sidecar/dist/sidecar/index.js"].map((entryPath) => {
+    const entry = byPath.get(entryPath);
+    stagingAssert(entry?.sha256, "RUNTIME_VERIFICATION_INVALID", `runtime entry copy evidence is missing: ${entryPath}`);
+    return { entryPath, entrySha256: entry.sha256 };
+  });
+  return { method: "sealed-candidate-loopback-v1", candidateMustBeSealed: true, entries, expected: { daemonVersion: "0.14.1", webStatusMinimum: 200 } };
+}
+
+function reproducibleEnvironment(environment) {
+  const replacements = {
+    HOME: "<private-home>", TMPDIR: "<private-tmp>/", XDG_CACHE_HOME: "<private-cache>",
+    npm_config_cache: "<private-cache>/npm", npm_config_store_dir: "<private-store>", PATH: "<node-dir>:/usr/bin:/bin",
+  };
+  return Object.fromEntries(Object.keys(environment).sort().map((key) => [key, replacements[key] ?? environment[key]]));
+}
+
+function normalizeBuildValue(value, plan) {
+  const replacements = [
+    [plan.workspace.checkoutRoot, "<private-checkout>"], [plan.workspace.daemonBundleRoot, "<daemon-bundle>"],
+    [plan.workspace.webDeployRoot, "<web-sidecar>"], [plan.workspace.root, "<private-workspace>"],
+    [plan.pnpmBin, "<pnpm>"], [plan.nodeBin, "<node>"],
+  ].filter(([actual]) => typeof actual === "string" && actual.length > 0).sort((left, right) => right[0].length - left[0].length);
+  return replacements.reduce((result, [actual, replacement]) => result.split(actual).join(replacement), value);
 }
 
 export async function materializeBuildOutputs({ workspace, buildStartedAtMs, daemonClosure } = {}) {
@@ -251,7 +271,7 @@ function publicNormalizationEvidence(normalization) {
   const nativeOrigins = normalization.outputs.flatMap((entry) => entry.nativeOrigins.map((origin) => ({
     path: `${entry.prefix}/${origin.path}`,
     sha256: origin.sha256,
-    sourceCtime: origin.sourceCtime,
+    freshFromBuild: true,
     mode: origin.mode,
   }))).sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)));
   return {
@@ -406,7 +426,7 @@ async function main(argv) {
   });
   const output = result.dryRun
     ? { dryRun: true, verification: result.verification, patch: { path: result.patch.path, sha256: result.patch.sha256 }, commands: result.plan.commands }
-    : { dryRun: false, stagingRoot: result.publish.root, files: result.inventory.files.length, nativeEntries: result.nativeInventory.length, smoke: result.attestation.smoke.ok, publish: result.publish };
+    : { dryRun: false, stagingRoot: result.publish.root, files: result.inventory.files.length, nativeEntries: result.nativeInventory.length, smoke: result.runEvidence.ok, publish: result.publish };
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
 }
 

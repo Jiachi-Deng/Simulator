@@ -5,7 +5,8 @@ import path from "node:path";
 import test from "node:test";
 
 import { copyStagingInputs } from "../src/staging-copier.mjs";
-import { createBuildPlan, runBuildPlan, validateSbom, writeArtifactManifest } from "../src/stage-open-design.mjs";
+import { createBuildAttestation, createBuildPlan, runBuildPlan, validateSbom, writeArtifactManifest } from "../src/stage-open-design.mjs";
+import { canonicalJsonBytes } from "../src/validate-artifact.mjs";
 
 const moduleRoot = new URL("../", import.meta.url);
 const policy = JSON.parse(await readFile(new URL("artifact-policy.json", moduleRoot), "utf8"));
@@ -98,6 +99,47 @@ test("build plan invokes exact pnpm through exact Node in a private checkout and
   const seen = [];
   await runBuildPlan(plan, async (command, args, options) => { seen.push({ command, args, options }); });
   assert.deepEqual(seen.map((entry) => entry.args), plan.commands.map((entry) => entry.args));
+});
+
+test("produces identical attestation bytes across private paths, times, and native ctimes", async () => {
+  const makeWorkspace = (root) => ({
+    root,
+    checkoutRoot: `${root}/checkout`, homeRoot: `${root}/home`, tempRoot: `${root}/tmp`, cacheRoot: `${root}/cache`, storeRoot: `${root}/store`,
+    daemonBundleRoot: `${root}/daemon-bundle`, daemonClosureRoot: `${root}/daemon-closure`, webDeployRoot: `${root}/web`, normalizedRoot: `${root}/normalized`,
+  });
+  const verification = { toolchain: {
+    nodeVersion: "v24.14.1", nodeAbi: "137", platform: "darwin", arch: "arm64", nodeExecutableSha256: "a".repeat(64),
+    pnpmVersion: "10.33.2", pnpmExecutableSha256: "b".repeat(64),
+  } };
+  const sbomEvidence = validateSbom({ sbom, sha256: "c".repeat(64), provenance, policy });
+  const create = async (root, sourceCtime) => {
+    const workspace = makeWorkspace(root);
+    const plan = createBuildPlan({ workspace, stagingRoot: "/staging", nodeBin: "/toolchain/node", pnpmBin: "/toolchain/pnpm.cjs", provenance });
+    const commandEvidence = await runBuildPlan(plan, async () => undefined, verification.toolchain.nodeExecutableSha256);
+    const normalization = {
+      outputs: [
+        { role: "next-standalone", prefix: "web/standalone", symlinksMaterialized: 1, hardlinksMaterialized: 0, virtualStorePackagesHoisted: 0, nativeOrigins: [] },
+        { role: "web-sidecar-closure", prefix: "runtime/packages/web-sidecar", symlinksMaterialized: 1, hardlinksMaterialized: 0, virtualStorePackagesHoisted: 0, nativeOrigins: [] },
+        { role: "daemon-esm-bundle-external-closure", prefix: "runtime/daemon", symlinksMaterialized: 0, hardlinksMaterialized: 0, virtualStorePackagesHoisted: 0, nativeOrigins: [{ path: "addon.node", sha256: "d".repeat(64), sourceCtime, mode: "0644" }] },
+      ],
+      daemonClosure: { bundleSha256: "e".repeat(64), metafileSha256: "f".repeat(64), metafileInputCount: 1, externalAllowlist: ["better-sqlite3", "node-pty", "blake3-wasm"], files: [{ path: "dist/sidecar/index.js", sha256: "e".repeat(64) }] },
+    };
+    return createBuildAttestation({
+      provenance, verification, environment: plan.environment, commandEvidence,
+      postBuild: { checkedAt: sourceCtime, buildStartedAt: sourceCtime, requiredOutputs: [`${workspace.checkoutRoot}/apps/web/.next/standalone`, `${workspace.checkoutRoot}/apps/web/.next/static`, workspace.daemonBundleRoot, workspace.webDeployRoot] },
+      normalization,
+      nativeInventory: [{ packageName: "better-sqlite3", path: "runtime/daemon/addon.node", format: "node-addon", platform: "darwin", arch: "arm64", nodeAbi: "137", libc: "none", binaryFormat: "mach-o", resourceClass: "native-binary", mode: "0644", sha256: "d".repeat(64), sourceCtime, freshFromBuild: true, load: null }],
+      runtimeVerification: { method: "sealed-candidate-loopback-v1", candidateMustBeSealed: true, entries: [{ entryPath: "runtime/daemon/dist/sidecar/index.js", entrySha256: "e".repeat(64) }, { entryPath: "runtime/packages/web-sidecar/dist/sidecar/index.js", entrySha256: "1".repeat(64) }], expected: { daemonVersion: "0.14.1", webStatusMinimum: 200 } },
+      sbomEvidence,
+      externalInputs: [{ name: "package.json", sha256: "2".repeat(64) }],
+    });
+  };
+  const first = await create("/private/build-one", "2026-07-13T00:00:00.000Z");
+  const second = await create("/private/build-two", "2026-07-13T01:00:00.000Z");
+  assert.deepEqual(canonicalJsonBytes(first), canonicalJsonBytes(second));
+  assert.equal(JSON.stringify(first).includes("sourceCtime"), false);
+  assert.equal(JSON.stringify(first).includes("startedAt"), false);
+  assert.equal(JSON.stringify(first).includes("pid"), false);
 });
 
 test("writes the producer-owned artifact manifest with O_EXCL semantics", async (t) => {

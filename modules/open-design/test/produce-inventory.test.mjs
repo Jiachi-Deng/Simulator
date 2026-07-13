@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import { link, mkdir, mkdtemp, rename, rm, symlink, unlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -28,22 +29,34 @@ async function fixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), "open-design-inventory-"));
   await Promise.all([
     mkdir(path.join(root, "web/standalone"), { recursive: true }),
-    mkdir(path.join(root, "runtime/daemon/dist"), { recursive: true }),
+    mkdir(path.join(root, "runtime/daemon/dist/sidecar"), { recursive: true }),
+    mkdir(path.join(root, "runtime/packages/web-sidecar/dist/sidecar"), { recursive: true }),
     mkdir(path.join(root, "legal"), { recursive: true })
   ]);
+  const daemonPath = path.join(root, "runtime/daemon/dist/sidecar/index.js");
+  const webPath = path.join(root, "runtime/packages/web-sidecar/dist/sidecar/index.js");
   await Promise.all([
     writeFile(path.join(root, "web/standalone/server.js"), "server\n"),
-    writeFile(path.join(root, "runtime/daemon/dist/cli.js"), "daemon\n"),
+    writeFile(daemonPath, "daemon\n"),
+    writeFile(webPath, "web\n"),
     writeFile(path.join(root, "legal/LICENSE"), "Apache License\n"),
     writeFile(path.join(root, "legal/SBOM.spdx.json"), sbomBytes),
     writeFile(path.join(root, "provenance.json"), canonicalJsonBytes(base.provenance)),
-    writeFile(path.join(root, "build-attestation.json"), canonicalJsonBytes(base.attestation))
   ]);
+  const attestation = structuredClone(base.attestation);
+  const daemonSha256 = createHash("sha256").update(await readFile(daemonPath)).digest("hex");
+  const webSha256 = createHash("sha256").update(await readFile(webPath)).digest("hex");
+  attestation.runtimeVerification.entries[0].entrySha256 = daemonSha256;
+  attestation.runtimeVerification.entries[1].entrySha256 = webSha256;
+  attestation.build.normalization.daemonClosure.bundleSha256 = daemonSha256;
+  attestation.build.normalization.daemonClosure.files[0].sha256 = daemonSha256;
+  await writeFile(path.join(root, "build-attestation.json"), canonicalJsonBytes(attestation));
   return root;
 }
 
 async function run(root, overrides = {}) {
-  return produceInventory({ ...structuredClone(base), stagingRoot: root, metadata: {}, ...overrides });
+  const attestation = JSON.parse(await readFile(path.join(root, "build-attestation.json"), "utf8"));
+  return produceInventory({ ...structuredClone(base), attestation, stagingRoot: root, metadata: {}, ...overrides });
 }
 
 async function rejectsCode(promise, code) {
@@ -190,6 +203,9 @@ test("requires exact resource metadata and rejects unknown metadata", async (t) 
   await mkdir(path.join(root, "web/public"), { recursive: true });
   await writeFile(path.join(root, "web/public/logo.png"), "png\n");
   await rejectsCode(run(root), "METADATA_MISSING");
+  const candidate = await run(root, { deferRights: true });
+  assert.ok(candidate.inventory.files.some((file) => file.path === "web/public/logo.png"));
+  assert.ok(candidate.deferredRightsErrors.some((error) => error.code === "UNEXPECTED_RESOURCE"));
   await rejectsCode(run(root, { metadata: { "web/public/missing.png": { resourceCategory: "images", sourcePath: "assets/missing.png", decisionId: "missing" } } }), "UNEXPECTED_METADATA");
   await rejectsCode(run(root, { metadata: { "web/public/logo.png": { resourceCategory: "images", sourcePath: "assets/logo.png", decisionId: "logo", unknown: true } } }), "METADATA_INVALID");
 });

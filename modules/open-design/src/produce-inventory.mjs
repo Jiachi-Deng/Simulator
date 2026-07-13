@@ -11,6 +11,7 @@ import { canonicalJsonBytes, digestInventory, inferResourcePathCategory, loadRun
 const moduleRoot = new URL("../", import.meta.url);
 const encoder = new TextEncoder();
 const RESOURCE_FIELDS = new Set(["resourceCategory", "sourcePath", "decisionId", "nativeTarget"]);
+const DEFERRED_RIGHTS_CODES = new Set(["UNEXPECTED_RESOURCE", "RESOURCE_EXCLUDED", "RIGHTS_EVIDENCE_MISSING"]);
 
 export class InventoryProductionError extends Error {
   constructor(code, message) {
@@ -22,7 +23,7 @@ export class InventoryProductionError extends Error {
 
 const fail = (code, message) => { throw new InventoryProductionError(code, message); };
 
-export async function produceInventory({ stagingRoot, metadata = {}, provenance, policy, decisions, attestation, target, schemas, hook }) {
+export async function produceInventory({ stagingRoot, metadata = {}, provenance, policy, decisions, attestation, target, schemas, hook, deferRights = false }) {
   if (!path.isAbsolute(stagingRoot)) fail("STAGING_ROOT_INVALID", "staging root must be absolute");
   if (!isPlainObject(metadata)) fail("METADATA_INVALID", "metadata map must be an object keyed by exact artifact path");
 
@@ -50,7 +51,7 @@ export async function produceInventory({ stagingRoot, metadata = {}, provenance,
   for (const artifactPath of leafPaths) {
     const rule = findRule(artifactPath, policy);
     if (!rule) fail("PATH_NOT_ALLOWED", `path is outside the feature profile: ${artifactPath}`);
-    const special = validateMetadata(artifactPath, metadata[artifactPath], policy);
+    const special = validateMetadata(artifactPath, metadata[artifactPath], policy, { deferRights });
     const collected = await collectFile({ stagingRoot, artifactPath, rootReal, policy, hook, expected: initial.entries.get(artifactPath) });
     const identityKey = `${collected.stat.dev}:${collected.stat.ino}`;
     if (identities.has(identityKey)) fail("HARD_LINK_ALIAS", `hard-linked artifact paths are forbidden: ${identities.get(identityKey)} and ${artifactPath}`);
@@ -101,8 +102,10 @@ export async function produceInventory({ stagingRoot, metadata = {}, provenance,
   }
   manifest.sha256 = digestInventory(inventory);
   const result = validateArtifact({ provenance, policy, decisions, attestation, inventory, schemas: schemas ?? await loadRuntimeSchemas() });
-  if (!result.ok) fail("ARTIFACT_INVALID", result.errors.map((error) => `${error.code}: ${error.message}`).join("; "));
-  return { inventory, json: canonicalJsonBytes(inventory).toString("utf8") };
+  const deferredErrors = result.errors.filter((error) => DEFERRED_RIGHTS_CODES.has(error.code));
+  const blockingErrors = deferRights ? result.errors.filter((error) => !DEFERRED_RIGHTS_CODES.has(error.code)) : result.errors;
+  if (blockingErrors.length > 0) fail("ARTIFACT_INVALID", blockingErrors.map((error) => `${error.code}: ${error.message}`).join("; "));
+  return { inventory, json: canonicalJsonBytes(inventory).toString("utf8"), deferredRightsErrors: deferredErrors };
 }
 
 async function snapshotDirectory(stagingRoot, rootReal, policy, { hashFiles = false } = {}) {
@@ -223,12 +226,12 @@ function validateArtifactPath(value, policy) {
   if (encoder.encode(value).length > policy.limits.maxPathBytes) fail("PATH_LIMIT_EXCEEDED", `path exceeds maxPathBytes: ${value}`);
 }
 
-function validateMetadata(artifactPath, value, policy) {
+function validateMetadata(artifactPath, value, policy, { deferRights = false } = {}) {
   const extension = path.posix.extname(artifactPath).toLowerCase();
   const pathCategory = inferResourcePathCategory(artifactPath, policy);
   const inferredCategory = runtimeBinaryClass(artifactPath, policy) ? "native-binaries" : Object.entries(policy.resourceExtensions).find(([, extensions]) => extensions.includes(extension))?.[0];
   if (value === undefined) {
-    if (inferredCategory || pathCategory !== undefined) fail("METADATA_MISSING", `resource/native metadata is required for exact path: ${artifactPath}`);
+    if (!deferRights && (inferredCategory || pathCategory !== undefined)) fail("METADATA_MISSING", `resource/native metadata is required for exact path: ${artifactPath}`);
     return {};
   }
   if (!isPlainObject(value) || Object.keys(value).some((key) => !RESOURCE_FIELDS.has(key))) fail("METADATA_INVALID", `metadata has unknown fields: ${artifactPath}`);

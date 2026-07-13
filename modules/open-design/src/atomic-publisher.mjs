@@ -12,6 +12,7 @@ export async function createAtomicStagingTarget(finalRoot) {
   const parent = await ensurePrivateDirectory(path.dirname(finalRoot), { code: "PUBLISH_PARENT_INVALID" });
   const basename = path.basename(finalRoot);
   stagingAssert(basename.length > 0 && basename !== "." && basename !== "..", "PUBLISH_TARGET_INVALID", "publish target basename is invalid");
+  finalRoot = path.join(parent, basename);
   await assertAbsent(finalRoot);
   await fsyncDirectory(parent, "PUBLISH_DURABILITY_UNSUPPORTED");
   const tempRoot = await mkdtemp(path.join(parent, `.${basename}.tmp-`)).catch((error) => stagingFail("PUBLISH_TEMP_FAILED", error.message));
@@ -46,21 +47,60 @@ async function makeTreeWritable(root) {
 }
 
 export async function sealAndPublish({ target, inventory } = {}) {
+  await sealCandidate({ target, inventory });
+  return await publishSealedCandidate({ target, inventory });
+}
+
+export async function sealCandidate({ target, inventory } = {}) {
   stagingAssert(target?.published === false && path.isAbsolute(target?.tempRoot ?? "") && path.isAbsolute(target?.finalRoot ?? ""), "PUBLISH_STATE_INVALID", "atomic staging target is invalid or already published");
+  stagingAssert(target.sealed !== true, "PUBLISH_STATE_INVALID", "atomic staging target is already sealed");
   stagingAssert(inventory?.files && Array.isArray(inventory.files), "PUBLISH_INVENTORY_INVALID", "final inventory is required");
   await verifyFinalInventory(target.tempRoot, inventory);
   await sealTree(target.tempRoot);
-  await verifySealedTree(target.tempRoot, inventory, { transportRootWritable: true });
+  await chmod(target.tempRoot, 0o555).catch((error) => stagingFail("PUBLISH_SEAL_FAILED", error.message));
+  await verifySealedTree(target.tempRoot, inventory);
   await fsyncDirectory(target.tempRoot, "PUBLISH_DURABILITY_UNSUPPORTED");
+  target.sealed = true;
+  return { root: target.tempRoot, sealed: true };
+}
+
+export async function publishSealedCandidate({ target, inventory, afterRename } = {}) {
+  stagingAssert(target?.published === false && target?.sealed === true && path.isAbsolute(target?.tempRoot ?? "") && path.isAbsolute(target?.finalRoot ?? ""), "PUBLISH_STATE_INVALID", "sealed atomic staging target is invalid or already published");
+  await verifySealedTree(target.tempRoot, inventory);
   await assertAbsent(target.finalRoot);
   await ensurePrivateDirectory(target.parent, { code: "PUBLISH_PARENT_INVALID" });
-  await rename(target.tempRoot, target.finalRoot).catch((error) => stagingFail("PUBLISH_RENAME_FAILED", error.message));
-  target.published = true;
-  await chmod(target.finalRoot, 0o555).catch((error) => stagingFail("PUBLISH_SEAL_FAILED", error.message));
-  await fsyncDirectory(target.finalRoot, "PUBLISH_DURABILITY_UNSUPPORTED");
-  await verifySealedTree(target.finalRoot, inventory);
-  await fsyncDirectory(target.parent, "PUBLISH_DURABILITY_UNSUPPORTED");
-  return { root: target.finalRoot, atomic: true, sealed: true, durability: "fsync-complete" };
+  // Darwin refuses to rename a directory whose own mode is 0555. Only the
+  // candidate root is reopened; every contained directory and file stays sealed.
+  await chmod(target.tempRoot, 0o700).catch((error) => stagingFail("PUBLISH_RENAME_FAILED", error.message));
+  await rename(target.tempRoot, target.finalRoot).catch(async (error) => {
+    await chmod(target.tempRoot, 0o555).catch(() => undefined);
+    stagingFail("PUBLISH_RENAME_FAILED", error.message);
+  });
+  try {
+    await chmod(target.finalRoot, 0o555).catch((error) => stagingFail("PUBLISH_SEAL_FAILED", error.message));
+    await afterRename?.(target.finalRoot);
+    await fsyncDirectory(target.finalRoot, "PUBLISH_DURABILITY_UNSUPPORTED");
+    await verifySealedTree(target.finalRoot, inventory);
+    await fsyncDirectory(target.parent, "PUBLISH_DURABILITY_UNSUPPORTED");
+    target.published = true;
+    return { root: target.finalRoot, atomic: true, sealed: true, durability: "fsync-complete" };
+  } catch (error) {
+    await chmod(target.finalRoot, 0o700).catch(() => undefined);
+    const quarantine = path.join(target.parent, `.${path.basename(target.finalRoot)}.failed-${process.pid}-${Date.now()}`);
+    const isolated = await rename(target.finalRoot, quarantine).then(() => quarantine, () => target.finalRoot);
+    await makeTreeWritable(isolated).catch(() => undefined);
+    await rm(isolated, { recursive: true, force: true }).catch(() => undefined);
+    await fsyncDirectory(target.parent, "PUBLISH_DURABILITY_UNSUPPORTED").catch(() => undefined);
+    const visible = await lstat(target.finalRoot).catch((failure) => failure.code === "ENOENT" ? null : failure);
+    if (visible != null) stagingFail("PUBLISH_ROLLBACK_FAILED", `failed publish remains visible at ${target.finalRoot}`);
+    target.sealed = false;
+    throw error;
+  }
+}
+
+export async function verifySealedCandidate({ target, inventory } = {}) {
+  stagingAssert(target?.published === false && target?.sealed === true, "PUBLISH_STATE_INVALID", "sealed candidate is required");
+  await verifySealedTree(target.tempRoot, inventory);
 }
 
 export async function writeExclusiveCanonicalJson(filename, value) {
@@ -123,12 +163,10 @@ async function sealTree(root) {
   }
 }
 
-async function verifySealedTree(root, inventory, { transportRootWritable = false } = {}) {
+async function verifySealedTree(root, inventory) {
   await verifyFinalInventory(root, inventory);
   await visit(root, "", async (_absolutePath, relativePath, stat) => {
-    if (transportRootWritable && relativePath === "") {
-      stagingAssert((stat.mode & 0o077) === 0, "PUBLISH_SEAL_FAILED", "transport root must remain owner-only before rename");
-    } else stagingAssert((stat.mode & 0o222) === 0, "PUBLISH_SEAL_FAILED", `sealed path remains writable: ${relativePath || "."}`);
+    stagingAssert((stat.mode & 0o222) === 0, "PUBLISH_SEAL_FAILED", `sealed path remains writable: ${relativePath || "."}`);
   });
 }
 

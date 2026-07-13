@@ -111,13 +111,15 @@ function validateAttestation({ attestation, provenance, inventory }, fail) {
   }
   if (inventory.target.platform !== actual.platform || inventory.target.arch !== actual.arch || inventory.target.nodeAbi !== actual.nodeAbi) fail("ATTESTATION_TARGET_MISMATCH", "artifact target does not match attested toolchain");
   validateSbomEvidence(attestation.sbom, provenance, fail);
-  const buildStartedAt = Date.parse(attestation.build.startedAt);
   const closure = attestation.build.normalization.daemonClosure;
   const expectedExternals = ["better-sqlite3", "node-pty", "blake3-wasm"];
+  const daemonEntry = inventory.files.find((file) => file.path === "runtime/daemon/dist/sidecar/index.js");
   if (closure?.method !== "esbuild-node24-esm-create-require-banner-v1" || JSON.stringify(closure.externalAllowlist) !== JSON.stringify(expectedExternals)) {
     fail("ATTESTATION_DAEMON_CLOSURE_MISMATCH", "daemon closure method or external allowlist is invalid");
   } else if (!closure.files.some((entry) => entry.path === "runtime/daemon/dist/sidecar/index.js" && entry.sha256 === closure.bundleSha256)) {
     fail("ATTESTATION_DAEMON_CLOSURE_MISMATCH", "daemon closure bundle evidence is missing or does not match its digest");
+  } else if (daemonEntry?.sha256 !== closure.bundleSha256) {
+    fail("ATTESTATION_DAEMON_CLOSURE_MISMATCH", "daemon closure bundle digest does not match the final inventory entry");
   }
   const originByPath = new Map(attestation.build.normalization.nativeOrigins.map((entry) => [entry.path, entry]));
   const nativeByPath = new Map(attestation.native.map((entry) => [entry.path, entry]));
@@ -125,14 +127,20 @@ function validateAttestation({ attestation, provenance, inventory }, fail) {
     if (!["native-binary", "executable-native", "wasm-resource"].includes(file.artifactKind)) continue;
     const native = nativeByPath.get(file.path);
     const origin = originByPath.get(file.path);
-    if (!native || native.sha256 !== file.sha256 || native.resourceClass !== file.artifactKind || native.mode !== file.fileMode || !origin || origin.sha256 !== file.sha256 || origin.mode !== file.fileMode || !Number.isFinite(Date.parse(origin.sourceCtime)) || Date.parse(origin.sourceCtime) < buildStartedAt) {
+    if (!native || native.sha256 !== file.sha256 || native.resourceClass !== file.artifactKind || native.mode !== file.fileMode || !origin || origin.sha256 !== file.sha256 || origin.mode !== file.fileMode || origin.freshFromBuild !== true || native.freshFromBuild !== true) {
       fail("ATTESTATION_NATIVE_MISMATCH", `native output is not bound to fresh normalized build evidence: ${file.path}`);
     } else if (path.posix.extname(file.path).toLowerCase() === ".node" && (native.load?.ok !== true || native.load.nodeAbi !== inventory.target.nodeAbi)) {
       fail("ATTESTATION_NATIVE_MISMATCH", `Node addon is not bound to a successful exact-runtime load: ${file.path}`);
     }
   }
-  if (attestation.smoke.daemon.pid !== attestation.smoke.daemon.status.pid || attestation.smoke.web.pid !== attestation.smoke.web.status.pid) fail("ATTESTATION_SMOKE_MISMATCH", "smoke status PID must match each spawned child");
-  if (attestation.smoke.daemon.entryPath !== "runtime/daemon/dist/sidecar/index.js" || attestation.smoke.web.entryPath !== "runtime/packages/web-sidecar/dist/sidecar/index.js") fail("ATTESTATION_SMOKE_MISMATCH", "smoke entries must bind the staged daemon and web sidecar");
+  const inventoryByPath = new Map(inventory.files.map((file) => [file.path, file]));
+  const expectedEntries = ["runtime/daemon/dist/sidecar/index.js", "runtime/packages/web-sidecar/dist/sidecar/index.js"];
+  if (attestation.runtimeVerification.method !== "sealed-candidate-loopback-v1" || attestation.runtimeVerification.candidateMustBeSealed !== true || JSON.stringify(attestation.runtimeVerification.entries.map((entry) => entry.entryPath)) !== JSON.stringify(expectedEntries)) {
+    fail("ATTESTATION_SMOKE_MISMATCH", "runtime verification policy must bind both sealed candidate entries");
+  }
+  for (const entry of attestation.runtimeVerification.entries) {
+    if (inventoryByPath.get(entry.entryPath)?.sha256 !== entry.entrySha256) fail("ATTESTATION_SMOKE_MISMATCH", `runtime verification digest does not match final inventory: ${entry.entryPath}`);
+  }
 }
 
 function validateSbomEvidence(sbom, provenance, fail) {

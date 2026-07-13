@@ -192,8 +192,8 @@ test("models native targets by kind and matches the artifact target", () => {
     approveResource(input, { id: "tool", category: "native-binaries", sourcePath: "packages/tool.exe" });
     const file = runtimeFile("runtime/packages/tool.exe", { artifactKind: "native-binary", fileMode: "0644", resourceCategory: "native-binaries", decisionId: "tool", sourcePath: "packages/tool.exe", nativeTarget: { format: "executable", platform: "darwin", arch: "arm64", libc: "none" } });
     input.inventory.files.push(file);
-    input.attestation.native.push({ packageName: "sharp", path: file.path, format: "executable", platform: "darwin", arch: "arm64", nodeAbi: "137", libc: "none", binaryFormat: "mach-o", resourceClass: "native-binary", mode: "0644", sha256: file.sha256, sourceCtime: "2026-07-13T00:00:00.000Z", freshFromBuild: true, load: null });
-    input.attestation.build.normalization.nativeOrigins.push({ path: file.path, sha256: file.sha256, sourceCtime: "2026-07-13T00:00:00.000Z", mode: "0644" });
+    input.attestation.native.push({ packageName: "sharp", path: file.path, format: "executable", platform: "darwin", arch: "arm64", nodeAbi: "137", libc: "none", binaryFormat: "mach-o", resourceClass: "native-binary", mode: "0644", sha256: file.sha256, freshFromBuild: true, load: null });
+    input.attestation.build.normalization.nativeOrigins.push({ path: file.path, sha256: file.sha256, freshFromBuild: true, mode: "0644" });
     refreshAttestationAndManifest(input);
   }).ok, true, "non-Node executable must not require nodeAbi");
   has(mutate((input) => {
@@ -213,8 +213,8 @@ test("binds extensionless Mach-O helpers and WASM resources to mode, target, has
       approveResource(input, { id: resource.id, category: "native-binaries", sourcePath: resource.sourcePath });
       const file = runtimeFile(resource.path, { artifactKind: resource.kind, fileMode: resource.mode, component: "daemon", resourceCategory: "native-binaries", decisionId: resource.id, sourcePath: resource.sourcePath, nativeTarget: { format: resource.format, platform: "darwin", arch: "arm64", libc: "none", nodeAbi: "137" } });
       input.inventory.files.push(file);
-      input.attestation.native.push({ packageName: resource.packageName, path: file.path, format: resource.format, platform: "darwin", arch: "arm64", nodeAbi: "137", libc: "none", binaryFormat: resource.binaryFormat, resourceClass: resource.kind, mode: resource.mode, sha256: file.sha256, sourceCtime: "2026-07-13T00:00:00.000Z", freshFromBuild: true, load: null });
-      input.attestation.build.normalization.nativeOrigins.push({ path: file.path, sha256: file.sha256, sourceCtime: "2026-07-13T00:00:00.000Z", mode: resource.mode });
+      input.attestation.native.push({ packageName: resource.packageName, path: file.path, format: resource.format, platform: "darwin", arch: "arm64", nodeAbi: "137", libc: "none", binaryFormat: resource.binaryFormat, resourceClass: resource.kind, mode: resource.mode, sha256: file.sha256, freshFromBuild: true, load: null });
+      input.attestation.build.normalization.nativeOrigins.push({ path: file.path, sha256: file.sha256, freshFromBuild: true, mode: resource.mode });
     }
     refreshAttestationAndManifest(input);
   });
@@ -243,11 +243,16 @@ test("binds patch, exact toolchain, target and every staged Node addon to attest
   has(mutate(({ attestation }) => { attestation.toolchain.nodeExecutableSha256 = "f".repeat(64); }), "ATTESTATION_TOOLCHAIN_MISMATCH");
   has(mutate(({ attestation }) => { attestation.sourceCommit = "f".repeat(40); }), "ATTESTATION_SOURCE_MISMATCH");
   has(mutate((input) => {
+    input.attestation.build.normalization.daemonClosure.bundleSha256 = "f".repeat(64);
+    input.attestation.build.normalization.daemonClosure.files[0].sha256 = "f".repeat(64);
+    refreshAttestationAndManifest(input);
+  }), "ATTESTATION_DAEMON_CLOSURE_MISMATCH");
+  has(mutate((input) => {
     approveResource(input, { id: "addon-attestation", category: "native-binaries", sourcePath: "packages/addon.node" });
     input.inventory.files.push(runtimeFile("runtime/packages/addon.node", {
       artifactKind: "native-binary", fileMode: "0644", resourceCategory: "native-binaries", decisionId: "addon-attestation", sourcePath: "packages/addon.node",
       nativeTarget: { format: "node-addon", platform: "darwin", arch: "arm64", libc: "none", nodeAbi: "137" },
     }));
   }), "ATTESTATION_NATIVE_MISMATCH");
-  has(mutate(({ attestation }) => { attestation.smoke.daemon.status.pid += 1; }), "ATTESTATION_SMOKE_MISMATCH");
+  has(mutate(({ attestation }) => { attestation.runtimeVerification.entries[0].entrySha256 = "f".repeat(64); }), "ATTESTATION_SMOKE_MISMATCH");
 });
