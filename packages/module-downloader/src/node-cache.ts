@@ -404,7 +404,13 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     for (const name of (await directoryNames(dirname(base))).filter((value) => value.startsWith(prefix))) {
       const token = name.slice(prefix.length)
       if (!UUID.test(token)) continue
-      if ((await safeReadFile(join(dirname(base), name), this.root)).toString() !== token) throw new Error('Invalid released lease marker')
+      let bytes: Buffer
+      try { bytes = await safeReadFile(join(dirname(base), name), this.root) }
+      catch (cause) {
+        if (hasCode(cause, 'ENOENT')) continue
+        throw cause
+      }
+      if (bytes.toString() !== token) throw new Error('Invalid released lease marker')
       tokens.push(token)
     }
     return tokens
@@ -541,7 +547,18 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   }
 
   async #newOwner(): Promise<OwnerRecord> {
-    const processStartIdentity = await (this.#ownProcessIdentity ??= this.#processIdentity(process.pid))
+    const pendingIdentity = this.#ownProcessIdentity ?? this.#processIdentity(process.pid)
+    this.#ownProcessIdentity = pendingIdentity
+    let processStartIdentity: string | undefined
+    try {
+      processStartIdentity = await pendingIdentity
+    } catch (cause) {
+      if (this.#ownProcessIdentity === pendingIdentity) this.#ownProcessIdentity = undefined
+      throw cause
+    }
+    if (!processStartIdentity && this.#ownProcessIdentity === pendingIdentity) {
+      this.#ownProcessIdentity = undefined
+    }
     return { token: randomUUID(), pid: process.pid, processInstanceId: PROCESS_INSTANCE_ID, ...(processStartIdentity ? { processStartIdentity } : {}), acquiredAt: this.#now() }
   }
   async #ownerRecordRecoverable(owner: OwnerRecord): Promise<boolean> {
