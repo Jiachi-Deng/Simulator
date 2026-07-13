@@ -17,10 +17,16 @@ for artifact in "$DMG" "$ZIP"; do
   [[ -f "$artifact" ]] || { echo "Missing artifact: $artifact" >&2; exit 1; }
 done
 
-find "$RELEASE_DIR" -maxdepth 1 -type f \( -iname 'latest*.yml' -o -iname '*.blockmap' \) -print -quit | grep -q . && {
-  echo "Updater metadata must not enter an engineering RC: $RELEASE_DIR" >&2
-  exit 1
+assert_no_updater_metadata() {
+  local root=$1
+  local label=$2
+  if find "$root" \( -type f -o -type l \) \( -iname 'latest*.yml' -o -iname 'latest*.yaml' -o -iname '*.blockmap' \) -print -quit | grep -q .; then
+    echo "Updater metadata must not enter an engineering RC $label: $root" >&2
+    exit 1
+  fi
 }
+
+assert_no_updater_metadata "$RELEASE_DIR" "release directory"
 
 WORK=$(mktemp -d)
 MOUNT="$WORK/mount"
@@ -35,6 +41,8 @@ trap cleanup EXIT
 hdiutil verify "$DMG"
 hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT" -quiet
 ditto -x -k "$ZIP" "$UNZIP"
+assert_no_updater_metadata "$MOUNT" "DMG mount root"
+assert_no_updater_metadata "$UNZIP" "ZIP extraction root"
 
 verify_app() {
   local app=$1
@@ -58,13 +66,9 @@ PY
 
 write_inventory() {
   local app=$1
-  local output=$2
-  (
-    cd "$app"
-    find . -type f -print | LC_ALL=C sort | while IFS= read -r path; do
-      shasum -a 256 "$path"
-    done | sed 's#  \./#  #'
-  ) > "$output"
+  local inventory=$2
+  local checksums=$3
+  python3 "$SCRIPT_DIR/write-app-inventory.py" "$app" "$inventory" --spdx-files "$checksums"
 }
 
 DMG_APPS=("$MOUNT"/*.app)
@@ -73,11 +77,11 @@ ZIP_APPS=("$UNZIP"/*.app)
 [[ ${#ZIP_APPS[@]} -eq 1 && -d "${ZIP_APPS[0]}" ]] || { echo "ZIP must contain one app" >&2; exit 1; }
 verify_app "${DMG_APPS[0]}"
 verify_app "${ZIP_APPS[0]}"
-write_inventory "${DMG_APPS[0]}" "$WORK/dmg-files.sha256"
-write_inventory "${ZIP_APPS[0]}" "$WORK/zip-files.sha256"
-if ! cmp -s "$WORK/dmg-files.sha256" "$WORK/zip-files.sha256"; then
-  echo "DMG and ZIP app file inventories differ" >&2
-  diff -u "$WORK/dmg-files.sha256" "$WORK/zip-files.sha256" >&2 || true
+write_inventory "${DMG_APPS[0]}" "$WORK/dmg-app-inventory.jsonl" "$WORK/dmg-files.sha256"
+write_inventory "${ZIP_APPS[0]}" "$WORK/zip-app-inventory.jsonl" "$WORK/zip-files.sha256"
+if ! cmp -s "$WORK/dmg-app-inventory.jsonl" "$WORK/zip-app-inventory.jsonl"; then
+  echo "DMG and ZIP app filesystem inventories differ" >&2
+  diff -u "$WORK/dmg-app-inventory.jsonl" "$WORK/zip-app-inventory.jsonl" >&2 || true
   exit 1
 fi
 
@@ -85,12 +89,10 @@ mkdir -p "$BUNDLE_DIR"
 find "$BUNDLE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 cp "$DMG" "$ZIP" "$BUNDLE_DIR/"
 cp "$WORK/dmg-files.sha256" "$BUNDLE_DIR/packaged-files.sha256"
+cp "$WORK/dmg-app-inventory.jsonl" "$BUNDLE_DIR/app-inventory.jsonl"
 (
   cd "$BUNDLE_DIR"
   shasum -a 256 "$(basename "$DMG")" "$(basename "$ZIP")" > SHA256SUMS
 )
 
-find "$BUNDLE_DIR" -type f \( -iname 'latest*.yml' -o -iname '*.blockmap' \) -print -quit | grep -q . && {
-  echo "Updater metadata leaked into bundle" >&2
-  exit 1
-}
+assert_no_updater_metadata "$BUNDLE_DIR" "bundle"

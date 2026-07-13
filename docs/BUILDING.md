@@ -43,3 +43,5 @@ An unsigned artifact is intended for local engineering verification. macOS may q
 ## Release boundary
 
 The public repository intentionally does not expose the former private upload command. Publishing and update-feed activation remain disabled until Simulator owns the release destination, signing identity, and rollback policy.
+
+Engineering RC bundles keep two different records. `packaged-files.sha256` feeds the SPDX SBOM and therefore lists only regular artifact files with their hashes. `app-inventory.jsonl` is an independent DMG/ZIP parity record: it compares the app bundle's directory structure, regular-file hashes, symlink targets, modes, ownership, filesystem flags, and extended attributes. It is a release-integrity control, not an SPDX assertion about those filesystem objects.

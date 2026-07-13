@@ -39,6 +39,7 @@ describe("minimal SPDX generator", () => {
     expect(first.relationships.some((item) => item.relationshipType === "CONTAINS")).toBe(true)
     expect(first.relationships.some((item) => item.relationshipType === "BUILD_DEPENDENCY_OF")).toBe(true)
     expect(first.relationships.some((item) => item.relationshipType === "DEPENDS_ON")).toBe(false)
+    expect(first.creationInfo.comment).toContain("app-inventory.jsonl parity check")
     expect(first.creationInfo.comment).toContain("not claimed runtime dependencies")
   })
 })

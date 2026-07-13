@@ -43,7 +43,7 @@ export function generateSpdx(lockContent: string, inventoryContent: string, vers
     creationInfo: {
       created,
       creators: ["Tool: scripts/release/generate-spdx.ts"],
-      comment: "Artifact file inventory contains regular files present identically in the DMG and ZIP app bundles. Symlinks, filesystem metadata, code-signing structures, licenses, and runtime dependency reachability are not analyzed. bun.lock resolutions are recorded separately as source build inputs, not claimed runtime dependencies.",
+      comment: "SPDX file entries describe regular artifact files present identically in the DMG and ZIP app bundles. The separate app-inventory.jsonl parity check compares directory structure, symlink targets, modes, ownership, flags, and extended attributes; it is not an SPDX file inventory. Code-signing structures, licenses, and runtime dependency reachability are not analyzed. bun.lock resolutions are recorded separately as source build inputs, not claimed runtime dependencies.",
     },
     documentDescribes: ["SPDXRef-Package-Simulator"],
     packages: [
