@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "sourceCommit": "2225647726d5387bb24e9539fdb577958b6d88c6",
+  "createdAt": "2026-07-13T00:00:00.000Z",
+  "patch": {"path": "patches/open-design-v0.14.1-node-pty-build.patch", "sha256": "9d861cc3c92208ee5a5bb6f7623acaea2c0e5e93deea7df5e5944b666b7f25f7", "postimageSha256": "74401e8c0550cedb17eadfac927fa4db384be277703520db9bbbe8e945bc7e1d", "changedPaths": ["package.json"]},
+  "toolchain": {"nodeVersion": "24.14.1", "nodeAbi": "137", "platform": "darwin", "arch": "arm64", "nodeExecutableSha256": "35d4bc736bbe4161f0c074aa140ddb74586e46969bc2ad63d32c838bec4463ff", "pnpmVersion": "10.33.2", "pnpmExecutableSha256": "b276da51dc8ca5b0d3ee3371695b50fc8b3244b281b091c63a3f082a88dadeb9"},
+  "host": {"platform": "darwin", "arch": "arm64", "release": "fixture", "type": "Darwin"},
+  "environment": {"CI": "1", "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0", "HOME": "/private/build/home", "OD_WEB_OUTPUT_MODE": "standalone", "PATH": "/toolchain/bin:/usr/bin:/bin", "TMPDIR": "/private/build/tmp/", "XDG_CACHE_HOME": "/private/build/cache", "npm_config_cache": "/private/build/cache/npm", "npm_config_store_dir": "/private/build/pnpm-store", "npm_config_update_notifier": "false"},
+  "inputs": [
+    {"name": "package.json", "sha256": "4513a63d525931288a1874676c2a5be397680ff51aeff30acffaf878cae20a74"},
+    {"name": "pnpm-lock.yaml", "sha256": "5b0f471b76ffdcca7f427e5b3cc9eb88cb82f1a30c7ab8a41fb57d46306da80f"},
+    {"name": "pnpm-workspace.yaml", "sha256": "7036cab2720e4e2db1e613bf0b7eb83075be2e60e1dd0ae683f2bca2483cc2ac"},
+    {"name": "apps/web/next-env.d.ts", "sha256": "7ad303e40d4fddf44f156129e397511953a71481c5cfd86b1862649aaaf240cc"},
+    {"name": "patches/open-design-v0.14.1-node-pty-build.patch", "sha256": "9d861cc3c92208ee5a5bb6f7623acaea2c0e5e93deea7df5e5944b666b7f25f7"},
+    {"name": "legal/SBOM.spdx.json", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+    {"name": "resource-metadata.json", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+    {"name": "target.json", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"}
+  ],
+  "commands": [{"ordinal": 0, "executable": "/toolchain/node", "executableSha256": "35d4bc736bbe4161f0c074aa140ddb74586e46969bc2ad63d32c838bec4463ff", "args": ["/toolchain/pnpm.cjs", "install", "--frozen-lockfile"], "cwdRole": "private-detached-checkout", "environmentSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd", "startedAt": "2026-07-13T00:00:00.000Z", "finishedAt": "2026-07-13T00:00:01.000Z"}],
+  "build": {"startedAt": "2026-07-13T00:00:00.000Z", "finishedAt": "2026-07-13T00:00:01.000Z", "privateDetachedCheckout": true, "postBuildVerified": true, "freshOutputs": ["apps/web/.next/standalone", "apps/web/.next/static", "daemon-bundle", "web-sidecar-deploy"], "normalization": {"method": "daemon-esm-bundle-external-closure-v1", "artifactSymlinksForbidden": true, "outputs": [{"role": "next-standalone", "symlinksMaterialized": 1, "hardlinksMaterialized": 0, "virtualStorePackagesHoisted": 0}, {"role": "daemon-esm-bundle-external-closure", "symlinksMaterialized": 0, "hardlinksMaterialized": 0, "virtualStorePackagesHoisted": 0}, {"role": "web-sidecar-closure", "symlinksMaterialized": 1, "hardlinksMaterialized": 1, "virtualStorePackagesHoisted": 0}], "nativeOrigins": [], "daemonClosure": {"method": "esbuild-node24-esm-create-require-banner-v1", "bundleSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "metafileSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "externalAllowlist": ["better-sqlite3", "node-pty", "blake3-wasm"], "files": [{"path": "runtime/daemon/dist/sidecar/index.js", "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}]}}},
+  "native": [],
+  "smoke": {"ok": true, "namespace": "fixture", "tokenSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "daemon": {"pid": 101, "status": {"pid": 101, "state": "running", "url": "http://127.0.0.1:41001"}, "entryPath": "runtime/daemon/dist/sidecar/index.js", "entrySha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "args": ["runtime/daemon/dist/sidecar/index.js"], "startedAt": "2026-07-13T00:00:00.000Z"}, "web": {"pid": 102, "status": {"pid": 102, "state": "running", "url": "http://127.0.0.1:41002"}, "entryPath": "runtime/packages/web-sidecar/dist/sidecar/index.js", "entrySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "args": ["runtime/packages/web-sidecar/dist/sidecar/index.js"], "startedAt": "2026-07-13T00:00:00.000Z"}, "functional": {"ok": true, "daemonVersion": "0.14.1", "webStatus": 200}}
+}
