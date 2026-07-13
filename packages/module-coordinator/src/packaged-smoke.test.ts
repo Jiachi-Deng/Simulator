@@ -2,7 +2,7 @@ import { afterAll, afterEach, describe, expect, it } from 'bun:test'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { chmod, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { delimiter, dirname, join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 import { parseModuleManifest, type ModuleId, type ModuleManifest, type ModulePlatform, type ModuleSha256, type ModuleVersion } from '@simulator/module-contract'
 import { LoopbackHttpHealthAdapter, ModuleDaemonManager, RealClock, RealProcessAdapter, type ModuleDaemonSnapshot } from '@simulator/module-daemon'
@@ -212,6 +212,24 @@ interface PackagedRuntimeOptions {
   readonly startupDelayMs?: number
 }
 
+function packagedRuntimeEnvironment(
+  mode: NonNullable<PackagedRuntimeOptions['mode']>,
+  startupDelayMs: number,
+): Readonly<Record<string, string>> {
+  const environment: Record<string, string> = {
+    PATH: [dirname(process.execPath), '/usr/bin', '/bin'].join(delimiter),
+    SIMULATOR_PACKAGED_FAKE_MODE: mode,
+    SIMULATOR_PACKAGED_FAKE_STARTUP_DELAY_MS: String(startupDelayMs),
+  }
+  if (process.platform === 'win32') {
+    const systemRoot = process.env.SystemRoot
+    if (!systemRoot) throw new Error('Windows packaged runtime requires SystemRoot')
+    environment.PATH = [dirname(process.execPath), join(systemRoot, 'System32')].join(delimiter)
+    environment.SystemRoot = systemRoot
+  }
+  return environment
+}
+
 async function createSystem(fixture: PackagedBundle, options: PackagedRuntimeOptions = {}): Promise<PackagedSystem> {
   const { mode = 'healthy', restartLimit = 2, startupDelayMs = 0 } = options
   const root = await mkdtemp(join(tmpdir(), 'simulator-module-coordinator-packaged-'))
@@ -245,11 +263,7 @@ async function createSystem(fixture: PackagedBundle, options: PackagedRuntimeOpt
     restartBackoffMs: [10, 20],
     idleTimeoutMs: 60_000,
     stopGraceMs: 1_000,
-    baseEnvironment: {
-      PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
-      SIMULATOR_PACKAGED_FAKE_MODE: mode,
-      SIMULATOR_PACKAGED_FAKE_STARTUP_DELAY_MS: String(startupDelayMs),
-    },
+    baseEnvironment: packagedRuntimeEnvironment(mode, startupDelayMs),
   })
   const view = new LoopbackFrontendModuleViewPort({ timeoutMs: 1_000 })
   const coordinator = new ModuleCoordinator({
