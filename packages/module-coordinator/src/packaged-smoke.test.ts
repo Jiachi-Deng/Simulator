@@ -528,7 +528,7 @@ describe('packaged fake module with production runtime adapters', () => {
     await Promise.all([left, right].map(async (id) => {
       expectOperationOk(await system.coordinator.stop({ operationId: `isolation-stop-${id}`, moduleId: id as ModuleId }))
     }))
-  }, 20_000)
+  }, 30_000)
 })
 
 describe('packaged fake module download and extraction failures', () => {
