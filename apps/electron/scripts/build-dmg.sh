@@ -217,7 +217,11 @@ done
 echo "Building Electron app..."
 cd "$ROOT_DIR"
 if [ "$UNSIGNED" = true ]; then
-    SIMULATOR_PUBLIC_BUILD=1 bun run electron:build
+    PUBLIC_PRIVACY_SENTINEL="SIMULATOR_PUBLIC_BUILD_MUST_STRIP_CRASH_INGEST_2026"
+    SENTRY_ELECTRON_INGEST_URL="$PUBLIC_PRIVACY_SENTINEL" \
+      SIMULATOR_PUBLIC_BUILD=1 \
+      SIMULATOR_DISABLE_UPDATES=1 \
+      bun run electron:build
 else
     bun run electron:build
 fi
@@ -233,8 +237,9 @@ else
     export CSC_IDENTITY_AUTO_DISCOVERY=true
 fi
 
-# Build electron-builder arguments
-BUILDER_ARGS="--mac --${ARCH}"
+# Build electron-builder arguments. Engineering RCs must never publish as a
+# side effect of creating their local DMG and ZIP artifacts.
+BUILDER_ARGS=(--mac "--${ARCH}" --publish never)
 
 # Add code signing if identity is available
 if [ "$UNSIGNED" = false ] && [ -n "$APPLE_SIGNING_IDENTITY" ]; then
@@ -258,7 +263,19 @@ if [ "$UNSIGNED" = false ] && [ -n "$APPLE_ID" ] && [ -n "$APPLE_TEAM_ID" ] && [
 fi
 
 # Run electron-builder
-npx electron-builder $BUILDER_ARGS
+npx electron-builder "${BUILDER_ARGS[@]}"
+
+if [ "$UNSIGNED" = true ]; then
+    if [ "$ARCH" = "arm64" ]; then
+        APP_ROOT="$ELECTRON_DIR/release/mac-arm64/Simulator.app"
+    else
+        APP_ROOT="$ELECTRON_DIR/release/mac/Simulator.app"
+    fi
+    require_path "$APP_ROOT" "unsigned app bundle" "electron-builder did not create the expected app."
+    bun "$ROOT_DIR/scripts/release/verify-public-build-privacy.ts" \
+      "$APP_ROOT" \
+      "$PUBLIC_PRIVACY_SENTINEL"
+fi
 
 # 8. Verify the DMG was built
 # electron-builder.yml uses artifactName to output: Simulator-${arch}.dmg
