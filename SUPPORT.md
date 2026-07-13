@@ -11,9 +11,9 @@ Simulator 尚未发布稳定版本。当前 `main`、源码构建和 unsigned En
 Simulator 使用 SemVer：`MAJOR.MINOR.PATCH`。
 
 - `MAJOR`：包含明确不兼容变更；
-- `MINOR`：向后兼容的功能增加；
+- `MINOR`：向后兼容的功能，或 `0.x` 阶段已通过 CHANGELOG、迁移/回滚说明和 ADR 明确记录的不兼容变化；
 - `PATCH`：向后兼容的 Bug 或安全修复；
-- `-rc.N`：Release Candidate，可能在稳定发布前继续变化。
+- `-rc.N`：Release Candidate，`N` 是从 1 开始的正整数；任何修复都产生新的不可变 RC。
 
 所有可分发 workspace 使用同一个版本号。Git tag、Release、Artifact、Checksum、SBOM 和 Provenance 必须指向同一 commit；不满足这一条件的产物不得作为官方 Release 发布。
 

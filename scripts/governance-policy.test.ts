@@ -46,8 +46,11 @@ describe("governance documentation contract", () => {
     expect(operations).toContain("禁止从 release branch")
     expect(read("README.md")).toContain("docs/VERSIONING.md")
     expect(read("CONTRIBUTING.md")).toContain("docs/adr/README.md")
-    expect(read("SUPPORT.md")).toContain("docs/VERSIONING.md")
-    expect(read("SUPPORT.md")).toContain("docs/adr/README.md")
+    const support = read("SUPPORT.md")
+    expect(support).toContain("docs/VERSIONING.md")
+    expect(support).toContain("docs/adr/README.md")
+    expect(support).toContain("`0.x` 阶段已通过 CHANGELOG、迁移/回滚说明和 ADR 明确记录的不兼容变化")
+    expect(support).toContain("`N` 是从 1 开始的正整数")
     expect(operations).toContain("VERSIONING.md")
   })
 
