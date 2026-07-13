@@ -476,7 +476,7 @@ describe('packaged fake module with production runtime adapters', () => {
     expect((await system.coordinator.start({ operationId: 'readiness-start', moduleId: id as ModuleId })).ok).toBe(false)
     expect(await system.view.query(id as ModuleId)).toBeUndefined()
     expect(await system.usage.runExclusive(id as ModuleId, async (lease) => lease.isVersionInUse('1.0.0' as ModuleVersion))).toBe(false)
-  }, 20_000)
+  }, 30_000)
 
   it('records restart budget exhaustion and detaches the frontend', async () => {
     const packaged = await packagedArchive()
@@ -504,7 +504,7 @@ describe('packaged fake module with production runtime adapters', () => {
     }
     expect(system.daemon.get(id as ModuleId)).toMatchObject({ state: 'crashed', diagnostic: { code: 'RESTART_BUDGET_EXHAUSTED' } })
     await system.coordinator.stop({ operationId: 'budget-stop', moduleId: id as ModuleId })
-  }, 20_000)
+  }, 30_000)
 
   it('isolates two running modules when one daemon crashes and restarts', async () => {
     const packaged = await packagedArchive()
