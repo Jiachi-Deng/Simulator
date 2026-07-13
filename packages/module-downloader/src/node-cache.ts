@@ -386,7 +386,12 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
       const marker = this.#leaseReleaseMarker(base, token)
       try { await this.#immutableBytes(marker, Buffer.from(token)) }
       catch (cause) {
-        if (!hasCode(cause, 'EEXIST') || (await safeReadFile(marker, this.root)).toString() !== token) throw cause
+        if (!hasCode(cause, 'EEXIST')) throw cause
+        try {
+          if ((await safeReadFile(marker, this.root)).toString() !== token) throw cause
+        } catch (markerCause) {
+          if (!hasCode(markerCause, 'ENOENT')) throw markerCause
+        }
       }
       try { await safeRemoveFile(join(lock, 'claim.json'), this.root) }
       catch (cause) {

@@ -76,6 +76,21 @@ describe('production filesystem cache', () => {
     expect((await readdir(join(directory, 'leases', 'claims'))).some((name) => name.includes('.released-'))).toBe(false)
   })
 
+  it.skipIf(process.platform !== 'win32')('treats a released marker that vanishes after EEXIST as a completed release', async () => {
+    const directory = await root()
+    const cache = new NodeFilesystemModuleDownloaderCache(directory, {
+      faultInjector(point, path) {
+        if (point === 'temp-write' && path.includes('.released-')) {
+          return rm(path, { force: true }).then(() => {
+            throw Object.assign(new Error('simulated marker collision'), { code: 'EEXIST' })
+          })
+        }
+      },
+    })
+    const lease = await cache.acquireLease('vanishing released marker', new AbortController().signal)
+    await expect(lease.release()).resolves.toBeUndefined()
+  })
+
   for (const code of ['EFAULT', 'EBUSY', 'EPERM'] as const) {
     it.skipIf(process.platform !== 'win32')(`fails finitely without granting a new owner when marker cleanup stays ${code}`, async () => {
       const directory = await root()
