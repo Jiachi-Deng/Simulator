@@ -3,8 +3,12 @@ import { dirname, join } from 'node:path'
 const host = process.env.SIMULATOR_MODULE_HEALTH_HOST
 const port = Number(process.env.SIMULATOR_MODULE_HEALTH_PORT)
 const mode = process.env.SIMULATOR_PACKAGED_FAKE_MODE ?? 'healthy'
+const startupDelayMs = Number(process.env.SIMULATOR_PACKAGED_FAKE_STARTUP_DELAY_MS ?? '0')
 
-if (host !== '127.0.0.1' || !Number.isSafeInteger(port) || port < 1 || port > 65_535) process.exit(64)
+if (host !== '127.0.0.1' || !Number.isSafeInteger(port) || port < 1 || port > 65_535
+  || !Number.isSafeInteger(startupDelayMs) || startupDelayMs < 0 || startupDelayMs > 10_000) process.exit(64)
+
+if (startupDelayMs > 0) await Bun.sleep(startupDelayMs)
 
 let exitScheduled = false
 const moduleRoot = join(dirname(process.execPath), '..')

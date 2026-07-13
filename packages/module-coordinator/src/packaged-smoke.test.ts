@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { gzipSync } from 'node:zlib'
 import { parseModuleManifest, type ModuleId, type ModuleManifest, type ModulePlatform, type ModuleSha256, type ModuleVersion } from '@simulator/module-contract'
-import { LoopbackHttpHealthAdapter, ModuleDaemonManager, RealClock, RealProcessAdapter } from '@simulator/module-daemon'
+import { LoopbackHttpHealthAdapter, ModuleDaemonManager, RealClock, RealProcessAdapter, type ModuleDaemonSnapshot } from '@simulator/module-daemon'
 import { ModuleDownloader, NodeFilesystemModuleDownloaderCache } from '@simulator/module-downloader'
 import { ManualClock, memoryResponse } from '@simulator/module-downloader/testing'
 import { ModuleInstaller } from '@simulator/module-installer'
@@ -21,6 +21,10 @@ import { ModuleRuntimeUseGate } from './usage-gate.ts'
 const NOW = Date.parse('2026-07-13T12:00:00.000Z')
 const CATALOG_URL = 'https://modules.example.test/packaged/catalog.json'
 const PACKAGED_RUNTIME_MAX_BYTES = 128 * 1024 * 1024
+const PROCESS_EXIT_TIMEOUT_MS = 2_000
+const SUPERVISOR_CRASH_TIMEOUT_MS = 2_000
+const REPLACEMENT_READY_TIMEOUT_MS = 6_000
+const VIEW_REATTACH_TIMEOUT_MS = 3_000
 const systems: PackagedSystem[] = []
 let compiledFixture: Promise<{ bytes: Buffer; entrypoint: string }> | undefined
 let compiledFixtureRoot: string | undefined
@@ -202,7 +206,14 @@ interface PackagedSystem {
   request(id: string, version?: string): Parameters<ModuleCoordinator['install']>[0]
 }
 
-async function createSystem(fixture: PackagedBundle, mode = 'healthy', restartLimit = 2): Promise<PackagedSystem> {
+interface PackagedRuntimeOptions {
+  readonly mode?: 'healthy' | 'readiness-failure' | 'crash-after-ready'
+  readonly restartLimit?: number
+  readonly startupDelayMs?: number
+}
+
+async function createSystem(fixture: PackagedBundle, options: PackagedRuntimeOptions = {}): Promise<PackagedSystem> {
+  const { mode = 'healthy', restartLimit = 2, startupDelayMs = 0 } = options
   const root = await mkdtemp(join(tmpdir(), 'simulator-module-coordinator-packaged-'))
   const cacheRoot = join(root, 'cache')
   const moduleRoot = join(root, 'installed')
@@ -226,8 +237,8 @@ async function createSystem(fixture: PackagedBundle, mode = 'healthy', restartLi
     process: new RealProcessAdapter(),
     clock: new RealClock(),
     health: new LoopbackHttpHealthAdapter(),
-    startupTimeoutMs: 500,
-    healthTimeoutMs: 100,
+    startupTimeoutMs: 3_000,
+    healthTimeoutMs: 500,
     healthIntervalMs: 20,
     unhealthyThreshold: 2,
     restartLimit,
@@ -237,6 +248,7 @@ async function createSystem(fixture: PackagedBundle, mode = 'healthy', restartLi
     baseEnvironment: {
       PATH: `${dirname(process.execPath)}:/usr/bin:/bin`,
       SIMULATOR_PACKAGED_FAKE_MODE: mode,
+      SIMULATOR_PACKAGED_FAKE_STARTUP_DELAY_MS: String(startupDelayMs),
     },
   })
   const view = new LoopbackFrontendModuleViewPort({ timeoutMs: 1_000 })
@@ -275,14 +287,114 @@ async function createSystem(fixture: PackagedBundle, mode = 'healthy', restartLi
   return system
 }
 
-async function waitFor<T>(read: () => T | undefined | Promise<T | undefined>, timeoutMs = 5_000): Promise<T> {
+interface DaemonTrace {
+  readonly history: ModuleDaemonSnapshot[]
+  readonly unsubscribe: () => void
+}
+
+function traceDaemon(daemon: ModuleDaemonManager, moduleId: ModuleId): DaemonTrace {
+  const history: ModuleDaemonSnapshot[] = []
+  const initial = daemon.get(moduleId)
+  if (initial) history.push(initial)
+  const unsubscribe = daemon.subscribe((snapshot) => {
+    if (snapshot.id !== moduleId) return
+    history.push(snapshot)
+    if (history.length > 32) history.shift()
+  })
+  return { history, unsubscribe }
+}
+
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false
+    if ((error as NodeJS.ErrnoException).code === 'EPERM') return true
+    throw error
+  }
+}
+
+async function runtimeDiagnostics(
+  system: PackagedSystem,
+  moduleId: ModuleId,
+  history: readonly ModuleDaemonSnapshot[],
+  previousPid?: number,
+): Promise<unknown> {
+  return {
+    daemon: system.daemon.get(moduleId),
+    daemonHistory: history,
+    previousPid,
+    previousPidAlive: previousPid === undefined ? undefined : processExists(previousPid),
+    view: await system.view.query(moduleId),
+    document: system.view.document(moduleId),
+  }
+}
+
+async function waitForPhase<T>(
+  phase: string,
+  read: () => T | undefined | Promise<T | undefined>,
+  timeoutMs: number,
+  diagnostics: () => unknown | Promise<unknown>,
+): Promise<T> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() < deadline) {
     const value = await read()
     if (value !== undefined) return value
     await Bun.sleep(10)
   }
-  throw new Error('Timed out waiting for packaged fixture state')
+  let detail: unknown
+  try {
+    detail = await diagnostics()
+  } catch (error) {
+    detail = { diagnosticsError: error instanceof Error ? error.message : String(error) }
+  }
+  throw new Error(`Timed out waiting for ${phase} after ${timeoutMs}ms; diagnostics=${JSON.stringify(detail)}`)
+}
+
+async function crashAndAwaitHealthyRestart(
+  system: PackagedSystem,
+  moduleId: ModuleId,
+  initial: ModuleDaemonSnapshot,
+): Promise<ModuleDaemonSnapshot> {
+  if (initial.pid === undefined || !initial.endpoint) throw new Error('Expected a healthy daemon with PID and endpoint before crash')
+  const previousPid = initial.pid
+  const trace = traceDaemon(system.daemon, moduleId)
+  const diagnostics = () => runtimeDiagnostics(system, moduleId, trace.history, previousPid)
+  try {
+    const response = await fetch(`http://${initial.endpoint.host}:${initial.endpoint.port}/crash`)
+    if (!response.ok) throw new Error(`Packaged fixture crash endpoint returned HTTP ${response.status}`)
+    await waitForPhase(
+      'old packaged daemon process to exit',
+      () => processExists(previousPid) ? undefined : true,
+      PROCESS_EXIT_TIMEOUT_MS,
+      diagnostics,
+    )
+    await waitForPhase(
+      'daemon supervisor to publish PROCESS_EXITED',
+      () => trace.history.some((snapshot) => snapshot.state === 'crashed' && snapshot.diagnostic?.code === 'PROCESS_EXITED') ? true : undefined,
+      SUPERVISOR_CRASH_TIMEOUT_MS,
+      diagnostics,
+    )
+    const restarted = await waitForPhase(
+      'replacement packaged daemon to become healthy',
+      () => {
+        const snapshot = system.daemon.get(moduleId)
+        return snapshot?.state === 'healthy' && snapshot.pid !== previousPid ? snapshot : undefined
+      },
+      REPLACEMENT_READY_TIMEOUT_MS,
+      diagnostics,
+    )
+    await waitForPhase(
+      'frontend to reattach to replacement daemon',
+      () => system.view.document(moduleId)?.url.includes(`:${restarted.endpoint!.port}/`) ? true : undefined,
+      VIEW_REATTACH_TIMEOUT_MS,
+      diagnostics,
+    )
+    return restarted
+  } finally {
+    trace.unsubscribe()
+  }
 }
 
 function expectOperationOk(result: ModuleCoordinatorOperationResult): void {
@@ -316,23 +428,36 @@ describe('packaged fake module with production runtime adapters', () => {
     const resource = await fetch(`http://${first.endpoint!.host}:${first.endpoint!.port}/resource/data.txt`)
     expect(await resource.text()).toBe('installed packaged fake resource\n')
 
-    await fetch(`http://${first.endpoint!.host}:${first.endpoint!.port}/crash`)
-    const restarted = await waitFor(() => {
-      const value = system.daemon.get(id as ModuleId)
-      return value?.state === 'healthy' && value.pid !== first.pid ? value : undefined
-    })
-    await waitFor(() => system.view.document(id as ModuleId)?.url.includes(`:${restarted.endpoint!.port}/`) ? true : undefined)
+    await crashAndAwaitHealthyRestart(system, id as ModuleId, first)
     expect(system.view.markCrashed(id as ModuleId)).toMatchObject({ state: 'crashed' })
     expectOperationOk(await system.coordinator.restart({ operationId: 'production-renderer-restart', moduleId: id as ModuleId }))
     expect(await system.view.query(id as ModuleId)).toMatchObject({ state: 'attached' })
     expect(builtInAgent).toEqual(expectedAgent)
     await system.coordinator.stop({ operationId: 'production-stop', moduleId: id as ModuleId })
-  }, 20_000)
+  }, 30_000)
+
+  it('restarts and reattaches after a bounded slow daemon startup', async () => {
+    const packaged = await packagedArchive()
+    const id = 'org.simulator.packaged-slow-start'
+    const system = await createSystem(
+      bundle([{ id, version: '1.0.0', ...packaged }]),
+      { startupDelayMs: 750 },
+    )
+
+    expectOperationOk(await system.coordinator.install({ ...system.request(id), operationId: 'slow-start-install' }))
+    expectOperationOk(await system.coordinator.start({ operationId: 'slow-start-start', moduleId: id as ModuleId }))
+    const initial = system.daemon.get(id as ModuleId)!
+    const restarted = await crashAndAwaitHealthyRestart(system, id as ModuleId, initial)
+
+    expect(restarted).toMatchObject({ state: 'healthy', restartCount: 1 })
+    expect(await system.view.query(id as ModuleId)).toMatchObject({ state: 'attached' })
+    expectOperationOk(await system.coordinator.stop({ operationId: 'slow-start-stop', moduleId: id as ModuleId }))
+  }, 30_000)
 
   it('fails closed on readiness failure without attaching a frontend or leaking a runtime lease', async () => {
     const packaged = await packagedArchive()
     const id = 'org.simulator.packaged-readiness'
-    const system = await createSystem(bundle([{ id, version: '1.0.0', ...packaged }]), 'readiness-failure')
+    const system = await createSystem(bundle([{ id, version: '1.0.0', ...packaged }]), { mode: 'readiness-failure', restartLimit: 0 })
     await system.coordinator.install({ ...system.request(id), operationId: 'readiness-install' })
     expect((await system.coordinator.start({ operationId: 'readiness-start', moduleId: id as ModuleId })).ok).toBe(false)
     expect(await system.view.query(id as ModuleId)).toBeUndefined()
@@ -342,11 +467,27 @@ describe('packaged fake module with production runtime adapters', () => {
   it('records restart budget exhaustion and detaches the frontend', async () => {
     const packaged = await packagedArchive()
     const id = 'org.simulator.packaged-restart-budget'
-    const system = await createSystem(bundle([{ id, version: '1.0.0', ...packaged }]), 'crash-after-ready', 1)
+    const system = await createSystem(bundle([{ id, version: '1.0.0', ...packaged }]), { mode: 'crash-after-ready', restartLimit: 1 })
     await system.coordinator.install({ ...system.request(id), operationId: 'budget-install' })
     expectOperationOk(await system.coordinator.start({ operationId: 'budget-start', moduleId: id as ModuleId }))
-    await waitFor(() => system.daemon.get(id as ModuleId)?.diagnostic?.code === 'RESTART_BUDGET_EXHAUSTED' ? true : undefined)
-    await waitFor(async () => (await system.view.query(id as ModuleId))?.state === 'detached' ? true : undefined)
+    const trace = traceDaemon(system.daemon, id as ModuleId)
+    const diagnostics = () => runtimeDiagnostics(system, id as ModuleId, trace.history)
+    try {
+      await waitForPhase(
+        'daemon restart budget exhaustion',
+        () => system.daemon.get(id as ModuleId)?.diagnostic?.code === 'RESTART_BUDGET_EXHAUSTED' ? true : undefined,
+        REPLACEMENT_READY_TIMEOUT_MS,
+        diagnostics,
+      )
+      await waitForPhase(
+        'frontend detach after restart budget exhaustion',
+        async () => (await system.view.query(id as ModuleId))?.state === 'detached' ? true : undefined,
+        VIEW_REATTACH_TIMEOUT_MS,
+        diagnostics,
+      )
+    } finally {
+      trace.unsubscribe()
+    }
     expect(system.daemon.get(id as ModuleId)).toMatchObject({ state: 'crashed', diagnostic: { code: 'RESTART_BUDGET_EXHAUSTED' } })
     await system.coordinator.stop({ operationId: 'budget-stop', moduleId: id as ModuleId })
   }, 20_000)
@@ -365,11 +506,7 @@ describe('packaged fake module with production runtime adapters', () => {
     }
     const leftBefore = system.daemon.get(left as ModuleId)!
     const rightBefore = system.daemon.get(right as ModuleId)!
-    await fetch(`http://${leftBefore.endpoint!.host}:${leftBefore.endpoint!.port}/crash`)
-    await waitFor(() => {
-      const value = system.daemon.get(left as ModuleId)
-      return value?.state === 'healthy' && value.pid !== leftBefore.pid ? true : undefined
-    })
+    await crashAndAwaitHealthyRestart(system, left as ModuleId, leftBefore)
     expect(system.daemon.get(right as ModuleId)).toMatchObject({ state: 'healthy', pid: rightBefore.pid })
     expect(await system.view.query(right as ModuleId)).toMatchObject({ state: 'attached' })
     for (const id of [left, right]) await system.coordinator.stop({ operationId: `isolation-stop-${id}`, moduleId: id as ModuleId })
