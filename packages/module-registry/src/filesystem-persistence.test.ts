@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseModuleManifest } from '@simulator/module-contract'
@@ -209,7 +209,35 @@ describe('FilesystemModuleRegistryPersistence', () => {
     expect(() => raced.read()).toThrow()
   })
 
-  it('does not follow a destination symlink introduced before atomic rename', () => {
+  it('rejects a cross-platform regular-file substitution between lstat and open', () => {
+    const directory = root()
+    const first = new ModuleRegistry(HOST, new FilesystemModuleRegistryPersistence(directory))
+    install(first)
+    const statePath = join(directory, 'module-registry.json')
+    const displaced = join(directory, 'displaced.json')
+    let replaced = false
+    const raced = new FilesystemModuleRegistryPersistence(directory, {
+      faultInjector(point) {
+        if (point !== 'after-state-lstat' || replaced) return
+        replaced = true
+        renameSync(statePath, displaced)
+        writeFileSync(statePath, readFileSync(displaced))
+      },
+    })
+    expect(() => raced.read()).toThrow('Unsafe registry persistence file')
+  })
+
+  it('pins the trusted root device and inode across operations', () => {
+    const directory = root()
+    const displaced = `${directory}-displaced`
+    roots.push(displaced)
+    const persistence = new FilesystemModuleRegistryPersistence(directory)
+    renameSync(directory, displaced)
+    mkdirSync(directory, { mode: 0o700 })
+    expect(() => persistence.read()).toThrow('trusted root changed')
+  })
+
+  it('fails closed on a destination symlink introduced before atomic rename', () => {
     if (process.platform === 'win32') return
     const directory = root()
     const external = join(root(), 'external.json')
@@ -223,9 +251,10 @@ describe('FilesystemModuleRegistryPersistence', () => {
       },
     })
     const registry = new ModuleRegistry(HOST, persistence)
-    install(registry)
+    expect(registry.install(manifest(), { hostVersionRange: '*' }).diagnostics[0]?.code)
+      .toBe('PERSISTENCE_WRITE_FAILED')
 
     expect(readFileSync(external, 'utf8')).toBe('untouched')
-    expect(new ModuleRegistry(HOST, new FilesystemModuleRegistryPersistence(directory)).snapshot().modules).toHaveLength(1)
+    expect(() => new FilesystemModuleRegistryPersistence(directory).read()).toThrow('symlink')
   })
 })

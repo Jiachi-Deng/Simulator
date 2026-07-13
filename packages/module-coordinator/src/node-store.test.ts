@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { NodeFilesystemModuleCoordinatorStore } from './node-store.ts'
@@ -70,6 +70,34 @@ describe('NodeFilesystemModuleCoordinatorStore', () => {
     await expect(store.load()).rejects.toMatchObject({ code: 'STORE_CORRUPT' })
   })
 
+  it('rejects a cross-platform regular-file substitution between lstat and open', async () => {
+    const directory = await root()
+    const statePath = join(directory, 'module-coordinator.json')
+    const displaced = join(directory, 'displaced.json')
+    await writeFile(statePath, JSON.stringify(EMPTY_STATE))
+    let replaced = false
+    const store = new NodeFilesystemModuleCoordinatorStore(directory, {
+      async faultInjector(point) {
+        if (point !== 'after-state-lstat' || replaced) return
+        replaced = true
+        await rename(statePath, displaced)
+        await writeFile(statePath, JSON.stringify(EMPTY_STATE))
+      },
+    })
+    await expect(store.load()).rejects.toMatchObject({ code: 'STORE_CORRUPT' })
+  })
+
+  it('pins the trusted root device and inode across operations', async () => {
+    const directory = await root()
+    const displaced = `${directory}-displaced`
+    roots.push(displaced)
+    const store = new NodeFilesystemModuleCoordinatorStore(directory)
+    await store.save(EMPTY_STATE)
+    await rename(directory, displaced)
+    await mkdir(directory, { mode: 0o700 })
+    await expect(store.load()).rejects.toMatchObject({ code: 'STORE_CORRUPT' })
+  })
+
   it('serializes writers across store instances', async () => {
     const directory = await root()
     let entered!: () => void
@@ -102,7 +130,7 @@ describe('NodeFilesystemModuleCoordinatorStore', () => {
     expect(await store.load()).toEqual(EMPTY_STATE)
   })
 
-  it('atomically replaces a destination symlink without touching its target', async () => {
+  it('fails closed on a destination symlink introduced before atomic rename', async () => {
     if (process.platform === 'win32') return
     const directory = await root()
     const external = join(await root(), 'external.json')
@@ -115,8 +143,7 @@ describe('NodeFilesystemModuleCoordinatorStore', () => {
         await symlink(external, join(directory, 'module-coordinator.json'))
       },
     })
-    await store.save(EMPTY_STATE)
+    await expect(store.save(EMPTY_STATE)).rejects.toMatchObject({ code: 'STORE_CORRUPT' })
     expect(await readFile(external, 'utf8')).toBe('untouched')
-    expect(await store.load()).toEqual(EMPTY_STATE)
   })
 })

@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { constants } from 'node:fs'
 import {
+  chmod,
   lstat,
   link,
   mkdir,
   open,
-  readFile,
   realpath,
   rename,
   rm,
@@ -22,6 +22,20 @@ import {
 const STATE_FILE = 'module-coordinator.json'
 const LOCK_FILE = 'module-coordinator.lock'
 const MAX_STATE_BYTES = 16 * 1024 * 1024
+const NO_FOLLOW = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW
+
+interface FilesystemIdentity {
+  readonly dev: number
+  readonly ino: number
+}
+
+interface RootIdentity extends FilesystemIdentity {
+  readonly canonical: string
+}
+
+function sameIdentity(left: FilesystemIdentity, right: FilesystemIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino
+}
 
 export type NodeCoordinatorStoreFaultPoint =
   | 'after-state-lstat'
@@ -36,7 +50,7 @@ export interface NodeFilesystemModuleCoordinatorStoreOptions {
 export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorStore {
   readonly root: string
   readonly path: string
-  readonly #ready: Promise<string>
+  readonly #ready: Promise<RootIdentity>
   readonly #fault?: NodeFilesystemModuleCoordinatorStoreOptions['faultInjector']
 
   constructor(trustedRoot: string, options: NodeFilesystemModuleCoordinatorStoreOptions = {}) {
@@ -60,13 +74,15 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
     await this.#fault?.('after-state-lstat')
     let handle
     try {
-      handle = await open(this.path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+      handle = await open(this.path, constants.O_RDONLY | NO_FOLLOW)
     } catch (error) {
       this.#corrupt(`state file could not be opened safely: ${this.#message(error)}`)
     }
     try {
       const opened = await handle.stat()
-      if (!opened.isFile() || opened.size > MAX_STATE_BYTES) this.#corrupt('opened state is not a bounded regular file')
+      if (!opened.isFile() || opened.size > MAX_STATE_BYTES || !sameIdentity(info, opened)) {
+        this.#corrupt('opened state identity changed after validation')
+      }
       const bytes = await handle.readFile()
       if (bytes.byteLength > MAX_STATE_BYTES) this.#corrupt('state exceeds the size limit')
       try {
@@ -94,20 +110,34 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
     let temporaryExists = false
     try {
       await this.#assertRoot()
-      const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600)
+      const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW, 0o600)
       temporaryExists = true
+      let temporaryIdentity: FilesystemIdentity
       try {
         await this.#fault?.('after-temp-open')
         await handle.writeFile(serialized)
         await handle.sync()
+        temporaryIdentity = await handle.stat()
       } finally {
         await handle.close()
       }
       await this.#assertRoot()
+      const temporaryBeforeRename = await lstat(temporary)
+      if (!temporaryBeforeRename.isFile() || temporaryBeforeRename.isSymbolicLink()
+        || !sameIdentity(temporaryIdentity!, temporaryBeforeRename)) {
+        this.#corrupt('temporary state identity changed before rename')
+      }
       await this.#assertSafeDestination()
       await this.#fault?.('before-state-rename')
+      await this.#assertRoot()
+      await this.#assertSafeDestination()
       await rename(temporary, this.path)
       temporaryExists = false
+      await this.#assertRoot()
+      const committed = await lstat(this.path)
+      if (!committed.isFile() || committed.isSymbolicLink() || !sameIdentity(temporaryIdentity!, committed)) {
+        this.#corrupt('committed state identity changed during rename')
+      }
       await this.#syncRoot()
     } finally {
       if (temporaryExists) await unlink(temporary).catch(() => undefined)
@@ -116,17 +146,28 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
     }
   }
 
-  async #initializeRoot(): Promise<string> {
+  async #initializeRoot(): Promise<RootIdentity> {
     await mkdir(this.root, { recursive: true, mode: 0o700 })
-    const info = await lstat(this.root)
+    let info = await lstat(this.root)
     if (!info.isDirectory() || info.isSymbolicLink()) throw new TypeError('Coordinator trusted root must be a real directory')
-    return realpath(this.root)
+    if (typeof process.getuid === 'function' && info.uid !== process.getuid()) {
+      throw new TypeError('Coordinator trusted root must be owned by the host user')
+    }
+    if (process.platform !== 'win32') {
+      await chmod(this.root, 0o700)
+      info = await lstat(this.root)
+    }
+    if (process.platform !== 'win32' && (info.mode & 0o077) !== 0) {
+      throw new TypeError('Coordinator trusted root must be owner-only')
+    }
+    return { canonical: await realpath(this.root), dev: info.dev, ino: info.ino }
   }
 
   async #assertRoot(): Promise<void> {
-    const canonical = await this.#ready
+    const expected = await this.#ready
     const info = await lstat(this.root)
-    if (!info.isDirectory() || info.isSymbolicLink() || await realpath(this.root) !== canonical) {
+    if (!info.isDirectory() || info.isSymbolicLink() || !sameIdentity(info, expected)
+      || await realpath(this.root) !== expected.canonical) {
       throw new ModuleCoordinatorError('STORE_CORRUPT', 'Coordinator trusted root changed')
     }
   }
@@ -145,7 +186,7 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const token = randomUUID()
       const candidate = join(this.root, `.${LOCK_FILE}.${token}.tmp`)
-      const handle = await open(candidate, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600)
+      const handle = await open(candidate, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW, 0o600)
       try {
         await handle.writeFile(`${JSON.stringify({ pid: process.pid, token })}\n`, 'utf8')
         await handle.sync()
@@ -172,15 +213,18 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
     const lock = join(this.root, LOCK_FILE)
     let owner: { pid: number; token: string }
     let handle
+    let beforeOpen
     try {
-      handle = await open(lock, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+      beforeOpen = await lstat(lock)
+      if (!beforeOpen.isFile() || beforeOpen.isSymbolicLink()) this.#corrupt('writer lock is invalid')
+      handle = await open(lock, constants.O_RDONLY | NO_FOLLOW)
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true
       this.#corrupt(`writer lock could not be opened safely: ${this.#message(error)}`)
     }
     try {
       const info = await handle.stat()
-      if (!info.isFile() || info.size > 1_024) this.#corrupt('writer lock is invalid')
+      if (!info.isFile() || info.size > 1_024 || !sameIdentity(beforeOpen, info)) this.#corrupt('writer lock is invalid')
       const parsed = JSON.parse((await handle.readFile()).toString('utf8')) as unknown
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) this.#corrupt('writer lock owner is invalid')
       const value = parsed as Record<string, unknown>
@@ -215,12 +259,22 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
 
   async #releaseLock(token: string): Promise<void> {
     const lock = join(this.root, LOCK_FILE)
-    let input: unknown
+    let handle
     try {
-      input = JSON.parse(await readFile(lock, 'utf8')) as unknown
+      const beforeOpen = await lstat(lock)
+      if (!beforeOpen.isFile() || beforeOpen.isSymbolicLink()) this.#corrupt('writer lock is invalid')
+      handle = await open(lock, constants.O_RDONLY | NO_FOLLOW)
+      const opened = await handle.stat()
+      if (!sameIdentity(beforeOpen, opened)) this.#corrupt('writer lock identity changed')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return
       throw error
+    }
+    let input: unknown
+    try {
+      input = JSON.parse((await handle.readFile()).toString('utf8')) as unknown
+    } finally {
+      await handle.close()
     }
     if (input === null || typeof input !== 'object' || (input as { token?: unknown }).token !== token) {
       throw new ModuleCoordinatorError('STORE_CORRUPT', 'Coordinator writer lock ownership changed')

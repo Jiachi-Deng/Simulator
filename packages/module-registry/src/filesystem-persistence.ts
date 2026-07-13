@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import {
   closeSync,
+  chmodSync,
   constants,
   existsSync,
   fstatSync,
@@ -28,6 +29,16 @@ const STATE_FILE = 'module-registry.json'
 const PENDING_FILE = 'module-registry.pending.json'
 const LOCK_FILE = 'module-registry.lock'
 const MAX_STATE_BYTES = 4 * 1024 * 1024
+const NO_FOLLOW = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW
+
+interface FilesystemIdentity {
+  readonly dev: number
+  readonly ino: number
+}
+
+function sameIdentity(left: FilesystemIdentity, right: FilesystemIdentity): boolean {
+  return left.dev === right.dev && left.ino === right.ino
+}
 
 export type FilesystemRegistryFaultPoint =
   | 'after-pending-sync'
@@ -42,13 +53,24 @@ export interface FilesystemModuleRegistryPersistenceOptions {
 export class FilesystemModuleRegistryPersistence implements ModuleRegistryPersistence {
   readonly root: string
   readonly #canonicalRoot: string
+  readonly #rootIdentity: FilesystemIdentity
   readonly #fault?: FilesystemModuleRegistryPersistenceOptions['faultInjector']
 
   constructor(trustedRoot: string, options: FilesystemModuleRegistryPersistenceOptions = {}) {
     if (!isAbsolute(trustedRoot)) throw new TypeError('Registry trusted root must be absolute')
     this.root = resolve(trustedRoot)
     mkdirSync(this.root, { recursive: true, mode: 0o700 })
+    let rootInfo = lstatSync(this.root)
+    if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()
+      || (typeof process.getuid === 'function' && rootInfo.uid !== process.getuid())) {
+      throw new TypeError('Registry trusted root must be a host-owned real directory')
+    }
+    if (process.platform !== 'win32') {
+      chmodSync(this.root, 0o700)
+      rootInfo = lstatSync(this.root)
+    }
     this.#canonicalRoot = realpathSync(this.root)
+    this.#rootIdentity = { dev: rootInfo.dev, ino: rootInfo.ino }
     this.#assertRoot()
     this.#fault = options.faultInjector
   }
@@ -78,18 +100,33 @@ export class FilesystemModuleRegistryPersistence implements ModuleRegistryPersis
       this.#fault?.('after-pending-sync')
       const serialized = this.#serialize(state)
       temporary = this.#path(`.${STATE_FILE}.${randomUUID()}.tmp`)
-      const descriptor = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600)
+      const descriptor = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW, 0o600)
+      let temporaryIdentity: FilesystemIdentity
       try {
         writeFileSync(descriptor, serialized)
         fsyncSync(descriptor)
+        const opened = fstatSync(descriptor)
+        temporaryIdentity = { dev: opened.dev, ino: opened.ino }
       } finally {
         closeSync(descriptor)
       }
       this.#assertRoot()
+      const temporaryBeforeRename = lstatSync(temporary)
+      if (!temporaryBeforeRename.isFile() || temporaryBeforeRename.isSymbolicLink()
+        || !sameIdentity(temporaryIdentity!, temporaryBeforeRename)) {
+        throw new Error('Registry temporary state identity changed before rename')
+      }
       this.#assertSafeDestination(STATE_FILE)
       this.#fault?.('before-state-rename')
+      this.#assertRoot()
+      this.#assertSafeDestination(STATE_FILE)
       renameSync(temporary, this.#path(STATE_FILE))
       temporary = undefined
+      this.#assertRoot()
+      const committed = lstatSync(this.#path(STATE_FILE))
+      if (!committed.isFile() || committed.isSymbolicLink() || !sameIdentity(temporaryIdentity!, committed)) {
+        throw new Error('Registry committed state identity changed during rename')
+      }
       this.#syncRoot()
       this.#fault?.('after-state-rename')
       unlinkSync(this.#path(PENDING_FILE))
@@ -119,10 +156,10 @@ export class FilesystemModuleRegistryPersistence implements ModuleRegistryPersis
       throw new Error(`Unsafe registry persistence file: ${name}`)
     }
     if (name === STATE_FILE) this.#fault?.('after-state-lstat')
-    const descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+    const descriptor = openSync(path, constants.O_RDONLY | NO_FOLLOW)
     try {
       const opened = fstatSync(descriptor)
-      if (!opened.isFile() || opened.size > MAX_STATE_BYTES) {
+      if (!opened.isFile() || opened.size > MAX_STATE_BYTES || !sameIdentity(info, opened)) {
         throw new Error(`Unsafe registry persistence file: ${name}`)
       }
       const bytes = readFileSync(descriptor)
@@ -138,7 +175,7 @@ export class FilesystemModuleRegistryPersistence implements ModuleRegistryPersis
   }
 
   #writeExclusive(name: string, state: PersistedModuleRegistryStateV1): void {
-    const descriptor = openSync(this.#path(name), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600)
+    const descriptor = openSync(this.#path(name), constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW, 0o600)
     try {
       writeFileSync(descriptor, this.#serialize(state))
       fsyncSync(descriptor)
@@ -151,7 +188,7 @@ export class FilesystemModuleRegistryPersistence implements ModuleRegistryPersis
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const token = randomUUID()
       const candidate = this.#path(`.${LOCK_FILE}.${token}.tmp`)
-      const descriptor = openSync(candidate, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600)
+      const descriptor = openSync(candidate, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW, 0o600)
       try {
         writeFileSync(descriptor, `${JSON.stringify({ pid: process.pid, token })}\n`, 'utf8')
         fsyncSync(descriptor)
@@ -199,11 +236,11 @@ export class FilesystemModuleRegistryPersistence implements ModuleRegistryPersis
     if (!this.#safeExists(LOCK_FILE)) return undefined
     const path = this.#path(LOCK_FILE)
     const info = lstatSync(path)
-    if (!info.isFile() || info.size > 1_024) throw new Error('Registry writer lock is invalid')
-    const descriptor = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 1_024) throw new Error('Registry writer lock is invalid')
+    const descriptor = openSync(path, constants.O_RDONLY | NO_FOLLOW)
     try {
       const opened = fstatSync(descriptor)
-      if (!opened.isFile() || opened.size > 1_024) throw new Error('Registry writer lock is invalid')
+      if (!opened.isFile() || opened.size > 1_024 || !sameIdentity(info, opened)) throw new Error('Registry writer lock is invalid')
       const parsed = JSON.parse(readFileSync(descriptor, 'utf8')) as unknown
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Registry writer lock is invalid')
       const value = parsed as Record<string, unknown>
@@ -230,7 +267,10 @@ export class FilesystemModuleRegistryPersistence implements ModuleRegistryPersis
 
   #assertRoot(): void {
     const info = lstatSync(this.root)
-    if (!info.isDirectory() || info.isSymbolicLink() || realpathSync(this.root) !== this.#canonicalRoot) {
+    if (!info.isDirectory() || info.isSymbolicLink() || !sameIdentity(info, this.#rootIdentity)
+      || realpathSync(this.root) !== this.#canonicalRoot
+      || (typeof process.getuid === 'function' && info.uid !== process.getuid())
+      || (process.platform !== 'win32' && (info.mode & 0o077) !== 0)) {
       throw new Error('Registry trusted root changed or is not a real directory')
     }
   }
