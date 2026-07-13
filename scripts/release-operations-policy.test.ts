@@ -19,7 +19,9 @@ describe("release operations policy", () => {
 
   test("the public unsigned packaging path explicitly enables public-build stripping", () => {
     const buildScript = read("apps/electron/scripts/build-dmg.sh")
-    expect(buildScript).toContain("SIMULATOR_PUBLIC_BUILD=1 bun run electron:build")
+    expect(buildScript).toContain("SIMULATOR_PUBLIC_BUILD=1")
+    expect(buildScript).toContain("SIMULATOR_DISABLE_UPDATES=1")
+    expect(buildScript).toContain("verify-public-build-privacy.ts")
   })
 
   test("public policy documents remain discoverable and contain no invented contact", () => {
@@ -32,6 +34,9 @@ describe("release operations policy", () => {
     expect(readme).toContain("[支持与版本政策](SUPPORT.md)")
     expect(security).toContain("[支持与版本政策](SUPPORT.md)")
     expect(privacy).toContain("默认不包含 crash-reporting ingest URL")
+    expect(privacy).toContain("https://agents.craft.do/electron/latest")
+    expect(privacy).toContain("~/.craft-agent/credentials.enc")
+    expect(privacy).toContain("不等同于 macOS Keychain")
     expect(support).toContain("Simulator 尚未发布稳定版本")
 
     for (const document of [privacy, support]) {
@@ -50,5 +55,6 @@ describe("release operations policy", () => {
     expect(disasterRecovery).toContain("每季度至少演练一次")
     expect(disasterRecovery).toContain("Pass/Fail/Not run")
     expect(disasterRecovery).toContain("不得写成已通过")
+    expect(disasterRecovery).toContain("Not run (blocked by #71)")
   })
 })

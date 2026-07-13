@@ -19,13 +19,53 @@
 
 ## 演练场景
 
-1. **Source recovery**：从 tag/commit 干净 clone，frozen install，运行完整 CI 和生产 build。
-2. **Artifact recovery**：下载公开 Artifact，验证 Checksum、SBOM、provenance、架构以及签名状态。
-3. **Host rollback**：安装候选版本，制造可控启动失败，恢复 last-known-good，验证用户数据未被降级写坏。
-4. **Module rollback**：安装 Fake Module，升级到故障版本，验证旧版本仍可启动且故障版本被隔离。
-5. **Credential loss**：使用测试 profile 模拟 Keychain/credential backend 不可用，验证 fail-closed 且日志不泄露 secret。
-6. **Network loss**：在下载、Catalog refresh 和 provider turn 期间断网，验证有限时失败、可重试且无半安装状态。
-7. **Maintainer recovery**：验证另一台干净设备可依据文档找到 security、support、build 和 release 流程。
+### 1. Source recovery
+
+```bash
+git clone https://github.com/Jiachi-Deng/Simulator.git simulator-drill
+cd simulator-drill
+git checkout FULL_SOURCE_SHA
+test -z "$(git status --porcelain)"
+bun install --frozen-lockfile
+bun run validate:ci
+bun run build
+```
+
+预期：checkout 保持 clean，全部命令退出码为 0，版本与目标 Release/RC 完全一致。
+
+### 2. Artifact recovery
+
+Engineering RC 使用 Actions artifact，不冒充公开 Release：
+
+```bash
+gh run download RUN_ID --repo Jiachi-Deng/Simulator \
+  --name simulator-VERSION-macos-arm64-unsigned \
+  --dir recovered-rc
+(cd recovered-rc && shasum -a 256 -c SHA256SUMS)
+bun scripts/release/verify-bundle-policy.ts recovered-rc
+```
+
+预期：Checksum 与 updater-leak policy 均通过，SBOM、provenance bundle 和 validation metadata 存在。稳定版上线后再增加签名、notarization 和公开 GitHub Release 下载验证。
+
+### 3. Host rollback
+
+在合成 macOS 用户中安装候选 DMG，保留上一版 DMG 和数据目录只读备份；制造可控的启动失败后卸载候选 app bundle、重新安装上一版并验证原会话只读打开。当前 Engineering RC updater 被禁用，因此不得用自动更新模拟回滚。预期：旧 app 可启动，数据目录 hash 除明确的日志文件外不变化。正式数据迁移尚未冻结时，此场景必须标记 `Not run` 并链接 Bundle ID/data migration ADR blocker。
+
+### 4. Module rollback
+
+Issue #71 的 packaged Fake Module gate 合并前，本场景必须标记为 `Not run (blocked by #71)`，不得手工伪造成功。合并后运行其专属 `smoke:module-coordinator:packaged` 命令，预期旧版本恢复、故障版本 quarantine，Built-in Agent 仍可启动。
+
+### 5. Credential backend loss
+
+只使用合成 profile：关闭应用，移动测试 profile 的 encrypted credential file，重新启动并执行需要 provider 的操作。预期：操作 fail closed、UI 要求重新认证、日志不出现 secret；测试结束后销毁整个合成 profile，不把真实 credential 文件用于演练。
+
+### 6. Network loss
+
+在干净设备上先确认没有活动写操作，再通过 macOS 系统设置断开网络；分别执行 Artifact 下载和合成 provider request。预期：有限时失败、可取消/重试、没有 partial Artifact 被激活。恢复网络后验证 last-known-good 仍可用。Catalog/Module 下载的正式 E2E 依赖 Issue #71，未合并前标为 `Not run`。
+
+### 7. Maintainer recovery
+
+在另一台干净设备只依据 `README.md`、`SECURITY.md`、`SUPPORT.md` 和本手册完成场景 1、2。预期：不需要开发机私有文件或未记录 secret；任何缺失步骤建立公开 Issue，漏洞细节除外。
 
 ## Evidence Template
 

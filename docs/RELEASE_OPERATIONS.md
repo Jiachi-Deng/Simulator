@@ -6,7 +6,7 @@
 
 1. 记录审查日期、维护者、当前 `main` commit 和最近 Release。
 2. 检查 Dependabot PR、GitHub Advisory、锁文件变化和过期 GitHub Actions。
-3. Fetch `upstream`，对比从上次记录的 Craft commit 到目标 commit 的代码、迁移、许可证与破坏性变更。
+3. Fetch `upstream`，对比从上次记录的 upstream commit 到目标 commit 的代码、迁移、许可证与破坏性变更。
 4. 对每项升级建立独立 Issue；高风险 Runtime、Electron、credential、database 和 updater 变更不得混入普通 dependency batch。
 5. 在独立分支执行 frozen install、`bun run validate:ci`、全部 production build 和对应 packaged smoke。
 6. 记录接受、推迟或拒绝的原因；不要直接 push `main`。
@@ -33,7 +33,7 @@ Deferred risks and owner:
 4. 生成并验证 DMG/ZIP、`SHA256SUMS`、SPDX SBOM 和 provenance/attestation。
 5. unsigned Engineering RC 必须明确标记 unsigned、禁用生产 updater，且不能冒充可自动更新的稳定发行版。
 6. 签名发行必须验证 Developer ID、notarization、stapling、Gatekeeper 和干净设备安装。
-7. 发布前执行 [灾难恢复演练](DISASTER_RECOVERY.md) 中与本次变更相关的恢复路径。
+7. 发布前执行 [灾难恢复演练](DISASTER_RECOVERY.md) 中当前可执行且与本次变更相关的恢复路径；尚未实现的 Module 场景必须标为 `Not run` 并链接 blocker。
 
 ## Go/No-Go
 
@@ -47,7 +47,7 @@ Deferred risks and owner:
 
 ## 发布后
 
-1. 从公开 Release 页面重新下载，而不是复用本地文件。
+1. Engineering RC 从 GitHub Actions run 使用 `gh run download RUN_ID --name simulator-VERSION-macos-arm64-unsigned` 重新下载；稳定版存在后才从公开 GitHub Release 页面下载。不得复用本地 build 输出。
 2. 重新计算 Checksum，验证签名、公证、架构和 SBOM。
 3. 在干净用户账户完成安装、首次启动、Built-in Agent 与 Module 基础 smoke。
 4. 检查公开构建没有意外嵌入 credential、DSN 或 production updater endpoint。

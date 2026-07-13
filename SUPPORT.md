@@ -22,10 +22,17 @@ Simulator 使用 SemVer：`MAJOR.MINOR.PATCH`。
 首个稳定版本发布后，默认支持规则为：
 
 - 最新稳定 `MINOR`：接收 Bug 和安全修复；
-- 前一个稳定 `MINOR`：仅接收 Critical/High 安全修复，最长支持 90 天；
+- 前一个稳定 `MINOR`：仅接收 Critical/High 安全修复；从后继稳定 `MINOR` 发布日开始计算，最长支持 90 个自然日；
 - 更早版本、所有被后续 RC 取代的 RC：End of Support。
 
-维护者可以因严重回归延长支持窗口，但必须在 GitHub Release 或 Security Advisory 中明确说明。自动下载的 Module 可以拥有独立版本，但必须声明与 Host 的兼容范围。
+每次稳定发布必须在本文件的支持矩阵和对应 GitHub Release notes 中记录发布日期、当前支持线和计划 EoS 日期。EoS 至少通过后继 Release notes 公告；安全原因需要缩短窗口时，通过 GitHub Security Advisory 说明。维护者可以因严重回归延长窗口，但必须更新同一记录。自动下载的 Module 可以拥有独立版本，但必须声明与 Host 的兼容范围。
+
+当前支持矩阵：
+
+| Release line | 状态 | EoS |
+| --- | --- | --- |
+| 最新 `main` / 最新 Engineering RC | Pre-release，best effort | 被后续 RC 取代时 |
+| Stable | 尚未发布 | Not applicable |
 
 ## 安全补丁
 
@@ -38,6 +45,6 @@ Simulator 使用 SemVer：`MAJOR.MINOR.PATCH`。
 - 可复现 Bug：使用 Bug Report Issue Form；
 - 功能建议：使用 Feature Request Issue Form；
 - 未公开漏洞：使用 GitHub Private Vulnerability Reporting；
-- Craft 上游行为：先确认问题是否也存在于 Simulator 当前 commit，再决定向哪个项目报告。
+- 上游项目行为：先确认问题是否也存在于 Simulator 当前 commit，再决定向哪个项目报告。
 
 提交日志、数据库、项目或截图前必须移除凭据和私人内容。
