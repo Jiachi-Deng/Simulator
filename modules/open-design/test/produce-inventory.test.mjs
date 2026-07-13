@@ -240,27 +240,18 @@ test("rejects NFKC full-case-fold collisions and path byte limits", async (t) =>
   await rejectsCode(run(limitRoot, { policy }), "PATH_LIMIT_EXCEEDED");
 });
 
-test("CLI accepts only the exact internal manifest output", async (t) => {
+test("CLI writes manifest JSON only to stdout and rejects every --output path", async (t) => {
   const root = await fixture();
   const { configRoot, args } = await cliFixture(root);
   t.after(() => Promise.all([rm(root, { recursive: true, force: true }), rm(configRoot, { recursive: true, force: true })]));
-  await rejectsCli([...args, "--output", path.join(root, "web/standalone/output.json")], "OUTPUT_PATH_INVALID");
-  const output = path.join(root, "artifact-manifest.json");
-  await execFileAsync(process.execPath, [producerPath, ...args, "--output", output]);
-  assert.equal(JSON.parse(await readFile(output, "utf8")).files.some((file) => file.path === "artifact-manifest.json"), true);
-});
-
-test("CLI rejects output paths that cross the staging boundary through symlinks", async (t) => {
-  const root = await fixture();
-  const externalRoot = await mkdtemp(path.join(os.tmpdir(), "open-design-output-"));
-  const { configRoot, args } = await cliFixture(root);
-  t.after(() => Promise.all([rm(root, { recursive: true, force: true }), rm(externalRoot, { recursive: true, force: true }), rm(configRoot, { recursive: true, force: true })]));
-  const injectedParent = path.join(externalRoot, "into-staging");
-  await symlink(root, injectedParent);
-  await rejectsCli([...args, "--output", path.join(injectedParent, "artifact-manifest.json")], "OUTPUT_PATH_INVALID");
-  await symlink(externalRoot, path.join(root, "escape"));
-  await rejectsCli([...args, "--output", path.join(root, "escape", "artifact-manifest.json")], "OUTPUT_PATH_INVALID");
-  await assert.rejects(readFile(path.join(externalRoot, "artifact-manifest.json"), "utf8"));
+  const result = await execFileAsync(process.execPath, [producerPath, ...args]);
+  assert.equal(result.stderr, "");
+  assert.equal(JSON.parse(result.stdout).files.some((file) => file.path === "artifact-manifest.json"), true);
+  await assert.rejects(readFile(path.join(root, "artifact-manifest.json"), "utf8"));
+  for (const output of ["-", path.join(root, "artifact-manifest.json"), path.join(os.tmpdir(), "artifact-manifest.json")]) {
+    await rejectsCli([...args, "--output", output], "ARGUMENT_UNKNOWN");
+  }
+  await rejectsCli([...args, "--output"], "ARGUMENT_UNKNOWN");
 });
 
 test("CLI rejects unknown, duplicate and missing-value arguments", async (t) => {
@@ -269,5 +260,5 @@ test("CLI rejects unknown, duplicate and missing-value arguments", async (t) => 
   t.after(() => Promise.all([rm(root, { recursive: true, force: true }), rm(configRoot, { recursive: true, force: true })]));
   await rejectsCli([...args, "--unknown", "value"], "ARGUMENT_UNKNOWN");
   await rejectsCli([...args, "--target", args.at(-1)], "ARGUMENT_DUPLICATE");
-  await rejectsCli([...args, "--output"], "ARGUMENT_MISSING");
+  await rejectsCli([...args.slice(0, -2), "--target"], "ARGUMENT_MISSING");
 });

@@ -2,7 +2,7 @@
 
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { lstat, open, opendir, readFile, realpath, writeFile } from "node:fs/promises";
+import { lstat, open, opendir, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { caseFold } from "unicode-case-folding";
@@ -101,7 +101,7 @@ export async function produceInventory({ stagingRoot, metadata = {}, provenance,
   manifest.sha256 = digestInventory(inventory);
   const result = validateArtifact({ provenance, policy, decisions, inventory, schemas: schemas ?? await loadRuntimeSchemas() });
   if (!result.ok) fail("ARTIFACT_INVALID", result.errors.map((error) => `${error.code}: ${error.message}`).join("; "));
-  return { inventory, json: `${canonicalJson(inventory)}\n`, baseline: final };
+  return { inventory, json: `${canonicalJson(inventory)}\n` };
 }
 
 async function snapshotDirectory(stagingRoot, rootReal, policy, { hashFiles = false } = {}) {
@@ -269,21 +269,15 @@ async function main(argv) {
   const stagingRoot = options["staging-root"];
   const metadataPath = options.metadata;
   const targetPath = options.target;
-  const output = options.output;
-  const outputLocation = output && await resolveOutputLocation(stagingRoot, output);
   const [metadata, target, provenance, policy, decisions] = await Promise.all([
     readJson(metadataPath), readJson(targetPath), readJson(new URL("provenance.json", moduleRoot)), readJson(new URL("artifact-policy.json", moduleRoot)), readJson(new URL("resource-decisions.json", moduleRoot))
   ]);
-  const { inventory, json, baseline } = await produceInventory({ stagingRoot, metadata, target, provenance, policy, decisions });
-  if (outputLocation) {
-    await writeFile(outputLocation.path, json, { encoding: "utf8", flag: "wx" });
-    if (outputLocation.internal) await verifyInternalOutput({ stagingRoot, output: outputLocation.path, json, inventory, baseline, policy });
-  }
-  else process.stdout.write(json);
+  const { json } = await produceInventory({ stagingRoot, metadata, target, provenance, policy, decisions });
+  process.stdout.write(json);
 }
 
 function parseArguments(argv) {
-  const allowed = new Set(["staging-root", "metadata", "target", "output"]);
+  const allowed = new Set(["staging-root", "metadata", "target"]);
   const options = {};
   for (let index = 0; index < argv.length; index += 2) {
     const token = argv[index];
@@ -296,46 +290,6 @@ function parseArguments(argv) {
   }
   for (const name of ["staging-root", "metadata", "target"]) if (!options[name]) fail("ARGUMENT_MISSING", `required argument: --${name}`);
   return options;
-}
-
-function isWithin(root, candidate) {
-  const relative = path.relative(path.resolve(root), candidate);
-  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
-}
-
-async function resolveOutputLocation(stagingRoot, output) {
-  const stagingAbsolute = path.resolve(stagingRoot);
-  const rootStat = await safeLstat(stagingAbsolute, "staging root");
-  if (!rootStat.isDirectory() || rootStat.isSymbolicLink()) fail("STAGING_ROOT_INVALID", "staging root must be a real directory");
-  const rootReal = await realpath(stagingAbsolute);
-  const requestedPath = path.resolve(output);
-  const requestedInternal = isWithin(stagingAbsolute, requestedPath);
-  const parentReal = await realpath(path.dirname(requestedPath));
-  const parentStat = await safeLstat(parentReal, "output parent");
-  if (!parentStat.isDirectory() || parentStat.isSymbolicLink()) fail("OUTPUT_PATH_INVALID", "output parent must resolve to a real directory");
-  const actualPath = path.join(parentReal, path.basename(requestedPath));
-  const actualInternal = isWithin(rootReal, actualPath);
-  if (requestedInternal !== actualInternal) fail("OUTPUT_PATH_INVALID", "output path must not cross the staging boundary through a symlink");
-  if (actualInternal && actualPath !== path.join(rootReal, "artifact-manifest.json")) fail("OUTPUT_PATH_INVALID", "output inside staging root must be exact artifact-manifest.json");
-  return { path: actualPath, internal: actualInternal };
-}
-
-async function verifyInternalOutput({ stagingRoot, output, json, inventory, baseline, policy }) {
-  const stat = await safeLstat(output, "artifact-manifest.json");
-  if (!stat.isFile() || stat.isSymbolicLink()) fail("OUTPUT_VERIFY_FAILED", "generated manifest is not a regular file");
-  const rootReal = await realpath(stagingRoot);
-  const final = await snapshotDirectory(stagingRoot, rootReal, policy, { hashFiles: true });
-  const expectedPaths = new Set([...baseline.entries.keys(), "artifact-manifest.json"]);
-  if (final.entries.size !== expectedPaths.size || [...final.entries.keys()].some((entry) => !expectedPaths.has(entry))) fail("OUTPUT_VERIFY_FAILED", "output created an unlisted staging entry");
-  for (const [artifactPath, identity] of baseline.entries) {
-    const finalIdentity = final.entries.get(artifactPath);
-    if (!finalIdentity || !sameIdentity(identity, finalIdentity) || identity.sha256 !== finalIdentity.sha256) fail("OUTPUT_VERIFY_FAILED", `staging entry changed while writing output: ${artifactPath}`);
-  }
-  const manifestEntry = inventory.files.find((file) => file.path === "artifact-manifest.json");
-  if (!manifestEntry || await readFile(output, "utf8") !== json) fail("OUTPUT_VERIFY_FAILED", "generated manifest failed final verification");
-  const confirmation = await snapshotDirectory(stagingRoot, rootReal, policy);
-  try { assertSamePathIdentities(final, confirmation, "staging changed after output verification"); }
-  catch (error) { if (error instanceof InventoryProductionError) fail("OUTPUT_VERIFY_FAILED", error.message); else throw error; }
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {

@@ -82,12 +82,11 @@ target 文件示例：
 }
 ```
 
-输出默认写到 stdout，也可使用 `--output` 以 exclusive-create 方式写入尚不存在的文件。staging root 外可使用任意输出路径；staging root 内只接受根目录的 exact `artifact-manifest.json`，producer 会在采集期间保留该路径、写入后复核内容，任何其他内部输出路径都会被拒绝。CLI 拒绝未知参数、重复参数和缺值参数：
+producer 只向 stdout 输出 manifest JSON，不接受 `--output` 或任何文件输出路径。这样不会在路径检查后创建文件，消除了该输出写入面的路径替换 TOCTOU；调用方如需保存结果，应在 producer 进程外处理 stdout。CLI 拒绝未知参数、重复参数和缺值参数：
 
 ```sh
 npm run inventory -- \
   --staging-root /absolute/path/to/staging \
   --metadata /absolute/path/to/metadata.json \
-  --target /absolute/path/to/target.json \
-  --output /absolute/path/to/artifact-manifest.json
+  --target /absolute/path/to/target.json
 ```

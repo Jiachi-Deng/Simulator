@@ -261,13 +261,8 @@ export async function loadRuntimeSchemas() {
 }
 
 async function main(argv) {
+  const options = parseArguments(argv);
   const names = ["provenance", "policy", "decisions", "inventory"];
-  const options = Object.fromEntries(names.map((name) => {
-    const index = argv.indexOf(`--${name}`);
-    return [name, index >= 0 ? argv[index + 1] : undefined];
-  }));
-  const missing = names.filter((name) => !options[name]);
-  if (missing.length) throw new Error(`Missing arguments: ${missing.map((name) => `--${name}`).join(", ")}`);
   const inputs = Object.fromEntries(await Promise.all(names.map(async (name) => [name, await readJson(options[name])])));
   inputs.schemas = await loadRuntimeSchemas();
   const result = validateArtifact(inputs);
@@ -275,6 +270,22 @@ async function main(argv) {
     for (const error of result.errors) console.error(`${error.code}: ${error.message}`);
     process.exitCode = 1;
   } else console.log(`Artifact inventory valid (${inputs.inventory.files.length} files).`);
+}
+
+function parseArguments(argv) {
+  const allowed = new Set(["provenance", "policy", "decisions", "inventory"]);
+  const options = {};
+  for (let index = 0; index < argv.length; index += 2) {
+    const token = argv[index];
+    if (!token?.startsWith("--") || !allowed.has(token.slice(2))) throw new Error(`ARGUMENT_UNKNOWN: unknown argument: ${token}`);
+    const name = token.slice(2);
+    if (Object.hasOwn(options, name)) throw new Error(`ARGUMENT_DUPLICATE: duplicate argument: ${token}`);
+    const value = argv[index + 1];
+    if (!value || value.startsWith("--")) throw new Error(`ARGUMENT_MISSING: missing value for ${token}`);
+    options[name] = value;
+  }
+  for (const name of allowed) if (!options[name]) throw new Error(`ARGUMENT_MISSING: required argument: --${name}`);
+  return options;
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.argv[1])) {
