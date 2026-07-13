@@ -262,6 +262,24 @@ test("rejects artifact-controlled empty component closure against trusted profil
   await assert.rejects(validateArtifact(root, inventory, trustedFakeOptions), /required trusted component missing/)
 }))
 
+test("rejects an unknown component even when all artifact declarations include it", () => withFixture(async (root, inventory) => {
+  const component = {
+    id: "pkg:npm/unreviewed-component@1.0.0", name: "Unreviewed component", version: "1.0.0", license: "MIT",
+  }
+  await mutateJson(root, inventory, "sbom", (value) => {
+    value.components.push({ "bom-ref": component.id, name: component.name, version: component.version, license: component.license })
+  })
+  await mutateJson(root, inventory, "third-party-notices", (value) => {
+    value.components.push({ ...component, notice: "Unreviewed component notice" })
+  })
+  await mutateJson(root, inventory, "third-party-decisions", (value) => {
+    value.decisions.push({
+      id: component.id, decision: "included", license: component.license, rationale: "Artifact-declared component",
+    })
+  })
+  await assert.rejects(validateArtifact(root, inventory, trustedFakeOptions), /included component set does not match trusted profile/)
+}))
+
 test("rejects malformed, Symbol-keyed, and identity-unbound verifier decisions at both library boundaries", () =>
   withFixture(async (root, inventory) => {
     const symbolDecision: Record<PropertyKey, unknown> = { trusted: true, subject: "x", source: "x", evidence: "x" }

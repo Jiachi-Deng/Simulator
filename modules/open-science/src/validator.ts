@@ -364,6 +364,11 @@ function parseComponentClosure(sbomInput: unknown, noticesInput: unknown, decisi
   const sbomIds = [...sbomComponents.keys()].sort()
   const noticeIds = [...noticeComponents.keys()].sort()
   const includedIds = [...included.keys()].sort()
+  const requiredIds = required.map(({ id }) => id).sort()
+  // The artifact's decision inventory cannot expand the trusted profile's allowlist.
+  if (JSON.stringify(includedIds) !== JSON.stringify(requiredIds)) {
+    throw new Error("included component set does not match trusted profile")
+  }
   if (JSON.stringify(sbomIds) !== JSON.stringify(includedIds) || JSON.stringify(noticeIds) !== JSON.stringify(includedIds)) throw new Error("SBOM/notices/decision component closure mismatch")
   for (const id of includedIds) if (sbomComponents.get(id) !== included.get(id) || noticeComponents.get(id) !== included.get(id)) throw new Error(`component license mismatch: ${id}`)
 }
