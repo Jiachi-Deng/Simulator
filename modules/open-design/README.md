@@ -27,6 +27,8 @@
 
 真实 staging 的所有输入都是显式路径，且必须是普通文件：SPDX `2.3` SBOM、resource metadata 和 target JSON。build scratch `--work-root` 必须与最终 `--staging-root` 分离，避免把临时 closure 混入 artifact。
 
+`fixtures/pinned-native-metadata.pending-review.darwin-arm64.json` 来自 pinned upstream 的真实 Node 24 build，只用于验证 exact native load 与后续 smoke。对应 decisions 保持 `review/pending`，因此该 fixture 必须在 inventory rights gate 失败，不能作为 production clearance。
+
 ```sh
 cd modules/open-design
 

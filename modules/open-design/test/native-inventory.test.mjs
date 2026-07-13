@@ -10,6 +10,8 @@ import { assertNativeBuildsAllowed, inspectNativeRuntime, parseNativeHeader } fr
 const target = { platform: "darwin", arch: "arm64", nodeAbi: "137", libc: "none" };
 const runtime = { platform: "darwin", arch: "arm64", nodeAbi: "137" };
 const loaded = { ok: true, nodeVersion: "v24.14.1", nodeAbi: "137", platform: "darwin", arch: "arm64" };
+const pendingMetadata = JSON.parse(await readFile(new URL("../fixtures/pinned-native-metadata.pending-review.darwin-arm64.json", import.meta.url), "utf8"));
+const resourceDecisions = JSON.parse(await readFile(new URL("../resource-decisions.json", import.meta.url), "utf8"));
 
 function arm64MachO() {
   const buffer = Buffer.alloc(32);
@@ -24,6 +26,20 @@ test("requires node-pty to be explicitly allowed to build", () => {
     { code: "NATIVE_BUILD_IGNORED" },
   );
   assert.doesNotThrow(() => assertNativeBuildsAllowed({ pnpm: { onlyBuiltDependencies: ["better-sqlite3", "node-pty", "sharp"] } }));
+});
+
+test("pins every real target-native path while keeping redistribution decisions pending", () => {
+  assert.equal(Object.keys(pendingMetadata).length, 11);
+  const decisionById = new Map(resourceDecisions.decisions.map((decision) => [decision.id, decision]));
+  for (const [artifactPath, metadata] of Object.entries(pendingMetadata)) {
+    assert.match(artifactPath, /(?:better_sqlite3|pty|sharp-darwin-arm64|libvips-cpp).*(?:\.node|\.dylib)$/u);
+    assert.equal(metadata.resourceCategory, "native-binaries");
+    assert.deepEqual({ platform: metadata.nativeTarget.platform, arch: metadata.nativeTarget.arch, nodeAbi: metadata.nativeTarget.nodeAbi, libc: metadata.nativeTarget.libc }, target);
+    const decision = decisionById.get(metadata.decisionId);
+    assert.equal(decision.sourcePath, metadata.sourcePath);
+    assert.equal(decision.status, "review");
+    assert.equal(decision.rightsStatus, "pending");
+  }
 });
 
 test("records target platform, architecture, and Node ABI for required native packages", async (t) => {
