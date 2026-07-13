@@ -178,7 +178,9 @@ export class ModuleCoordinator {
   async dispose(): Promise<void> {
     this.#acceptEvents = false
     this.#unsubscribeDaemon()
-    await Promise.allSettled([...this.#eventTasks])
+    while (this.#eventTasks.size > 0 || this.#moduleTails.size > 0) {
+      await Promise.allSettled([...this.#eventTasks, ...this.#moduleTails.values()])
+    }
     await this.#commitTail
   }
 

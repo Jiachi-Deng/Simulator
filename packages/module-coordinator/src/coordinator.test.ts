@@ -622,4 +622,35 @@ describe('ModuleCoordinator scheduler', () => {
     daemon.release(left)
     await second
   })
+
+  it('does not dispose the durable store while a module operation is still in flight', async () => {
+    const daemon = new BlockingDaemon()
+    const coordinator = new ModuleCoordinator({
+      downloader: {} as never,
+      installer: {
+        recoverAll: async () => undefined,
+        getState: async (moduleId: ModuleId) => ({ moduleId, activeVersion: null, lastKnownGoodVersion: null }),
+      } as never,
+      registry: new ModuleRegistry({ version: '0.11.1', platform: 'darwin-arm64' }),
+      daemon: daemon as never,
+      platform: 'darwin-arm64',
+      store: new InMemoryModuleCoordinatorStore(),
+      archiveLocator: { locate: async () => '' },
+      activationLocator: { locate: async () => '', isInstalled: async () => false },
+      view: { attach: async () => { throw new Error('unused') }, detach: async () => undefined, query: async () => undefined },
+      usage: { acquireReference: async () => () => undefined },
+    })
+    const moduleId = 'org.simulator.dispose-in-flight' as ModuleId
+    const operation = coordinator.stop({ operationId: 'dispose-in-flight', moduleId })
+    await waitFor(() => daemon.calls.length === 1)
+    let disposed = false
+    const disposal = coordinator.dispose().then(() => { disposed = true })
+
+    await Bun.sleep(5)
+    expect(disposed).toBe(false)
+    daemon.release(moduleId)
+    await operation
+    await disposal
+    expect(disposed).toBe(true)
+  })
 })
