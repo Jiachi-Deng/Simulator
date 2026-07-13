@@ -40,6 +40,11 @@ function filesystemError(message: string, cause: unknown): ModuleInstallerError 
   return new ModuleInstallerError('FILESYSTEM_ERROR', `${message}: ${cause instanceof Error ? cause.message : String(cause)}`, cause)
 }
 
+function isUnsupportedFsync(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code
+  return code === 'EINVAL' || code === 'ENOTSUP' || code === 'EISDIR' || code === 'EPERM'
+}
+
 export async function pathExists(path: string): Promise<boolean> {
   try {
     await lstat(path)
@@ -244,7 +249,7 @@ export async function fsyncTree(root: string): Promise<void> {
       else {
         const handle = await open(path, 'r')
         try {
-          await handle.sync()
+          try { await handle.sync() } catch (error) { if (!isUnsupportedFsync(error)) throw error }
         } finally {
           await handle.close()
         }
@@ -267,7 +272,7 @@ export async function fsyncDirectory(directory: string): Promise<void> {
     await handle.sync()
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
-    if (code !== 'EINVAL' && code !== 'ENOTSUP' && code !== 'EISDIR' && code !== 'EPERM') throw error
+    if (!isUnsupportedFsync(error)) throw error
   } finally {
     await handle?.close().catch(() => undefined)
   }
