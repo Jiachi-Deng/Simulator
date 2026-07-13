@@ -10,8 +10,11 @@
     "build": "node ./src/validate-artifact.mjs --provenance ./provenance.json --policy ./artifact-policy.json --decisions ./resource-decisions.json --inventory ./fixtures/minimal-valid.inventory.json",
     "diff-check": "git diff --check -- .",
     "inventory": "node ./src/produce-inventory.mjs",
+    "stage": "node ./src/stage-open-design.mjs",
+    "stage:plan": "node ./src/stage-open-design.mjs --dry-run",
+    "smoke:loopback": "node ./src/smoke-loopback.mjs",
     "test": "node --test",
-    "typecheck": "node --check ./src/validate-artifact.mjs && node --check ./src/produce-inventory.mjs && node --check ./test/validate-artifact.test.mjs && node --check ./test/produce-inventory.test.mjs"
+    "typecheck": "node --check ./src/validate-artifact.mjs && node --check ./src/produce-inventory.mjs && node --check ./src/staging-error.mjs && node --check ./src/verify-upstream.mjs && node --check ./src/native-inventory.mjs && node --check ./src/staging-copier.mjs && node --check ./src/stage-open-design.mjs && node --check ./src/smoke-loopback.mjs && node --check ./test/validate-artifact.test.mjs && node --check ./test/produce-inventory.test.mjs && node --check ./test/verify-upstream.test.mjs && node --check ./test/native-inventory.test.mjs && node --check ./test/staging-infrastructure.test.mjs && node --check ./test/smoke-loopback.test.mjs"
   },
   "engines": {
     "node": ">=20"

@@ -32,7 +32,7 @@
     "installer", "installers", "updater", "updaters", "app-update", "electron", "electron.*", "electron-*", "electron-winstaller"
   ],
   "forbiddenBasenamePatterns": [
-    "*.test.*", "*.spec.*", "latest*.yml", "electron-builder.*", "tsc", "tsx", "eslint", "jest", "vite", "vitest"
+    "*.test.*", "*.spec.*", "*.map", "latest*.yml", "electron-builder.*", "tsc", "tsx", "eslint", "jest", "vite", "vitest"
   ],
   "allowedDependencyScopes": ["production", "artifact"],
   "resourceCategories": ["templates", "fonts", "images", "plugins", "skills", "native-binaries"],

@@ -1,6 +1,6 @@
 # OpenDesign artifact policy
 
-本目录包含 OpenDesign artifact 的 provenance、范围 policy、真实 staging inventory producer 和离线 validator。它不下载或构建上游源码，也不包含上游依赖、二进制或资源文件。
+本目录包含 OpenDesign artifact 的 provenance、范围 policy、生产 staging build runner、安全 copier、native inventory、真实 staging inventory producer 和离线 validator。仓库不提交上游依赖、二进制或其他大型 build artifact。
 
 ## 固定来源
 
@@ -16,15 +16,50 @@
 
 明确排除 nested Electron、desktop/packaged app、installer、updater、dev dependencies、cache、test、coverage、plugin 和 skill。模板、字体、图片及 native binaries 不会因位于允许目录就自动获准；它们必须先在 `resource-decisions.json` 中完成逐项权利和风险决策。
 
-## 计划中的生产流程
+## 生产 staging 流程
 
-1. 在隔离、可复现的构建环境中 checkout `provenance.json` 的精确 commit，并核对 tag 指向。
-2. 使用上游 lockfile、Node 24 和 pnpm 10.33.2 构建 Next standalone 与 daemon/runtime。
-3. 只收集 `artifact-policy.json` allowlist 内的 production 输出，生成 SPDX SBOM 和 artifact inventory。
-4. 对每个模板、字体、图片、plugin、skill 和 native binary 完成 `resource-decisions.schema.json` 所定义的决策。未知权利保持 `review`/`pending` 或 `exclude`，不得进入 artifact。
-5. 对 native binary 记录 `platform`、`arch`、`nodeAbi`、`libc`，并按目标平台分别验证。
-6. 离线运行 validator；通过后才允许后续签名、归档或分发步骤。
+1. `stage-open-design.mjs` 验证 upstream `origin`、完整 commit、tag、根 manifest、Node `~24`、精确 `pnpm@10.33.2`，以及 `provenance.json` 固定的 `pnpm-lock.yaml` SHA-256。
+2. checkout 必须 clean；唯一例外是当前 pinned Next.js 会生成的 `apps/web/next-env.d.ts` 单行路径变更。该例外要求 Git status 和文件前后内容均精确匹配，任何其他改动都会 fail closed。
+3. 真实模式按 upstream `tools/pack` 的 build closure 顺序执行 `pnpm install --frozen-lockfile`、workspace runtime build、Next standalone、web sidecar 和两个 `pnpm deploy --prod` closure。
+4. copier 只写入 `artifact-policy.json` 的目标路径：Next standalone（连同 `.next/static`、`public`）、daemon closure、web sidecar closure、LICENSE、外部 SPDX SBOM 和本模块 provenance。它不会 stage source map、test/cache/Electron/updater 等 policy 排除项，并拒绝 symlink、special file 和 hard link。
+5. native inventory 对 staged `better-sqlite3`、`node-pty` 和 `sharp` 的二进制格式、platform、arch、Node ABI、libc 和显式 metadata 做闭包检查。上游 `pnpm.onlyBuiltDependencies` 也必须逐项允许三个 native package；`node-pty` 被 ignored 时立即失败。
+6. 通过现有 producer 生成并校验 inventory 后，runner 用 `O_EXCL` 写入 `artifact-manifest.json`；随后才能执行 loopback smoke、签名、归档或分发。
 
+真实 staging 的所有输入都是显式路径，且必须是普通文件：SPDX `2.3` SBOM、resource metadata 和 target JSON。build scratch `--work-root` 必须与最终 `--staging-root` 分离，避免把临时 closure 混入 artifact。
+
+```sh
+cd modules/open-design
+
+# 只输出经全部预检后的命令计划，不执行 build 或写入 staging。
+npm run stage:plan -- \
+  --source /absolute/path/to/open-design \
+  --staging-root /absolute/path/to/staging \
+  --work-root /absolute/path/to/build-scratch \
+  --sbom /absolute/path/to/SBOM.spdx.json \
+  --metadata /absolute/path/to/resource-metadata.json \
+  --target /absolute/path/to/target.json
+
+# 通过相同预检后执行真实 build、copy 和 inventory。
+npm run stage -- \
+  --source /absolute/path/to/open-design \
+  --staging-root /absolute/path/to/staging \
+  --work-root /absolute/path/to/build-scratch \
+  --sbom /absolute/path/to/SBOM.spdx.json \
+  --metadata /absolute/path/to/resource-metadata.json \
+  --target /absolute/path/to/target.json
+```
+
+当前 pinned upstream 的 `pnpm.onlyBuiltDependencies` 没有 `node-pty`，所以这个 runner 会在安装前以 `NATIVE_BUILD_IGNORED` 停止。修复必须来自 upstream 或一个重新审计、重新固定的 source revision；不得通过忽略检查或手工复制未验证 native binary 绕过。任何非 Node 24 的执行环境也会在 build 前以 `NODE_VERSION_MISMATCH` 停止。
+
+## Loopback readiness
+
+artifact 启动后，使用 daemon 直接端点与 web sidecar 的 daemon proxy 共同验收：daemon `/api/health`、daemon `/api/ready`、web `/` 和 web `/api/ready` 都必须成功，且 readiness version 必须一致。脚本只接受 `127.0.0.1` 或 `::1`，不会向非 loopback 地址发请求。
+
+```sh
+npm run smoke:loopback -- \
+  --daemon-url http://127.0.0.1:7456 \
+  --web-url http://127.0.0.1:7457
+```
 validator 不访问文件系统中的 artifact。`produce-inventory.mjs` 负责安全读取一个已经完成构建和筛选的 staging root：逐级 `lstat`/`realpath` containment，不跟随 symlink，只接受 regular files；打开 descriptor 后以 `fstat` 绑定 identity，流式计算 SHA-256 和 bytes，再检查 descriptor 与路径的 dev/inode/size/mtime/ctime 未变化。hard-link alias、特殊文件、采集期间替换和修改均会失败。
 
 producer 使用 UTF-8 byte order 排序，并拒绝 NFKC + full Unicode case-fold collision。初始安全遍历记录所有目录和 leaf 的 exact path 与 `dev/ino/size/mtimeNs/ctimeNs`；采集完成后再次完整遍历并复核 exact path set、identity 与每个 leaf 的 SHA-256，随后用 confirmation pass 确保已复核文件没有在 final hash traversal 后变化，因此新增、删除、替换或后改文件都会失败。遍历通过 `opendir` 流式累计 entry count，在保存完整单目录列表前执行全局上限。每个 staged leaf 必须被现有 exact/prefix path rule 覆盖。字体、图片、native binary，以及路径含 `plugins`、`skills`、`templates`、`design-templates`、`design-systems` 或 `assets` 的资源必须在 metadata map 中以 artifact exact path 提供资源 metadata；多余路径、未知字段和缺失 metadata 都会 fail closed。生成后 producer 会立即调用同一个 `validateArtifact`，不会输出未验证 inventory。
@@ -90,3 +125,5 @@ npm run inventory -- \
   --metadata /absolute/path/to/metadata.json \
   --target /absolute/path/to/target.json
 ```
+
+`npm run stage` 是受控的例外：它创建一个全新 staging root，调用 producer 后仅以 `O_EXCL` 创建 artifact manifest，并在写入前绑定 producer 计算的 canonical byte length。不要将 runner 的 staging root、work root 或任何 deploy output 加入 Git。

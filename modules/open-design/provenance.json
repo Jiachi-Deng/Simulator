@@ -19,6 +19,10 @@
     "version": "0.14.1",
     "packageManager": "pnpm@10.33.2"
   },
+  "lockfile": {
+    "path": "pnpm-lock.yaml",
+    "sha256": "5b0f471b76ffdcca7f427e5b3cc9eb88cb82f1a30c7ab8a41fb57d46306da80f"
+  },
   "buildToolchainExpectations": {
     "node": "~24",
     "pnpm": ">=10.33.2 <11",
