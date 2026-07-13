@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "open-design-provenance-v1", "type": "object",
-  "required": ["schemaVersion", "repository", "source", "license", "upstreamManifest", "lockfile", "buildToolchainExpectations"],
+  "required": ["schemaVersion", "repository", "source", "license", "upstreamManifest", "simulatorPatch", "lockfile", "buildInputs", "buildToolchainExpectations", "buildContract"],
   "properties": {
     "schemaVersion": {"const": 1},
     "repository": {"const": "https://github.com/nexu-io/open-design"},
@@ -10,13 +10,30 @@
       "observedHead": {"type": "string", "pattern": "^[0-9a-f]{40}$"}, "auditedAt": {"type": "string", "minLength": 1, "maxLength": 64}
     }, "additionalProperties": false},
     "license": {"type": "object", "required": ["spdxId", "sourceFile"], "properties": {"spdxId": {"const": "Apache-2.0"}, "sourceFile": {"const": "LICENSE"}}, "additionalProperties": false},
-    "upstreamManifest": {"type": "object", "required": ["path", "name", "version", "packageManager"], "properties": {"path": {"const": "package.json"}, "name": {"const": "open-design"}, "version": {"type": "string", "minLength": 1, "maxLength": 64}, "packageManager": {"type": "string", "minLength": 1, "maxLength": 64}}, "additionalProperties": false},
+    "upstreamManifest": {"type": "object", "required": ["path", "name", "version", "packageManager", "sha256"], "properties": {"path": {"const": "package.json"}, "name": {"const": "open-design"}, "version": {"type": "string", "minLength": 1, "maxLength": 64}, "packageManager": {"const": "pnpm@10.33.2"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, "additionalProperties": false},
+    "simulatorPatch": {"type": "object", "required": ["path", "sha256", "preimageSha256", "postimageSha256", "changedPaths", "purpose"], "properties": {
+      "path": {"const": "patches/open-design-v0.14.1-node-pty-build.patch"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+      "preimageSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "postimageSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+      "changedPaths": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"const": "package.json"}},
+      "purpose": {"type": "string", "minLength": 1, "maxLength": 512}
+    }, "additionalProperties": false},
     "lockfile": {"type": "object", "required": ["path", "sha256"], "properties": {"path": {"const": "pnpm-lock.yaml"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, "additionalProperties": false},
-    "buildToolchainExpectations": {"type": "object", "required": ["node", "pnpm", "typescript", "next", "artifactTargets", "reproducibility"], "properties": {
-      "node": {"type": "string", "minLength": 1, "maxLength": 64}, "pnpm": {"type": "string", "minLength": 1, "maxLength": 64},
+    "buildInputs": {"type": "array", "minItems": 5, "maxItems": 16, "items": {"type": "object", "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1, "maxLength": 256}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, "additionalProperties": false}},
+    "buildToolchainExpectations": {"type": "object", "required": ["node", "nodeAbi", "platform", "arch", "nodeDistributionUrl", "nodeDistributionSha256", "nodeExecutableSha256", "pnpm", "pnpmPackageIntegrity", "pnpmExecutableSha256", "typescript", "next", "artifactTargets", "reproducibility"], "properties": {
+      "node": {"const": "24.14.1"}, "nodeAbi": {"const": "137"}, "platform": {"const": "darwin"}, "arch": {"const": "arm64"},
+      "nodeDistributionUrl": {"const": "https://nodejs.org/dist/v24.14.1/node-v24.14.1-darwin-arm64.tar.gz"},
+      "nodeDistributionSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "nodeExecutableSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+      "pnpm": {"const": "10.33.2"}, "pnpmPackageIntegrity": {"type": "string", "pattern": "^sha512-[0-9a-f]{128}$"}, "pnpmExecutableSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
       "typescript": {"type": "string", "minLength": 1, "maxLength": 256}, "next": {"type": "string", "minLength": 1, "maxLength": 64},
       "artifactTargets": {"type": "array", "minItems": 1, "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 256}},
       "reproducibility": {"type": "string", "minLength": 1, "maxLength": 1024}
+    }, "additionalProperties": false},
+    "buildContract": {"type": "object", "required": ["environmentPolicy", "commands"], "properties": {
+      "environmentPolicy": {"type": "object", "required": ["inherit", "force"], "properties": {
+        "inherit": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 64}},
+        "force": {"type": "object", "additionalProperties": {"type": "string"}}
+      }, "additionalProperties": false},
+      "commands": {"type": "array", "minItems": 6, "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 512}}
     }, "additionalProperties": false}
   }, "additionalProperties": false
 }
