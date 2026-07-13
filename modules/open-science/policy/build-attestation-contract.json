@@ -6,6 +6,7 @@
     "sourceRepository",
     "sourceRef",
     "sourceCommit",
+    "sourceLockSha256",
     "bunVersion",
     "modelsDevApiSha256",
     "networkDisabled",

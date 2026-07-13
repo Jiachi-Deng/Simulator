@@ -86,6 +86,7 @@ async function fixture(): Promise<{ root: string; inventory: ArtifactInventory }
   const componentPolicy = JSON.parse(componentPolicyBytes.toString("utf8")) as { components: unknown[] }
   const buildBindings: BuildBindings = {
     binarySha256: hash(binary), sourceRepository: REPOSITORY, sourceRef: REF, sourceCommit: COMMIT,
+    sourceLockSha256: "702eecf22d18e468484f40351ad5f0a7d40fc645784ff93b882c8a63588b4bb1",
     bunVersion: "1.3.5", modelsDevApiSha256: hash(modelsBytes), networkDisabled: true,
     componentPolicySha256: hash(componentPolicyBytes),
     componentSetSha256: hash(Buffer.from(JSON.stringify(componentPolicy.components))),
@@ -107,13 +108,14 @@ async function fixture(): Promise<{ root: string; inventory: ArtifactInventory }
       licenseSha256: "d8ac5e917b2099e5cbe2999f297b56e2cc946e545f39aebc1e1aa91dd5cb0e9f",
       noticeSha256: "7632b32824f48bc3d5f0654cfa2370c1821fc0086349f1d331c9d27b8d66e960",
     },
-    toolchain: { bunVersion: "1.3.5", target: "bun-darwin-arm64", modelsDevApiSha256: hash(modelsBytes), networkDisabled: true },
+    toolchain: { bunVersion: "1.3.5", target: "bun-darwin-arm64", sourceLockSha256: "702eecf22d18e468484f40351ad5f0a7d40fc645784ff93b882c8a63588b4bb1", modelsDevApiSha256: hash(modelsBytes), networkDisabled: true },
   }))
   await write(root, paths.sbom, json({
     bomFormat: "CycloneDX", specVersion: "1.6", version: 1,
     metadata: { sourceCommit: COMMIT, materials: [
       { uri: `${REPOSITORY}@${COMMIT}`, digest: { algorithm: "gitCommit", value: COMMIT } },
       { uri: "https://models.dev/api.json", digest: { algorithm: "sha256", value: hash(modelsBytes) } },
+      { uri: `${REPOSITORY}/bun.lock@${COMMIT}`, digest: { algorithm: "sha256", value: "702eecf22d18e468484f40351ad5f0a7d40fc645784ff93b882c8a63588b4bb1" } },
     ] },
     components: components.map(({ id, name, version, license }) => ({ "bom-ref": id, name, version, license })),
   }))
@@ -330,6 +332,16 @@ test("rejects runtime evidence binary mismatch", () => withFixture(async (root, 
 test("rejects unknown provenance fields", () => withFixture(async (root, inventory) => {
   await mutateJson(root, inventory, "provenance", (value) => { value.unknown = true })
   await assert.rejects(validateArtifact(root, inventory, trustedFakeOptions), /provenance has unknown fields/)
+}))
+
+test("rejects source lock mismatch in provenance", () => withFixture(async (root, inventory) => {
+  await mutateJson(root, inventory, "provenance", (value) => { value.toolchain.sourceLockSha256 = "0".repeat(64) })
+  await assert.rejects(validateArtifact(root, inventory, trustedFakeOptions), /provenance binding mismatch/)
+}))
+
+test("rejects source lock mismatch in trusted build bindings", () => withFixture(async (root, inventory) => {
+  await mutateJson(root, inventory, "build-attestation", (value) => { value.bindings.sourceLockSha256 = "0".repeat(64) })
+  await assert.rejects(validateArtifact(root, inventory, trustedFakeOptions), /build attestation binding mismatch/)
 }))
 
 test("rejects checksum omissions", () => withFixture(async (root, inventory) => {

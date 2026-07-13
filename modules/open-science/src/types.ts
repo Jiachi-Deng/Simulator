@@ -49,6 +49,7 @@ export interface BuildBindings {
   sourceRepository: string
   sourceRef: string
   sourceCommit: string
+  sourceLockSha256: string
   bunVersion: string
   modelsDevApiSha256: string
   networkDisabled: true

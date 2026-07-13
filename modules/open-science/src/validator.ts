@@ -2,19 +2,12 @@ import { createHash } from "node:crypto"
 import { lstat, readdir, readFile, realpath } from "node:fs/promises"
 import path from "node:path"
 import { parseTrustDecision } from "./trust-decision.js"
+import { OPENSCIENCE_PIN as PIN } from "./pins.js"
 import type {
   ArtifactInventory, ArtifactRole, BuildBindings, InventoryFile, RuntimeBindings, RuntimePolicy, TrustDecision,
   ValidationOptions, VerificationIdentity,
 } from "./types.js"
 
-const PIN = {
-  repository: "https://github.com/synthetic-sciences/openscience",
-  ref: "refs/tags/v1.3.4",
-  commit: "109a1b94329fa4cdd82e984b5a40bfe8842b5e6f",
-  bun: "1.3.5",
-  licenseSha256: "d8ac5e917b2099e5cbe2999f297b56e2cc946e545f39aebc1e1aa91dd5cb0e9f",
-  noticeSha256: "7632b32824f48bc3d5f0654cfa2370c1821fc0086349f1d331c9d27b8d66e960",
-} as const
 const MAX_FILE_SIZE = 256 * 1024 * 1024
 const MAX_TOTAL_SIZE = 384 * 1024 * 1024
 const SHA256 = /^[a-f0-9]{64}$/
@@ -214,10 +207,10 @@ function parseProvenance(input: unknown, modelsDigest: string): void {
   const toolchain = record(root.toolchain, "provenance.toolchain")
   exactKeys(source, ["repository", "ref", "commit"], "provenance.source")
   exactKeys(legal, ["license", "licenseSha256", "noticeSha256"], "provenance.legal")
-  exactKeys(toolchain, ["bunVersion", "target", "modelsDevApiSha256", "networkDisabled"], "provenance.toolchain")
+  exactKeys(toolchain, ["bunVersion", "target", "sourceLockSha256", "modelsDevApiSha256", "networkDisabled"], "provenance.toolchain")
   if (root.schemaVersion !== 1 || source.repository !== PIN.repository || source.ref !== PIN.ref || source.commit !== PIN.commit ||
       legal.license !== "Apache-2.0" || legal.licenseSha256 !== PIN.licenseSha256 || legal.noticeSha256 !== PIN.noticeSha256 ||
-      toolchain.bunVersion !== PIN.bun || toolchain.target !== "bun-darwin-arm64" ||
+      toolchain.bunVersion !== PIN.bun || toolchain.target !== PIN.target || toolchain.sourceLockSha256 !== PIN.bunLockSha256 ||
       toolchain.modelsDevApiSha256 !== modelsDigest || toolchain.networkDisabled !== true) throw new Error("provenance binding mismatch")
 }
 
@@ -310,6 +303,7 @@ function parseComponentClosure(sbomInput: unknown, noticesInput: unknown, decisi
   const expectedMaterials = [
     { uri: `${PIN.repository}@${PIN.commit}`, digest: { algorithm: "gitCommit", value: PIN.commit } },
     { uri: "https://models.dev/api.json", digest: { algorithm: "sha256", value: modelsDigest } },
+    { uri: `${PIN.repository}/bun.lock@${PIN.commit}`, digest: { algorithm: "sha256", value: PIN.bunLockSha256 } },
   ]
   if (JSON.stringify(materials) !== JSON.stringify(expectedMaterials)) throw new Error("SBOM material closure mismatch")
   const sbomComponents = new Map<string, string>()
@@ -394,7 +388,7 @@ function parseBuildAttestation(input: unknown): BuildBindings {
   const root = record(input, "build attestation")
   exactKeys(root, ["schemaVersion", "predicateType", "bindings"], "build attestation")
   const bindings = record(root.bindings, "build attestation bindings")
-  exactKeys(bindings, ["binarySha256", "sourceRepository", "sourceRef", "sourceCommit", "bunVersion", "modelsDevApiSha256", "networkDisabled", "componentPolicySha256", "componentSetSha256"], "build attestation bindings")
+  exactKeys(bindings, ["binarySha256", "sourceRepository", "sourceRef", "sourceCommit", "sourceLockSha256", "bunVersion", "modelsDevApiSha256", "networkDisabled", "componentPolicySha256", "componentSetSha256"], "build attestation bindings")
   if (root.schemaVersion !== 1 || root.predicateType !== "https://slsa.dev/provenance/v1") throw new Error("build attestation schema mismatch")
   return bindings as unknown as BuildBindings
 }
@@ -447,7 +441,8 @@ export async function validateArtifact(root: string, rawInventory: unknown, opti
 
   const buildExpected: BuildBindings = {
     binarySha256: leaf("binary").sha256, sourceRepository: PIN.repository, sourceRef: PIN.ref,
-    sourceCommit: PIN.commit, bunVersion: PIN.bun, modelsDevApiSha256: leaf("models-snapshot").sha256, networkDisabled: true,
+    sourceCommit: PIN.commit, sourceLockSha256: PIN.bunLockSha256, bunVersion: PIN.bun,
+    modelsDevApiSha256: leaf("models-snapshot").sha256, networkDisabled: true,
     componentPolicySha256: trustedComponents.policySha256, componentSetSha256: trustedComponents.componentSetSha256,
   }
   const attestation = parseJson(leaf("build-attestation"), "build attestation")

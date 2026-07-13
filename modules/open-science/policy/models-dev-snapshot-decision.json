@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "source": "https://models.dev/api.json",
+  "sha256": "bc75bbf216a1519d8b36fada7c1fe21fbc7b01f949998e9208f67f31a762e68b",
+  "disposition": "included-offline-only",
+  "rationale": "Reviewed 2026-07-13 snapshot required by the exact OpenScience v1.3.4 source build. The build is denied network access and must use this immutable file through MODELS_DEV_API_JSON.",
+  "refresh": "A new snapshot requires an explicit digest and legal/security review before replacing this decision."
+}
