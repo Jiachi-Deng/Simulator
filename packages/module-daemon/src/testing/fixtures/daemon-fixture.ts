@@ -26,7 +26,7 @@ const childProgram = `
     process.exit(0);
   });
   await Bun.sleep(${Number.isSafeInteger(childReadyDelayMs) && childReadyDelayMs >= 0 ? childReadyDelayMs : 0});
-  writeFileSync(${JSON.stringify(childPidFile)}, String(process.pid));
+  writeFileSync(${JSON.stringify(childPidFile)}, String(process.pid) + '\\n');
   setInterval(() => {}, 1000);
 `
 const child = Bun.spawn([runtime, '-e', childProgram], {

@@ -49,18 +49,59 @@ async function waitForExit(pid: number): Promise<void> {
   if (processExists(pid)) throw new Error(`process ${pid} remained alive after ${timeoutMs}ms`)
 }
 
-async function waitForFile(path: string): Promise<string> {
-  const deadline = Date.now() + 2_000
+function parseFixturePid(value: string): number | undefined {
+  const match = value.match(/^([1-9]\d*)\n$/)
+  if (!match) return undefined
+  const pid = Number(match[1])
+  return Number.isSafeInteger(pid) && pid <= 0x7fffffff ? pid : undefined
+}
+
+async function waitForPidFile(path: string, timeoutMs = 2_000, onRead?: (value: string) => void): Promise<number> {
+  const deadline = Date.now() + timeoutMs
+  let lastValue: string | undefined
   while (Date.now() < deadline) {
     try {
-      return await readFile(path, 'utf8')
+      lastValue = await readFile(path, 'utf8')
+      onRead?.(lastValue)
+      const pid = parseFixturePid(lastValue)
+      if (pid !== undefined) return pid
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
     }
     await Bun.sleep(10)
   }
-  throw new Error(`Timed out waiting for fixture file ${path}`)
+  throw new Error(`Timed out waiting for a valid fixture PID in ${path}; last value: ${JSON.stringify(lastValue)}`)
 }
+
+describe('fixture PID readiness', () => {
+  test('waits through observed empty and digit-prefix states for a terminated PID record', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'simulator-daemon-pid-'))
+    roots.push(root)
+    const path = join(root, 'child.pid')
+    await Bun.write(path, '')
+    let resolveEmpty!: () => void
+    let resolvePrefix!: () => void
+    const observedEmpty = new Promise<void>((resolve) => { resolveEmpty = resolve })
+    const observedPrefix = new Promise<void>((resolve) => { resolvePrefix = resolve })
+    const waiting = waitForPidFile(path, 1_000, (value) => {
+      if (value === '') resolveEmpty()
+      if (value === '123') resolvePrefix()
+    })
+
+    await observedEmpty
+    await Bun.write(path, '123')
+    await observedPrefix
+    await Bun.write(path, `${process.pid}\n`)
+
+    expect(await waiting).toBe(process.pid)
+  })
+
+  test('rejects values that must never reach process.kill', () => {
+    for (const value of ['', '0\n', '-1\n', '1.5\n', '1x\n', '01\n', '123', '2147483648\n']) {
+      expect(parseFixturePid(value)).toBeUndefined()
+    }
+  })
+})
 
 describe.skipIf(process.platform === 'win32')('real local module daemon fixture', () => {
   test('runs 20 start/stop cycles without parent or descendant orphans', async () => {
@@ -114,7 +155,7 @@ describe.skipIf(process.platform === 'win32')('real local module daemon fixture'
       expect(started.state).toBe('healthy')
       endpoints.add(started.endpoint!.port)
       const parentPid = started.pid!
-      const childPid = Number(await waitForFile(childPidFile))
+      const childPid = await waitForPidFile(childPidFile)
       expect(processExists(parentPid)).toBe(true)
       expect(processExists(childPid)).toBe(true)
 
@@ -174,7 +215,7 @@ describe.skipIf(process.platform === 'win32')('real local module daemon fixture'
     })
     const manifest = fixtureManifest(entrypoint)
     await manager.start({ manifest, activatedRoot: root, platform: currentPlatform() })
-    const childPid = Number(await waitForFile(childPidFile))
+    const childPid = await waitForPidFile(childPidFile)
     const deadline = Date.now() + 5_000
     while (manager.get(manifest.id)?.state !== 'crashed' && Date.now() < deadline) await Bun.sleep(10)
     expect(manager.get(manifest.id)).toMatchObject({
