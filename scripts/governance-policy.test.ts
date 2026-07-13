@@ -46,11 +46,13 @@ describe("governance documentation contract", () => {
     expect(operations).toContain("禁止从 release branch")
     expect(read("README.md")).toContain("docs/VERSIONING.md")
     expect(read("CONTRIBUTING.md")).toContain("docs/adr/README.md")
+    expect(read("SUPPORT.md")).toContain("docs/VERSIONING.md")
+    expect(read("SUPPORT.md")).toContain("docs/adr/README.md")
     expect(operations).toContain("VERSIONING.md")
   })
 
   test("keeps every new local governance link resolvable", () => {
-    for (const source of ["README.md", "CONTRIBUTING.md", "docs/VERSIONING.md", "docs/RELEASE_OPERATIONS.md", "docs/adr/README.md"]) {
+    for (const source of ["README.md", "CONTRIBUTING.md", "SUPPORT.md", "docs/VERSIONING.md", "docs/RELEASE_OPERATIONS.md", "docs/adr/README.md"]) {
       for (const target of localMarkdownLinks(source)) {
         expect(existsSync(target), `${source} links to missing ${target}`).toBeTrue()
       }

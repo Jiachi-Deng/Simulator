@@ -6,6 +6,8 @@ Simulator 尚未发布稳定版本。当前 `main`、源码构建和 unsigned En
 
 ## 版本规则
 
+完整的版本事实源、RC 不可变性、Host/Module 边界与发布证据规则以 [Simulator Versioning Policy](docs/VERSIONING.md) 为准；长期兼容性决定遵循 [Architecture Decision Record 流程](docs/adr/README.md)。
+
 Simulator 使用 SemVer：`MAJOR.MINOR.PATCH`。
 
 - `MAJOR`：包含明确不兼容变更；
