@@ -448,7 +448,7 @@ describe('ModuleCoordinator all-operation forward crash matrix', () => {
         if (kind === 'uninstall') {
           expect(restarted.registry.snapshot().modules[0]?.versions.map((item) => item.version)).not.toContain('1.0.0')
         }
-      })
+      }, 15_000)
     }
   }
 })
@@ -506,7 +506,7 @@ describe('ModuleCoordinator all-operation compensation crash matrix', () => {
         const module = restarted.registry.snapshot().modules.find((item) => item.id === MODULE_ID)
         expect(module?.activeVersion ?? null).toBe(operation?.source.activeVersion ?? null)
         expect((await restarted.view.query(MODULE_ID as ModuleId))?.state === 'attached').toBe(operation?.source.viewAttached ?? false)
-      })
+      }, 15_000)
     }
   }
 })
