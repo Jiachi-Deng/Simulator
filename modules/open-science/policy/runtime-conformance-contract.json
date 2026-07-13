@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "requiredBindings": [
+    "binarySha256",
+    "dynamicLoopbackBind",
+    "hostValidation",
+    "originValidation",
+    "productionCredentialPersistenceDenied"
+  ],
+  "trustPolicy": {
+    "default": "deny",
+    "externalVerifierRequired": true,
+    "plainJsonTrusted": false
+  }
+}
