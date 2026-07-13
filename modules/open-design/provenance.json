@@ -60,7 +60,7 @@
   },
   "buildContract": {
     "environmentPolicy": {
-      "inherit": ["HOME", "TMPDIR"],
+      "inherit": [],
       "force": {
         "CI": "1",
         "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",

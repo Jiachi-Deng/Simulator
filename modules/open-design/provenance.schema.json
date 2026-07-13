@@ -30,7 +30,7 @@
     }, "additionalProperties": false},
     "buildContract": {"type": "object", "required": ["environmentPolicy", "commands"], "properties": {
       "environmentPolicy": {"type": "object", "required": ["inherit", "force"], "properties": {
-        "inherit": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"type": "string", "minLength": 1, "maxLength": 64}},
+        "inherit": {"type": "array", "minItems": 0, "maxItems": 0, "items": {"type": "string", "minLength": 1, "maxLength": 64}},
         "force": {"type": "object", "additionalProperties": {"type": "string"}}
       }, "additionalProperties": false},
       "commands": {"type": "array", "minItems": 6, "maxItems": 32, "items": {"type": "string", "minLength": 1, "maxLength": 512}}
