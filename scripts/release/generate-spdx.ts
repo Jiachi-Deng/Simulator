@@ -29,9 +29,16 @@ export function packagedFilesFromChecksums(content: string): PackagedFile[] {
   return files.sort((a, b) => a.path.localeCompare(b.path))
 }
 
-export function generateSpdx(lockContent: string, inventoryContent: string, version: string, sourceSha: string, created: string): object {
+export function packageVerificationCodeFromContent(content: string): string {
+  const code = content.trim()
+  if (!/^[0-9a-f]{40}$/.test(code)) throw new Error("Invalid SPDX package verification code")
+  return code
+}
+
+export function generateSpdx(lockContent: string, inventoryContent: string, packageVerificationCodeContent: string, version: string, sourceSha: string, created: string): object {
   const packages = packagesFromBunLock(lockContent)
   const packagedFiles = packagedFilesFromChecksums(inventoryContent)
+  const packageVerificationCode = packageVerificationCodeFromContent(packageVerificationCodeContent)
   const lockHash = createHash("sha256").update(lockContent).digest("hex")
   const namespaceSeed = createHash("sha256").update(`${version}\n${sourceSha}\n${lockHash}\n${inventoryContent}`).digest("hex")
   return {
@@ -52,7 +59,8 @@ export function generateSpdx(lockContent: string, inventoryContent: string, vers
         SPDXID: "SPDXRef-Package-Simulator",
         versionInfo: version,
         downloadLocation: `git+https://github.com/Jiachi-Deng/Simulator.git@${sourceSha}`,
-        filesAnalyzed: false,
+        filesAnalyzed: true,
+        packageVerificationCode: { packageVerificationCodeValue: packageVerificationCode },
         licenseConcluded: "NOASSERTION",
         licenseDeclared: "Apache-2.0",
         copyrightText: "NOASSERTION",
@@ -120,10 +128,17 @@ export function generateSpdx(lockContent: string, inventoryContent: string, vers
 }
 
 if (import.meta.main) {
-  const [lockPath, inventoryPath, outputPath, version, sourceSha, created] = process.argv.slice(2)
-  if (!lockPath || !inventoryPath || !outputPath || !version || !sourceSha || !created || Number.isNaN(Date.parse(created))) {
-    throw new Error(`Usage: ${basename(process.argv[1])} LOCK PACKAGED_CHECKSUMS OUTPUT VERSION SOURCE_SHA CREATED_ISO`)
+  const [lockPath, inventoryPath, packageVerificationCodePath, outputPath, version, sourceSha, created] = process.argv.slice(2)
+  if (!lockPath || !inventoryPath || !packageVerificationCodePath || !outputPath || !version || !sourceSha || !created || Number.isNaN(Date.parse(created))) {
+    throw new Error(`Usage: ${basename(process.argv[1])} LOCK PACKAGED_CHECKSUMS PACKAGE_VERIFICATION_CODE OUTPUT VERSION SOURCE_SHA CREATED_ISO`)
   }
-  const spdx = generateSpdx(readFileSync(lockPath, "utf8"), readFileSync(inventoryPath, "utf8"), version, sourceSha, new Date(created).toISOString())
+  const spdx = generateSpdx(
+    readFileSync(lockPath, "utf8"),
+    readFileSync(inventoryPath, "utf8"),
+    readFileSync(packageVerificationCodePath, "utf8"),
+    version,
+    sourceSha,
+    new Date(created).toISOString(),
+  )
   writeFileSync(outputPath, `${JSON.stringify(spdx, null, 2)}\n`)
 }

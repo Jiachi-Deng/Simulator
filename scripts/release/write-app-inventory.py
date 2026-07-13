@@ -14,12 +14,14 @@ from pathlib import Path
 from typing import Any
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
+def file_digests(path: Path) -> tuple[str, str]:
+    sha1 = hashlib.sha1()
+    sha256 = hashlib.sha256()
     with path.open("rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+            sha1.update(chunk)
+            sha256.update(chunk)
+    return sha1.hexdigest(), sha256.hexdigest()
 
 
 def xattrs(path: Path) -> list[dict[str, str]]:
@@ -86,7 +88,7 @@ def inventory_entry(root: Path, path: Path) -> dict[str, Any]:
     if stat.S_ISDIR(metadata.st_mode):
         entry["type"] = "directory"
     elif stat.S_ISREG(metadata.st_mode):
-        entry["sha256"] = sha256_file(path)
+        entry["sha1"], entry["sha256"] = file_digests(path)
         entry["type"] = "file"
     elif stat.S_ISLNK(metadata.st_mode):
         entry["target"] = os.readlink(path)
@@ -123,23 +125,43 @@ def write_spdx_checksums(entries: list[dict[str, Any]], output: Path) -> None:
     output.write_text("".join(lines), encoding="utf-8")
 
 
+def write_spdx_package_verification_code(entries: list[dict[str, Any]], output: Path) -> None:
+    file_sha1s = sorted(entry["sha1"] for entry in entries if entry["type"] == "file")
+    if not file_sha1s:
+        raise RuntimeError("Cannot calculate an SPDX package verification code without regular files")
+    code = hashlib.sha1("".join(file_sha1s).encode("ascii")).hexdigest()
+    output.write_text(f"{code}\n", encoding="utf-8")
+
+
+def app_root(path: Path) -> Path:
+    root = path.absolute()
+    try:
+        metadata = root.lstat()
+    except OSError as error:
+        raise RuntimeError(f"Could not inspect app bundle root {path}: {error}") from error
+    if stat.S_ISLNK(metadata.st_mode):
+        raise RuntimeError(f"Symbolic links are not allowed for app bundle roots: {path}")
+    if not stat.S_ISDIR(metadata.st_mode) or root.suffix != ".app":
+        raise RuntimeError(f"Expected an app bundle directory: {path}")
+    return root
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app", type=Path)
     parser.add_argument("inventory", type=Path)
     parser.add_argument("--spdx-files", required=True, type=Path, metavar="PATH")
+    parser.add_argument("--spdx-package-verification-code", required=True, type=Path, metavar="PATH")
     args = parser.parse_args()
 
-    root = args.app.resolve()
-    if not root.is_dir() or root.suffix != ".app":
-        raise RuntimeError(f"Expected an app bundle directory: {args.app}")
-
+    root = app_root(args.app)
     entries = walk(root)
     args.inventory.write_text(
         "".join(json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n" for entry in entries),
         encoding="utf-8",
     )
     write_spdx_checksums(entries, args.spdx_files)
+    write_spdx_package_verification_code(entries, args.spdx_package_verification_code)
     return 0
 
 

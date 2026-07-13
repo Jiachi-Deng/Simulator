@@ -93,7 +93,7 @@ jobs:
         run: |
           set -euo pipefail
           CREATED=$(git show -s --format=%cI "$SOURCE_SHA")
-          bun scripts/release/generate-spdx.ts bun.lock engineering-rc-bundle/packaged-files.sha256 engineering-rc-bundle/sbom.spdx.json "$RC_VERSION" "$SOURCE_SHA" "$CREATED"
+          bun scripts/release/generate-spdx.ts bun.lock engineering-rc-bundle/packaged-files.sha256 engineering-rc-bundle/package-verification-code.txt engineering-rc-bundle/sbom.spdx.json "$RC_VERSION" "$SOURCE_SHA" "$CREATED"
           cp "apps/electron/resources/release-notes/$RC_VERSION.md" engineering-rc-bundle/RELEASE_NOTES.md
           cp engineering-rc-validation.json engineering-rc-bundle/rc-validation.json
           printf '{\n  "schemaVersion": 1,\n  "version": "%s",\n  "sourceSha": "%s",\n  "signed": false,\n  "channel": "engineering-rc"\n}\n' \
