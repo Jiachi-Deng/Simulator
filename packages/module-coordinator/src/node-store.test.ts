@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, it } from 'bun:test'
-import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { chmod, lstat, mkdir, mkdtemp, readFile, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { promisify } from 'node:util'
 import { NodeFilesystemModuleCoordinatorStore } from './node-store.ts'
 import { MODULE_COORDINATOR_STATE_SCHEMA_VERSION, ModuleCoordinatorError, type ModuleCoordinatorState } from './types.ts'
 
 const roots: string[] = []
+const execFileAsync = promisify(execFile)
 const EMPTY_STATE: ModuleCoordinatorState = Object.freeze({
   schemaVersion: MODULE_COORDINATOR_STATE_SCHEMA_VERSION,
   operations: [],
@@ -18,6 +21,13 @@ async function root(): Promise<string> {
   await mkdir(value, { mode: 0o700 })
   roots.push(parent)
   return value
+}
+
+async function shortPath(path: string): Promise<string | undefined> {
+  if (process.platform !== 'win32') return undefined
+  const { stdout } = await execFileAsync('cmd.exe', ['/d', '/s', '/c', `for %I in ("${path}") do @echo %~sI`])
+  const value = stdout.trim()
+  return value.length > 0 && value !== path ? value : undefined
 }
 
 afterEach(async () => {
@@ -125,6 +135,20 @@ describe('NodeFilesystemModuleCoordinatorStore', () => {
     await mkdir(directory, { recursive: true, mode: 0o700 })
 
     await expect(store.load()).rejects.toMatchObject({ code: 'STORE_CORRUPT' })
+  })
+
+  it('keeps pinned identities stable across equivalent Windows short and long paths', async () => {
+    const directory = await root()
+    const longPath = await realpath(directory)
+    const alias = await shortPath(longPath)
+    if (!alias) return
+
+    const shortStore = new NodeFilesystemModuleCoordinatorStore(alias)
+    const longStore = new NodeFilesystemModuleCoordinatorStore(longPath)
+    await shortStore.save(EMPTY_STATE)
+    expect(await longStore.load()).toEqual(EMPTY_STATE)
+    await Promise.all([shortStore.save(EMPTY_STATE), longStore.load()])
+    expect(await new NodeFilesystemModuleCoordinatorStore(longPath).load()).toEqual(EMPTY_STATE)
   })
 
   it('rejects a writable trust boundary instead of silently trusting it', async () => {

@@ -194,7 +194,8 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
     if (process.platform !== 'win32' && (info.mode & 0o077) !== 0) {
       throw new TypeError('Coordinator trusted boundary and descendants must be owner-only')
     }
-    return { path, canonical: await realpath(path), dev: info.dev, ino: info.ino }
+    const canonical = await realpath(path)
+    return { path: canonical, canonical, dev: info.dev, ino: info.ino }
   }
 
   async #assertIdentities(expected: readonly RootIdentity[]): Promise<void> {
