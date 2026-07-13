@@ -8,6 +8,7 @@
   "types": "src/index.ts",
   "exports": {
     ".": "./src/index.ts",
+    "./filesystem": "./src/filesystem-persistence.ts",
     "./testing": "./src/testing/index.ts"
   },
   "scripts": {
@@ -19,6 +20,7 @@
     "semver": "7.7.3"
   },
   "devDependencies": {
+    "@types/node": "^25.0.8",
     "@types/semver": "^7.7.1",
     "typescript": "^5.8.2"
   }
