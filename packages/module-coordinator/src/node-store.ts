@@ -123,7 +123,7 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
     let temporaryExists = false
     try {
       await this.#assertRoot()
-      const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW, 0o600)
+      const handle = await open(temporary, exclusiveWriteFlags(), 0o600)
       temporaryExists = true
       let temporaryIdentity: FilesystemIdentity
       try {
@@ -228,7 +228,7 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const token = randomUUID()
       const candidate = join(this.root, `.${LOCK_FILE}.${token}.tmp`)
-      const handle = await open(candidate, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | NO_FOLLOW, 0o600)
+      const handle = await open(candidate, exclusiveWriteFlags(), 0o600)
       try {
         await handle.writeFile(`${JSON.stringify({ pid: process.pid, token })}\n`, 'utf8')
         await handle.sync()
@@ -325,6 +325,7 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
   }
 
   async #syncRoot(): Promise<void> {
+    if (process.platform === 'win32') return
     const handle = await open(this.root, constants.O_RDONLY)
     try {
       await handle.sync()
@@ -343,4 +344,10 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
   #message(error: unknown): string {
     return error instanceof Error ? error.message : String(error)
   }
+}
+
+function exclusiveWriteFlags(): 'wx' | number {
+  return process.platform === 'win32'
+    ? 'wx'
+    : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW
 }
