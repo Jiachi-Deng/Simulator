@@ -10,6 +10,8 @@
 
 请先搜索现有 [Issues](https://github.com/Jiachi-Deng/Simulator/issues)，确认问题尚未被报告或认领。Bug 请使用 Bug report 模板并提供系统版本、复现步骤、预期行为、实际行为及必要日志；功能建议请说明使用场景和预期价值。较大的功能、架构调整或破坏性变更，应先开 Issue 与维护者对齐范围，再开始实现。
 
+会长期影响兼容性、安全边界、持久化格式或发布机制的决定还应遵循 [Architecture Decision Record 流程](docs/adr/README.md)。只有合并到 `main` 且状态为 `Accepted` 的 ADR 才是有效决定；不要把 Issue、草稿或示例值当作已锁定产品承诺。
+
 ## 本地设置
 
 ```bash
