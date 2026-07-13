@@ -29,7 +29,7 @@ test("requires node-pty to be explicitly allowed to build", () => {
 });
 
 test("pins every real target-native path while keeping redistribution decisions pending", () => {
-  assert.equal(Object.keys(pendingMetadata).length, 11);
+  assert.equal(Object.keys(pendingMetadata).length, 13);
   const decisionById = new Map(resourceDecisions.decisions.map((decision) => [decision.id, decision]));
   for (const [artifactPath, metadata] of Object.entries(pendingMetadata)) {
     assert.match(artifactPath, /(?:better_sqlite3|pty|sharp-darwin-arm64|libvips-cpp).*(?:\.node|\.dylib)$/u);
