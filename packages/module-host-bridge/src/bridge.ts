@@ -1,6 +1,7 @@
 import { ContractValidationError, stableJson } from './json.ts'
 import { parseRawRequest, parseRequestEnvelope } from './schema.ts'
 import {
+  CAPABILITY_KINDS,
   DEFAULT_LIMITS,
   SCHEMA_VERSION,
   type ApprovalResolution,
@@ -25,6 +26,7 @@ import {
 interface CapabilityRecord {
   tokenHash: string
   kind: CapabilityKind
+  ownerId: string
   moduleId: string
   processId: string
   generation: number
@@ -41,12 +43,19 @@ interface ReplayRecord {
   identityHash: string
   tokenHash: string
   generation: number
+  ownerId: string
+  moduleId: string
+  processId: string
   response: ResponseEnvelope
   receiptId?: string
+  approvalId?: string
 }
 
 interface ApprovalRecord {
   approvalId: string
+  tokenHash: string
+  generation: number
+  ownerId: string
   moduleId: string
   processId: string
   sessionId: string
@@ -68,6 +77,8 @@ interface ExecutionReceiptRecord extends ExecutionReceipt {
   generation: number
 }
 
+const capabilityKinds = new Set<string>(CAPABILITY_KINDS)
+
 export interface ApprovalStatus {
   approvalId: string
   status: ApprovalRecord['status']
@@ -79,7 +90,7 @@ export class ModuleHostBridge {
   readonly #limits: ContractLimits
   readonly #capabilities = new Map<string, CapabilityRecord>()
   readonly #generations = new Map<string, number>()
-  readonly #replays = new Map<string, ReplayRecord>()
+  readonly #replays = new Map<string, Map<string, ReplayRecord>>()
   readonly #receipts = new Map<string, ExecutionReceiptRecord>()
   readonly #approvals = new Map<string, ApprovalRecord>()
   readonly #auditEvents: EventEnvelope[] = []
@@ -101,10 +112,25 @@ export class ModuleHostBridge {
 
   grant(input: CapabilityGrantRequest): Promise<CapabilityGrant> {
     return this.#exclusive(async () => {
-      if (input.descriptor.kind === 'host-agent.opaque') {
+      if (input === null || typeof input !== 'object') {
+        throw new ContractValidationError('Capability grant must be an object')
+      }
+      const descriptor = (input as { descriptor?: unknown }).descriptor
+      const descriptorKind = descriptor !== null && typeof descriptor === 'object'
+        ? (descriptor as { kind?: unknown }).kind
+        : undefined
+      if (descriptorKind === 'host-agent.opaque') {
         throw new BridgePolicyError('UNSUPPORTED_CAPABILITY', 'Host-agent opaque capabilities are unsupported by this bridge version')
       }
-      if (!input.moduleId || !input.processId || !input.nonce) {
+      if (!isCapabilityKind(descriptorKind)) {
+        throw new BridgePolicyError('UNSUPPORTED_CAPABILITY', 'Capability descriptor kind must be a canonical supported method')
+      }
+      if (!Array.isArray(input.allowedMethods) || input.allowedMethods.length !== 1
+        || !isCapabilityKind(input.allowedMethods[0]) || input.allowedMethods[0] !== descriptorKind) {
+        throw new ContractValidationError('Allowed methods must exactly match a canonical capability descriptor kind')
+      }
+      if (!isNonEmptyString(input.ownerId) || !isNonEmptyString(input.moduleId)
+        || !isNonEmptyString(input.processId) || !isNonEmptyString(input.nonce)) {
         throw new ContractValidationError('Capability identity and nonce must be non-empty')
       }
       if (!Number.isFinite(input.expiresAt) || input.expiresAt <= this.#deps.clock.now()) {
@@ -113,10 +139,6 @@ export class ModuleHostBridge {
       if (!Number.isSafeInteger(input.maxUses) || input.maxUses < 1) {
         throw new ContractValidationError('Capability maxUses must be a positive integer')
       }
-      if (input.allowedMethods.length !== 1 || input.allowedMethods[0] !== input.descriptor.kind) {
-        throw new ContractValidationError('Allowed methods must exactly match the capability descriptor kind')
-      }
-
       const [workspaceRoot, filesystemRoot, hostDataRoot, moduleDataRoot] = await Promise.all([
         this.#deps.paths.resolve(input.workspaceRoot),
         this.#deps.paths.resolve(this.#deps.forbiddenRoots.filesystemRoot),
@@ -135,12 +157,13 @@ export class ModuleHostBridge {
       const generation = this.#currentGeneration(input.moduleId, input.processId)
       this.#capabilities.set(tokenHash, {
         tokenHash,
-        kind: input.descriptor.kind,
+        kind: descriptorKind,
+        ownerId: input.ownerId,
         moduleId: input.moduleId,
         processId: input.processId,
         generation,
         workspaceRoot,
-        allowedMethods: new Set(input.allowedMethods),
+        allowedMethods: new Set([descriptorKind]),
         expiresAt: input.expiresAt,
         maxUses: input.maxUses,
         uses: 0,
@@ -150,7 +173,7 @@ export class ModuleHostBridge {
       this.#audit('capability.issued', {
         moduleId: input.moduleId,
         processId: input.processId,
-        kind: input.descriptor.kind,
+        kind: descriptorKind,
         expiresAt: input.expiresAt,
         maxUses: input.maxUses,
         generation,
@@ -216,8 +239,9 @@ export class ModuleHostBridge {
   revokeModule(moduleId: string): Promise<number> {
     return this.#exclusive(async () => {
       this.#advanceModuleGenerations(moduleId)
-      const count = this.#revoke(record => record.moduleId === moduleId, 'module')
-      this.#cancelApprovals(record => record.moduleId === moduleId, 'module revoked')
+      const predicate = (record: CapabilityRecord) => record.moduleId === moduleId
+      const count = this.#revoke(predicate, 'module')
+      this.#cancelApprovalsForCapabilities(predicate, 'module revoked')
       return count
     })
   }
@@ -225,8 +249,9 @@ export class ModuleHostBridge {
   revokeProcess(moduleId: string, processId: string): Promise<number> {
     return this.#exclusive(async () => {
       this.#advanceGeneration(moduleId, processId)
-      const count = this.#revoke(record => record.moduleId === moduleId && record.processId === processId, 'process')
-      this.#cancelApprovals(record => record.moduleId === moduleId && record.processId === processId, 'process revoked')
+      const predicate = (record: CapabilityRecord) => record.moduleId === moduleId && record.processId === processId
+      const count = this.#revoke(predicate, 'process')
+      this.#cancelApprovalsForCapabilities(predicate, 'process revoked')
       return count
     })
   }
@@ -234,8 +259,9 @@ export class ModuleHostBridge {
   revokeAll(): Promise<number> {
     return this.#exclusive(async () => {
       for (const key of this.#generations.keys()) this.#generations.set(key, this.#generations.get(key)! + 1)
-      const count = this.#revoke(() => true, 'all')
-      this.#cancelApprovals(() => true, 'all capabilities revoked')
+      const predicate = () => true
+      const count = this.#revoke(predicate, 'all')
+      this.#cancelApprovalsForCapabilities(predicate, 'all capabilities revoked')
       return count
     })
   }
@@ -243,8 +269,9 @@ export class ModuleHostBridge {
   restartProcess(moduleId: string, processId: string): Promise<void> {
     return this.#exclusive(async () => {
       this.#advanceGeneration(moduleId, processId)
-      this.#revoke(record => record.moduleId === moduleId && record.processId === processId, 'crash')
-      this.#cancelApprovals(record => record.moduleId === moduleId && record.processId === processId, 'process restarted')
+      const predicate = (record: CapabilityRecord) => record.moduleId === moduleId && record.processId === processId
+      this.#revoke(predicate, 'crash')
+      this.#cancelApprovalsForCapabilities(predicate, 'process restarted')
     })
   }
 
@@ -276,6 +303,7 @@ export class ModuleHostBridge {
           record.revoked = true
           capabilities += 1
           this.#audit('capability.revoked', capabilityAudit(record, { reason: 'expired' }))
+          approvals += this.#cancelApprovalsForCapabilities(candidate => candidate === record, 'capability expired')
         }
       }
       for (const record of this.#approvals.values()) {
@@ -309,7 +337,7 @@ export class ModuleHostBridge {
     }
     return {
       activeCapabilities,
-      replayEntries: this.#replays.size,
+      replayEntries: this.#replayEntryCount(),
       pendingApprovals,
       auditEvents: structuredClone(this.#auditEvents),
     }
@@ -319,14 +347,15 @@ export class ModuleHostBridge {
     const request = { ...parsed, moduleId: context.moduleId, processId: context.processId }
     return this.#exclusive(async () => {
       const identityHash = this.#deps.hasher.hash(stableJson(request as unknown as JsonValue))
-      const replay = this.#replays.get(request.requestId)
+      const namespace = principalKey(context.ownerId, context.moduleId, context.processId)
+      const replay = this.#replays.get(namespace)?.get(request.requestId)
       if (replay) {
-        if (replay.identityHash !== identityHash) {
+        if (!this.#matchesPrincipal(replay, context) || replay.identityHash !== identityHash) {
           this.#audit('capability.denied', scopedAudit(request, { code: 'REPLAY_MISMATCH' }))
           return errorResponse(request.requestId, 'REPLAY_MISMATCH', 'Request id was already used with a different identity')
         }
         const record = this.#capabilities.get(replay.tokenHash)
-        const denial = this.#validateCapability(record, request, true, replay.generation)
+        const denial = this.#validateCapability(record, request, context, true, replay.generation)
         if (denial) {
           this.#audit('capability.denied', scopedAudit(request, { code: denial.code }))
           return errorResponse(request.requestId, denial.code, denial.message)
@@ -340,13 +369,24 @@ export class ModuleHostBridge {
         return response
       }
 
-      if (this.#replays.size >= this.#limits.maxReplayEntries) {
+      this.#reclaimReplays(namespace)
+      if ((this.#replays.get(namespace)?.size ?? 0) >= this.#limits.maxReplayEntries) {
         return this.#deny(request, { code: 'REPLAY_CAPACITY', message: 'Replay store capacity was reached' })
       }
 
-      const { response, tokenHash, generation, receiptId } = await this.#authorize(request, context)
+      const { response, tokenHash, generation, receiptId, approvalId } = await this.#authorize(request, context)
       if (response.ok && tokenHash !== undefined && generation !== undefined) {
-        this.#rememberReplay(request.requestId, { identityHash, tokenHash, generation, response, ...(receiptId ? { receiptId } : {}) })
+        this.#rememberReplay(namespace, request.requestId, {
+          identityHash,
+          tokenHash,
+          generation,
+          ownerId: context.ownerId,
+          moduleId: context.moduleId,
+          processId: context.processId,
+          response,
+          ...(receiptId ? { receiptId } : {}),
+          ...(approvalId ? { approvalId } : {}),
+        })
       }
       return structuredClone(response)
     })
@@ -355,10 +395,10 @@ export class ModuleHostBridge {
   async #authorize(
     request: RequestEnvelope,
     context: TrustedTransportContext,
-  ): Promise<{ response: ResponseEnvelope; tokenHash?: string; generation?: number; receiptId?: string }> {
+  ): Promise<{ response: ResponseEnvelope; tokenHash?: string; generation?: number; receiptId?: string; approvalId?: string }> {
     const tokenHash = this.#deps.hasher.hash(request.capabilityToken)
     const record = this.#capabilities.get(tokenHash)
-    const denial = this.#validateCapability(record, request, false)
+    const denial = this.#validateCapability(record, request, context, false)
     if (denial || !record) return { response: this.#deny(request, denial!) }
 
     const path = await this.#authorizePath(request, record)
@@ -398,10 +438,13 @@ export class ModuleHostBridge {
     record.uses += 1
     let result: JsonObject
     let receiptId: string | undefined
+    let approvalId: string | undefined
     if (request.method === 'approval.request') {
-      result = this.#beginApproval(request)
+      const approval = this.#beginApproval(request, record)
+      result = approval.result
+      approvalId = approval.approvalId
     } else {
-      const receipt = this.#createReceipt(request, record)
+      const receipt = this.#createReceipt(request, record, context)
       receiptId = receipt.receiptId
       result = { authorized: true, method: request.method, executionReceipt: receiptJson(receipt) }
       if (path) {
@@ -417,12 +460,14 @@ export class ModuleHostBridge {
       tokenHash,
       generation: record.generation,
       ...(receiptId ? { receiptId } : {}),
+      ...(approvalId ? { approvalId } : {}),
     }
   }
 
   #validateCapability(
     record: CapabilityRecord | undefined,
     request: RequestEnvelope,
+    context: TrustedTransportContext,
     replay: boolean,
     replayGeneration?: number,
   ): PolicyDenial | undefined {
@@ -434,7 +479,7 @@ export class ModuleHostBridge {
       return { code: 'CAPABILITY_REVOKED', message: 'Capability belongs to an obsolete process generation' }
     }
     if (!replay && record.uses >= record.maxUses) return { code: 'CAPABILITY_EXHAUSTED', message: 'Capability use limit was reached' }
-    if (record.moduleId !== request.moduleId || record.processId !== request.processId
+    if (record.ownerId !== context.ownerId || record.moduleId !== request.moduleId || record.processId !== request.processId
       || record.nonce !== request.nonce || record.kind !== request.method || !record.allowedMethods.has(request.method)) {
       return { code: 'CAPABILITY_SCOPE_MISMATCH', message: 'Capability scope does not match trusted request identity' }
     }
@@ -453,6 +498,10 @@ export class ModuleHostBridge {
     if (record.generation !== receipt.generation
       || record.generation !== this.#currentGeneration(record.moduleId, record.processId)) {
       return { code: 'CAPABILITY_REVOKED', message: 'Capability belongs to an obsolete process generation' }
+    }
+    if (record.ownerId !== receipt.ownerId || record.moduleId !== receipt.moduleId
+      || record.processId !== receipt.processId || record.kind !== receipt.method) {
+      return { code: 'CAPABILITY_SCOPE_MISMATCH', message: 'Execution receipt does not match capability scope' }
     }
     return undefined
   }
@@ -482,10 +531,15 @@ export class ModuleHostBridge {
       || this.#deps.paths.isEqualOrWithin(candidate, module.realPath)
   }
 
-  #createReceipt(request: RequestEnvelope, capability: CapabilityRecord): ExecutionReceiptRecord {
+  #createReceipt(
+    request: RequestEnvelope,
+    capability: CapabilityRecord,
+    context: TrustedTransportContext,
+  ): ExecutionReceiptRecord {
     const receipt: ExecutionReceiptRecord = {
       receiptId: `receipt-${++this.#receiptSequence}`,
       requestId: request.requestId,
+      ownerId: context.ownerId,
       moduleId: request.moduleId,
       processId: request.processId,
       method: request.method,
@@ -500,17 +554,20 @@ export class ModuleHostBridge {
   #requireReceipt(receiptId: string, context: TrustedTransportContext): ExecutionReceiptRecord {
     const receipt = this.#receipts.get(receiptId)
     if (!receipt) throw new BridgePolicyError('EXECUTION_RECEIPT_NOT_FOUND', 'Execution receipt was not found')
-    if (receipt.moduleId !== context.moduleId || receipt.processId !== context.processId) {
+    if (receipt.ownerId !== context.ownerId || receipt.moduleId !== context.moduleId || receipt.processId !== context.processId) {
       throw new BridgePolicyError('EXECUTION_RECEIPT_NOT_FOUND', 'Execution receipt was not found')
     }
     return receipt
   }
 
-  #beginApproval(request: RequestEnvelope): JsonObject {
+  #beginApproval(request: RequestEnvelope, capability: CapabilityRecord): { approvalId: string; result: JsonObject } {
     const expiresAt = request.payload.expiresAt as number
     const approvalId = `approval-${++this.#approvalSequence}`
     const record: ApprovalRecord = {
       approvalId,
+      tokenHash: capability.tokenHash,
+      generation: capability.generation,
+      ownerId: capability.ownerId,
       moduleId: request.moduleId,
       processId: request.processId,
       sessionId: request.sessionId,
@@ -524,6 +581,7 @@ export class ModuleHostBridge {
     this.#audit('approval.pending', approvalAudit(record))
     void this.#deps.approvals.resolve({
       approvalId,
+      ownerId: record.ownerId,
       moduleId: record.moduleId,
       processId: record.processId,
       sessionId: record.sessionId,
@@ -532,16 +590,26 @@ export class ModuleHostBridge {
       prompt: record.prompt,
       expiresAt: record.expiresAt,
     }).then(
-      resolution => this.#completeApproval(approvalId, resolution),
-      () => this.#completeApproval(approvalId, { decision: 'denied', reason: 'resolver failed' }),
+      resolution => this.#completeApproval(approvalId, record.tokenHash, record.generation, resolution),
+      () => this.#completeApproval(approvalId, record.tokenHash, record.generation, { decision: 'denied', reason: 'resolver failed' }),
     )
-    return { approvalId, status: 'pending' }
+    return { approvalId, result: { approvalId, status: 'pending' } }
   }
 
-  #completeApproval(approvalId: string, resolution: ApprovalResolution): Promise<void> {
+  #completeApproval(
+    approvalId: string,
+    tokenHash: string,
+    generation: number,
+    resolution: ApprovalResolution,
+  ): Promise<void> {
     return this.#exclusive(() => {
       const record = this.#approvals.get(approvalId)
-      if (!record || record.status !== 'pending') return
+      if (!record || record.status !== 'pending' || record.tokenHash !== tokenHash || record.generation !== generation) return
+      const capabilityDenial = this.#validateApprovalCapability(record)
+      if (capabilityDenial) {
+        this.#cancelApprovalRecord(record, capabilityDenial.message)
+        return
+      }
       if (record.expiresAt <= this.#deps.clock.now()) {
         record.status = 'timed_out'
         record.reason = 'approval expired'
@@ -572,18 +640,92 @@ export class ModuleHostBridge {
     let count = 0
     for (const record of this.#approvals.values()) {
       if (record.status === 'pending' && predicate(record)) {
-        record.status = 'cancelled'
-        record.reason = reason
-        record.prompt = ''
+        this.#cancelApprovalRecord(record, reason)
         count += 1
-        this.#audit('approval.cancelled', approvalAudit(record))
       }
     }
     return count
   }
 
-  #rememberReplay(requestId: string, replay: ReplayRecord): void {
-    this.#replays.set(requestId, { ...replay, response: structuredClone(replay.response) })
+  #cancelApprovalsForCapabilities(predicate: (record: CapabilityRecord) => boolean, reason: string): number {
+    return this.#cancelApprovals(approval => {
+      const capability = this.#capabilities.get(approval.tokenHash)
+      return capability !== undefined
+        && capability.generation === approval.generation
+        && capability.ownerId === approval.ownerId
+        && capability.moduleId === approval.moduleId
+        && capability.processId === approval.processId
+        && predicate(capability)
+    }, reason)
+  }
+
+  #cancelApprovalRecord(record: ApprovalRecord, reason: string): void {
+    record.status = 'cancelled'
+    record.reason = reason
+    record.prompt = ''
+    this.#audit('approval.cancelled', approvalAudit(record))
+  }
+
+  #validateApprovalCapability(record: ApprovalRecord): PolicyDenial | undefined {
+    const capability = this.#capabilities.get(record.tokenHash)
+    if (!capability) return { code: 'CAPABILITY_NOT_FOUND', message: 'Capability was no longer available for approval' }
+    if (capability.revoked) return { code: 'CAPABILITY_REVOKED', message: 'Capability was revoked before approval resolved' }
+    if (capability.expiresAt <= this.#deps.clock.now()) return { code: 'CAPABILITY_EXPIRED', message: 'Capability expired before approval resolved' }
+    if (capability.generation !== record.generation
+      || capability.generation !== this.#currentGeneration(capability.moduleId, capability.processId)) {
+      return { code: 'CAPABILITY_REVOKED', message: 'Capability belongs to an obsolete process generation' }
+    }
+    if (capability.ownerId !== record.ownerId || capability.moduleId !== record.moduleId || capability.processId !== record.processId) {
+      return { code: 'CAPABILITY_SCOPE_MISMATCH', message: 'Capability scope changed before approval resolved' }
+    }
+    return undefined
+  }
+
+  #rememberReplay(namespace: string, requestId: string, replay: ReplayRecord): void {
+    let entries = this.#replays.get(namespace)
+    if (!entries) {
+      entries = new Map()
+      this.#replays.set(namespace, entries)
+    }
+    entries.set(requestId, { ...replay, response: structuredClone(replay.response) })
+  }
+
+  #reclaimReplays(namespace: string): void {
+    const entries = this.#replays.get(namespace)
+    if (!entries) return
+    for (const [requestId, replay] of entries) {
+      if (this.#isReplayReclaimable(replay)) entries.delete(requestId)
+    }
+    if (entries.size === 0) this.#replays.delete(namespace)
+  }
+
+  #isReplayReclaimable(replay: ReplayRecord): boolean {
+    const capability = this.#capabilities.get(replay.tokenHash)
+    const capabilityIsCurrent = capability !== undefined
+      && !capability.revoked
+      && capability.expiresAt > this.#deps.clock.now()
+      && capability.generation === replay.generation
+      && capability.generation === this.#currentGeneration(capability.moduleId, capability.processId)
+    if (capabilityIsCurrent) return false
+
+    if (replay.receiptId) {
+      const receipt = this.#receipts.get(replay.receiptId)
+      return receipt === undefined || receipt.status === 'committed' || receipt.status === 'failed'
+    }
+    if (replay.approvalId) return this.#approvals.get(replay.approvalId)?.status !== 'pending'
+    return true
+  }
+
+  #matchesPrincipal(replay: ReplayRecord, context: TrustedTransportContext): boolean {
+    return replay.ownerId === context.ownerId
+      && replay.moduleId === context.moduleId
+      && replay.processId === context.processId
+  }
+
+  #replayEntryCount(): number {
+    let count = 0
+    for (const entries of this.#replays.values()) count += entries.size
+    return count
   }
 
   #malformed(
@@ -640,7 +782,8 @@ export class ModuleHostBridge {
   }
 
   #assertContext(context: TrustedTransportContext): void {
-    if (!context.ownerId || !context.moduleId || !context.processId) {
+    if (!context || !isNonEmptyString(context.ownerId)
+      || !isNonEmptyString(context.moduleId) || !isNonEmptyString(context.processId)) {
       throw new ContractValidationError('Trusted transport context identity must be non-empty')
     }
   }
@@ -658,7 +801,7 @@ export class ModuleHostBridge {
   }
 
   #advanceModuleGenerations(moduleId: string): void {
-    const prefix = `${moduleId}\u0000`
+    const prefix = `${JSON.stringify(moduleId)}\u0000`
     for (const key of this.#generations.keys()) {
       if (key.startsWith(prefix)) this.#generations.set(key, this.#generations.get(key)! + 1)
     }
@@ -740,6 +883,7 @@ function receiptAudit(receipt: ExecutionReceipt): JsonObject {
   return {
     receiptId: receipt.receiptId,
     requestId: receipt.requestId,
+    ownerId: receipt.ownerId,
     moduleId: receipt.moduleId,
     processId: receipt.processId,
     method: receipt.method,
@@ -755,6 +899,7 @@ function publicReceipt(receipt: ExecutionReceipt): ExecutionReceipt {
   return {
     receiptId: receipt.receiptId,
     requestId: receipt.requestId,
+    ownerId: receipt.ownerId,
     moduleId: receipt.moduleId,
     processId: receipt.processId,
     method: receipt.method,
@@ -767,7 +912,19 @@ function approvalStatus(record: ApprovalRecord): ApprovalStatus {
 }
 
 function processKey(moduleId: string, processId: string): string {
-  return `${moduleId}\u0000${processId}`
+  return `${JSON.stringify(moduleId)}\u0000${JSON.stringify(processId)}`
+}
+
+function principalKey(ownerId: string, moduleId: string, processId: string): string {
+  return `${JSON.stringify(ownerId)}\u0000${JSON.stringify(moduleId)}\u0000${JSON.stringify(processId)}`
+}
+
+function isNonEmptyString(value: unknown): value is string {
+  return typeof value === 'string' && value.length > 0
+}
+
+function isCapabilityKind(value: unknown): value is CapabilityKind {
+  return typeof value === 'string' && capabilityKinds.has(value)
 }
 
 async function raceTimeout(operation: Promise<void>, timeoutMs: number): Promise<void> {

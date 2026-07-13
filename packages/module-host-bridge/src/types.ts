@@ -167,6 +167,7 @@ export interface ApprovalResolution {
 export interface TrustedApprovalResolver {
   resolve(input: {
     approvalId: string
+    ownerId: string
     moduleId: string
     processId: string
     sessionId: string
@@ -179,6 +180,7 @@ export interface TrustedApprovalResolver {
 
 export interface CapabilityGrantRequest {
   descriptor: CapabilityDescriptor
+  ownerId: string
   moduleId: string
   processId: string
   workspaceRoot: string
@@ -200,6 +202,7 @@ export type ExecutionReceiptStatus = (typeof EXECUTION_RECEIPT_STATUSES)[number]
 export interface ExecutionReceipt {
   receiptId: string
   requestId: string
+  ownerId: string
   moduleId: string
   processId: string
   method: CapabilityKind

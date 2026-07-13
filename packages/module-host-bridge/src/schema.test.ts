@@ -52,8 +52,23 @@ describe('plain JSON and envelope contracts', () => {
     expect(parseRawRequest(raw, DEFAULT_LIMITS)).toEqual(request)
     expect(parseRawRequest(new TextEncoder().encode(raw), DEFAULT_LIMITS)).toEqual(request)
     expect(() => parseRawRequest(raw, { ...DEFAULT_LIMITS, maxBytes: 8 })).toThrow('byte limit')
+    expect(() => parseRawRequest('{"a":{"b":1}}', { ...DEFAULT_LIMITS, maxDepth: 1 })).toThrow('depth')
     expect(() => parseRawRequest(new Uint8Array([0xc3, 0x28]), DEFAULT_LIMITS)).toThrow('UTF-8')
     expect(() => parseRawRequest('{', DEFAULT_LIMITS)).toThrow('valid JSON')
+  })
+
+  test('rejects duplicate raw JSON keys after decoding escapes', () => {
+    const escapedKey = JSON.stringify({ ...request, payload: { title: 'A "quoted" value', body: 'Done' } })
+      .replace('"title"', '"ti\\u0074le"')
+    expect(parseRawRequest(escapedKey, DEFAULT_LIMITS).payload.title).toBe('A "quoted" value')
+
+    const duplicateEscapedKey = escapedKey.replace('"body"', '"title":"duplicate","body"')
+    expect(() => parseRawRequest(duplicateEscapedKey, DEFAULT_LIMITS)).toThrow('duplicate JSON object keys')
+
+    const duplicateTopLevelKey = JSON.stringify(request).replace('"requestId":"req-1"', '"requestId":"req-1","requestId":"req-2"')
+    expect(() => parseRawRequest(duplicateTopLevelKey, DEFAULT_LIMITS)).toThrow('duplicate JSON object keys')
+
+    expect(() => parseRawRequest('{"a\\\"b":1,"a\\u0022b":2}', DEFAULT_LIMITS)).toThrow('duplicate JSON object keys')
   })
 
   test('requires non-empty unique path operation enum values', () => {

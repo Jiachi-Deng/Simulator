@@ -10,7 +10,7 @@ import {
   FakeTokenHasher,
   FakeURLAuthority,
 } from './testing/fakes.ts'
-import type { CapabilityKind, ContractLimits, TrustedTransportContext } from './types.ts'
+import type { CapabilityGrantRequest, CapabilityKind, ContractLimits, TrustedTransportContext } from './types.ts'
 
 const trustedContext: TrustedTransportContext = {
   ownerId: 'owner-a',
@@ -42,6 +42,7 @@ function harness(
   })
   const grant = () => bridge.grant({
     descriptor: { kind },
+    ownerId: 'owner-a',
     moduleId: 'module-a',
     processId: 'process-a',
     workspaceRoot: '/work/a',
@@ -142,6 +143,43 @@ describe('capability, replay, and execution policy', () => {
     expect(replay).toMatchObject({ ok: true, replayed: true })
   })
 
+  test('binds grants, receipts, and replay capacity to the complete trusted principal', async () => {
+    const target = harness(3, 'notification.send', { limits: { maxReplayEntries: 1 } })
+    const ownerB = { ...trustedContext, ownerId: 'owner-b' }
+    const ownerAGrant = await target.grant()
+    const first = await target.bridge.handle(request(ownerAGrant.token, { requestId: 'shared-request' }), trustedContext)
+    const receiptId = (first.result?.executionReceipt as { receiptId: string }).receiptId
+
+    await expect(target.bridge.claimExecution(receiptId, ownerB)).rejects.toMatchObject({ code: 'EXECUTION_RECEIPT_NOT_FOUND' })
+    const wrongOwner = await target.bridge.handle(request(ownerAGrant.token, { requestId: 'wrong-owner' }), ownerB)
+    expect(wrongOwner.error?.code).toBe('CAPABILITY_SCOPE_MISMATCH')
+
+    const ownerBGrant = await target.bridge.grant({
+      descriptor: { kind: 'notification.send' }, ownerId: 'owner-b', moduleId: 'module-a', processId: 'process-a',
+      workspaceRoot: '/work/a', allowedMethods: ['notification.send'], expiresAt: 2_000, maxUses: 3, nonce: 'nonce-a',
+    })
+    const second = await target.bridge.handle(request(ownerBGrant.token, { requestId: 'shared-request' }), ownerB)
+    expect(second).toMatchObject({ ok: true, replayed: false })
+    expect(target.bridge.snapshot().replayEntries).toBe(2)
+  })
+
+  test('keeps a live receipt replay entry and reclaims only a terminal entry after capability revocation', async () => {
+    const target = harness(3, 'notification.send', { limits: { maxReplayEntries: 1 } })
+    const firstGrant = await target.grant()
+    const first = await target.bridge.handle(request(firstGrant.token), trustedContext)
+    const receiptId = (first.result?.executionReceipt as { receiptId: string }).receiptId
+    await target.bridge.claimExecution(receiptId, trustedContext)
+    await target.bridge.revokeProcess('module-a', 'process-a')
+
+    const renewedGrant = await target.grant()
+    const blocked = await target.bridge.handle(request(renewedGrant.token, { requestId: 'request-b' }), trustedContext)
+    expect(blocked.error?.code).toBe('REPLAY_CAPACITY')
+
+    await target.bridge.completeExecution(receiptId, 'committed', trustedContext)
+    const reclaimed = await target.bridge.handle(request(renewedGrant.token, { requestId: 'request-b' }), trustedContext)
+    expect(reclaimed).toMatchObject({ ok: true, replayed: false })
+  })
+
   test('uses trusted transport identity instead of envelope claims and binds nonce', async () => {
     const target = harness(2)
     const { token } = await target.grant()
@@ -160,15 +198,20 @@ describe('capability, replay, and execution policy', () => {
   test('requires descriptor kind and allowed methods to match exactly', async () => {
     const target = harness()
     await expect(target.bridge.grant({
-      descriptor: { kind: 'notification.send' },
+      descriptor: { kind: 'notification.send' }, ownerId: 'owner-a',
       moduleId: 'module-a', processId: 'process-a', workspaceRoot: '/work/a',
       allowedMethods: ['notification.send', 'external.open'], expiresAt: 2_000, maxUses: 1, nonce: 'nonce',
     })).rejects.toThrow('exactly match')
     await expect(target.bridge.grant({
-      descriptor: { kind: 'notification.send' },
+      descriptor: { kind: 'notification.send' }, ownerId: 'owner-a',
       moduleId: 'module-a', processId: 'process-a', workspaceRoot: '/work/a',
       allowedMethods: ['external.open'], expiresAt: 2_000, maxUses: 1, nonce: 'nonce',
     })).rejects.toThrow('exactly match')
+    const nonCanonical = {
+      descriptor: { kind: 'notification.send ' }, ownerId: 'owner-a', moduleId: 'module-a', processId: 'process-a',
+      workspaceRoot: '/work/a', allowedMethods: ['notification.send '], expiresAt: 2_000, maxUses: 1, nonce: 'nonce',
+    } as unknown as CapabilityGrantRequest
+    await expect(target.bridge.grant(nonCanonical)).rejects.toMatchObject({ code: 'UNSUPPORTED_CAPABILITY' })
   })
 })
 
@@ -287,6 +330,25 @@ describe('approval lifecycle', () => {
     await flush()
     expect(target.bridge.getApproval(approvalId)?.status).toBe(mode === 'timeout' ? 'timed_out' : 'cancelled')
   })
+
+  test('capability expiry cancels its bound approval before a late resolver can approve it', async () => {
+    const target = harness(1, 'approval.request')
+    const { token } = await target.bridge.grant({
+      descriptor: { kind: 'approval.request' }, ownerId: 'owner-a', moduleId: 'module-a', processId: 'process-a',
+      workspaceRoot: '/work/a', allowedMethods: ['approval.request'], expiresAt: 1_050, maxUses: 1, nonce: 'nonce-a',
+    })
+    const response = await target.bridge.handle(methodRequest(token, 'approval.request', {
+      prompt: 'Approve operation?', expiresAt: 2_000,
+    }), trustedContext)
+    const approvalId = response.result?.approvalId as string
+
+    target.clock.advance(50)
+    expect(await target.bridge.sweepExpired()).toEqual({ capabilities: 1, approvals: 1 })
+    expect(target.bridge.getApproval(approvalId)).toMatchObject({ status: 'cancelled' })
+    target.approvals.approve()
+    await flush()
+    expect(target.bridge.getApproval(approvalId)).toMatchObject({ status: 'cancelled' })
+  })
 })
 
 describe('audit isolation and malformed input', () => {
@@ -306,7 +368,7 @@ describe('audit isolation and malformed input', () => {
       limits: { maxAuditQueue: 2, auditSinkTimeoutMs: 5 },
     })
     const grant = await bridge.grant({
-      descriptor: { kind: 'notification.send' }, moduleId: 'module-a', processId: 'process-a', workspaceRoot: '/work/a',
+      descriptor: { kind: 'notification.send' }, ownerId: 'owner-a', moduleId: 'module-a', processId: 'process-a', workspaceRoot: '/work/a',
       allowedMethods: ['notification.send'], expiresAt: 2_000, maxUses: 4, nonce: 'nonce-a',
     })
     const response = await Promise.race([

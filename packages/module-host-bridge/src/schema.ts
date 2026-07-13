@@ -1,4 +1,12 @@
-import { assertExactKeys, assertPlainJson, ContractValidationError, requireNumber, requireString, requireStringArray } from './json.ts'
+import {
+  assertExactKeys,
+  assertNoDuplicateJsonKeys,
+  assertPlainJson,
+  ContractValidationError,
+  requireNumber,
+  requireString,
+  requireStringArray,
+} from './json.ts'
 import {
   CAPABILITY_KINDS,
   AUDIT_EVENT_KINDS,
@@ -33,8 +41,10 @@ export function parseRawRequest(input: string | Uint8Array, limits: ContractLimi
 
   let value: unknown
   try {
+    assertNoDuplicateJsonKeys(source, limits)
     value = JSON.parse(source)
-  } catch {
+  } catch (error) {
+    if (error instanceof ContractValidationError) throw error
     throw new ContractValidationError('Raw request must be valid JSON')
   }
   return parseRequestEnvelope(value, limits)
