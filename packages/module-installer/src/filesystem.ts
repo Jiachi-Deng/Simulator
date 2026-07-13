@@ -70,7 +70,7 @@ export async function copyAndHashArchive(
     source = await open(sourcePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
     const openedInfo = await source.stat()
     if (!openedInfo.isFile()) throw new ModuleInstallerError('ARCHIVE_INVALID', 'Opened archive source is not a regular file')
-    destination = await open(destinationPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
+    destination = await open(destinationPath, exclusiveWriteFlags(), 0o600)
 
     const hash = createHash('sha256')
     const buffer = Buffer.allocUnsafe(256 * 1024)
@@ -274,7 +274,7 @@ export async function atomicWriteJson(path: string, value: unknown): Promise<voi
   const directory = dirname(path)
   await mkdir(directory, { recursive: true, mode: 0o700 })
   const temporary = join(directory, `.${randomUUID()}.tmp`)
-  const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
+  const handle = await open(temporary, exclusiveWriteFlags(), 0o600)
   try {
     await handle.writeFile(`${JSON.stringify(value)}\n`, 'utf8')
     await handle.sync()
@@ -307,7 +307,7 @@ export async function createJsonExclusive(
   let published = false
   try {
     await fault?.('before-journal-temp-write')
-    handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
+    handle = await open(temporary, exclusiveWriteFlags(), 0o600)
     const serialized = Buffer.from(`${JSON.stringify(value)}\n`, 'utf8')
     const midpoint = Math.max(1, Math.floor(serialized.length / 2))
     await handle.writeFile(serialized.subarray(0, midpoint))
@@ -341,4 +341,10 @@ export async function createJsonExclusive(
     await fsyncDirectory(directory).catch(() => undefined)
     throw error
   }
+}
+
+function exclusiveWriteFlags(): 'wx' | number {
+  return process.platform === 'win32'
+    ? 'wx'
+    : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0)
 }

@@ -395,6 +395,36 @@ describe('transaction fault injection and recovery', () => {
     await installing
   })
 
+  it('keeps fresh staging when a separate recovery instance races the temp write', async () => {
+    const root = await tempRoot()
+    const source = await artifactAt(root)
+    const moduleRoot = join(root, 'modules-root')
+    let release!: () => void
+    let reached!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const paused = new Promise<void>((resolve) => { reached = resolve })
+    const installer = new ModuleInstaller(moduleRoot, {
+      async faultInjector(point) {
+        if (point === 'after-archive-copy') {
+          reached()
+          await gate
+        }
+      },
+    })
+    const installing = installer.install({ descriptor: descriptor(source.archive, VALID_ENTRIES), archivePath: source.path })
+    await paused
+    const stagingRoot = join(moduleRoot, '.module-installer', 'staging')
+    const [stagingEntry] = await readdir(stagingRoot)
+    expect(stagingEntry).toBeDefined()
+    try {
+      await new ModuleInstaller(moduleRoot).recoverAll()
+      expect(await exists(join(stagingRoot, stagingEntry!))).toBe(true)
+    } finally {
+      release()
+    }
+    await installing
+  })
+
   it('keeps malformed staging ownership markers quarantined', async () => {
     const root = await tempRoot()
     const moduleRoot = join(root, 'modules-root')
