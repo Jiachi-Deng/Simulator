@@ -20,6 +20,25 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
 }
 
+function workspaceManifests(): string[] {
+  const manifest = readJson("package.json")
+  const patterns = manifest.workspaces as string[]
+  const excludedPatterns = patterns
+    .filter((pattern) => pattern.startsWith("!"))
+    .map((pattern) => new Bun.Glob(`${pattern.slice(1)}/package.json`))
+
+  return patterns
+    .filter((pattern) => !pattern.startsWith("!"))
+    .flatMap((pattern) => [...new Bun.Glob(`${pattern}/package.json`).scanSync({ cwd: root, onlyFiles: true })])
+    .filter((relativePath) => !excludedPatterns.some((pattern) => pattern.match(relativePath)))
+    .sort()
+}
+
+function beautifulMermaidManifests(): string[] {
+  return ["package.json", ...workspaceManifests()]
+    .filter((manifest) => dependencyVersion(manifest, "beautiful-mermaid") !== undefined)
+}
+
 describe("dependency policy", () => {
   test("pins beautiful-mermaid consistently across workspace manifests", () => {
     const rootRange = dependencyVersion("package.json", "beautiful-mermaid")
@@ -29,10 +48,8 @@ describe("dependency policy", () => {
     expect(minVersion(rootRange!)).not.toBeNull()
     expect(gte(minVersion(rootRange!)!, beautifulMermaidPatchedVersion)).toBeTrue()
 
-    for (const manifest of [
-      "packages/session-tools-core/package.json",
-      "packages/ui/package.json",
-    ]) {
+    const manifests = beautifulMermaidManifests()
+    for (const manifest of manifests) {
       expect(dependencyVersion(manifest, "beautiful-mermaid"), manifest).toBe(rootRange)
     }
   })
@@ -43,7 +60,7 @@ describe("dependency policy", () => {
     const declarations = lockfile.match(new RegExp(`"beautiful-mermaid": "${escapeRegExp(rootRange)}"`, "g")) ?? []
     const resolution = lockfile.match(/"beautiful-mermaid": \["beautiful-mermaid@([^"\]]+)"/)
 
-    expect(declarations.length).toBe(3)
+    expect(declarations.length).toBe(beautifulMermaidManifests().length)
     expect(resolution).not.toBeNull()
     expect(gte(resolution![1]!, beautifulMermaidPatchedVersion)).toBeTrue()
   })
