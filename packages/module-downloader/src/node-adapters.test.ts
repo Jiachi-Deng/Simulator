@@ -26,6 +26,21 @@ describe('production filesystem cache', () => {
     await expect(cache.readPartial('../bad')).rejects.toThrow()
   })
 
+  it('defers initialization until an operation can observe its result', async () => {
+    const directory = join(await root(), 'lazy-cache')
+    const cache = new NodeFilesystemModuleDownloaderCache(directory)
+    await expect(lstat(directory)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await cache.readCatalog()).toBeUndefined()
+    expect((await lstat(directory)).isDirectory()).toBe(true)
+  })
+
+  it('contains nested cache directories by filesystem identity across path aliases', async () => {
+    const directory = await root()
+    const cache = new NodeFilesystemModuleDownloaderCache(directory)
+    expect(await cache.readArtifact('0'.repeat(64))).toBeUndefined()
+    expect((await lstat(join(directory, 'artifacts', 'owners'))).isDirectory()).toBe(true)
+  })
+
   it('serializes leases across OS processes', async () => {
     const directory = await root()
     const fixture = join(import.meta.dir, 'testing', 'lease-child.ts')

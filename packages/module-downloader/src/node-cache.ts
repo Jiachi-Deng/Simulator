@@ -4,7 +4,7 @@ import { constants } from 'node:fs'
 import {
   chmod, link, lstat, mkdir, open, readFile, readdir, realpath, rename, rm, rmdir,
 } from 'node:fs/promises'
-import { dirname, isAbsolute, join, relative, resolve } from 'node:path'
+import { dirname, isAbsolute, join, resolve } from 'node:path'
 import type { ModuleReleaseTrustState } from '@simulator/module-release-trust'
 import type {
   ArtifactPartialRecord, ArtifactPublishResult, CachedArtifactRecord, CachedCatalogRecord,
@@ -51,7 +51,8 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   readonly #fault?: NodeFilesystemCacheOptions['faultInjector']
   readonly #checkpointHook?: NodeFilesystemCacheOptions['checkpoint']
   readonly #processIdentity: (pid: number) => Promise<string | undefined>
-  readonly #ready: Promise<void>
+  readonly #startupPruneLimit: number
+  #ready?: Promise<void>
   #stage?: CatalogTransaction
   #ownProcessIdentity?: Promise<string | undefined>
 
@@ -65,11 +66,11 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     this.#fault = options.faultInjector
     this.#checkpointHook = options.checkpoint
     this.#processIdentity = options.processIdentity ?? processStartIdentity
-    this.#ready = this.#initialize(positive(options.maxStartupPrunes, 64, 'maxStartupPrunes'))
+    this.#startupPruneLimit = positive(options.maxStartupPrunes, 64, 'maxStartupPrunes')
   }
 
   async acquireLease(key: string, signal: AbortSignal): Promise<ModuleDownloaderCacheLease> {
-    await this.#ready
+    await this.#ensureReady()
     if (!key || key.length > 1024 || /[\0\r\n]/.test(key)) throw new TypeError('Invalid cache lease key')
     const base = join(this.root, 'leases', 'claims', createHash('sha256').update(key).digest('hex'))
     let recoveries = 0
@@ -128,12 +129,12 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   }
 
   async readCatalog(): Promise<CachedCatalogRecord | undefined> {
-    await this.#ready; await this.#assertSafeTree('catalog')
+    await this.#ensureReady(); await this.#assertSafeTree('catalog')
     return (await this.#scanCatalogGenerations())?.record
   }
 
   async readStagedCatalog(): Promise<CachedCatalogRecord | undefined> {
-    await this.#ready; await this.#assertSafeTree('catalog')
+    await this.#ensureReady(); await this.#assertSafeTree('catalog')
     if (this.#stage) return (await this.#readTransaction(this.#stage))?.record
     const directory = join(this.root, 'catalog', 'staged')
     for (const name of (await directoryNames(directory)).sort()) {
@@ -147,7 +148,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   }
 
   async stageCatalog(record: CachedCatalogRecord): Promise<void> {
-    await this.#ready; await this.#assertSafeTree('catalog')
+    await this.#ensureReady(); await this.#assertSafeTree('catalog')
     const bytes = Buffer.from(JSON.stringify(toCatalogWire(record)))
     const id = randomUUID(); const digest = sha256(bytes)
     const tx: CatalogTransaction = { id, digest, path: join(this.root, 'catalog', 'staged', `${id}.${digest}.json`) }
@@ -156,7 +157,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   }
 
   async publishCatalog(expectedState: ModuleReleaseTrustState | undefined): Promise<boolean> {
-    await this.#ready
+    await this.#ensureReady()
     if (!this.#stage) throw new Error('No staged catalog transaction for this adapter')
     const exact = this.#stage
     const lease = await this.acquireLease('__catalog-cas__', new AbortController().signal)
@@ -177,14 +178,14 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   }
 
   async discardStagedCatalog(): Promise<void> {
-    await this.#ready
+    await this.#ensureReady()
     if (!this.#stage) return
     await safeRemoveFile(this.#stage.path, this.root)
     this.#stage = undefined
   }
 
   async readArtifact(hash: string): Promise<CachedArtifactRecord | undefined> {
-    await this.#ready; validateHash(hash); await this.#assertSafeTree('artifacts')
+    await this.#ensureReady(); validateHash(hash); await this.#assertSafeTree('artifacts')
     const directory = join(this.root, 'artifacts', hash)
     const info = await lstat(directory).catch(() => undefined)
     if (!info) return undefined
@@ -198,7 +199,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   }
 
   async listPartials(hash?: string): Promise<readonly ArtifactPartialRecord[]> {
-    await this.#ready; if (hash) validateHash(hash); await this.#assertSafeTree('partials')
+    await this.#ensureReady(); if (hash) validateHash(hash); await this.#assertSafeTree('partials')
     const records = await Promise.all((await directoryNames(join(this.root, 'partials'))).filter((id) => UUID.test(id)).map(async (id) => {
       try { return await safeReadJson<ArtifactPartialRecord>(this.#partialRecord(id), this.root) } catch { return undefined }
     }))
@@ -206,7 +207,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   }
 
   async createPartial(record: Omit<ArtifactPartialRecord, 'id' | 'bytesWritten'>): Promise<ArtifactPartialRecord> {
-    await this.#ready; validateHash(record.sha256); await this.#assertSafeTree('partials')
+    await this.#ensureReady(); validateHash(record.sha256); await this.#assertSafeTree('partials')
     const id = randomUUID(); const directory = this.#partialDirectory(id); const value = { ...record, id, bytesWritten: 0 }
     await mkdir(directory, { mode: OWNER_MODE }); await this.#immutableJson(join(directory, 'owner.json'), await this.#newOwner())
     await this.#immutableBytes(this.#partialData(id), new Uint8Array())
@@ -233,7 +234,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   }
 
   async removePartial(id: string): Promise<void> {
-    await this.#ready; validateId(id); await this.#assertSafeTree('partials')
+    await this.#ensureReady(); validateId(id); await this.#assertSafeTree('partials')
     const directory = this.#partialDirectory(id); const info = await lstat(directory).catch(() => undefined)
     if (!info) return
     if (!info.isDirectory() || info.isSymbolicLink()) throw new Error('Unsafe partial directory')
@@ -244,7 +245,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   }
 
   async publishPartial(id: string, artifact: CachedArtifactRecord): Promise<ArtifactPublishResult> {
-    await this.#ready; validateHash(artifact.sha256); await this.#assertSafeTree('artifacts')
+    await this.#ensureReady(); validateHash(artifact.sha256); await this.#assertSafeTree('artifacts')
     const partial = await this.#requiredPartial(id)
     if (partial.sha256 !== artifact.sha256 || partial.bytesWritten !== artifact.size || await hashFile(this.#partialData(id), this.root) !== artifact.sha256) throw new Error('Partial verification failed')
     const existing = await this.readArtifact(artifact.sha256)
@@ -301,6 +302,10 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
       join(this.root, 'artifacts', 'owners'), join(this.root, 'artifacts', 'claims'),
     ]) await this.#ensureDirectory(path)
     await this.#recoverStartup(limit)
+  }
+
+  #ensureReady(): Promise<void> {
+    return this.#ready ??= this.#initialize(this.#startupPruneLimit)
   }
 
   async #ensureDirectory(path: string): Promise<void> {
@@ -573,7 +578,7 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
   #partialRecord(id: string): string { return join(this.#partialDirectory(id), 'record.json') }
   #partialData(id: string): string { return join(this.#partialDirectory(id), 'data.bin') }
   async #requiredPartial(id: string): Promise<ArtifactPartialRecord> {
-    await this.#ready; validateId(id); await this.#assertSafeTree('partials'); await assertDirectory(this.#partialDirectory(id)); await assertContained(this.root, this.#partialDirectory(id))
+    await this.#ensureReady(); validateId(id); await this.#assertSafeTree('partials'); await assertDirectory(this.#partialDirectory(id)); await assertContained(this.root, this.#partialDirectory(id))
     const value = await safeReadJson<ArtifactPartialRecord>(this.#partialRecord(id), this.root)
     if (!value || !validPartial(value)) throw new Error(`Unknown partial: ${id}`)
     await safeStatFile(this.#partialData(id), this.root)
@@ -612,7 +617,18 @@ function once(operation: () => Promise<void>): () => Promise<void> { let promise
 async function directoryNames(path: string): Promise<string[]> { try { return await readdir(path) } catch (cause) { if (hasCode(cause, 'ENOENT')) return []; throw cause } }
 async function exists(path: string): Promise<boolean> { try { await lstat(path); return true } catch (cause) { if (hasCode(cause, 'ENOENT')) return false; throw cause } }
 async function assertDirectory(path: string): Promise<void> { const info = await lstat(path); if (!info.isDirectory() || info.isSymbolicLink()) throw new Error(`Unsafe cache directory: ${path}`) }
-async function assertContained(root: string, path: string): Promise<void> { const [a, b] = await Promise.all([realpath(root), realpath(path)]); const rel = relative(a, b); if (rel.startsWith('..') || isAbsolute(rel)) throw new Error('Cache path escapes root') }
+async function assertContained(root: string, path: string): Promise<void> {
+  const [canonicalRoot, canonicalPath, rootInfo] = await Promise.all([realpath(root), realpath(path), lstat(root)])
+  let cursor = canonicalPath
+  while (true) {
+    const info = await lstat(cursor)
+    if (info.dev === rootInfo.dev && info.ino === rootInfo.ino) return
+    const parent = dirname(cursor)
+    if (parent === cursor) break
+    cursor = parent
+  }
+  throw new Error(`Cache path escapes root: ${canonicalPath} is not beneath ${canonicalRoot}`)
+}
 async function safeOpen(path: string, flags: number, root: string) {
   const before = await lstat(path); if (!before.isFile() || before.isSymbolicLink()) throw new Error('Unsafe cache leaf')
   await assertContained(root, path)
