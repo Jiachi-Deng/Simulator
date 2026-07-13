@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import { createAtomicStagingTarget, sealAndPublish, writeExclusiveCanonicalJson } from "./atomic-publisher.mjs";
 import { inspectNativeRuntime } from "./native-inventory.mjs";
-import { materializeBuildOutput } from "./materialize-build-output.mjs";
+import { hoistMaterializedPnpmAliases, materializeBuildOutput } from "./materialize-build-output.mjs";
 import { createHermeticBuildEnvironment, createPrivateBuildWorkspace, verifyPostBuildWorkspace } from "./private-build-workspace.mjs";
 import { produceInventory } from "./produce-inventory.mjs";
 import { copyStagingInputs } from "./staging-copier.mjs";
@@ -223,13 +223,14 @@ export async function materializeBuildOutputs({ workspace, buildStartedAtMs } = 
   const results = [];
   for (const definition of definitions) {
     const result = await materializeBuildOutput({ sourceRoot: definition.source, destinationRoot: definition.destination, buildStartedAtMs });
+    await hoistMaterializedPnpmAliases({ materialized: result, buildStartedAtMs });
     results.push({ ...definition, ...result });
   }
   return Object.assign({ outputs: results }, Object.fromEntries(results.map((entry) => [entry.role === "next-standalone" ? "standalone" : entry.role === "daemon-production-closure" ? "daemon" : "web", entry])));
 }
 
 function publicNormalizationEvidence(normalization) {
-  const outputs = normalization.outputs.map((entry) => ({ role: entry.role, symlinksMaterialized: entry.symlinksMaterialized, hardlinksMaterialized: entry.hardlinksMaterialized }));
+  const outputs = normalization.outputs.map((entry) => ({ role: entry.role, symlinksMaterialized: entry.symlinksMaterialized, hardlinksMaterialized: entry.hardlinksMaterialized, virtualStorePackagesHoisted: entry.virtualStorePackagesHoisted }));
   const nativeOrigins = normalization.outputs.flatMap((entry) => entry.nativeOrigins.map((origin) => ({
     path: `${entry.prefix}/${origin.path}`,
     sha256: origin.sha256,

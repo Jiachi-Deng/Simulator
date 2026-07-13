@@ -39,8 +39,8 @@
       "privateDetachedCheckout": {"const": true}, "postBuildVerified": {"const": true}, "freshOutputs": {"type": "array", "minItems": 4, "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 256}},
       "normalization": {"type": "object", "required": ["method", "artifactSymlinksForbidden", "outputs", "nativeOrigins"], "properties": {
         "method": {"const": "contained-symlink-materialization-v1"}, "artifactSymlinksForbidden": {"const": true},
-        "outputs": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "object", "required": ["role", "symlinksMaterialized", "hardlinksMaterialized"], "properties": {
-          "role": {"enum": ["next-standalone", "daemon-production-closure", "web-sidecar-closure"]}, "symlinksMaterialized": {"type": "integer", "minimum": 0}, "hardlinksMaterialized": {"type": "integer", "minimum": 0}
+        "outputs": {"type": "array", "minItems": 3, "maxItems": 3, "items": {"type": "object", "required": ["role", "symlinksMaterialized", "hardlinksMaterialized", "virtualStorePackagesHoisted"], "properties": {
+          "role": {"enum": ["next-standalone", "daemon-production-closure", "web-sidecar-closure"]}, "symlinksMaterialized": {"type": "integer", "minimum": 0}, "hardlinksMaterialized": {"type": "integer", "minimum": 0}, "virtualStorePackagesHoisted": {"type": "integer", "minimum": 0}
         }, "additionalProperties": false}},
         "nativeOrigins": {"type": "array", "maxItems": 10000, "items": {"type": "object", "required": ["path", "sha256", "sourceCtime"], "properties": {
           "path": {"type": "string", "minLength": 1, "maxLength": 1024}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "sourceCtime": {"type": "string", "minLength": 20, "maxLength": 64}

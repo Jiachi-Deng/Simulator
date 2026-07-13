@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { materializeBuildOutput } from "../src/materialize-build-output.mjs";
+import { hoistMaterializedPnpmAliases, materializeBuildOutput } from "../src/materialize-build-output.mjs";
 
 async function fixture(t) {
   const parent = await mkdtemp(path.join(os.tmpdir(), "open-design-materialize-"));
@@ -49,4 +49,16 @@ test("rejects escaping symlinks and stale native sources while unlinking private
   const stale = await fixture(t);
   await writeFile(path.join(stale.source, "stale.node"), "native");
   await assert.rejects(materializeBuildOutput({ sourceRoot: stale.source, destinationRoot: stale.destination, buildStartedAtMs: Date.now() + 10_000 }), { code: "NATIVE_OUTPUT_STALE" });
+});
+
+test("materializes pnpm virtual-store aliases at the root for symlink-free ESM resolution", async (t) => {
+  const { source, destination } = await fixture(t);
+  await mkdir(path.join(source, "node_modules/.pnpm/node_modules/zod"), { recursive: true });
+  await writeFile(path.join(source, "node_modules/.pnpm/node_modules/zod/index.js"), "export const ok = true;\n");
+  const result = await materializeBuildOutput({ sourceRoot: source, destinationRoot: destination, buildStartedAtMs: 0 });
+  const hoisted = await hoistMaterializedPnpmAliases({ materialized: result, buildStartedAtMs: 0 });
+  assert.equal(hoisted.packagesHoisted, 1);
+  assert.equal(result.virtualStorePackagesHoisted, 1);
+  assert.equal(await readFile(path.join(destination, "node_modules/zod/index.js"), "utf8"), "export const ok = true;\n");
+  assert.equal((await lstat(path.join(destination, "node_modules/zod/index.js"))).nlink, 1);
 });

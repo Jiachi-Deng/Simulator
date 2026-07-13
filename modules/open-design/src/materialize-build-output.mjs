@@ -126,6 +126,61 @@ export async function materializeBuildOutput({ sourceRoot, destinationRoot, buil
   }
 }
 
+export async function hoistMaterializedPnpmAliases({ materialized, buildStartedAtMs } = {}) {
+  stagingAssert(path.isAbsolute(materialized?.root ?? "") && Array.isArray(materialized?.nativeOrigins), "MATERIALIZE_ROOT_INVALID", "materialized output evidence is required");
+  const virtualRoot = path.join(materialized.root, "node_modules/.pnpm/node_modules");
+  const virtualStat = await lstat(virtualRoot).catch((error) => error.code === "ENOENT" ? null : stagingFail("MATERIALIZE_SOURCE_INVALID", error.message));
+  if (virtualStat == null) {
+    materialized.virtualStorePackagesHoisted = 0;
+    return { packagesHoisted: 0, nativeOrigins: [] };
+  }
+  stagingAssert(virtualStat.isDirectory() && !virtualStat.isSymbolicLink() && virtualStat.uid === currentUid(), "MATERIALIZE_SOURCE_INVALID", "pnpm virtual hoist root must be an owner-built real directory");
+  const packagePaths = await listVirtualPackages(virtualRoot);
+  const originByPath = new Map(materialized.nativeOrigins.map((entry) => [entry.path, entry]));
+  const nativeOrigins = [];
+  let packagesHoisted = 0;
+  for (const packagePath of packagePaths) {
+    const destination = path.join(materialized.root, "node_modules", ...packagePath.split("/"));
+    const existing = await lstat(destination).catch((error) => error.code === "ENOENT" ? null : stagingFail("MATERIALIZE_DESTINATION_INVALID", error.message));
+    if (existing != null) continue;
+    await mkdir(path.dirname(destination), { recursive: true, mode: 0o700 });
+    const source = path.join(virtualRoot, ...packagePath.split("/"));
+    const result = await materializeBuildOutput({ sourceRoot: source, destinationRoot: destination, buildStartedAtMs: 0 });
+    for (const origin of result.nativeOrigins) {
+      const sourcePath = `node_modules/.pnpm/node_modules/${packagePath}/${origin.path}`;
+      const original = originByPath.get(sourcePath);
+      stagingAssert(original?.sha256 === origin.sha256 && Date.parse(original.sourceCtime) >= buildStartedAtMs, "NATIVE_BUILD_EVIDENCE_INVALID", `hoisted native alias lacks original build evidence: ${sourcePath}`);
+      nativeOrigins.push({ path: `node_modules/${packagePath}/${origin.path}`, sha256: original.sha256, sourceCtime: original.sourceCtime });
+    }
+    packagesHoisted += 1;
+  }
+  materialized.nativeOrigins.push(...nativeOrigins);
+  materialized.nativeOrigins.sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)));
+  materialized.virtualStorePackagesHoisted = packagesHoisted;
+  return { packagesHoisted, nativeOrigins };
+}
+
+async function listVirtualPackages(virtualRoot) {
+  const packagePaths = [];
+  const directory = await opendir(virtualRoot).catch((error) => stagingFail("MATERIALIZE_SOURCE_INVALID", error.message));
+  for await (const entry of directory) {
+    const entryPath = path.join(virtualRoot, entry.name);
+    const stat = await lstat(entryPath).catch((error) => stagingFail("MATERIALIZE_SOURCE_INVALID", error.message));
+    stagingAssert(stat.isDirectory() && !stat.isSymbolicLink(), "MATERIALIZE_SOURCE_INVALID", `virtual package alias is not a real directory: ${entry.name}`);
+    if (!entry.name.startsWith("@")) {
+      packagePaths.push(entry.name);
+      continue;
+    }
+    const scoped = await opendir(entryPath).catch((error) => stagingFail("MATERIALIZE_SOURCE_INVALID", error.message));
+    for await (const child of scoped) {
+      const childStat = await lstat(path.join(entryPath, child.name)).catch((error) => stagingFail("MATERIALIZE_SOURCE_INVALID", error.message));
+      stagingAssert(childStat.isDirectory() && !childStat.isSymbolicLink(), "MATERIALIZE_SOURCE_INVALID", `virtual scoped package alias is not a real directory: ${entry.name}/${child.name}`);
+      packagePaths.push(`${entry.name}/${child.name}`);
+    }
+  }
+  return packagePaths.sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right)));
+}
+
 function assertContained(root, candidate, relativePath) {
   stagingAssert(candidate === root || candidate.startsWith(`${root}${path.sep}`), "MATERIALIZE_SYMLINK_ESCAPE", `resolved path escapes output root: ${relativePath}`);
 }
