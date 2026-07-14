@@ -108,11 +108,20 @@ function target(input: unknown, label: string): ModuleCoordinatorTargetState {
   return output
 }
 
+function sameStringArray(left: readonly string[] | undefined, right: unknown): boolean {
+  if (left === undefined) return right === undefined
+  if (!Array.isArray(right) || right.length !== left.length) return false
+  return left.every((value, index) => Object.hasOwn(right, index) && right[index] === value)
+}
+
 function artifact(input: unknown, manifestArtifacts: readonly ModuleArtifact[], label: string): ModuleArtifact {
   const value = record(input, label)
-  fields(value, ['platform', 'entrypoint', 'url', 'sha256'], [], label)
+  fields(value, ['platform', 'entrypoint', 'url', 'sha256'], ['auxiliaryExecutables'], label)
   const match = manifestArtifacts.find((candidate) => candidate.platform === value.platform
-    && candidate.entrypoint === value.entrypoint && candidate.url === value.url && candidate.sha256 === value.sha256)
+    && candidate.entrypoint === value.entrypoint
+    && sameStringArray(candidate.auxiliaryExecutables, value.auxiliaryExecutables)
+    && candidate.url === value.url
+    && candidate.sha256 === value.sha256)
   if (!match) fail(`${label} must exactly match a manifest artifact`)
   return match
 }

@@ -67,6 +67,13 @@ function sameManifest(left: ModuleManifest, right: ModuleManifest): boolean {
   return stable(left) === stable(right)
 }
 
+function sameStringArray(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+  const normalizedLeft = left ?? []
+  const normalizedRight = right ?? []
+  return normalizedLeft.length === normalizedRight.length
+    && normalizedLeft.every((value, index) => value === normalizedRight[index])
+}
+
 function sameTarget(left: Pick<ModuleCoordinatorTargetState, 'activeVersion' | 'lastKnownGoodVersion'>, right: Pick<ModuleCoordinatorTargetState, 'activeVersion' | 'lastKnownGoodVersion'>): boolean {
   return left.activeVersion === right.activeVersion && left.lastKnownGoodVersion === right.lastKnownGoodVersion
 }
@@ -549,6 +556,7 @@ export class ModuleCoordinator {
       || artifact.platform !== descriptorArtifact.platform
       || artifact.sha256 !== descriptorArtifact.sha256
       || artifact.entrypoint !== descriptorArtifact.entrypoint
+      || !sameStringArray(artifact.auxiliaryExecutables, descriptorArtifact.auxiliaryExecutables)
       || artifact.url !== descriptorArtifact.url) {
       throw new ModuleCoordinatorError('CATALOG_RELEASE_MISMATCH', 'Descriptor does not match the verified catalog release')
     }

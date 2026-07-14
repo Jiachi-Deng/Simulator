@@ -57,16 +57,19 @@ function tarEntry(path: string, type: '0' | '5', mode: number, content = ''): Bu
 
 function packagedFakeArchive(): { readonly archive: Buffer; readonly treeHash: ModuleSha256 } {
   const executable = '#!/bin/sh\nexit 0\n'
+  const helper = '#!/bin/sh\nexit 0\n'
   const data = 'packaged fake module\n'
   const archive = gzipSync(Buffer.concat([
     tarEntry('module/', '5', 0o755),
     tarEntry('module/bin/', '5', 0o755),
     tarEntry('module/bin/module', '0', 0o755, executable),
+    tarEntry('module/bin/helper', '0', 0o755, helper),
     tarEntry('module/data.txt', '0', 0o644, data),
     Buffer.alloc(1024),
   ]))
   const records = [
     `D\t${JSON.stringify('bin')}`,
+    `F\t${JSON.stringify('bin/helper')}\t${Buffer.byteLength(helper)}\t1\t${sha256(helper)}`,
     `F\t${JSON.stringify('bin/module')}\t${Buffer.byteLength(executable)}\t1\t${sha256(executable)}`,
     `F\t${JSON.stringify('data.txt')}\t${Buffer.byteLength(data)}\t0\t${sha256(data)}`,
   ]
@@ -79,7 +82,7 @@ function manifest(version: string, archiveHash: ModuleSha256): ModuleManifest {
     id: MODULE_ID,
     version,
     artifacts: [{
-      platform: 'darwin-arm64', entrypoint: 'bin/module', url: ARTIFACT_URL, sha256: archiveHash,
+      platform: 'darwin-arm64', entrypoint: 'bin/module', auxiliaryExecutables: ['bin/helper'], url: ARTIFACT_URL, sha256: archiveHash,
     }],
     capabilities: ['workspace.read'],
   })
