@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 
 import { createHash } from 'node:crypto'
-import { mkdir, readFile, rm, stat } from 'node:fs/promises'
+import { mkdir, readFile, realpath, rm, stat } from 'node:fs/promises'
 import { createServer } from 'node:http'
-import { isAbsolute, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path'
 import process from 'node:process'
+import { pathToFileURL } from 'node:url'
 import WebSocket from 'ws'
 
 const CDP_PORT = Number.parseInt(process.env.APP_CDP_PORT ?? '9345', 10)
@@ -30,33 +31,29 @@ const FIRST_MARKER = 'M1_FIRST_TURN_COMPLETE'
 const SECOND_MARKER = 'M1_SECOND_TURN_COMPLETE'
 const TIMEOUT_MS = Number.parseInt(process.env.AGENT_TASK_TIMEOUT_MS ?? '90000', 10)
 
-if (!Number.isInteger(CDP_PORT) || CDP_PORT < 1 || CDP_PORT > 65535) {
-  throw new Error(`APP_CDP_PORT must be a valid TCP port, received ${process.env.APP_CDP_PORT ?? ''}`)
-}
-if (ACCEPTANCE_OPT_IN !== REQUIRED_ACCEPTANCE_OPT_IN) {
-  throw new Error(`SIMULATOR_M1_AGENT_ACCEPTANCE must equal ${REQUIRED_ACCEPTANCE_OPT_IN}`)
-}
-if (!DISPOSABLE_ROOT || !isAbsolute(DISPOSABLE_ROOT)) {
-  throw new Error('AGENT_DISPOSABLE_ROOT must be an absolute path')
-}
-if (!AGENT_WORKSPACE || !isAbsolute(AGENT_WORKSPACE)) {
-  throw new Error('AGENT_WORKSPACE must be an absolute path')
-}
+let disposableRootPath
+let workspacePath
+let outputPath
 
-const disposableRootPath = resolve(DISPOSABLE_ROOT)
-const workspacePath = resolve(AGENT_WORKSPACE)
-const outputPath = resolve(workspacePath, FILE_NAME)
-
-function pathContains(parent, candidate) {
+export function pathContains(parent, candidate) {
   const relation = relative(parent, candidate)
   return relation === '' || (relation !== '..' && !relation.startsWith(`..${sep}`) && !isAbsolute(relation))
 }
 
-if (!pathContains(disposableRootPath, workspacePath)) {
-  throw new Error('AGENT_WORKSPACE must be inside AGENT_DISPOSABLE_ROOT')
-}
-if (outputPath === workspacePath || !pathContains(workspacePath, outputPath)) {
-  throw new Error('Acceptance output escaped AGENT_WORKSPACE')
+export async function canonicalPath(path) {
+  const unresolved = []
+  let current = resolve(path)
+  while (true) {
+    try {
+      return resolve(await realpath(current), ...unresolved)
+    } catch (error) {
+      if (error?.code !== 'ENOENT' && error?.code !== 'ENOTDIR') throw error
+      const parent = dirname(current)
+      if (parent === current) return resolve(current, ...unresolved)
+      unresolved.unshift(basename(current))
+      current = parent
+    }
+  }
 }
 
 function sha256(value) {
@@ -397,6 +394,29 @@ async function waitForTurn(cdp, sessionId, marker) {
 }
 
 async function main() {
+  if (!Number.isInteger(CDP_PORT) || CDP_PORT < 1 || CDP_PORT > 65535) {
+    throw new Error(`APP_CDP_PORT must be a valid TCP port, received ${process.env.APP_CDP_PORT ?? ''}`)
+  }
+  if (ACCEPTANCE_OPT_IN !== REQUIRED_ACCEPTANCE_OPT_IN) {
+    throw new Error(`SIMULATOR_M1_AGENT_ACCEPTANCE must equal ${REQUIRED_ACCEPTANCE_OPT_IN}`)
+  }
+  if (!DISPOSABLE_ROOT || !isAbsolute(DISPOSABLE_ROOT)) {
+    throw new Error('AGENT_DISPOSABLE_ROOT must be an absolute path')
+  }
+  if (!AGENT_WORKSPACE || !isAbsolute(AGENT_WORKSPACE)) {
+    throw new Error('AGENT_WORKSPACE must be an absolute path')
+  }
+
+  disposableRootPath = await canonicalPath(DISPOSABLE_ROOT)
+  workspacePath = await canonicalPath(AGENT_WORKSPACE)
+  outputPath = resolve(workspacePath, FILE_NAME)
+  if (!pathContains(disposableRootPath, workspacePath)) {
+    throw new Error('AGENT_WORKSPACE must be canonically inside AGENT_DISPOSABLE_ROOT')
+  }
+  if (outputPath === workspacePath || !pathContains(workspacePath, outputPath)) {
+    throw new Error('Acceptance output escaped AGENT_WORKSPACE')
+  }
+
   await mkdir(workspacePath, { recursive: true, mode: 0o700 })
   await rm(outputPath, { force: true })
 
@@ -414,9 +434,14 @@ async function main() {
     const debugMode = await cdp.evaluate(apiCall('isDebugMode'))
     const workspaces = await cdp.evaluate(apiCall('getWorkspaces'))
     if (!Array.isArray(workspaces) || workspaces.length === 0) throw new Error('Packaged app returned no workspaces')
-    const outsideDisposableRoot = workspaces.find(item => (
-      typeof item?.rootPath !== 'string' || !pathContains(disposableRootPath, resolve(item.rootPath))
-    ))
+    let outsideDisposableRoot
+    for (const item of workspaces) {
+      if (typeof item?.rootPath !== 'string'
+        || !pathContains(disposableRootPath, await canonicalPath(item.rootPath))) {
+        outsideDisposableRoot = item
+        break
+      }
+    }
     if (outsideDisposableRoot) {
       throw new Error(`Refusing non-disposable Simulator profile: ${JSON.stringify({
         workspaceId: outsideDisposableRoot.id,
@@ -537,7 +562,9 @@ async function main() {
   }
 }
 
-main().catch(error => {
-  console.error(error instanceof Error ? error.stack : error)
-  process.exitCode = 1
-})
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  main().catch(error => {
+    console.error(error instanceof Error ? error.stack : error)
+    process.exitCode = 1
+  })
+}
