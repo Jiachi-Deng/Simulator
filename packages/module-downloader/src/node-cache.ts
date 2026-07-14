@@ -651,7 +651,7 @@ function validateId(value: string): void { if (!UUID.test(value)) throw new Type
 function validPartial(value: ArtifactPartialRecord): boolean { return UUID.test(value.id) && HASH.test(value.sha256) && Number.isSafeInteger(value.bytesWritten) && value.bytesWritten >= 0 }
 function positive(value: number | undefined, fallback: number, name: string): number { const result = value ?? fallback; if (!Number.isSafeInteger(result) || result <= 0) throw new TypeError(`${name} must be positive`); return result }
 function hasCode(cause: unknown, code: string): boolean { return cause instanceof Error && 'code' in cause && cause.code === code }
-function isDeferredWindowsCleanup(cause: unknown): boolean { return process.platform === 'win32' && ['EFAULT', 'EBUSY', 'EPERM'].some((code) => hasCode(cause, code)) }
+function isDeferredWindowsCleanup(cause: unknown): boolean { return process.platform === 'win32' && ['EFAULT', 'EBADF', 'EBUSY', 'EPERM'].some((code) => hasCode(cause, code)) }
 function isLivePid(pid: number): boolean { if (!Number.isSafeInteger(pid) || pid <= 0) return false; try { process.kill(pid, 0); return true } catch (cause) { return hasCode(cause, 'EPERM') } }
 function sha256(bytes: Uint8Array): string { return createHash('sha256').update(bytes).digest('hex') }
 function baseName(path: string): string { return path.slice(Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\')) + 1) }

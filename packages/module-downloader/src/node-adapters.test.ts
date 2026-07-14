@@ -178,7 +178,7 @@ describe('production filesystem cache', () => {
     })
   }
 
-  for (const code of ['EFAULT', 'EBUSY', 'EPERM'] as const) {
+  for (const code of ['EFAULT', 'EBADF', 'EBUSY', 'EPERM'] as const) {
     it.skipIf(process.platform !== 'win32')(`fails finitely without granting a new owner when marker cleanup stays ${code}`, async () => {
       const directory = await root()
       const cache = new NodeFilesystemModuleDownloaderCache(directory, {
