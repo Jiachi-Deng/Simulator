@@ -13,7 +13,7 @@ import {
   lstatSync,
   readdirSync,
 } from 'fs';
-import { join, dirname } from 'path';
+import { join } from 'path';
 import { createHash } from 'crypto';
 
 export type Platform = 'darwin' | 'win32' | 'linux';
@@ -490,84 +490,41 @@ export function copySessionServer(config: BuildConfig): void {
   const { rootDir, electronDir } = config;
 
   const sessionSource = join(rootDir, 'packages', 'session-mcp-server', 'dist', 'index.js');
-  const sessionDest = join(electronDir, 'resources', 'session-mcp-server', 'index.js');
+  const sessionDestDir = join(electronDir, 'resources', 'session-mcp-server');
+  const sessionDest = join(sessionDestDir, 'index.js');
+
+  rmSync(sessionDestDir, { recursive: true, force: true });
 
   if (!existsSync(sessionSource)) {
-    console.warn(`Warning: Session server not found at ${sessionSource}. Session-scoped tools will not work.`);
-    return;
+    throw new Error(`Session server not found at ${sessionSource}`);
   }
 
   console.log('Copying Session MCP Server...');
-  mkdirSync(dirname(sessionDest), { recursive: true });
+  mkdirSync(sessionDestDir, { recursive: true });
   copyFileSync(sessionSource, sessionDest);
-}
-
-/**
- * Map our Platform type to koffi's directory naming convention.
- * koffi uses: darwin_arm64, darwin_x64, linux_x64, win32_x64, etc.
- */
-function koffiPlatformDir(platform: Platform, arch: Arch): string {
-  return `${platform}_${arch}`;
 }
 
 /**
  * Copy Pi Agent Server to packaged app resources.
  *
- * The bun build uses --external koffi so the bare import resolves through
- * node_modules at runtime. We copy the koffi npm package next to index.js
- * with only the target platform's native binary (~4MB instead of ~80MB).
+ * The Pi bundle is expected to be self-contained apart from Bun/Node runtime
+ * modules. Asset validation rejects any unstaged external dependency.
  */
 export function copyPiAgentServer(config: BuildConfig): void {
-  const { rootDir, electronDir, platform, arch } = config;
+  const { rootDir, electronDir } = config;
 
   const piSourceDir = join(rootDir, 'packages', 'pi-agent-server', 'dist');
   const piDestDir = join(electronDir, 'resources', 'pi-agent-server');
 
+  rmSync(piDestDir, { recursive: true, force: true });
+
   if (!existsSync(join(piSourceDir, 'index.js'))) {
-    console.warn(`Warning: Pi agent server not found at ${piSourceDir}/index.js. Pi SDK sessions will not work.`);
-    return;
+    throw new Error(`Pi agent server not found at ${piSourceDir}/index.js`);
   }
 
   console.log('Copying Pi Agent Server...');
   mkdirSync(piDestDir, { recursive: true });
-
-  // 1. Copy index.js
   copyFileSync(join(piSourceDir, 'index.js'), join(piDestDir, 'index.js'));
-
-  // 2. Copy koffi npm package (external import, resolved via node_modules at runtime)
-  const koffiSource = join(rootDir, 'node_modules', 'koffi');
-
-  if (!existsSync(koffiSource)) {
-    console.warn('  Warning: koffi not found in node_modules. Pi SDK sessions may not work.');
-    return;
-  }
-
-  const koffiDest = join(piDestDir, 'node_modules', 'koffi');
-  mkdirSync(koffiDest, { recursive: true });
-
-  // Copy koffi JS files
-  for (const entry of ['package.json', 'index.js', 'indirect.js', 'index.d.ts', 'lib']) {
-    const src = join(koffiSource, entry);
-    if (existsSync(src)) {
-      cpSync(src, join(koffiDest, entry), { recursive: true });
-    }
-  }
-
-  // Copy only the target platform's native binary
-  const targetDir = koffiPlatformDir(platform, arch);
-  const nativeSrc = join(koffiSource, 'build', 'koffi', targetDir);
-  const nativeDest = join(koffiDest, 'build', 'koffi', targetDir);
-
-  if (existsSync(nativeSrc)) {
-    mkdirSync(nativeDest, { recursive: true });
-    cpSync(nativeSrc, nativeDest, { recursive: true });
-    const size = lstatSync(join(nativeSrc, readdirSync(nativeSrc)[0])).size;
-    console.log(`  Copied index.js + koffi/${targetDir} (${(size / 1024 / 1024).toFixed(1)}MB)`);
-  } else {
-    console.warn(`  Warning: koffi native binary not found for ${targetDir}`);
-    cpSync(join(koffiSource, 'build'), join(koffiDest, 'build'), { recursive: true });
-    console.log('  Copied index.js + koffi (all platforms as fallback)');
-  }
 }
 
 /**
@@ -584,6 +541,7 @@ export function buildMcpServers(config: BuildConfig): void {
 
   console.log('Building MCP servers...');
 
+  rmSync(join(sessionDir, 'dist'), { recursive: true, force: true });
   mkdirSync(join(sessionDir, 'dist'), { recursive: true });
 
   execSync(
@@ -597,20 +555,17 @@ export function buildMcpServers(config: BuildConfig): void {
 
   // Pi agent server uses --target=bun --format=esm because its Pi SDK deps are ESM-only.
   // --target=node --format=cjs leaves ESM deps as external require() calls that fail at runtime.
-  // koffi is marked external because it's a native N-API module — bun can't inline .node binaries
-  // and inlining its JS breaks the native binary resolution paths.
-  // Optional: skip if package directory is missing (e.g., not synced to OSS).
-  if (existsSync(join(piDir, 'src'))) {
-    mkdirSync(join(piDir, 'dist'), { recursive: true });
-    execSync(
-      `bun build ${join(piDir, 'src', 'index.ts')} --outdir ${join(piDir, 'dist')} --target bun --format esm --external koffi`,
-      { cwd: rootDir, stdio: 'inherit', shell: true }
-    );
-    if (!existsSync(piOut)) {
-      throw new Error(`Pi agent server output not found at ${piOut}`);
-    }
-  } else {
-    console.warn('Warning: Pi agent server package not found. Pi SDK sessions will not work.');
+  if (!existsSync(join(piDir, 'src'))) {
+    throw new Error(`Pi agent server source not found at ${join(piDir, 'src')}`);
+  }
+  rmSync(join(piDir, 'dist'), { recursive: true, force: true });
+  mkdirSync(join(piDir, 'dist'), { recursive: true });
+  execSync(
+    `bun build ${join(piDir, 'src', 'index.ts')} --outdir ${join(piDir, 'dist')} --target bun --format esm`,
+    { cwd: rootDir, stdio: 'inherit', shell: true }
+  );
+  if (!existsSync(piOut)) {
+    throw new Error(`Pi agent server output not found at ${piOut}`);
   }
 }
 
@@ -645,7 +600,7 @@ export function verifyMcpServersExist(config: BuildConfig): void {
     throw new Error(`Session MCP server not found at ${sessionPath}`);
   }
   if (!existsSync(piPath)) {
-    console.warn(`Warning: Pi agent server not found at ${piPath}. Pi SDK sessions will not work.`);
+    throw new Error(`Pi agent server not found at ${piPath}`);
   }
 }
 
