@@ -8,7 +8,11 @@ import type {
 } from '@simulator/module-contract'
 
 export const DEFAULT_INSTALL_LIMITS = Object.freeze({
-  maxArchiveBytes: 128 * 1024 * 1024,
+  // The sealed OpenDesign development bundle is ~138 MiB compressed after its
+  // fixed Node and AMR runtimes are included. Keep a bounded 192 MiB envelope;
+  // extracted bytes, individual files, entry count, and decompression ratio
+  // remain independently constrained below.
+  maxArchiveBytes: 192 * 1024 * 1024,
   // OpenDesign staging contains 4,777 files; retain a bounded headroom without relaxing byte-based limits.
   maxEntries: 8_192,
   maxFileBytes: 64 * 1024 * 1024,

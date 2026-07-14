@@ -289,7 +289,8 @@ describe('ModuleInstaller production tar.gz path', () => {
     })).rejects.toMatchObject({ code: 'ARCHIVE_LIMIT_EXCEEDED' })
   })
 
-  it('accepts exactly 8,192 archive entries and rejects the next entry without relaxing other limits', async () => {
+  it('retains the bounded M1 archive envelope, accepts exactly 8,192 entries, and rejects the next entry', async () => {
+    expect(DEFAULT_INSTALL_LIMITS.maxArchiveBytes).toBe(192 * 1024 * 1024)
     expect(DEFAULT_INSTALL_LIMITS.maxEntries).toBe(8_192)
     const root = await tempRoot()
     const entries = [
