@@ -7,11 +7,14 @@ import type { SessionManager } from '@craft-agent/server-core/sessions'
 import { addLlmConnection, getWorkspaces, setDefaultLlmConnection } from '@craft-agent/shared/config'
 import type { HostModuleCoordinatorRuntime } from './host-module-coordinator'
 import type { ModuleViewManager } from './module-view-manager'
+import {
+  HOST_MODULE_SMOKE_ROOT_PREFIX,
+  isHostModuleSmokeAcceptanceRequested,
+  resolveHostModuleSmokeNodeRuntime,
+} from './host-module-smoke-gate'
 
-const ROOT_PREFIX = '--host-module-smoke-root='
 const MANIFEST_PREFIX = '--host-module-smoke-manifest='
 const RESULT_PREFIX = '--host-module-smoke-result='
-const NODE_RUNTIME_PREFIX = '--host-module-smoke-node-runtime='
 const TIMEOUT_MS = 40_000
 const AGENT_REPLY = 'deterministic built-in Agent response'
 
@@ -115,15 +118,16 @@ function createDeterministicProvider(): Server {
 }
 
 export function isHostModuleCoordinatorSmokeRequested(): boolean {
-  return process.argv.some((value) => value.startsWith(ROOT_PREFIX))
+  return isHostModuleSmokeAcceptanceRequested({ argv: process.argv, env: process.env })
 }
 
 export function getHostModuleCoordinatorSmokeRoot(): string | undefined {
-  return argument(ROOT_PREFIX)
+  if (!isHostModuleCoordinatorSmokeRequested()) return undefined
+  return argument(HOST_MODULE_SMOKE_ROOT_PREFIX)
 }
 
 export function getHostModuleCoordinatorSmokeNodeRuntime(): string | undefined {
-  return argument(NODE_RUNTIME_PREFIX)
+  return resolveHostModuleSmokeNodeRuntime({ argv: process.argv, env: process.env })
 }
 
 export function writeHostModuleCoordinatorSmokeBootMarker(): void {

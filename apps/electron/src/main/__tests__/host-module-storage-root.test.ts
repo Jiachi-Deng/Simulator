@@ -1,4 +1,6 @@
 import { describe, expect, it } from 'bun:test'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { resolveHostModuleStorageRoot } from '../host-module-storage-root'
 
@@ -43,6 +45,43 @@ describe('resolveHostModuleStorageRoot', () => {
         smokeRoot,
         developmentBootstrapStatus,
       })).toBe(smokeRoot)
+    }
+  })
+
+  it('rejects acceptance roots that overlap public or development storage', () => {
+    const roots = [
+      USER_DATA_ROOT,
+      join(USER_DATA_ROOT, 'optional-modules'),
+      join(USER_DATA_ROOT, 'optional-modules', 'nested'),
+      join(USER_DATA_ROOT, 'open-design-development-modules'),
+      join(USER_DATA_ROOT, 'open-design-development-modules', 'nested'),
+    ]
+
+    for (const smokeRoot of roots) {
+      expect(() => resolveHostModuleStorageRoot({
+        userDataRoot: USER_DATA_ROOT,
+        smokeRoot,
+        developmentBootstrapStatus: 'disabled',
+      })).toThrow('acceptance root must be disjoint')
+    }
+  })
+
+  it('rejects a symlink ancestor that aliases product storage', () => {
+    const temporary = mkdtempSync(join(tmpdir(), 'simulator-module-root-test-'))
+    try {
+      const userDataRoot = join(temporary, 'user-data')
+      const publicRoot = join(userDataRoot, 'optional-modules')
+      const alias = join(temporary, 'alias')
+      mkdirSync(publicRoot, { recursive: true })
+      symlinkSync(userDataRoot, alias, 'dir')
+
+      expect(() => resolveHostModuleStorageRoot({
+        userDataRoot,
+        smokeRoot: join(alias, 'optional-modules'),
+        developmentBootstrapStatus: 'disabled',
+      })).toThrow('acceptance root must be disjoint')
+    } finally {
+      rmSync(temporary, { recursive: true, force: true })
     }
   })
 })

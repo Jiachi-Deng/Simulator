@@ -75,6 +75,7 @@ if (!existsSync(executablePath)) throw new Error(`Electron executable not found:
 const child = Bun.spawn([
   executablePath,
   ...appArguments,
+  '--debug',
   `--user-data-dir=${join(temporary, 'electron-user-data')}`,
   `--host-module-smoke-root=${runtimeRoot}`,
   `--host-module-smoke-manifest=${manifestPath}`,
@@ -90,6 +91,7 @@ const child = Bun.spawn([
     APPDATA: join(homeRoot, 'AppData', 'Roaming'),
     LOCALAPPDATA: join(homeRoot, 'AppData', 'Local'),
     ELECTRON_ENABLE_LOGGING: '1',
+    SIMULATOR_HOST_MODULE_ACCEPTANCE: '1',
   },
   stdout: 'pipe',
   stderr: 'pipe',
