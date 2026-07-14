@@ -8,9 +8,25 @@ mock.module('@/actions', () => ({
 mock.module('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }))
 mock.module('pdfjs-dist', () => ({ GlobalWorkerOptions: { workerSrc: '' }, getDocument: () => ({}) }))
 
-const { getOpenDesignMenuPresentation } = await import('./DesktopAppMenu')
+const { getOpenDesignMenuPresentation, loadOpenDesignStateWithRetry } = await import('./DesktopAppMenu')
 
 describe('OpenDesign Debug menu presentation', () => {
+  it('retries startup IPC registration races and returns the first real state', async () => {
+    let attempts = 0
+    const waits: number[] = []
+    const state = await loadOpenDesignStateWithRetry({
+      async getState() {
+        attempts += 1
+        if (attempts < 3) throw new Error('IPC handler is not registered yet')
+        return { status: 'not-installed' }
+      },
+    }, async (milliseconds) => { waits.push(milliseconds) })
+
+    expect(state).toEqual({ status: 'not-installed' })
+    expect(attempts).toBe(3)
+    expect(waits).toEqual([250, 250])
+  })
+
   it('maps stable states to the single appropriate action', () => {
     const cases: Array<{
       state: OpenDesignModuleState

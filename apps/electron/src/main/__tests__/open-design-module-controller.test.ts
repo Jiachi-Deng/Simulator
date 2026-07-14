@@ -373,6 +373,14 @@ describe('reduceOpenDesignModuleState', () => {
     expect(reduceOpenDesignModuleState({ availability: 'disabled' })).toEqual({ status: 'disabled' })
     expect(reduceOpenDesignModuleState({ availability: 'not-ready' })).toEqual({ status: 'not-ready' })
     expect(reduceOpenDesignModuleState({
+      availability: 'not-ready',
+      availabilityError: { code: 'DEVELOPMENT_BUNDLE_INVALID', message: 'Bundle verification failed.' },
+    })).toEqual({
+      status: 'not-ready',
+      errorCode: 'DEVELOPMENT_BUNDLE_INVALID',
+      errorMessage: 'Bundle verification failed.',
+    })
+    expect(reduceOpenDesignModuleState({
       availability: 'ready',
       registry: registrySnapshot(VERSION, true),
     }).status).toBe('disabled')

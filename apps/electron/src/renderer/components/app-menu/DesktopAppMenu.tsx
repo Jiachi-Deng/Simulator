@@ -32,6 +32,7 @@ import type { MenuItem, MenuSection } from "../../../shared/menu-schema"
 import type {
   OpenDesignModuleAction,
   OpenDesignModuleCheckpoint,
+  OpenDesignModuleFacade,
   OpenDesignModuleState,
 } from "../../../shared/open-design-module-ipc"
 import type { AppMenuProps } from "./types"
@@ -142,6 +143,23 @@ function unavailableOpenDesignState(): OpenDesignModuleState {
     errorCode: 'CONTROLLER_UNAVAILABLE',
     errorMessage: 'OpenDesign controller unavailable',
   }
+}
+
+const OPEN_DESIGN_STATE_RETRY_ATTEMPTS = 60
+const OPEN_DESIGN_STATE_RETRY_DELAY_MS = 250
+
+export async function loadOpenDesignStateWithRetry(
+  module: Pick<OpenDesignModuleFacade, 'getState'>,
+  wait: (milliseconds: number) => Promise<void> = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+): Promise<OpenDesignModuleState> {
+  for (let attempt = 0; attempt < OPEN_DESIGN_STATE_RETRY_ATTEMPTS; attempt += 1) {
+    try {
+      return await module.getState()
+    } catch {
+      if (attempt + 1 < OPEN_DESIGN_STATE_RETRY_ATTEMPTS) await wait(OPEN_DESIGN_STATE_RETRY_DELAY_MS)
+    }
+  }
+  return unavailableOpenDesignState()
 }
 
 const roleHandlers: Record<string, () => void> = {
@@ -287,7 +305,7 @@ export function DesktopAppMenu({
     } catch {
       updateState(unavailableOpenDesignState())
     }
-    void openDesignModule.getState().then(updateState).catch(() => updateState(unavailableOpenDesignState()))
+    void loadOpenDesignStateWithRetry(openDesignModule).then(updateState)
     return () => {
       active = false
       unsubscribe()
@@ -449,6 +467,12 @@ function renderOpenDesignMenuItems(
           : <Icons.Palette className="h-3.5 w-3.5" />}
         {t(presentation.statusKey, statusValues)}
       </StyledDropdownMenuItem>
+      {props.state?.errorCode && (
+        <StyledDropdownMenuItem disabled>
+          <Icons.CircleAlert className="h-3.5 w-3.5" />
+          {props.state.errorCode}
+        </StyledDropdownMenuItem>
+      )}
       {presentation.action && presentation.actionKey && (
         <StyledDropdownMenuItem
           disabled={presentation.actionDisabled}

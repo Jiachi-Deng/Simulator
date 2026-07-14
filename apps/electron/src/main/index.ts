@@ -1052,6 +1052,11 @@ app.whenReady().then(async () => {
         argv: process.argv,
         platform: currentModulePlatform(),
       })
+      if (openDesignDevelopmentBootstrap.status === 'not-ready') {
+        mainLog.error('OpenDesign development bundle bootstrap failed', {
+          errorCode: openDesignDevelopmentBootstrap.errorCode,
+        })
+      }
       const developmentBundle = openDesignDevelopmentBootstrap.status === 'ready'
         ? openDesignDevelopmentBootstrap.bundle
         : undefined
@@ -1110,8 +1115,21 @@ app.whenReady().then(async () => {
       openDesignModuleController = new OpenDesignModuleController({
         getRuntime: () => {
           if (openDesignDevelopmentBootstrap.status === 'disabled') return { status: 'disabled' }
+          if (openDesignDevelopmentBootstrap.status === 'not-ready') {
+            return {
+              status: 'not-ready',
+              errorCode: openDesignDevelopmentBootstrap.errorCode,
+              errorMessage: openDesignDevelopmentBootstrap.errorMessage,
+            }
+          }
           const runtime = hostModuleCoordinator
-          if (openDesignDevelopmentBootstrap.status !== 'ready' || !runtime) return { status: 'not-ready' }
+          if (!runtime) {
+            return {
+              status: 'not-ready',
+              errorCode: 'MODULE_COORDINATOR_UNAVAILABLE',
+              errorMessage: 'The optional Module runtime is unavailable.',
+            }
+          }
           return { status: 'ready', runtime }
         },
         getInstallRequest: () => openDesignDevelopmentBootstrap.status === 'ready'

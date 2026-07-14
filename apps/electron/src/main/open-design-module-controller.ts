@@ -34,7 +34,7 @@ export interface OpenDesignModuleRuntime {
 
 export type OpenDesignModuleRuntimeLookup =
   | { readonly status: 'disabled' }
-  | { readonly status: 'not-ready' }
+  | { readonly status: 'not-ready'; readonly errorCode?: string; readonly errorMessage?: string }
   | { readonly status: 'ready'; readonly runtime: OpenDesignModuleRuntime }
 
 export interface OpenDesignModuleHostAdapter {
@@ -68,6 +68,7 @@ interface ActiveOperation {
 
 export interface OpenDesignModuleReducerInput {
   readonly availability: OpenDesignModuleRuntimeLookup['status']
+  readonly availabilityError?: OpenDesignModuleSafeError
   readonly coordinator?: ModuleCoordinatorSnapshot
   readonly registry?: ModuleRegistrySnapshot
   readonly daemon?: ModuleDaemonSnapshot
@@ -138,7 +139,15 @@ function stateError(
 /** Pure projection of current coordinator, registry, daemon, and view observations. */
 export function reduceOpenDesignModuleState(input: OpenDesignModuleReducerInput): OpenDesignModuleState {
   if (input.availability === 'disabled') return Object.freeze({ status: 'disabled' })
-  if (input.availability === 'not-ready') return Object.freeze({ status: 'not-ready' })
+  if (input.availability === 'not-ready') {
+    return Object.freeze({
+      status: 'not-ready',
+      ...(input.availabilityError ? {
+        errorCode: input.availabilityError.code,
+        errorMessage: input.availabilityError.message,
+      } : {}),
+    })
+  }
 
   const installed = input.registry?.modules.find((module) => module.id === OPEN_DESIGN_MODULE_ID)
   const operation = operationForState(input)
@@ -266,7 +275,15 @@ export class OpenDesignModuleController {
     const lookup = this.#runtimeLookup()
     if (lookup.status !== 'ready') {
       this.#clearSubscription()
-      return reduceOpenDesignModuleState({ availability: lookup.status })
+      return reduceOpenDesignModuleState({
+        availability: lookup.status,
+        ...(lookup.status === 'not-ready' && lookup.errorCode ? {
+          availabilityError: {
+            code: lookup.errorCode,
+            message: lookup.errorMessage ?? 'OpenDesign is not ready.',
+          },
+        } : {}),
+      })
     }
     this.#ensureSubscription(lookup.runtime)
 
@@ -368,7 +385,17 @@ export class OpenDesignModuleController {
   ): Promise<OpenDesignModuleState> {
     if (this.#disposed) return this.getState()
     const lookup = this.#runtimeLookup()
-    if (lookup.status !== 'ready') return reduceOpenDesignModuleState({ availability: lookup.status })
+    if (lookup.status !== 'ready') {
+      return reduceOpenDesignModuleState({
+        availability: lookup.status,
+        ...(lookup.status === 'not-ready' && lookup.errorCode ? {
+          availabilityError: {
+            code: lookup.errorCode,
+            message: lookup.errorMessage ?? 'OpenDesign is not ready.',
+          },
+        } : {}),
+      })
+    }
     this.#ensureSubscription(lookup.runtime)
 
     this.#lastError = undefined
@@ -394,7 +421,11 @@ export class OpenDesignModuleController {
     try {
       return this.#options.getRuntime()
     } catch {
-      return { status: 'not-ready' }
+      return {
+        status: 'not-ready',
+        errorCode: 'RUNTIME_LOOKUP_FAILED',
+        errorMessage: 'OpenDesign runtime discovery failed.',
+      }
     }
   }
 
