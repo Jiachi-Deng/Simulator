@@ -92,7 +92,7 @@ export async function verifyUpstream({
 export function verifyToolchain({ manifest, provenance, toolchain }) {
   const expectedNode = provenance?.buildToolchainExpectations?.node;
   const expectedPnpm = parsePackageManager(provenance?.upstreamManifest?.packageManager);
-  stagingAssert(expectedNode === "24.14.1", "TOOLCHAIN_EXPECTATION_INVALID", "provenance must pin Node 24.14.1");
+  stagingAssert(expectedNode === "24.18.0", "TOOLCHAIN_EXPECTATION_INVALID", "provenance must pin Node 24.18.0");
   stagingAssert(provenance?.buildToolchainExpectations?.pnpm === "10.33.2", "TOOLCHAIN_EXPECTATION_INVALID", "provenance must pin pnpm 10.33.2");
   stagingAssert(expectedPnpm?.name === "pnpm" && expectedPnpm.version === "10.33.2", "TOOLCHAIN_EXPECTATION_INVALID", "provenance must pin pnpm@10.33.2");
   stagingAssert(manifest?.packageManager === "pnpm@10.33.2", "UPSTREAM_MANIFEST_MISMATCH", "upstream packageManager must be pnpm@10.33.2");

@@ -108,7 +108,7 @@ test("produces identical attestation bytes across private paths, times, and nati
     daemonBundleRoot: `${root}/daemon-bundle`, daemonClosureRoot: `${root}/daemon-closure`, webDeployRoot: `${root}/web`, normalizedRoot: `${root}/normalized`,
   });
   const verification = { toolchain: {
-    nodeVersion: "v24.14.1", nodeAbi: "137", platform: "darwin", arch: "arm64", nodeExecutableSha256: "a".repeat(64),
+    nodeVersion: "v24.18.0", nodeAbi: "137", platform: "darwin", arch: "arm64", nodeExecutableSha256: "a".repeat(64),
     pnpmVersion: "10.33.2", pnpmExecutableSha256: "b".repeat(64),
   } };
   const sbomEvidence = validateSbom({ sbom, sha256: "c".repeat(64), provenance, policy });

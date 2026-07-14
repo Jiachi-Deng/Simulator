@@ -8,7 +8,7 @@ import { buildOpenDesignDevelopmentPackage } from "./open-design-package.mjs";
 function parseArguments(argv) {
   const values = {};
   let developmentLocalOnly = false;
-  const allowed = new Set(["staging-root", "node-bin", "node-license", "vela-platform-package-root", "vela-platform-tarball", "catalog-issued-at", "output"]);
+  const allowed = new Set(["staging-root", "node-bin", "node-license", "catalog-issued-at", "output"]);
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     if (token === "--development-local-only") {
@@ -34,8 +34,6 @@ async function main(argv) {
     stagingRoot: options.values["staging-root"],
     nodeBin: options.values["node-bin"],
     nodeLicense: options.values["node-license"],
-    velaPlatformPackageRoot: options.values["vela-platform-package-root"],
-    velaPlatformTarball: options.values["vela-platform-tarball"],
     catalogIssuedAt: options.values["catalog-issued-at"],
     output: options.values.output,
     developmentLocalOnly: options.developmentLocalOnly,

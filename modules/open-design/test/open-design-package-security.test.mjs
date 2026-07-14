@@ -6,7 +6,6 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { gzipSync } from "node:zlib";
 
 import { ModuleInstaller } from "../../../packages/module-installer/src/index.ts";
 import { canonicalJsonBytes, digestInventory } from "../src/validate-artifact.mjs";
@@ -62,15 +61,13 @@ test("tampered archive is rejected by the existing ModuleInstaller", { skip: !su
   }), (error) => error.code === "ARCHIVE_HASH_MISMATCH");
 });
 
-test("Node and Vela provenance digests fail closed", { skip: !supported, timeout: 120_000 }, async (t) => {
+test("Node provenance digests fail closed", { skip: !supported, timeout: 120_000 }, async (t) => {
   const fixture = await createFixture(t);
   const fixedPolicyOutput = path.join(fixture.root, "fixed-policy-output");
   await assert.rejects(buildOpenDesignDevelopmentPackage({
     stagingRoot: fixture.stagingRoot,
     nodeBin: fixture.nodeBin,
     nodeLicense: fixture.nodeLicense,
-    velaPlatformPackageRoot: fixture.velaPlatformPackageRoot,
-    velaPlatformTarball: fixture.velaPlatformTarball,
     catalogIssuedAt: DEVELOPMENT_ONLY_TEST_CATALOG_ISSUED_AT,
     output: fixedPolicyOutput,
     developmentLocalOnly: true,
@@ -85,21 +82,6 @@ test("Node and Vela provenance digests fail closed", { skip: !supported, timeout
   await assert.rejects(lstat(tamperedNodeLicenseOutput), { code: "ENOENT" });
   await writeFile(fixture.nodeLicense, originalNodeLicense, { mode: 0o600 });
 
-  const originalVela = await readFile(fixture.velaPath);
-  originalVela[0] ^= 0x01;
-  await writeFile(fixture.velaPath, originalVela, { mode: 0o700 });
-  const tamperedBinaryOutput = path.join(fixture.root, "tampered-vela-output");
-  await assert.rejects(packageFixture(fixture, tamperedBinaryOutput), (error) => error.code === "PACKAGE_VELA_INVALID" || error.code === "PACKAGE_VELA_DIGEST_MISMATCH");
-  await assert.rejects(lstat(tamperedBinaryOutput), { code: "ENOENT" });
-
-  await writeFile(fixture.velaPath, await readFile(fixture.opencodePath), { mode: 0o700 });
-  const packageJsonPath = path.join(fixture.velaPlatformPackageRoot, "package.json");
-  const packageJson = JSON.parse(await readFile(packageJsonPath, "utf8"));
-  packageJson.license = "MIT";
-  await writeFile(packageJsonPath, JSON.stringify(packageJson), { mode: 0o600 });
-  const licenseOutput = path.join(fixture.root, "license-output");
-  await assert.rejects(packageFixture(fixture, licenseOutput), (error) => error.code === "PACKAGE_VELA_INVALID");
-  await assert.rejects(lstat(licenseOutput), { code: "ENOENT" });
 });
 
 async function createFixture(t) {
@@ -111,35 +93,13 @@ async function createFixture(t) {
   });
   const nodeBin = path.join(root, "node");
   const source = path.join(root, "node.c");
-  await writeFile(source, `#include <stdio.h>\nint main(void) { puts("{\\\"nodeVersion\\\":\\\"v24.14.1\\\",\\\"nodeAbi\\\":\\\"137\\\",\\\"platform\\\":\\\"darwin\\\",\\\"arch\\\":\\\"arm64\\\"}"); return 0; }\n`);
+  await writeFile(source, `#include <stdio.h>\nint main(void) { puts("{\\\"nodeVersion\\\":\\\"v24.18.0\\\",\\\"nodeAbi\\\":\\\"137\\\",\\\"platform\\\":\\\"darwin\\\",\\\"arch\\\":\\\"arm64\\\"}"); return 0; }\n`);
   await execFileAsync("cc", [source, "-o", nodeBin]);
   await chmod(nodeBin, 0o700);
   const nodeLicense = path.join(root, "LICENSE");
   await writeFile(nodeLicense, "Node.js is licensed for use as follows:\n\nCopyright Node.js contributors.\n", { mode: 0o600 });
-  const velaPlatformPackageRoot = path.join(root, "vela-platform/package");
-  const velaPath = path.join(velaPlatformPackageRoot, "bin/vela");
-  const opencodePath = path.join(velaPlatformPackageRoot, "bin/libexec/opencode/opencode");
-  await mkdir(path.dirname(opencodePath), { recursive: true, mode: 0o700 });
-  const fixtureMachO = await readFile(nodeBin);
-  await writeFile(velaPath, fixtureMachO, { mode: 0o700 });
-  await writeFile(opencodePath, fixtureMachO, { mode: 0o700 });
-  await writeFile(path.join(velaPlatformPackageRoot, "package.json"), JSON.stringify({
-    name: "@powerformer/vela-cli-darwin-arm64",
-    version: "0.0.21",
-    license: "UNLICENSED",
-    os: ["darwin"],
-    cpu: ["arm64"],
-    files: ["bin/vela", "bin/libexec/opencode/opencode"],
-  }));
-  const velaPlatformTarball = path.join(root, "powerformer-vela-cli-darwin-arm64-0.0.21.tgz");
-  const tarballBytes = gzipSync(Buffer.from("test-only Vela platform tarball fixture\n"), { level: 9 });
-  await writeFile(velaPlatformTarball, tarballBytes, { mode: 0o600 });
-  const fixtureBinarySha256 = sha256(fixtureMachO);
-  const velaFixtureDigests = {
+  const fixtureDigests = {
     nodeLicenseSha256: sha256(await readFile(nodeLicense)),
-    tarballSha1: createHash("sha1").update(tarballBytes).digest("hex"),
-    velaSha256: fixtureBinarySha256,
-    opencodeSha256: fixtureBinarySha256,
   };
   const stagingRoot = path.join(root, "staging");
   await mkdir(path.join(stagingRoot, "runtime/daemon/node_modules/node-pty/prebuilds/darwin-arm64"), { recursive: true, mode: 0o700 });
@@ -148,7 +108,7 @@ async function createFixture(t) {
   const attestation = {
     distribution,
     toolchain: {
-      nodeVersion: "24.14.1",
+      nodeVersion: "24.18.0",
       nodeAbi: "137",
       platform: "darwin",
       arch: "arm64",
@@ -180,11 +140,7 @@ async function createFixture(t) {
     nodeBin,
     nodeLicense,
     stagingRoot,
-    velaPlatformPackageRoot,
-    velaPlatformTarball,
-    velaPath,
-    opencodePath,
-    velaFixtureDigests,
+    fixtureDigests,
   };
 }
 
@@ -220,12 +176,10 @@ function packageFixture(fixture, output) {
     stagingRoot: fixture.stagingRoot,
     nodeBin: fixture.nodeBin,
     nodeLicense: fixture.nodeLicense,
-    velaPlatformPackageRoot: fixture.velaPlatformPackageRoot,
-    velaPlatformTarball: fixture.velaPlatformTarball,
     output,
     developmentLocalOnly: true,
     allowUnreviewedLocalArtifact: true,
-  }, fixture.velaFixtureDigests);
+  }, fixture.fixtureDigests);
 }
 
 function sha256(bytes) {

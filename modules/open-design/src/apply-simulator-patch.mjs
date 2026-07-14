@@ -15,15 +15,29 @@ export async function applySimulatorPatch({ checkoutRoot, provenance, run = defa
   stagingAssert(path.isAbsolute(checkoutRoot ?? ""), "PATCH_CHECKOUT_INVALID", "checkout root must be absolute");
   const patch = provenance?.simulatorPatch;
   stagingAssert(isPlainObject(patch), "PATCH_PROVENANCE_INVALID", "Simulator patch provenance is required");
-  stagingAssert(Array.isArray(patch.changedPaths) && patch.changedPaths.length === 1 && patch.changedPaths[0] === "package.json", "PATCH_SCOPE_INVALID", "patch may change only package.json");
+  stagingAssert(Array.isArray(patch.changedPaths) && patch.changedPaths.length > 0, "PATCH_SCOPE_INVALID", "Simulator patch changed paths are required");
+  stagingAssert(Array.isArray(patch.fileDigests) && patch.fileDigests.length === patch.changedPaths.length, "PATCH_PROVENANCE_INVALID", "Simulator patch file digests are required");
+  const expectedPaths = [...patch.changedPaths].sort();
+  stagingAssert(new Set(expectedPaths).size === expectedPaths.length && expectedPaths.every(isAllowedPatchPath), "PATCH_SCOPE_INVALID", "Simulator patch contains an unsupported path");
+  stagingAssert(JSON.stringify(patch.changedPaths) === JSON.stringify(expectedPaths), "PATCH_SCOPE_INVALID", "Simulator patch paths must be sorted");
+  const digestByPath = new Map(patch.fileDigests.map((entry) => [entry?.path, entry]));
+  stagingAssert(digestByPath.size === expectedPaths.length && expectedPaths.every((entry) => digestByPath.has(entry)), "PATCH_PROVENANCE_INVALID", "Simulator patch file digests do not match changed paths");
 
   const patchPath = safeModulePath(patch.path);
   const packagePath = path.join(checkoutRoot, "package.json");
-  const [patchSha256, preimageSha256] = await Promise.all([
-    hashRegularFile(patchPath, "PATCH_FILE_INVALID"),
-    hashRegularFile(packagePath, "PATCH_PREIMAGE_INVALID"),
-  ]);
+  const patchSha256 = await hashRegularFile(patchPath, "PATCH_FILE_INVALID");
   stagingAssert(patchSha256 === patch.sha256, "PATCH_HASH_MISMATCH", "Simulator patch digest does not match provenance");
+  for (const relativePath of expectedPaths) {
+    const digest = digestByPath.get(relativePath);
+    stagingAssert(isPlainObject(digest) && digest.path === relativePath && (digest.preimageSha256 === null || isSha256(digest.preimageSha256)) && isSha256(digest.postimageSha256), "PATCH_PROVENANCE_INVALID", `invalid patch digest entry for ${relativePath}`);
+    const filename = safeCheckoutPath(checkoutRoot, relativePath);
+    if (digest.preimageSha256 === null) {
+      await assertMissing(filename, "PATCH_PREIMAGE_MISMATCH");
+    } else {
+      stagingAssert(await hashRegularFile(filename, "PATCH_PREIMAGE_INVALID") === digest.preimageSha256, "PATCH_PREIMAGE_MISMATCH", `${relativePath} does not match the pinned patch preimage`);
+    }
+  }
+  const preimageSha256 = await hashRegularFile(packagePath, "PATCH_PREIMAGE_INVALID");
   stagingAssert(preimageSha256 === patch.preimageSha256 && preimageSha256 === provenance.upstreamManifest.sha256, "PATCH_PREIMAGE_MISMATCH", "package.json does not match the pinned patch preimage");
 
   await run("git", ["apply", "--check", "--whitespace=error-all", patchPath], { cwd: checkoutRoot });
@@ -31,8 +45,12 @@ export async function applySimulatorPatch({ checkoutRoot, provenance, run = defa
 
   const postimageSha256 = await hashRegularFile(packagePath, "PATCH_POSTIMAGE_INVALID");
   stagingAssert(postimageSha256 === patch.postimageSha256, "PATCH_POSTIMAGE_MISMATCH", "patched package.json digest does not match provenance");
-  const changedPaths = stdout(await run("git", ["diff", "--name-only", "--no-ext-diff"], { cwd: checkoutRoot })).trim().split("\n").filter(Boolean);
-  stagingAssert(changedPaths.length === 1 && changedPaths[0] === "package.json", "PATCH_SCOPE_INVALID", `patch changed unexpected paths: ${changedPaths.join(", ") || "none"}`);
+  for (const relativePath of expectedPaths) {
+    const digest = digestByPath.get(relativePath);
+    stagingAssert(await hashRegularFile(safeCheckoutPath(checkoutRoot, relativePath), "PATCH_POSTIMAGE_INVALID") === digest.postimageSha256, "PATCH_POSTIMAGE_MISMATCH", `${relativePath} does not match the pinned patch postimage`);
+  }
+  const changedPaths = await changedPathsInCheckout(checkoutRoot, run);
+  stagingAssert(JSON.stringify(changedPaths) === JSON.stringify(expectedPaths), "PATCH_SCOPE_INVALID", `patch changed unexpected paths: ${changedPaths.join(", ") || "none"}`);
 
   const manifest = await readJsonRegular(packagePath, "PATCH_POSTIMAGE_INVALID");
   await assertOnlyNodePtyApproval(provenance, manifest);
@@ -55,6 +73,58 @@ export function assertOnlyNodePtyApproval(provenance, patchedManifest) {
 function safeModulePath(relativePath) {
   stagingAssert(typeof relativePath === "string" && relativePath.length > 0 && !path.isAbsolute(relativePath) && path.posix.normalize(relativePath) === relativePath && !relativePath.includes("\\") && !relativePath.split("/").some((part) => !part || part === "." || part === ".."), "PATCH_FILE_INVALID", "patch path must be normalized and module-relative");
   return path.join(moduleRoot, ...relativePath.split("/"));
+}
+
+function safeCheckoutPath(checkoutRoot, relativePath) {
+  stagingAssert(isNormalizedRelativePath(relativePath), "PATCH_SCOPE_INVALID", "patch changed path must be normalized and checkout-relative");
+  return path.join(checkoutRoot, ...relativePath.split("/"));
+}
+
+function isNormalizedRelativePath(relativePath) {
+  return typeof relativePath === "string" && relativePath.length > 0 && !path.isAbsolute(relativePath) && path.posix.normalize(relativePath) === relativePath && !relativePath.includes("\\") && !relativePath.split("/").some((part) => !part || part === "." || part === "..");
+}
+
+function isAllowedPatchPath(relativePath) {
+  return isNormalizedRelativePath(relativePath) && (
+    relativePath === "package.json"
+    || relativePath === "apps/daemon/src/server.ts"
+    || relativePath === "apps/daemon/src/simulator-host-agent.ts"
+    || relativePath === "apps/daemon/src/routes/runs.ts"
+    || relativePath === "apps/daemon/src/routes/static-resource.ts"
+    || relativePath === "apps/daemon/src/routes/vela.ts"
+    || relativePath === "apps/daemon/src/runtimes/registry.ts"
+    || relativePath === "apps/daemon/src/runtimes/runs.ts"
+    || relativePath === "apps/daemon/src/runtimes/defs/simulator-host.ts"
+    || relativePath === "apps/web/src/components/EntryShell.tsx"
+    || relativePath === "apps/web/src/providers/daemon.ts"
+    || relativePath === "apps/web/src/providers/simulator-host-mode.js"
+  );
+}
+
+async function changedPathsInCheckout(checkoutRoot, run) {
+  const [tracked, untracked] = await Promise.all([
+    run("git", ["diff", "--name-only", "--no-ext-diff", "HEAD"], { cwd: checkoutRoot }),
+    run("git", ["ls-files", "--others", "--exclude-standard"], { cwd: checkoutRoot }),
+  ]);
+  return [...new Set([...lines(stdout(tracked)), ...lines(stdout(untracked))])].sort();
+}
+
+function lines(value) {
+  return value.trim().split("\n").filter(Boolean);
+}
+
+async function assertMissing(filename, code) {
+  try {
+    await lstat(filename);
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    stagingFail(code, error.message);
+  }
+  stagingFail(code, `${filename} must not exist before applying the patch`);
+}
+
+function isSha256(value) {
+  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
 }
 
 async function hashRegularFile(filename, code) {

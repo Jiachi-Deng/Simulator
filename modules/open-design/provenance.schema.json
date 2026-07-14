@@ -11,10 +11,14 @@
     }, "additionalProperties": false},
     "license": {"type": "object", "required": ["spdxId", "sourceFile"], "properties": {"spdxId": {"const": "Apache-2.0"}, "sourceFile": {"const": "LICENSE"}}, "additionalProperties": false},
     "upstreamManifest": {"type": "object", "required": ["path", "name", "version", "packageManager", "sha256"], "properties": {"path": {"const": "package.json"}, "name": {"const": "open-design"}, "version": {"type": "string", "minLength": 1, "maxLength": 64}, "packageManager": {"const": "pnpm@10.33.2"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, "additionalProperties": false},
-    "simulatorPatch": {"type": "object", "required": ["path", "sha256", "preimageSha256", "postimageSha256", "changedPaths", "purpose"], "properties": {
-      "path": {"const": "patches/open-design-v0.14.1-node-pty-build.patch"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "simulatorPatch": {"type": "object", "required": ["path", "sha256", "preimageSha256", "postimageSha256", "changedPaths", "fileDigests", "purpose"], "properties": {
+      "path": {"const": "patches/open-design-v0.14.1-simulator-host-runtime.patch"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
       "preimageSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "postimageSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-      "changedPaths": {"type": "array", "minItems": 1, "maxItems": 1, "items": {"const": "package.json"}},
+      "changedPaths": {"type": "array", "minItems": 12, "maxItems": 12, "uniqueItems": true, "items": {"enum": ["apps/daemon/src/routes/runs.ts", "apps/daemon/src/routes/static-resource.ts", "apps/daemon/src/routes/vela.ts", "apps/daemon/src/runtimes/defs/simulator-host.ts", "apps/daemon/src/runtimes/registry.ts", "apps/daemon/src/runtimes/runs.ts", "apps/daemon/src/server.ts", "apps/daemon/src/simulator-host-agent.ts", "apps/web/src/components/EntryShell.tsx", "apps/web/src/providers/daemon.ts", "apps/web/src/providers/simulator-host-mode.js", "package.json"]}},
+      "fileDigests": {"type": "array", "minItems": 12, "maxItems": 12, "items": {"type": "object", "required": ["path", "preimageSha256", "postimageSha256"], "properties": {
+        "path": {"enum": ["apps/daemon/src/routes/runs.ts", "apps/daemon/src/routes/static-resource.ts", "apps/daemon/src/routes/vela.ts", "apps/daemon/src/runtimes/defs/simulator-host.ts", "apps/daemon/src/runtimes/registry.ts", "apps/daemon/src/runtimes/runs.ts", "apps/daemon/src/server.ts", "apps/daemon/src/simulator-host-agent.ts", "apps/web/src/components/EntryShell.tsx", "apps/web/src/providers/daemon.ts", "apps/web/src/providers/simulator-host-mode.js", "package.json"]},
+        "preimageSha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}, "postimageSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }, "additionalProperties": false}},
       "purpose": {"type": "string", "minLength": 1, "maxLength": 512}
     }, "additionalProperties": false},
     "lockfile": {"type": "object", "required": ["path", "sha256"], "properties": {"path": {"const": "pnpm-lock.yaml"}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, "additionalProperties": false},
@@ -23,8 +27,8 @@
     }, "additionalProperties": false}}}, "additionalProperties": false},
     "buildInputs": {"type": "array", "minItems": 5, "maxItems": 16, "items": {"type": "object", "required": ["path", "sha256"], "properties": {"path": {"type": "string", "minLength": 1, "maxLength": 256}, "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}, "additionalProperties": false}},
     "buildToolchainExpectations": {"type": "object", "required": ["node", "nodeAbi", "platform", "arch", "nodeDistributionUrl", "nodeDistributionSha256", "nodeExecutableSha256", "pnpm", "pnpmPackageIntegrity", "pnpmExecutableSha256", "typescript", "next", "artifactTargets", "reproducibility"], "properties": {
-      "node": {"const": "24.14.1"}, "nodeAbi": {"const": "137"}, "platform": {"const": "darwin"}, "arch": {"const": "arm64"},
-      "nodeDistributionUrl": {"const": "https://nodejs.org/dist/v24.14.1/node-v24.14.1-darwin-arm64.tar.gz"},
+      "node": {"const": "24.18.0"}, "nodeAbi": {"const": "137"}, "platform": {"const": "darwin"}, "arch": {"const": "arm64"},
+      "nodeDistributionUrl": {"const": "https://nodejs.org/dist/v24.18.0/node-v24.18.0-darwin-arm64.tar.gz"},
       "nodeDistributionSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "nodeExecutableSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
       "pnpm": {"const": "10.33.2"}, "pnpmPackageIntegrity": {"type": "string", "pattern": "^sha512-[0-9a-f]{128}$"}, "pnpmExecutableSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
       "typescript": {"type": "string", "minLength": 1, "maxLength": 256}, "next": {"type": "string", "minLength": 1, "maxLength": 64},

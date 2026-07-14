@@ -11,8 +11,9 @@ const ipc = process.argv.find((value) => value.startsWith("--od-stamp-ipc="))?.s
 const port = Number(app === "daemon" ? process.env.OD_PORT : process.env.OD_WEB_PORT);
 const dataRoot = process.env.OD_DATA_DIR;
 const runtimeRoot = process.env.OD_SIDECAR_BASE;
-const resourceRoot = process.env.OD_RESOURCE_ROOT;
 const agentHome = process.env.OD_AGENT_HOME;
+const hostAgentUrl = process.env.SIMULATOR_HOST_AGENT_URL;
+const hostAgentTokenFile = process.env.SIMULATOR_HOST_AGENT_TOKEN_FILE;
 
 if (!(["daemon", "web"].includes(app))
   || !namespace
@@ -26,12 +27,15 @@ if (!(["daemon", "web"].includes(app))
   || port > 65_535
   || !dataRoot
   || !runtimeRoot
-  || !resourceRoot
   || !agentHome
   || !/^[A-Za-z0-9_-]{32,}$/.test(process.env.OD_API_TOKEN ?? "")
   || process.env.OD_SIDECAR_SOURCE !== "tools-pack"
   || process.env.OD_WEB_OUTPUT_MODE !== "standalone") process.exit(64);
 if ((app === "web" && !process.env.OD_WEB_STANDALONE_ROOT) || (app === "daemon" && process.env.OD_WEB_STANDALONE_ROOT)) process.exit(64);
+if (
+  (app === "daemon" && (hostAgentUrl !== "http://127.0.0.1:37654" || !hostAgentTokenFile))
+  || (app === "web" && (hostAgentUrl || hostAgentTokenFile))
+) process.exit(64);
 
 mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
 appendFileSync(path.join(dataRoot, "starts.log"), `${app}\n`);
@@ -53,7 +57,7 @@ const server = http.createServer((request, response) => {
   }
   if (request.url === "/runtime") {
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ agentHome, dataRoot, runtimeRoot, resourceRoot }));
+    response.end(JSON.stringify({ agentHome, dataRoot, runtimeRoot, hostAgentUrl, hostAgentTokenFile }));
     return;
   }
   if (request.url === "/redirect-external") {

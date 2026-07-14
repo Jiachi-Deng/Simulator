@@ -69,8 +69,6 @@ export async function verifyPostBuildWorkspace({ workspace, provenance, buildSta
   stagingAssert(path.isAbsolute(checkoutRoot ?? ""), "BUILD_ROOT_INVALID", "workspace checkout root is invalid");
   await assertCheckoutIdentity({ checkoutRoot, provenance, run, phase: "post-build" });
   await assertPatchedCheckout({ checkoutRoot, provenance, run, allowNextGenerated: true });
-  const untracked = stdout(await run("git", ["ls-files", "--others", "--exclude-standard", "-z"], { cwd: checkoutRoot }));
-  stagingAssert(untracked.length === 0, "BUILD_SOURCE_MUTATED", "build created non-ignored untracked files in the checkout");
   await run("git", ["diff", "--check"], { cwd: checkoutRoot });
   const requiredOutputs = [
     path.join(checkoutRoot, "apps/web/.next/standalone"),
@@ -136,16 +134,28 @@ async function assertNoIgnoredOrUntrackedInputs(checkoutRoot, run) {
 }
 
 async function assertPatchedCheckout({ checkoutRoot, provenance, run, allowNextGenerated = false }) {
-  const changed = stdout(await run("git", ["diff", "--name-only", "--no-ext-diff", "HEAD"], { cwd: checkoutRoot })).trim().split("\n").filter(Boolean);
-  const allowed = allowNextGenerated ? ["apps/web/next-env.d.ts", "package.json"] : ["package.json"];
-  stagingAssert(changed.length >= 1 && changed.every((entry) => allowed.includes(entry)) && changed.includes("package.json"), "BUILD_SOURCE_MUTATED", `tracked changes exceed the patch contract: ${changed.join(", ") || "none"}`);
+  const [trackedResult, untrackedResult] = await Promise.all([
+    run("git", ["diff", "--name-only", "--no-ext-diff", "HEAD"], { cwd: checkoutRoot }),
+    run("git", ["ls-files", "--others", "--exclude-standard"], { cwd: checkoutRoot }),
+  ]);
+  const changed = [...new Set([...lines(stdout(trackedResult)), ...lines(stdout(untrackedResult))])].sort();
+  const patchPaths = [...provenance.simulatorPatch.changedPaths].sort();
+  const allowed = allowNextGenerated ? [...patchPaths, "apps/web/next-env.d.ts"].sort() : patchPaths;
+  stagingAssert(changed.length >= patchPaths.length && changed.every((entry) => allowed.includes(entry)) && patchPaths.every((entry) => changed.includes(entry)), "BUILD_SOURCE_MUTATED", `tracked or untracked changes exceed the patch contract: ${changed.join(", ") || "none"}`);
   stagingAssert(await hashRegular(path.join(checkoutRoot, "package.json")) === provenance.simulatorPatch.postimageSha256, "PATCH_POSTIMAGE_MISMATCH", "patched package.json changed after patch application");
+  for (const entry of provenance.simulatorPatch.fileDigests) {
+    stagingAssert(await hashRegular(path.join(checkoutRoot, ...entry.path.split("/"))) === entry.postimageSha256, "PATCH_POSTIMAGE_MISMATCH", `${entry.path} changed after patch application`);
+  }
   for (const input of provenance.buildInputs) {
-    if (input.path.startsWith("patches/") || input.path === "package.json" || input.path === "apps/web/next-env.d.ts") continue;
+    if (input.path.startsWith("patches/") || patchPaths.includes(input.path) || input.path === "apps/web/next-env.d.ts") continue;
     stagingAssert(await hashRegular(path.join(checkoutRoot, ...input.path.split("/"))) === input.sha256, "BUILD_INPUT_HASH_MISMATCH", `${input.path} changed in private checkout`);
   }
   const nextEnv = await readFile(path.join(checkoutRoot, "apps/web/next-env.d.ts"), "utf8");
   stagingAssert(nextEnv === EXPECTED_NEXT_ENV_BASE || (allowNextGenerated && nextEnv === EXPECTED_NEXT_ENV_GENERATED), "BUILD_SOURCE_MUTATED", "next-env.d.ts is not the pinned input or exact known generated output");
+}
+
+function lines(value) {
+  return value.trim().split("\n").filter(Boolean);
 }
 
 async function hashRegular(filename) {

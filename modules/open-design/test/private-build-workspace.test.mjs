@@ -38,11 +38,24 @@ async function fixture(t) {
   await git(source, ["add", "."]);
   await git(source, ["commit", "--quiet", "-m", "fixture"]);
   const provenance = structuredClone(baseProvenance);
+  provenance.simulatorPatch = {
+    path: "patches/open-design-v0.14.1-node-pty-build.patch",
+    sha256: "9d861cc3c92208ee5a5bb6f7623acaea2c0e5e93deea7df5e5944b666b7f25f7",
+    preimageSha256: baseProvenance.upstreamManifest.sha256,
+    postimageSha256: "74401e8c0550cedb17eadfac927fa4db384be277703520db9bbbe8e945bc7e1d",
+    changedPaths: ["package.json"],
+    fileDigests: [{ path: "package.json", preimageSha256: baseProvenance.upstreamManifest.sha256, postimageSha256: "74401e8c0550cedb17eadfac927fa4db384be277703520db9bbbe8e945bc7e1d" }],
+    purpose: "Synthetic fixture for the private workspace unit test.",
+  };
   provenance.source.commit = (await git(source, ["rev-parse", "HEAD"])).trim();
   provenance.lockfile.sha256 = sha256(lockfile);
   for (const input of provenance.buildInputs) {
     if (input.path === "pnpm-lock.yaml") input.sha256 = sha256(lockfile);
     if (input.path === "pnpm-workspace.yaml") input.sha256 = sha256(workspaceFile);
+    if (input.path.startsWith("patches/")) {
+      input.path = provenance.simulatorPatch.path;
+      input.sha256 = provenance.simulatorPatch.sha256;
+    }
   }
   return { parent, source, workParent, provenance };
 }

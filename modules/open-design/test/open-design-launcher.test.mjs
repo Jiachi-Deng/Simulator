@@ -38,7 +38,8 @@ test("bootstrap launches sealed sidecars, proxies HTTP/WebSocket, preserves data
   const runtime = JSON.parse((await request(first.port, "/runtime")).body);
   assert.equal(runtime.dataRoot, path.join(fixture.dataRoot, "open-design"));
   assert.equal(runtime.agentHome, path.join(fixture.dataRoot, "open-design", "home"));
-  assert.equal(runtime.resourceRoot, await realpath(path.join(fixture.root, "runtime", "daemon", "resources", "open-design")));
+  assert.equal(runtime.hostAgentUrl, undefined, "the browser-facing web sidecar must not receive the Host grant");
+  assert.equal(runtime.hostAgentTokenFile, undefined, "the browser-facing web sidecar must not receive the Host token path");
   if (process.platform !== "win32") {
     assert.match(runtime.runtimeRoot, /^\/tmp\/simulator-open-design-/);
   }
@@ -113,7 +114,6 @@ async function createFixture() {
     mkdir(path.dirname(daemonEntry), { recursive: true, mode: 0o700 }),
     mkdir(path.dirname(webEntry), { recursive: true, mode: 0o700 }),
     mkdir(path.join(root, "web", "standalone"), { recursive: true, mode: 0o700 }),
-    mkdir(path.join(runtime, "daemon", "resources", "open-design"), { recursive: true, mode: 0o700 }),
     mkdir(path.join(runtime, "node", "bin"), { recursive: true, mode: 0o700 }),
   ]);
   await Promise.all([
@@ -128,7 +128,10 @@ async function createFixture() {
   const longDataParent = path.join(root, "intentionally-long-user-data-root-for-unix-socket-regression");
   await mkdir(longDataParent, { recursive: true, mode: 0o700 });
   const dataRoot = await realpath(await mkdtemp(path.join(longDataParent, "data-")));
-  return { root, dataRoot, bootstrap: path.join(runtime, "open-design-launcher") };
+  const hostAgentTokenFile = path.join(root, "host-agent-token");
+  await writeFile(hostAgentTokenFile, "ab".repeat(32), { mode: 0o600 });
+  await chmod(hostAgentTokenFile, 0o600);
+  return { root, dataRoot, hostAgentTokenFile, bootstrap: path.join(runtime, "open-design-launcher") };
 }
 
 async function startLauncher(fixture, { ipc = false } = {}) {
@@ -146,6 +149,8 @@ function environmentFor(fixture, port, overrides = {}) {
     SIMULATOR_MODULE_HEALTH_HOST: "127.0.0.1",
     SIMULATOR_MODULE_HEALTH_PORT: String(port),
     SIMULATOR_MODULE_DATA_ROOT: fixture.dataRoot,
+    SIMULATOR_HOST_AGENT_URL: "http://127.0.0.1:37654",
+    SIMULATOR_HOST_AGENT_TOKEN_FILE: fixture.hostAgentTokenFile,
     ...overrides,
   };
 }

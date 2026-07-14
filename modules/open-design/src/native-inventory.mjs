@@ -100,7 +100,7 @@ export async function inspectNativeRuntime({
       if (expectedFormat === "node-addon") {
         load = await loadAddon({ nodeBin, addonPath: absolutePath, relativePath });
         stagingAssert(load?.ok === true, "NATIVE_LOAD_FAILED", `${relativePath} did not load under the exact target Node runtime`);
-        stagingAssert(load.nodeVersion === `v${target.nodeVersion ?? "24.14.1"}` && load.nodeAbi === target.nodeAbi && load.platform === target.platform && load.arch === target.arch, "NATIVE_LOAD_RUNTIME_MISMATCH", `${relativePath} loaded under a different Node runtime`);
+        stagingAssert(load.nodeVersion === `v${target.nodeVersion ?? "24.18.0"}` && load.nodeAbi === target.nodeAbi && load.platform === target.platform && load.arch === target.arch, "NATIVE_LOAD_RUNTIME_MISMATCH", `${relativePath} loaded under a different Node runtime`);
       }
       entries.push({
         packageName,

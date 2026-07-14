@@ -38,17 +38,30 @@ async function sourceFixture(t) {
   await git(root, ["tag", "open-design-v0.14.1"]);
   const commit = (await git(root, ["rev-parse", "HEAD"])).trim();
   const provenance = structuredClone(pinnedProvenance);
+  provenance.simulatorPatch = {
+    path: "patches/open-design-v0.14.1-node-pty-build.patch",
+    sha256: "9d861cc3c92208ee5a5bb6f7623acaea2c0e5e93deea7df5e5944b666b7f25f7",
+    preimageSha256: pinnedProvenance.upstreamManifest.sha256,
+    postimageSha256: "74401e8c0550cedb17eadfac927fa4db384be277703520db9bbbe8e945bc7e1d",
+    changedPaths: ["package.json"],
+    fileDigests: [{ path: "package.json", preimageSha256: pinnedProvenance.upstreamManifest.sha256, postimageSha256: "74401e8c0550cedb17eadfac927fa4db384be277703520db9bbbe8e945bc7e1d" }],
+    purpose: "Synthetic fixture for the node-pty lifecycle policy unit test.",
+  };
   provenance.source.commit = commit;
   provenance.lockfile.sha256 = sha256(lockfile);
   for (const input of provenance.buildInputs) {
     if (input.path === "pnpm-lock.yaml") input.sha256 = sha256(lockfile);
     if (input.path === "pnpm-workspace.yaml") input.sha256 = sha256(workspace);
+    if (input.path.startsWith("patches/")) {
+      input.path = provenance.simulatorPatch.path;
+      input.sha256 = provenance.simulatorPatch.sha256;
+    }
   }
   return { root, provenance };
 }
 
 const exactToolchain = Object.freeze({
-  nodeVersion: "v24.14.1",
+  nodeVersion: "v24.18.0",
   nodeAbi: "137",
   platform: "darwin",
   arch: "arm64",
@@ -68,7 +81,7 @@ test("verifies exact repository, commit/tag, real manifest, inputs, lock and too
   assert.equal(result.toolchain.nodeAbi, "137");
 });
 
-test("real pinned manifest fails node-pty policy until the single approved patch is applied", async (t) => {
+test("real pinned manifest fails node-pty policy until the approved manifest fixture patch is applied", async (t) => {
   const { root, provenance } = await sourceFixture(t);
   const manifest = JSON.parse(await readFile(path.join(root, "package.json"), "utf8"));
   assert.throws(() => assertNativeBuildsAllowed(manifest), { code: "NATIVE_BUILD_IGNORED" });
@@ -93,7 +106,7 @@ test("allows only the exact known Next-generated next-env.d.ts change", async (t
 test("fails closed for Node patch, ABI, platform and executable digest drift", () => {
   const manifest = JSON.parse(pinnedManifestText);
   const cases = [
-    ["NODE_VERSION_MISMATCH", { nodeVersion: "v24.14.0" }],
+    ["NODE_VERSION_MISMATCH", { nodeVersion: "v24.17.0" }],
     ["NODE_ABI_MISMATCH", { nodeAbi: "136" }],
     ["TOOLCHAIN_PLATFORM_MISMATCH", { arch: "x64" }],
     ["NODE_EXECUTABLE_MISMATCH", { nodeExecutableSha256: "0".repeat(64) }],

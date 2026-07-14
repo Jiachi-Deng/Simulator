@@ -56,8 +56,8 @@ async function readConfig() {
   const daemonEntry = await installedFile(root, "runtime/daemon/dist/sidecar/index.js");
   const webEntry = await installedFile(root, "runtime/packages/web-sidecar/dist/sidecar/index.js");
   const standaloneRoot = await installedDirectory(root, "web/standalone");
-  const resourceRoot = await installedDirectory(root, "runtime/daemon/resources/open-design");
-  return { id, version, healthHost, healthPort, dataRoot, root, daemonEntry, webEntry, standaloneRoot, resourceRoot };
+  const hostAgent = await readHostAgentLaunchGrant();
+  return { id, version, healthHost, healthPort, dataRoot, root, daemonEntry, webEntry, standaloneRoot, hostAgent };
 }
 
 function requiredEnvironment(name, expression) {
@@ -70,6 +70,41 @@ function parsePort(value) {
   const port = Number(value);
   if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) throw new Error("invalid SIMULATOR_MODULE_HEALTH_PORT");
   return port;
+}
+
+async function readHostAgentLaunchGrant() {
+  const rawUrl = requiredEnvironment("SIMULATOR_HOST_AGENT_URL", /^.{1,1024}$/);
+  let url;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    throw new Error("invalid SIMULATOR_HOST_AGENT_URL");
+  }
+  if (
+    url.protocol !== "http:"
+    || !["127.0.0.1", "[::1]"].includes(url.hostname)
+    || url.username
+    || url.password
+    || url.search
+    || url.hash
+    || url.pathname !== "/"
+  ) throw new Error("invalid SIMULATOR_HOST_AGENT_URL");
+
+  const tokenFile = requiredEnvironment("SIMULATOR_HOST_AGENT_TOKEN_FILE", /^.{1,1024}$/);
+  if (!path.isAbsolute(tokenFile) || path.resolve(tokenFile) !== tokenFile || tokenFile.includes("\0")) {
+    throw new Error("invalid SIMULATOR_HOST_AGENT_TOKEN_FILE");
+  }
+  const tokenInfo = await lstat(tokenFile).catch(() => null);
+  if (
+    !tokenInfo
+    || !tokenInfo.isFile()
+    || tokenInfo.isSymbolicLink()
+    || tokenInfo.nlink !== 1
+    || tokenInfo.uid !== currentUid()
+    || (tokenInfo.mode & 0o777) !== 0o600
+    || (tokenInfo.size !== 64 && tokenInfo.size !== 65)
+  ) throw new Error("invalid SIMULATOR_HOST_AGENT_TOKEN_FILE");
+  return Object.freeze({ url: url.origin, tokenFile });
 }
 
 async function canonicalDataRoot(value) {
@@ -185,7 +220,6 @@ async function launchSidecar(value, app, entry, port) {
     OD_DISABLE_TELEMETRY: "1",
     OD_HOST: LOOPBACK,
     OD_PORT: String(value.daemonReservation.port),
-    OD_RESOURCE_ROOT: value.resourceRoot,
     OD_SIDECAR_BASE: value.runRoot,
     OD_SIDECAR_IPC_BASE: value.ipcBase,
     OD_SIDECAR_NAMESPACE: value.namespace,
@@ -193,6 +227,10 @@ async function launchSidecar(value, app, entry, port) {
     OD_WEB_OUTPUT_MODE: "standalone",
     OD_WEB_PORT: String(value.webReservation.port),
     OD_WEB_PROD: "1",
+    ...(app === "daemon" ? {
+      SIMULATOR_HOST_AGENT_URL: value.hostAgent.url,
+      SIMULATOR_HOST_AGENT_TOKEN_FILE: value.hostAgent.tokenFile,
+    } : {}),
     ...(app === "web" ? { OD_WEB_STANDALONE_ROOT: value.standaloneRoot } : {}),
   });
   const child = spawn(process.execPath, args, { cwd: value.root, env: environment, detached: true, stdio: ["ignore", "pipe", "pipe"] });

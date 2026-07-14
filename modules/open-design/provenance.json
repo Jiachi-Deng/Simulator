@@ -21,12 +21,39 @@
     "sha256": "4513a63d525931288a1874676c2a5be397680ff51aeff30acffaf878cae20a74"
   },
   "simulatorPatch": {
-    "path": "patches/open-design-v0.14.1-node-pty-build.patch",
-    "sha256": "9d861cc3c92208ee5a5bb6f7623acaea2c0e5e93deea7df5e5944b666b7f25f7",
+    "path": "patches/open-design-v0.14.1-simulator-host-runtime.patch",
+    "sha256": "3292c20976aec3b1657014043281c3e9ca6b30b29d45b089a496f528a09fe74c",
     "preimageSha256": "4513a63d525931288a1874676c2a5be397680ff51aeff30acffaf878cae20a74",
     "postimageSha256": "74401e8c0550cedb17eadfac927fa4db384be277703520db9bbbe8e945bc7e1d",
-    "changedPaths": ["package.json"],
-    "purpose": "Approve the locked node-pty dependency lifecycle build without changing the audited upstream revision."
+    "changedPaths": [
+      "apps/daemon/src/routes/runs.ts",
+      "apps/daemon/src/routes/static-resource.ts",
+      "apps/daemon/src/routes/vela.ts",
+      "apps/daemon/src/runtimes/defs/simulator-host.ts",
+      "apps/daemon/src/runtimes/registry.ts",
+      "apps/daemon/src/runtimes/runs.ts",
+      "apps/daemon/src/server.ts",
+      "apps/daemon/src/simulator-host-agent.ts",
+      "apps/web/src/components/EntryShell.tsx",
+      "apps/web/src/providers/daemon.ts",
+      "apps/web/src/providers/simulator-host-mode.js",
+      "package.json"
+    ],
+    "fileDigests": [
+      {"path": "apps/daemon/src/routes/runs.ts", "preimageSha256": "8241b0e7cecb5394e1bbf051375f60e51d119e4e70f44e786c4a11036c7ea191", "postimageSha256": "f26c6704a6578dfac4a4fcfac59fa13409174dbb7e8fcad52db80a2dfd622ff8"},
+      {"path": "apps/daemon/src/routes/static-resource.ts", "preimageSha256": "ef27de937b4e61f63e99bae8039badbb7f836d01209119f1d2532eae4a2460ba", "postimageSha256": "1ae134af315d27c4bea68bc273a17f8c91034d595f16eecdcd488dfa1aa6e051"},
+      {"path": "apps/daemon/src/routes/vela.ts", "preimageSha256": "7d7a2c4cd5bb1a0b22711e4fdac44346aaa8f747639a3ec6cd47ef0e155b72ef", "postimageSha256": "bb2905fc02f3c0a4ccc5912f2ea1655f0cb517b1ea0ca1961d4d3649ec434957"},
+      {"path": "apps/daemon/src/runtimes/defs/simulator-host.ts", "preimageSha256": null, "postimageSha256": "1fef3ac458d546ce4efd5adb0211515a287f2af3327f26d30a23b23077f5403a"},
+      {"path": "apps/daemon/src/runtimes/registry.ts", "preimageSha256": "6fd6b191cd60bf260885ff4a7307495e2925640b41f60da9d4abd009c6bb0636", "postimageSha256": "db7544ccb8f0171c9e28db453170532583bb9d5d8163725f0b18b123ab7a162d"},
+      {"path": "apps/daemon/src/runtimes/runs.ts", "preimageSha256": "bd63264e8401be17c2eeaec911c6c997f11a0b7d45345a9c4bbdb155d30aca42", "postimageSha256": "7f43da71fcbbe197b513a98ab68e657863c65c7c63a869f37b6ba7ecbf3b6f4c"},
+      {"path": "apps/daemon/src/server.ts", "preimageSha256": "8660437481e611c900d579f578ba7186384c73d9e2affcf016bf5be249e8c4f0", "postimageSha256": "e6d01752a5bb806a09ffdd8086def4cb18702bfdf2961b877a4d4db9187c001d"},
+      {"path": "apps/daemon/src/simulator-host-agent.ts", "preimageSha256": null, "postimageSha256": "51ced387c95b3707c4b790470b8fc5229f1cd98de071c4d49f6ca2a0da0ffe8c"},
+      {"path": "apps/web/src/components/EntryShell.tsx", "preimageSha256": "f4cfd3ad2756684b0ddc1055e36b186498db7870ab7c87a5a7904d769e8b75ff", "postimageSha256": "b2e954d0c3f8e5c2f8b8a2d54c464e8ccfc8760be81879f35cf01b23d662c016"},
+      {"path": "apps/web/src/providers/daemon.ts", "preimageSha256": "c04a3e10107dd8568cbe4209c60a933eeed97f72533cca716168e6944e8e021c", "postimageSha256": "24b44f99f7dc32d3624c004d8caa13b474d620ec1ea3d4440e85ea9a53cba850"},
+      {"path": "apps/web/src/providers/simulator-host-mode.js", "preimageSha256": null, "postimageSha256": "5220ca203c44dc9b72067acb195cff39ebae4c13eca7a39761dc609fb1c5b280"},
+      {"path": "package.json", "preimageSha256": "4513a63d525931288a1874676c2a5be397680ff51aeff30acffaf878cae20a74", "postimageSha256": "74401e8c0550cedb17eadfac927fa4db384be277703520db9bbbe8e945bc7e1d"}
+    ],
+    "purpose": "Add the Simulator-owned clean-room Host Runtime adapter, make Simulator mode Host-only across manual chat, runs, Orbit, and routines, disable Vela/AMR cloud routes and web requests, close cancellation races, and approve the locked node-pty lifecycle build. No Proma implementation code is copied."
   },
   "lockfile": {
     "path": "pnpm-lock.yaml",
@@ -49,16 +76,16 @@
     {"path": "pnpm-lock.yaml", "sha256": "5b0f471b76ffdcca7f427e5b3cc9eb88cb82f1a30c7ab8a41fb57d46306da80f"},
     {"path": "pnpm-workspace.yaml", "sha256": "7036cab2720e4e2db1e613bf0b7eb83075be2e60e1dd0ae683f2bca2483cc2ac"},
     {"path": "apps/web/next-env.d.ts", "sha256": "7ad303e40d4fddf44f156129e397511953a71481c5cfd86b1862649aaaf240cc"},
-    {"path": "patches/open-design-v0.14.1-node-pty-build.patch", "sha256": "9d861cc3c92208ee5a5bb6f7623acaea2c0e5e93deea7df5e5944b666b7f25f7"}
+    {"path": "patches/open-design-v0.14.1-simulator-host-runtime.patch", "sha256": "3292c20976aec3b1657014043281c3e9ca6b30b29d45b089a496f528a09fe74c"}
   ],
   "buildToolchainExpectations": {
-    "node": "24.14.1",
+    "node": "24.18.0",
     "nodeAbi": "137",
     "platform": "darwin",
     "arch": "arm64",
-    "nodeDistributionUrl": "https://nodejs.org/dist/v24.14.1/node-v24.14.1-darwin-arm64.tar.gz",
-    "nodeDistributionSha256": "25495ff85bd89e2d8a24d88566d7e2f827c6b0d3d872b2cebf75371f93fcb1fe",
-    "nodeExecutableSha256": "35d4bc736bbe4161f0c074aa140ddb74586e46969bc2ad63d32c838bec4463ff",
+    "nodeDistributionUrl": "https://nodejs.org/dist/v24.18.0/node-v24.18.0-darwin-arm64.tar.gz",
+    "nodeDistributionSha256": "e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1",
+    "nodeExecutableSha256": "ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a",
     "pnpm": "10.33.2",
     "pnpmPackageIntegrity": "sha512-a90faf6feeab71ad6c6e57f94e0fe1a12f5dcc22cd754db40ae9593eb6a3e0b6b12e3540218bb37ae083404b1f2ce6db2a4121e979829b4aff94b99f49da1cf8",
     "pnpmExecutableSha256": "b276da51dc8ca5b0d3ee3371695b50fc8b3244b281b091c63a3f082a88dadeb9",

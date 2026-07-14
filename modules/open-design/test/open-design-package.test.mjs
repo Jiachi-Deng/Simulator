@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import test from "node:test";
-import { gzipSync, gunzipSync } from "node:zlib";
+import { gunzipSync } from "node:zlib";
 
 import { list as listTar } from "tar";
 
@@ -67,7 +67,7 @@ test("development package is deterministic, signed, owner-only, and installer-ve
       sha256: first.archiveSha256,
       url: DEVELOPMENT_ONLY_ARCHIVE_URL,
     }],
-    capabilities: ["workspace.read", "workspace.write"],
+    capabilities: ["host-agent.use", "workspace.read", "workspace.write"],
     id: OPEN_DESIGN_MODULE_ID,
     schemaVersion: 1,
     version: OPEN_DESIGN_MODULE_VERSION,
@@ -94,25 +94,15 @@ test("development package is deterministic, signed, owner-only, and installer-ve
   assert.equal(artifactMetadata.extractedManifestSha256, first.extractedManifestSha256);
   assert.deepEqual(artifactMetadata.provenance.nodeRuntime, {
     executableSha256: fixture.nodeSha256,
-    licenseSha256: fixture.velaFixtureDigests.nodeLicenseSha256,
+    licenseSha256: fixture.fixtureDigests.nodeLicenseSha256,
     verification: "sealed-attestation-executable-sha256-and-pinned-license-sha256",
-    version: "24.14.1",
+    version: "24.18.0",
   });
-  assert.deepEqual(artifactMetadata.provenance.velaPlatformPackage, {
-    binaries: fixture.velaBinaries.map((binary) => ({
-      packagePath: binary.packagePath,
-      sha256: binary.sha256,
-      size: binary.size,
-      targetPath: binary.targetPath,
-    })),
-    developmentOnly: true,
-    license: "UNLICENSED",
-    nonPromotable: true,
-    npmTarballSha1: fixture.velaFixtureDigests.tarballSha1,
-    npmTarballSize: fixture.velaTarballSize,
-    packageName: "@powerformer/vela-cli-darwin-arm64",
-    verification: "npm-tarball-sha1-and-unpacked-binary-sha256",
-    version: "0.0.21",
+  assert.deepEqual(artifactMetadata.provenance.agentRuntime, {
+    bundledAgentExecutables: [],
+    kind: "simulator-host-runtime",
+    transport: "launch-scoped-loopback-grant-v1",
+    verification: "runtime-contract-and-fail-closed-integration-tests",
   });
 
   const catalogBytes = await readFile(first.catalogPath);
@@ -231,42 +221,16 @@ async function createPackageFixture(t, { distribution = { class: "development-lo
   });
   const nodeBin = path.join(root, "node");
   const nodeSource = path.join(root, "node.c");
-  await writeFile(nodeSource, `#include <stdio.h>\nint main(void) { puts("{\\\"nodeVersion\\\":\\\"v24.14.1\\\",\\\"nodeAbi\\\":\\\"137\\\",\\\"platform\\\":\\\"darwin\\\",\\\"arch\\\":\\\"arm64\\\"}"); return 0; }\n`);
+  await writeFile(nodeSource, `#include <stdio.h>\nint main(void) { puts("{\\\"nodeVersion\\\":\\\"v24.18.0\\\",\\\"nodeAbi\\\":\\\"137\\\",\\\"platform\\\":\\\"darwin\\\",\\\"arch\\\":\\\"arm64\\\"}"); return 0; }\n`);
   await execFileAsync("cc", [nodeSource, "-o", nodeBin]);
   await chmod(nodeBin, 0o700);
   const nodeSha256 = sha256(await readFile(nodeBin));
   const nodeLicense = path.join(root, "LICENSE");
   await writeFile(nodeLicense, "Node.js is licensed for use as follows:\n\nCopyright Node.js contributors.\n", { mode: 0o600 });
 
-  const velaPlatformPackageRoot = path.join(root, "vela-platform/package");
-  const velaPath = path.join(velaPlatformPackageRoot, "bin/vela");
-  const opencodePath = path.join(velaPlatformPackageRoot, "bin/libexec/opencode/opencode");
-  await mkdir(path.dirname(opencodePath), { recursive: true, mode: 0o700 });
-  const fixtureMachO = await readFile(nodeBin);
-  await writeFile(velaPath, fixtureMachO, { mode: 0o700 });
-  await writeFile(opencodePath, fixtureMachO, { mode: 0o700 });
-  await writeFile(path.join(velaPlatformPackageRoot, "package.json"), JSON.stringify({
-    name: "@powerformer/vela-cli-darwin-arm64",
-    version: "0.0.21",
-    license: "UNLICENSED",
-    os: ["darwin"],
-    cpu: ["arm64"],
-    files: ["bin/vela", "bin/libexec/opencode/opencode"],
-  }));
-  const velaPlatformTarball = path.join(root, "powerformer-vela-cli-darwin-arm64-0.0.21.tgz");
-  const tarballBytes = gzipSync(Buffer.from("test-only Vela platform tarball fixture\n"), { level: 9 });
-  await writeFile(velaPlatformTarball, tarballBytes, { mode: 0o600 });
-  const fixtureBinarySha256 = sha256(fixtureMachO);
-  const velaFixtureDigests = {
+  const fixtureDigests = {
     nodeLicenseSha256: sha256(await readFile(nodeLicense)),
-    tarballSha1: createHash("sha1").update(tarballBytes).digest("hex"),
-    velaSha256: fixtureBinarySha256,
-    opencodeSha256: fixtureBinarySha256,
   };
-  const velaBinaries = [
-    { packagePath: "bin/vela", targetPath: "runtime/daemon/resources/open-design/bin/vela", size: fixtureMachO.length, sha256: fixtureBinarySha256 },
-    { packagePath: "bin/libexec/opencode/opencode", targetPath: "runtime/daemon/resources/open-design/bin/libexec/opencode/opencode", size: fixtureMachO.length, sha256: fixtureBinarySha256 },
-  ];
 
   const stagingRoot = path.join(root, "staging");
   await mkdir(path.join(stagingRoot, "runtime/daemon/node_modules/node-pty/prebuilds/darwin-arm64"), { recursive: true, mode: 0o700 });
@@ -274,7 +238,7 @@ async function createPackageFixture(t, { distribution = { class: "development-lo
   const attestation = {
     distribution: structuredClone(distribution),
     toolchain: {
-      nodeVersion: "24.14.1",
+      nodeVersion: "24.18.0",
       nodeAbi: "137",
       platform: "darwin",
       arch: "arm64",
@@ -294,11 +258,7 @@ async function createPackageFixture(t, { distribution = { class: "development-lo
     nodeBin,
     nodeLicense,
     nodeSha256,
-    velaPlatformPackageRoot,
-    velaPlatformTarball,
-    velaTarballSize: tarballBytes.length,
-    velaFixtureDigests,
-    velaBinaries,
+    fixtureDigests,
   };
 }
 
@@ -367,12 +327,10 @@ function packageFixture(fixture, output) {
     stagingRoot: fixture.stagingRoot,
     nodeBin: fixture.nodeBin,
     nodeLicense: fixture.nodeLicense,
-    velaPlatformPackageRoot: fixture.velaPlatformPackageRoot,
-    velaPlatformTarball: fixture.velaPlatformTarball,
     output,
     developmentLocalOnly: true,
     allowUnreviewedLocalArtifact: true,
-  }, fixture.velaFixtureDigests);
+  }, fixture.fixtureDigests);
 }
 
 function deterministicBytes(length) {

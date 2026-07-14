@@ -9,7 +9,7 @@ import { assertNativeBuildsAllowed, inspectNativeRuntime, parseNativeHeader } fr
 
 const target = { platform: "darwin", arch: "arm64", nodeAbi: "137", libc: "none" };
 const runtime = { platform: "darwin", arch: "arm64", nodeAbi: "137" };
-const loaded = { ok: true, nodeVersion: "v24.14.1", nodeAbi: "137", platform: "darwin", arch: "arm64" };
+const loaded = { ok: true, nodeVersion: "v24.18.0", nodeAbi: "137", platform: "darwin", arch: "arm64" };
 const pendingMetadata = JSON.parse(await readFile(new URL("../fixtures/pinned-native-metadata.pending-review.darwin-arm64.json", import.meta.url), "utf8"));
 const resourceDecisions = JSON.parse(await readFile(new URL("../resource-decisions.json", import.meta.url), "utf8"));
 
@@ -68,7 +68,7 @@ test("records target platform, architecture, and Node ABI for required native pa
   assert.deepEqual(inventory.map((entry) => entry.resourceClass), ["native-binary", "wasm-resource", "native-binary", "executable-native", "native-binary"]);
   assert.ok(inventory.every((entry) => entry.platform === "darwin" && entry.arch === "arm64" && entry.nodeAbi === "137"));
   assert.ok(inventory.every((entry) => entry.freshFromBuild));
-  assert.ok(inventory.filter((entry) => entry.format === "node-addon").every((entry) => entry.load?.nodeVersion === "v24.14.1"));
+  assert.ok(inventory.filter((entry) => entry.format === "node-addon").every((entry) => entry.load?.nodeVersion === "v24.18.0"));
   assert.equal(inventory.find((entry) => entry.resourceClass === "executable-native").mode, "0755");
 });
 

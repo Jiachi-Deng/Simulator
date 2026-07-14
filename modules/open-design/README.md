@@ -12,6 +12,7 @@
 
 - Next.js standalone server，以及对应 static/public 文件。
 - OpenDesign daemon 与其运行所需的 production runtime。
+- Simulator Host Runtime adapter。模块不携带 Vela 或 OpenCode agent executable；运行时只通过 Host 发放的 launch-scoped loopback grant 复用 Craft 当前 Claude/Pi Runtime。
 - LICENSE、producer 生成的 SPDX SBOM、resource metadata、provenance、build attestation 和 artifact manifest。
 
 明确排除 nested Electron、desktop/packaged app、installer、updater、dev dependencies、cache、test、coverage、plugin 和 skill。模板、字体、图片及 native binaries 不会因位于允许目录就自动获准；它们必须先在 `resource-decisions.json` 中完成逐项权利和风险决策。
@@ -41,7 +42,7 @@ npm run stage:plan -- \
   --staging-root /absolute/path/to/staging \
   --work-parent /absolute/path/to/build-scratch-parent \
   --target /absolute/path/to/target.json \
-  --node-bin /absolute/path/to/node-24.14.1 \
+  --node-bin /absolute/path/to/node-24.18.0 \
   --pnpm-bin /absolute/path/to/pnpm-10.33.2.cjs
 
 # 通过相同预检后执行真实 build、copy 和 inventory。
@@ -50,7 +51,7 @@ npm run stage -- \
   --staging-root /absolute/path/to/staging \
   --work-parent /absolute/path/to/build-scratch-parent \
   --target /absolute/path/to/target.json \
-  --node-bin /absolute/path/to/node-24.14.1 \
+  --node-bin /absolute/path/to/node-24.18.0 \
   --pnpm-bin /absolute/path/to/pnpm-10.33.2.cjs
 
 # 仅供本机开发验收。flag 和环境变量缺一不可；artifact 永久标记为 non-promotable。
@@ -60,11 +61,13 @@ SIMULATOR_ALLOW_UNREVIEWED_LOCAL_ARTIFACT=1 npm run stage -- \
   --staging-root /absolute/path/to/owner-only-parent/open-design-dev \
   --work-parent /absolute/path/to/build-scratch-parent \
   --target /absolute/path/to/target.json \
-  --node-bin /absolute/path/to/node-24.14.1 \
+  --node-bin /absolute/path/to/node-24.18.0 \
   --pnpm-bin /absolute/path/to/pnpm-10.33.2.cjs
 ```
 
-Simulator-owned patch 只在 pinned manifest 的 `pnpm.onlyBuiltDependencies` 增加 `node-pty`，其 digest、preimage 和 postimage 全部固定；真实 build 已证明 `node-pty` 与 `better-sqlite3` lifecycle 执行。任何 patch、exact Node、ABI、pnpm executable 或 input digest drift 都会在 build 前停止。
+Simulator-owned clean-room patch 基于 pinned `open-design-v0.14.1`：一方面在 manifest 的 `pnpm.onlyBuiltDependencies` 增加 `node-pty`，另一方面加入 `Simulator Host Runtime` adapter。Simulator 模式下 `/api/agents` 只返回该 Runtime，所有 `/api/runs` 都在 AMR preflight、local CLI discovery 和 process spawn 前转发到 Host Gateway；Gateway 配置、认证、协议或流式响应失败时 fail closed，不回退到 AMR、Vela、OpenCode 或系统 CLI。adapter 使用 opaque session/turn ID，支持 SSE transcript、cancel 与 close；只把最终 prompt 和 canonical working directory 交给 Host，不发送 Craft workspace、connection、model 或 credential。
+
+Host grant 只通过 `SIMULATOR_HOST_AGENT_URL` 与 `SIMULATOR_HOST_AGENT_TOKEN_FILE` 进入 daemon sidecar。launcher 要求 loopback `http:` URL，以及 owner-only `0600`、非 symlink、64 位小写十六进制 token file；web sidecar 不接收这两个变量。patch 本身、十二个 changed path 的 preimage/postimage、exact Node、ABI、pnpm executable 和 build input digest 全部固定，任一 drift 都会在 build 前停止。该实现为 Simulator 原创 clean-room code，不复制 Proma AGPL 实现。
 
 ## Issue #87 当前 blocker
 
