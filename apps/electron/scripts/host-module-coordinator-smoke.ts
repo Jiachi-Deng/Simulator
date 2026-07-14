@@ -75,8 +75,9 @@ if (!existsSync(executablePath)) throw new Error(`Electron executable not found:
 const child = Bun.spawn([
   executablePath,
   ...appArguments,
-  '--debug',
   `--user-data-dir=${join(temporary, 'electron-user-data')}`,
+  ...(packagedApp ? ['--'] : []),
+  '--debug',
   `--host-module-smoke-root=${runtimeRoot}`,
   `--host-module-smoke-manifest=${manifestPath}`,
   `--host-module-smoke-result=${resultPath}`,
