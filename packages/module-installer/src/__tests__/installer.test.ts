@@ -395,6 +395,36 @@ describe('transaction fault injection and recovery', () => {
     await installing
   })
 
+  it('keeps fresh staging when a separate recovery instance races the temp write', async () => {
+    const root = await tempRoot()
+    const source = await artifactAt(root)
+    const moduleRoot = join(root, 'modules-root')
+    let release!: () => void
+    let reached!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const paused = new Promise<void>((resolve) => { reached = resolve })
+    const installer = new ModuleInstaller(moduleRoot, {
+      async faultInjector(point) {
+        if (point === 'after-archive-copy') {
+          reached()
+          await gate
+        }
+      },
+    })
+    const installing = installer.install({ descriptor: descriptor(source.archive, VALID_ENTRIES), archivePath: source.path })
+    await paused
+    const stagingRoot = join(moduleRoot, '.module-installer', 'staging')
+    const [stagingEntry] = await readdir(stagingRoot)
+    expect(stagingEntry).toBeDefined()
+    try {
+      await new ModuleInstaller(moduleRoot).recoverAll()
+      expect(await exists(join(stagingRoot, stagingEntry!))).toBe(true)
+    } finally {
+      release()
+    }
+    await installing
+  })
+
   it('keeps malformed staging ownership markers quarantined', async () => {
     const root = await tempRoot()
     const moduleRoot = join(root, 'modules-root')
@@ -651,6 +681,32 @@ describe('transaction fault injection and recovery', () => {
     const releaseReference = await reference
     expect(referenceAcquired).toBe(true)
     releaseReference()
+  })
+
+  it('restores an exact activation target idempotently and rejects live version references', async () => {
+    const root = await tempRoot()
+    const usageGuard = new TestUsageGuard()
+    const installer = new ModuleInstaller(join(root, 'modules-root'), { usageGuard })
+    const source = await artifactAt(root)
+    await installer.install({ descriptor: descriptor(source.archive, VALID_ENTRIES, '1.0.0'), archivePath: source.path })
+    await installer.install({ descriptor: descriptor(source.archive, VALID_ENTRIES, '2.0.0'), archivePath: source.path })
+
+    usageGuard.inUse.add('2.0.0')
+    await expect(installer.restoreState({
+      moduleId: MODULE_ID,
+      activeVersion: '1.0.0' as ModuleVersion,
+      lastKnownGoodVersion: null,
+    })).rejects.toMatchObject({ code: 'PROTECTED_VERSION' })
+    usageGuard.inUse.clear()
+
+    const target = {
+      moduleId: MODULE_ID,
+      activeVersion: '1.0.0' as ModuleVersion,
+      lastKnownGoodVersion: null,
+    }
+    expect(await installer.restoreState(target)).toMatchObject(target)
+    expect(await installer.restoreState(target)).toMatchObject(target)
+    expect(await installer.getState(MODULE_ID)).toEqual(target)
   })
 
   it('treats a durable state switch as committed when cleanup is interrupted', async () => {

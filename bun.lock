@@ -150,6 +150,12 @@
         "@radix-ui/react-label": "^2.1.8",
         "@radix-ui/react-popover": "^1.1.15",
         "@radix-ui/react-switch": "^1.2.6",
+        "@simulator/module-contract": "workspace:*",
+        "@simulator/module-coordinator": "workspace:*",
+        "@simulator/module-daemon": "workspace:*",
+        "@simulator/module-downloader": "workspace:*",
+        "@simulator/module-installer": "workspace:*",
+        "@simulator/module-registry": "workspace:*",
         "@tanstack/react-table": "^8.21.3",
         "chrono-node": "^2.9.0",
         "cmdk": "^1.1.1",
@@ -272,6 +278,22 @@
         "typescript": "^5.8.2",
       },
     },
+    "packages/module-coordinator": {
+      "name": "@simulator/module-coordinator",
+      "version": "0.11.1",
+      "dependencies": {
+        "@simulator/module-contract": "workspace:*",
+        "@simulator/module-daemon": "workspace:*",
+        "@simulator/module-downloader": "workspace:*",
+        "@simulator/module-installer": "workspace:*",
+        "@simulator/module-registry": "workspace:*",
+      },
+      "devDependencies": {
+        "@simulator/module-release-trust": "workspace:*",
+        "@types/node": "^25.0.8",
+        "typescript": "^5.8.2",
+      },
+    },
     "packages/module-daemon": {
       "name": "@simulator/module-daemon",
       "version": "0.11.1",
@@ -322,6 +344,7 @@
         "semver": "7.7.3",
       },
       "devDependencies": {
+        "@types/node": "^25.0.8",
         "@types/semver": "^7.7.1",
         "typescript": "^5.8.2",
       },
@@ -1386,6 +1409,8 @@
     "@silvia-odwyer/photon-node": ["@silvia-odwyer/photon-node@0.3.4", "", {}, "sha512-bnly4BKB3KDTFxrUIcgCLbaeVVS8lrAkri1pEzskpmxu9MdfGQTy8b8EgcD83ywD3RPMsIulY8xJH5Awa+t9fA=="],
 
     "@simulator/module-contract": ["@simulator/module-contract@workspace:packages/module-contract"],
+
+    "@simulator/module-coordinator": ["@simulator/module-coordinator@workspace:packages/module-coordinator"],
 
     "@simulator/module-daemon": ["@simulator/module-daemon@workspace:packages/module-daemon"],
 

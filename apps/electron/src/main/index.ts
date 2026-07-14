@@ -110,7 +110,21 @@ import { setPowerShellValidatorRoot } from '@craft-agent/shared/agent'
 import { handleDeepLink } from './deep-link'
 import { BrowserPaneManager } from './browser-pane-manager'
 import { ModuleViewManager } from './module-view-manager'
+import {
+  createHostModuleCoordinator,
+  currentModulePlatform,
+  type HostModuleCoordinatorRuntime,
+} from './host-module-coordinator'
 import { isModuleViewSmokeRequested, runModuleViewSmokeIfRequested } from './module-view-smoke'
+import {
+  isHostModuleCoordinatorSmokeRequested,
+  completeHostModuleCoordinatorSmokeCleanup,
+  getHostModuleCoordinatorSmokeNodeRuntime,
+  getHostModuleCoordinatorSmokeRoot,
+  recordHostModuleCoordinatorBeforeQuitEvent,
+  runHostModuleCoordinatorSmokeIfRequested,
+  writeHostModuleCoordinatorSmokeBootMarker,
+} from './host-module-coordinator-smoke'
 import { OAuthFlowStore } from '@craft-agent/shared/auth'
 import { registerThumbnailScheme, registerThumbnailHandler } from './thumbnail-protocol'
 import log, { isDebugMode, mainLog, getLogFilePath, getMessagingGatewayLogFilePath, messagingGatewayLog, autoUpdateLog } from './logger'
@@ -121,6 +135,7 @@ import { initNotificationService, initBadgeIcon, initInstanceBadge, updateBadgeC
 import { checkForUpdatesOnLaunch, setAutoUpdateEventSink, isUpdating, setBeforeUpdateQuitHook } from './auto-update'
 import type { EventSink } from '@craft-agent/server-core/transport'
 import { validateGitBashPath, checkVCRedistInstalled } from '@craft-agent/server-core/services'
+import { BeforeQuitCleanupController } from './before-quit-cleanup'
 
 // Initialize electron-log for renderer process support
 log.initialize()
@@ -213,6 +228,9 @@ let windowManager: WindowManager | null = null
 let sessionManager: SessionManager | null = null
 let browserPaneManager: BrowserPaneManager | null = null
 let moduleViewManager: ModuleViewManager | null = null
+let hostModuleCoordinator: HostModuleCoordinatorRuntime | null = null
+let stopServer: (() => Promise<void>) | null = null
+let embeddedServer: { host: string; port: number } | null = null
 let oauthFlowStore: OAuthFlowStore | null = null
 let moduleSink: EventSink | null = null
 let moduleClientResolver: ((webContentsId: number) => string | undefined) | null = null
@@ -267,7 +285,8 @@ app.on('open-url', (event, url) => {
 })
 
 // Handle deeplink on Windows/Linux (single instance check)
-const gotTheLock = isModuleViewSmokeRequested() || app.requestSingleInstanceLock()
+writeHostModuleCoordinatorSmokeBootMarker()
+const gotTheLock = isModuleViewSmokeRequested() || isHostModuleCoordinatorSmokeRequested() || app.requestSingleInstanceLock()
 if (!gotTheLock) {
   app.quit()
 } else {
@@ -348,6 +367,8 @@ async function createInitialWindows(): Promise<void> {
 app.whenReady().then(async () => {
   // Export packaged state as env var so logger.ts (and headless Bun) don't need 'electron'
   process.env.CRAFT_IS_PACKAGED = app.isPackaged ? 'true' : 'false'
+  const smokeNodeRuntime = getHostModuleCoordinatorSmokeNodeRuntime()
+  if (smokeNodeRuntime) process.env.PATH = `${join(smokeNodeRuntime, '..')}${delimiter}${process.env.PATH ?? ''}`
 
   // The smoke path is intentionally isolated from normal workspace/server startup.
   if (await runModuleViewSmokeIfRequested()) return
@@ -362,6 +383,7 @@ app.whenReady().then(async () => {
       appRootPath: app.isPackaged ? app.getAppPath() : process.cwd(),
       resourcesPath: process.resourcesPath,
       isPackaged: app.isPackaged,
+      nodeRuntimePath: getHostModuleCoordinatorSmokeNodeRuntime(),
     },
   })
 
@@ -447,8 +469,8 @@ app.whenReady().then(async () => {
     browserPaneManager.registerToolbarIpc()
     browserPaneManager.registerCapabilityIpc()
 
-    // Register the isolated optional-module transport. Real Module lifecycle and
-    // frontend attachment are intentionally owned by later integration slices.
+    // Register the isolated optional-module transport before constructing the
+    // coordinator runtime after the first host window exists.
     moduleViewManager = new ModuleViewManager()
 
     // Build real PlatformServices from Electron APIs
@@ -702,6 +724,8 @@ app.whenReady().then(async () => {
 
       // Capture module-level references for before-quit cleanup and deep-link handlers
       sessionManager = instance.sessionManager
+      stopServer = instance.stop
+      embeddedServer = { host: instance.host, port: instance.port }
       oauthFlowStore = instance.oauthFlowStore
       moduleSink = instance.wsServer.push.bind(instance.wsServer)
       moduleClientResolver = resolveClientId
@@ -1010,6 +1034,31 @@ app.whenReady().then(async () => {
     // In headless mode the server runs without any UI — skip window creation.
     if (!isHeadless) {
       await createInitialWindows()
+      hostModuleCoordinator = createHostModuleCoordinator({
+        root: getHostModuleCoordinatorSmokeRoot() ?? join(app.getPath('userData'), 'optional-modules'),
+        hostVersion: app.getVersion(),
+        platform: currentModulePlatform(),
+        // Product release keys are injected when a catalog source is configured.
+        // An empty set keeps network installation fail-closed while recovery of
+        // already verified and installed modules remains available.
+        trustedKeys: [],
+        moduleViewManager,
+        hostWindow: () => windowManager?.getLastActiveWindow() ?? undefined,
+      })
+      await hostModuleCoordinator.coordinator.recover()
+      if (isHostModuleCoordinatorSmokeRequested()) {
+        const hostWindow = windowManager?.getLastActiveWindow()
+        if (!sessionManager || !embeddedServer || !hostWindow) throw new Error('Built-in runtime was incomplete before module smoke')
+        await runHostModuleCoordinatorSmokeIfRequested({
+          runtime: hostModuleCoordinator,
+          manager: moduleViewManager,
+          sessionManager,
+          hostWindow,
+          serverHost: embeddedServer.host,
+          serverPort: embeddedServer.port,
+        })
+        return
+      }
     }
 
     // Run credential health check at startup to detect issues early
@@ -1115,9 +1164,6 @@ app.on('window-all-closed', () => {
   }
 })
 
-// Track if we're in the process of quitting (to avoid re-entry)
-let isQuitting = false
-
 /**
  * Capture the current multi-window state and persist it to disk.
  * Called from two sites:
@@ -1140,16 +1186,13 @@ function captureAndSaveWindowState(reason: 'before-quit' | 'pre-update'): number
   return windows.length
 }
 
-// Save window state and clean up resources before quitting
-app.on('before-quit', async (event) => {
-  // Avoid re-entry when we call app.exit()
-  if (isQuitting) return
-  isQuitting = true
-
+async function cleanupBeforeQuit(): Promise<void> {
+  let coordinatorDrained = false
+  let sessionFlushed = false
+  let serverStopped = false
+  let viewsDisposed = false
   // Ensure Cmd+Q/app quit bypasses layered window close interception (Cmd+W behavior).
   windowManager?.setAppQuitting(true)
-  moduleViewManager?.dispose()
-  moduleViewManager = null
 
   if (windowManager) {
     const windows = windowManager.getWindowStates()
@@ -1179,60 +1222,117 @@ app.on('before-quit', async (event) => {
     }
   }
 
-  // Flush all pending session writes before quitting
+  try {
+    await hostModuleCoordinator?.dispose()
+    coordinatorDrained = true
+  } catch (error) {
+    mainLog.error('Failed to drain host module coordinator:', error)
+  } finally {
+    hostModuleCoordinator = null
+  }
+  try {
+    moduleViewManager?.dispose()
+    viewsDisposed = true
+  } catch (error) {
+    mainLog.error('Failed to dispose module views:', error)
+  } finally {
+    moduleViewManager = null
+  }
+
+  // Flush all pending session writes before quitting.
   if (sessionManager) {
-    // Prevent quit until sessions are flushed
-    event.preventDefault()
     try {
       await sessionManager.flushAllSessions()
+      sessionFlushed = true
       mainLog.info('Flushed all pending session writes')
     } catch (error) {
       mainLog.error('Failed to flush sessions:', error)
     }
-    // Clean up SessionManager resources (file watchers, timers, etc.)
-    sessionManager.cleanup()
+    try {
+      sessionManager.cleanup()
+    } catch (error) {
+      mainLog.error('Failed to clean up session manager:', error)
+    }
+    sessionManager = null
+  }
 
-    // Clean up browser pane instances
-    if (browserPaneManager) {
+  if (browserPaneManager) {
+    try {
       browserPaneManager.destroyAll()
+    } catch (error) {
+      mainLog.error('Failed to destroy browser panes:', error)
     }
+    browserPaneManager = null
+  }
 
-    // Clean up OAuth flow store (stop periodic cleanup timer)
-    if (oauthFlowStore) {
+  if (oauthFlowStore && !stopServer) {
+    try {
       oauthFlowStore.dispose()
+    } catch (error) {
+      mainLog.error('Failed to dispose OAuth flow store:', error)
     }
+    oauthFlowStore = null
+  }
 
-    // Stop all model refresh timers
+  try {
     getModelRefreshService().stopAll()
+  } catch (error) {
+    mainLog.error('Failed to stop model refresh timers:', error)
+  }
 
-    // Stop messaging gateways so the WhatsApp worker subprocess exits cleanly.
-    if (messagingHandle) {
-      try {
-        await messagingHandle.dispose()
-      } catch (err) {
-        mainLog.error('[messaging] dispose failed:', err)
-      }
+  if (messagingHandle) {
+    try {
+      await messagingHandle.dispose()
+    } catch (err) {
+      mainLog.error('[messaging] dispose failed:', err)
     }
+    messagingHandle = null
+  }
 
-    // Clean up power manager (release power blocker)
+  try {
     const { cleanup: cleanupPowerManager } = await import('./power-manager')
     cleanupPowerManager()
+  } catch (error) {
+    mainLog.error('Failed to clean up power manager:', error)
+  }
 
-    // Release the server lock file so the next launch doesn't see a stale PID.
-    // This must happen regardless of the exit path (normal quit or update quit).
+  if (stopServer) {
+    const stop = stopServer
+    stopServer = null
+    try {
+      await stop()
+      serverStopped = true
+    } catch (error) {
+      mainLog.error('Failed to stop embedded server:', error)
+      releaseServerLock()
+    } finally {
+      oauthFlowStore = null
+    }
+  } else {
     releaseServerLock()
+    serverStopped = true
+  }
+  embeddedServer = null
+  completeHostModuleCoordinatorSmokeCleanup({ coordinatorDrained, sessionFlushed, serverStopped, viewsDisposed })
+}
 
-    // If update is in progress, let electron-updater handle the quit flow
-    // Force exit breaks the NSIS installer on Windows
+const beforeQuitCleanup = new BeforeQuitCleanupController({
+  cleanup: cleanupBeforeQuit,
+  onCleanupError: (error) => mainLog.error('Failed to clean up before quit:', error),
+  continueQuit: () => {
     if (isUpdating()) {
       mainLog.info('Update in progress, letting electron-updater handle quit')
       app.quit()
       return
     }
-
-    // Now actually quit
     app.exit(0)
-  }
+  },
+})
+
+// Save state and synchronously cancel Electron's first quit event before async cleanup starts.
+app.on('before-quit', (event) => {
+  recordHostModuleCoordinatorBeforeQuitEvent()
+  beforeQuitCleanup.handleBeforeQuit(event)
 })
 
 // Handle uncaught exceptions — forward to Sentry explicitly since registering

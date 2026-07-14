@@ -1,0 +1,149 @@
+name: Module Coordinator
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/module-coordinator.yml"
+      - "bun.lock"
+      - "package.json"
+      - "packages/module-coordinator/**"
+      - "packages/module-contract/**"
+      - "packages/module-release-trust/**"
+      - "packages/module-downloader/**"
+      - "packages/module-installer/**"
+      - "packages/module-registry/**"
+      - "packages/module-daemon/**"
+      - "apps/electron/package.json"
+      - "apps/electron/electron-builder.yml"
+      - "apps/electron/scripts/host-module-coordinator-smoke.ts"
+      - "apps/electron/scripts/stage-module-coordinator-smoke-resources.ts"
+      - "apps/electron/src/main/electron-module-view-port.ts"
+      - "apps/electron/src/main/host-module-coordinator.ts"
+      - "apps/electron/src/main/host-module-coordinator-smoke.ts"
+      - "apps/electron/src/main/index.ts"
+      - "apps/electron/src/main/module-view-manager.ts"
+      - "apps/electron/src/preload/module-view.ts"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/module-coordinator.yml"
+      - "bun.lock"
+      - "package.json"
+      - "packages/module-coordinator/**"
+      - "packages/module-contract/**"
+      - "packages/module-release-trust/**"
+      - "packages/module-downloader/**"
+      - "packages/module-installer/**"
+      - "packages/module-registry/**"
+      - "packages/module-daemon/**"
+      - "apps/electron/package.json"
+      - "apps/electron/electron-builder.yml"
+      - "apps/electron/scripts/host-module-coordinator-smoke.ts"
+      - "apps/electron/scripts/stage-module-coordinator-smoke-resources.ts"
+      - "apps/electron/src/main/electron-module-view-port.ts"
+      - "apps/electron/src/main/host-module-coordinator.ts"
+      - "apps/electron/src/main/host-module-coordinator-smoke.ts"
+      - "apps/electron/src/main/index.ts"
+      - "apps/electron/src/main/module-view-manager.ts"
+      - "apps/electron/src/preload/module-view.ts"
+  workflow_dispatch:
+
+concurrency:
+  group: module-coordinator-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  module-coordinator:
+    name: Module Coordinator (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.10"
+      - run: bun install --frozen-lockfile
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: bun run test:module-registry
+      - run: bun run validate:module-coordinator
+
+  module-coordinator-gate:
+    name: Module Coordinator Gate
+    needs: [module-coordinator, module-coordinator-packaged-smoke, module-coordinator-electron-packaged-smoke]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all module coordinator platforms
+        env:
+          MATRIX_RESULT: ${{ needs.module-coordinator.result }}
+          PACKAGED_RESULT: ${{ needs.module-coordinator-packaged-smoke.result }}
+          ELECTRON_RESULT: ${{ needs.module-coordinator-electron-packaged-smoke.result }}
+        run: |
+          if [[ "$MATRIX_RESULT" != "success" ]]; then
+            echo "Module coordinator matrix result: $MATRIX_RESULT"
+            exit 1
+          fi
+          if [[ "$PACKAGED_RESULT" != "success" ]]; then
+            echo "Module coordinator packaged smoke result: $PACKAGED_RESULT"
+            exit 1
+          fi
+          if [[ "$ELECTRON_RESULT" != "success" ]]; then
+            echo "Module coordinator Electron packaged smoke result: $ELECTRON_RESULT"
+            exit 1
+          fi
+
+  module-coordinator-packaged-smoke:
+    name: Packaged Module Smoke (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.10"
+      - run: bun install --frozen-lockfile
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - run: bun run test:module-coordinator:packaged
+
+  module-coordinator-electron-packaged-smoke:
+    name: Electron Packaged Module Coordinator Smoke (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.10"
+      - run: bun install --frozen-lockfile
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build Electron and subprocess bundles
+        run: bun run electron:build
+      - name: Stage packaged Electron native resources
+        run: |
+          test -f packages/pi-agent-server/dist/index.js
+          bun apps/electron/scripts/stage-module-coordinator-smoke-resources.ts
+      - name: Build unpacked packaged app
+        working-directory: apps/electron
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+        run: bunx electron-builder --dir --config electron-builder.yml --mac --publish never
+      - name: Run packaged Coordinator and WebContentsView lifecycle
+        run: |
+          app_path="$(find apps/electron/release -maxdepth 3 -name Simulator.app -print -quit)"
+          test -n "$app_path"
+          bun run test:module-coordinator:electron -- --app "$app_path"

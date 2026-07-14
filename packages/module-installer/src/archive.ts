@@ -1,8 +1,9 @@
 import { createReadStream } from 'node:fs'
+import { constants as fsConstants } from 'node:fs'
 import { open, stat } from 'node:fs/promises'
 import { posix } from 'node:path'
 import { createGunzip } from 'node:zlib'
-import { extract, list, type ReadEntry } from 'tar'
+import type { ReadEntry } from 'tar'
 import {
   ModuleInstallerError,
   type InstallLimits,
@@ -14,6 +15,19 @@ const DRIVE_OR_UNC = /^(?:[A-Za-z]:|[/\\]{2})/
 const SAFE_PATH_SEGMENT = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
 const TAR_BLOCK_SIZE = 512
 const TAR_METADATA_TYPES = new Set(['g', 'x', 'X', 'L', 'K', 'N'])
+
+let tarModule: Promise<typeof import('tar')> | undefined
+
+async function loadTar(): Promise<typeof import('tar')> {
+  if (!tarModule) {
+    // Bun's Windows fs.open does not implement libuv's optional file-map flag.
+    if (process.platform === 'win32' && process.versions.bun && fsConstants.UV_FS_O_FILEMAP) {
+      (fsConstants as { UV_FS_O_FILEMAP: number }).UV_FS_O_FILEMAP = 0
+    }
+    tarModule = import('tar')
+  }
+  return tarModule
+}
 
 export interface ArchiveEntryPlan {
   readonly archivePath: string
@@ -212,6 +226,7 @@ export async function inspectArchive(
 
   try {
     await inspectRawTarHeaders(archivePath, limits, signal)
+    const { list } = await loadTar()
     await list({
       file: archivePath,
       gzip: true,
@@ -279,6 +294,7 @@ export async function extractArchive(
   let extractedBytes = 0
   let validationError: ModuleInstallerError | undefined
   try {
+    const { extract } = await loadTar()
     await extract({
       file: archivePath,
       cwd: destination,

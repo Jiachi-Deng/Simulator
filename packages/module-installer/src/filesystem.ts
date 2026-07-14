@@ -40,6 +40,11 @@ function filesystemError(message: string, cause: unknown): ModuleInstallerError 
   return new ModuleInstallerError('FILESYSTEM_ERROR', `${message}: ${cause instanceof Error ? cause.message : String(cause)}`, cause)
 }
 
+function isUnsupportedFsync(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code
+  return code === 'EINVAL' || code === 'ENOTSUP' || code === 'EISDIR' || code === 'EPERM'
+}
+
 export async function pathExists(path: string): Promise<boolean> {
   try {
     await lstat(path)
@@ -70,7 +75,7 @@ export async function copyAndHashArchive(
     source = await open(sourcePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
     const openedInfo = await source.stat()
     if (!openedInfo.isFile()) throw new ModuleInstallerError('ARCHIVE_INVALID', 'Opened archive source is not a regular file')
-    destination = await open(destinationPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
+    destination = await open(destinationPath, exclusiveWriteFlags(), 0o600)
 
     const hash = createHash('sha256')
     const buffer = Buffer.allocUnsafe(256 * 1024)
@@ -136,6 +141,7 @@ export async function hashExtractedTree(
   limits: InstallLimits,
   signal: AbortSignal | undefined,
   report: ProgressReporter,
+  entrypoint?: string,
 ): Promise<TreeManifestResult> {
   const records: TreeRecord[] = []
   const files = new Map<string, { size: number; executable: boolean; sha256: string }>()
@@ -176,7 +182,9 @@ export async function hashExtractedTree(
         throw new ModuleInstallerError('ARCHIVE_LIMIT_EXCEEDED', 'Extracted tree exceeds byte limits')
       }
       const sha256 = await hashFile(absolute)
-      const executable = (info.mode & 0o111) !== 0
+      const executable = path === entrypoint
+        ? process.platform === 'win32' || (info.mode & 0o111) !== 0
+        : (info.mode & 0o111) !== 0
       files.set(path, { size: info.size, executable, sha256 })
       records.push({ path, value: `F\t${JSON.stringify(path)}\t${info.size}\t${executable ? 1 : 0}\t${sha256}` })
       report({
@@ -221,7 +229,7 @@ export async function normalizeAndVerifyModes(root: string, entrypoint: string):
     await visit(root)
     const entrypointPath = join(root, ...entrypoint.split('/'))
     const info = await lstat(entrypointPath)
-    if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o100) === 0) {
+    if (!info.isFile() || info.isSymbolicLink() || (process.platform !== 'win32' && (info.mode & 0o100) === 0)) {
       throw new ModuleInstallerError('ENTRYPOINT_INVALID', 'Extracted entrypoint is not an owner-executable regular file')
     }
     await access(entrypointPath, constants.X_OK)
@@ -241,7 +249,7 @@ export async function fsyncTree(root: string): Promise<void> {
       else {
         const handle = await open(path, 'r')
         try {
-          await handle.sync()
+          try { await handle.sync() } catch (error) { if (!isUnsupportedFsync(error)) throw error }
         } finally {
           await handle.close()
         }
@@ -264,7 +272,7 @@ export async function fsyncDirectory(directory: string): Promise<void> {
     await handle.sync()
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
-    if (code !== 'EINVAL' && code !== 'ENOTSUP' && code !== 'EISDIR' && code !== 'EPERM') throw error
+    if (!isUnsupportedFsync(error)) throw error
   } finally {
     await handle?.close().catch(() => undefined)
   }
@@ -274,7 +282,7 @@ export async function atomicWriteJson(path: string, value: unknown): Promise<voi
   const directory = dirname(path)
   await mkdir(directory, { recursive: true, mode: 0o700 })
   const temporary = join(directory, `.${randomUUID()}.tmp`)
-  const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
+  const handle = await open(temporary, exclusiveWriteFlags(), 0o600)
   try {
     await handle.writeFile(`${JSON.stringify(value)}\n`, 'utf8')
     await handle.sync()
@@ -307,7 +315,7 @@ export async function createJsonExclusive(
   let published = false
   try {
     await fault?.('before-journal-temp-write')
-    handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
+    handle = await open(temporary, exclusiveWriteFlags(), 0o600)
     const serialized = Buffer.from(`${JSON.stringify(value)}\n`, 'utf8')
     const midpoint = Math.max(1, Math.floor(serialized.length / 2))
     await handle.writeFile(serialized.subarray(0, midpoint))
@@ -341,4 +349,10 @@ export async function createJsonExclusive(
     await fsyncDirectory(directory).catch(() => undefined)
     throw error
   }
+}
+
+function exclusiveWriteFlags(): 'wx' | number {
+  return process.platform === 'win32'
+    ? 'wx'
+    : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0)
 }
