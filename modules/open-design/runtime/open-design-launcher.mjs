@@ -53,7 +53,8 @@ async function readConfig() {
   const daemonEntry = await installedFile(root, "runtime/daemon/dist/sidecar/index.js");
   const webEntry = await installedFile(root, "runtime/packages/web-sidecar/dist/sidecar/index.js");
   const standaloneRoot = await installedDirectory(root, "web/standalone");
-  return { id, version, healthHost, healthPort, dataRoot, root, daemonEntry, webEntry, standaloneRoot };
+  const resourceRoot = await installedDirectory(root, "resources/open-design");
+  return { id, version, healthHost, healthPort, dataRoot, root, daemonEntry, webEntry, standaloneRoot, resourceRoot };
 }
 
 function requiredEnvironment(name, expression) {
@@ -170,6 +171,7 @@ async function launchSidecar(value, app, entry, port) {
     OD_DISABLE_TELEMETRY: "1",
     OD_HOST: LOOPBACK,
     OD_PORT: String(value.daemonReservation.port),
+    OD_RESOURCE_ROOT: value.resourceRoot,
     OD_SIDECAR_BASE: value.runRoot,
     OD_SIDECAR_IPC_BASE: value.ipcBase,
     OD_SIDECAR_NAMESPACE: value.namespace,
