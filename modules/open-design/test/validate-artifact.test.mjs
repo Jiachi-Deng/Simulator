@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
-import { digestInventory, loadRuntimeSchemas, validateArtifact } from "../src/validate-artifact.mjs";
+import { digestCanonicalJson, digestInventory, loadRuntimeSchemas, validateArtifact } from "../src/validate-artifact.mjs";
 
 const root = new URL("../", import.meta.url);
 const load = async (name) => JSON.parse(await readFile(new URL(name, root), "utf8"));
@@ -12,6 +12,7 @@ const base = {
   provenance: await load("provenance.json"),
   policy: await load("artifact-policy.json"),
   decisions: await load("resource-decisions.json"),
+  attestation: await load("fixtures/minimal-build-attestation.json"),
   inventory: await load("fixtures/minimal-valid.inventory.json"),
   schemas: await loadRuntimeSchemas()
 };
@@ -22,6 +23,7 @@ const cliArgs = [
   "--provenance", fileURLToPath(new URL("../provenance.json", import.meta.url)),
   "--policy", fileURLToPath(new URL("../artifact-policy.json", import.meta.url)),
   "--decisions", fileURLToPath(new URL("../resource-decisions.json", import.meta.url)),
+  "--attestation", fileURLToPath(new URL("../fixtures/minimal-build-attestation.json", import.meta.url)),
   "--inventory", fileURLToPath(new URL("../fixtures/minimal-valid.inventory.json", import.meta.url))
 ];
 
@@ -55,6 +57,11 @@ function refreshManifestDigest(inventory) {
   inventory.files.find((file) => file.path === "artifact-manifest.json").sha256 = digestInventory(inventory);
 }
 
+function refreshAttestationAndManifest(input) {
+  input.inventory.files.find((file) => file.path === "build-attestation.json").sha256 = digestCanonicalJson(input.attestation);
+  refreshManifestDigest(input.inventory);
+}
+
 test("accepts the minimal pinned artifact inventory", () => assert.deepEqual(validateArtifact(base), { ok: true, errors: [] }));
 
 test("validator CLI rejects unknown, duplicate and missing-value arguments", async () => {
@@ -67,7 +74,7 @@ test("validator CLI rejects unknown, duplicate and missing-value arguments", asy
 });
 
 test("executes strict schemas for every document and inventory file", () => {
-  for (const name of ["provenance", "policy", "decisions", "inventory"]) {
+  for (const name of ["provenance", "policy", "decisions", "attestation", "inventory"]) {
     has(mutate((input) => { input[name].unknownField = true; }), "SCHEMA_INVALID");
     has(mutate((input) => { input[name].schemaVersion = 2; }), "SCHEMA_INVALID");
   }
@@ -183,8 +190,11 @@ test("models native targets by kind and matches the artifact target", () => {
   }), "NATIVE_ABI_MISSING");
   assert.equal(mutate((input) => {
     approveResource(input, { id: "tool", category: "native-binaries", sourcePath: "packages/tool.exe" });
-    input.inventory.files.push(runtimeFile("runtime/packages/tool.exe", { artifactKind: "native-binary", resourceCategory: "native-binaries", decisionId: "tool", sourcePath: "packages/tool.exe", nativeTarget: { format: "executable", platform: "darwin", arch: "arm64", libc: "none" } }));
-    refreshManifestDigest(input.inventory);
+    const file = runtimeFile("runtime/packages/tool.exe", { artifactKind: "native-binary", resourceCategory: "native-binaries", decisionId: "tool", sourcePath: "packages/tool.exe", nativeTarget: { format: "executable", platform: "darwin", arch: "arm64", libc: "none" } });
+    input.inventory.files.push(file);
+    input.attestation.native.push({ packageName: "sharp", path: file.path, format: "executable", platform: "darwin", arch: "arm64", nodeAbi: "137", libc: "none", binaryFormat: "mach-o", sha256: file.sha256, sourceCtime: "2026-07-13T00:00:00.000Z", freshFromBuild: true, load: null });
+    input.attestation.build.normalization.nativeOrigins.push({ path: file.path, sha256: file.sha256, sourceCtime: "2026-07-13T00:00:00.000Z" });
+    refreshAttestationAndManifest(input);
   }).ok, true, "non-Node executable must not require nodeAbi");
   has(mutate((input) => {
     approveResource(input, { id: "addon", category: "native-binaries", sourcePath: "packages/addon.node" });
@@ -204,4 +214,18 @@ test("enforces entry, path, string, file and total byte limits", () => {
 test("rejects non-pinned and mismatched source refs", () => {
   has(mutate(({ provenance }) => { provenance.source.ref = "main"; }), "SOURCE_NOT_PINNED");
   has(mutate(({ inventory }) => { inventory.source.commit = "b".repeat(40); }), "SOURCE_MISMATCH");
+});
+
+test("binds patch, exact toolchain, target and every staged Node addon to attestation", () => {
+  has(mutate(({ attestation }) => { attestation.patch.sha256 = "f".repeat(64); }), "ATTESTATION_PATCH_MISMATCH");
+  has(mutate(({ attestation }) => { attestation.toolchain.nodeExecutableSha256 = "f".repeat(64); }), "ATTESTATION_TOOLCHAIN_MISMATCH");
+  has(mutate(({ attestation }) => { attestation.sourceCommit = "f".repeat(40); }), "ATTESTATION_SOURCE_MISMATCH");
+  has(mutate((input) => {
+    approveResource(input, { id: "addon-attestation", category: "native-binaries", sourcePath: "packages/addon.node" });
+    input.inventory.files.push(runtimeFile("runtime/packages/addon.node", {
+      artifactKind: "native-binary", resourceCategory: "native-binaries", decisionId: "addon-attestation", sourcePath: "packages/addon.node",
+      nativeTarget: { format: "node-addon", platform: "darwin", arch: "arm64", libc: "none", nodeAbi: "137" },
+    }));
+  }), "ATTESTATION_NATIVE_MISMATCH");
+  has(mutate(({ attestation }) => { attestation.smoke.daemon.status.pid += 1; }), "ATTESTATION_SMOKE_MISMATCH");
 });
