@@ -37,6 +37,7 @@ test("bootstrap launches sealed sidecars, proxies HTTP/WebSocket, preserves data
 
   const runtime = JSON.parse((await request(first.port, "/runtime")).body);
   assert.equal(runtime.dataRoot, path.join(fixture.dataRoot, "open-design"));
+  assert.equal(runtime.agentHome, path.join(fixture.dataRoot, "open-design", "home"));
   assert.equal(runtime.resourceRoot, await realpath(path.join(fixture.root, "runtime", "daemon", "resources", "open-design")));
   if (process.platform !== "win32") {
     assert.match(runtime.runtimeRoot, /^\/tmp\/simulator-open-design-/);

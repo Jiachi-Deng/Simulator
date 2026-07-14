@@ -12,6 +12,7 @@ const port = Number(app === "daemon" ? process.env.OD_PORT : process.env.OD_WEB_
 const dataRoot = process.env.OD_DATA_DIR;
 const runtimeRoot = process.env.OD_SIDECAR_BASE;
 const resourceRoot = process.env.OD_RESOURCE_ROOT;
+const agentHome = process.env.OD_AGENT_HOME;
 
 if (!(["daemon", "web"].includes(app))
   || !namespace
@@ -26,6 +27,7 @@ if (!(["daemon", "web"].includes(app))
   || !dataRoot
   || !runtimeRoot
   || !resourceRoot
+  || !agentHome
   || !/^[A-Za-z0-9_-]{32,}$/.test(process.env.OD_API_TOKEN ?? "")
   || process.env.OD_SIDECAR_SOURCE !== "tools-pack"
   || process.env.OD_WEB_OUTPUT_MODE !== "standalone") process.exit(64);
@@ -51,7 +53,7 @@ const server = http.createServer((request, response) => {
   }
   if (request.url === "/runtime") {
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ dataRoot, runtimeRoot, resourceRoot }));
+    response.end(JSON.stringify({ agentHome, dataRoot, runtimeRoot, resourceRoot }));
     return;
   }
   if (request.url === "/redirect-external") {

@@ -176,6 +176,10 @@ async function launchSidecar(value, app, entry, port) {
     PATH: `${path.dirname(process.execPath)}:/usr/bin:/bin`,
     NODE_ENV: "production",
     OD_API_TOKEN: value.token,
+    // Force executable discovery to the Module-owned home. OpenDesign's GUI
+    // discovery otherwise supplements PATH with /usr/local/bin,
+    // /opt/homebrew/bin and app-bundle locations from the host machine.
+    OD_AGENT_HOME: value.homeRoot,
     OD_BIND_HOST: LOOPBACK,
     OD_DATA_DIR: value.persistentRoot,
     OD_DISABLE_TELEMETRY: "1",
