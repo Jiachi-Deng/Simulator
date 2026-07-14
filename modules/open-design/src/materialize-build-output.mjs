@@ -28,6 +28,7 @@ export async function materializeBuildOutput({ sourceRoot, destinationRoot, buil
     const roots = privateRoots ?? inferPrivateRoots(sourceRoot);
     if (roots != null) {
       await normalizeStandaloneServerFile(destinationRoot, roots);
+      await normalizeRequiredServerFilesFile(destinationRoot, roots);
       await assertNoPrivatePathResiduals(destinationRoot, validatePrivateRoots(roots));
     }
     return { root: destinationRoot, symlinksMaterialized, hardlinksMaterialized, nativeOrigins: nativeOrigins.sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path))) };
@@ -150,6 +151,29 @@ export function normalizeStandaloneServer(serverText, { checkoutRoot, workspaceR
   return `${serverText.slice(0, assignment.objectStart)}${replacement}${serverText.slice(objectEnd)}`;
 }
 
+export function normalizeRequiredServerFiles(jsonText, { checkoutRoot, workspaceRoot, sourceRoot } = {}) {
+  const roots = validatePrivateRoots({ checkoutRoot, workspaceRoot, sourceRoot });
+  let manifest;
+  try { manifest = JSON.parse(jsonText); }
+  catch (error) { stagingFail("MATERIALIZE_REQUIRED_SERVER_FILES_INVALID", `required-server-files.json is not JSON: ${error.message}`); }
+  stagingAssert(isPlainObject(manifest), "MATERIALIZE_REQUIRED_SERVER_FILES_INVALID", "required-server-files.json must be a JSON object");
+  stagingAssert(typeof manifest.appDir === "string", "MATERIALIZE_REQUIRED_SERVER_FILES_INVALID", "required-server-files appDir must be a string");
+  stagingAssert(isPlainObject(manifest.config), "MATERIALIZE_REQUIRED_SERVER_FILES_INVALID", "required-server-files config must be an object");
+  stagingAssert(typeof manifest.config.outputFileTracingRoot === "string", "MATERIALIZE_REQUIRED_SERVER_FILES_INVALID", "required-server-files outputFileTracingRoot must be a string");
+  assertRuntimePath(manifest.appDir, roots);
+  assertRuntimePath(manifest.config.outputFileTracingRoot, roots);
+  manifest.appDir = "apps/web";
+  manifest.config.outputFileTracingRoot = ".";
+  normalizeOptionalRoot(manifest.config, "turbopack", "root", roots);
+  normalizeOptionalRoot(manifest.config, "experimental", "turbopackRoot", roots);
+  delete manifest.config.configOrigin;
+  delete manifest.config.configFile;
+  delete manifest.configOrigin;
+  delete manifest.configFile;
+  assertNoPrivateStrings(manifest, roots);
+  return `${JSON.stringify(manifest)}\n`;
+}
+
 async function normalizeStandaloneServerFile(destinationRoot, roots) {
   const serverPath = path.join(destinationRoot, "apps/web/server.js");
   const source = await readFile(serverPath).catch((error) => error.code === "ENOENT" ? null : stagingFail("MATERIALIZE_NEXT_CONFIG_READ_FAILED", error.message));
@@ -157,6 +181,23 @@ async function normalizeStandaloneServerFile(destinationRoot, roots) {
   const text = decodeText(source, serverPath);
   const normalized = normalizeStandaloneServer(text, roots);
   await writeFile(serverPath, normalized, { mode: 0o644 }).catch((error) => stagingFail("MATERIALIZE_NEXT_CONFIG_WRITE_FAILED", error.message));
+}
+
+async function normalizeRequiredServerFilesFile(destinationRoot, roots) {
+  const manifestPath = path.join(destinationRoot, "apps/web/.next/required-server-files.json");
+  const source = await readFile(manifestPath).catch((error) => error.code === "ENOENT" ? null : stagingFail("MATERIALIZE_REQUIRED_SERVER_FILES_READ_FAILED", error.message));
+  if (source == null) return;
+  const text = decodeText(source, manifestPath);
+  const normalized = normalizeRequiredServerFiles(text, roots);
+  await writeFile(manifestPath, normalized, { mode: 0o644 }).catch((error) => stagingFail("MATERIALIZE_REQUIRED_SERVER_FILES_WRITE_FAILED", error.message));
+}
+
+function normalizeOptionalRoot(config, parentKey, rootKey, roots) {
+  const parent = config[parentKey];
+  if (parent == null) return;
+  stagingAssert(isPlainObject(parent) && typeof parent[rootKey] === "string", "MATERIALIZE_REQUIRED_SERVER_FILES_INVALID", `required-server-files ${parentKey}.${rootKey} must be a string`);
+  assertRuntimePath(parent[rootKey], roots);
+  parent[rootKey] = ".";
 }
 
 async function assertNoPrivatePathResiduals(root, roots) {

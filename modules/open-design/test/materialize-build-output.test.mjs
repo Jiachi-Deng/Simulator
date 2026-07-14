@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { hoistMaterializedPnpmAliases, materializeBuildOutput, normalizeStandaloneServer } from "../src/materialize-build-output.mjs";
+import { hoistMaterializedPnpmAliases, materializeBuildOutput, normalizeRequiredServerFiles, normalizeStandaloneServer } from "../src/materialize-build-output.mjs";
 
 async function fixture(t) {
   const parent = await mkdtemp(path.join(os.tmpdir(), "open-design-materialize-"));
@@ -104,13 +104,48 @@ test("rejects extra private absolute paths and produces deterministic output", (
   assert.equal(normalizeStandaloneServer(input, privateRoots), normalizeStandaloneServer(input, privateRoots));
 });
 
+test("normalizes required-server-files build roots and removes build-only metadata", () => {
+  const input = JSON.stringify({
+    version: 1,
+    appDir: `${privateRoots.checkoutRoot}/apps/web`,
+    config: {
+      outputFileTracingRoot: privateRoots.checkoutRoot,
+      turbopack: { root: `${privateRoots.checkoutRoot}/apps/web` },
+      experimental: { turbopackRoot: privateRoots.checkoutRoot },
+      configOrigin: `${privateRoots.checkoutRoot}/apps/web/next.config.mjs`,
+    },
+    configFile: `${privateRoots.checkoutRoot}/apps/web/next.config.mjs`,
+    files: ["apps/web/server.js"],
+  });
+  const output = JSON.parse(normalizeRequiredServerFiles(input, privateRoots));
+  assert.equal(output.appDir, "apps/web");
+  assert.equal(output.config.outputFileTracingRoot, ".");
+  assert.equal(output.config.turbopack.root, ".");
+  assert.equal(output.config.experimental.turbopackRoot, ".");
+  assert.equal(Object.hasOwn(output.config, "configOrigin"), false);
+  assert.equal(Object.hasOwn(output, "configFile"), false);
+  assert.doesNotMatch(JSON.stringify(output), /private\/tmp/u);
+});
+
+test("fails closed for malformed or incomplete required-server-files JSON", () => {
+  assert.throws(() => normalizeRequiredServerFiles("{}", privateRoots), { code: "MATERIALIZE_REQUIRED_SERVER_FILES_INVALID" });
+  assert.throws(() => normalizeRequiredServerFiles("{\"appDir\":\"apps/web\",\"config\":null}", privateRoots), { code: "MATERIALIZE_REQUIRED_SERVER_FILES_INVALID" });
+  assert.throws(() => normalizeRequiredServerFiles("{\"appDir\":\"apps/web\",\"config\":{\"outputFileTracingRoot\":\"/private/attacker\"}}", privateRoots), { code: "MATERIALIZE_NEXT_CONFIG_INVALID" });
+  assert.throws(() => normalizeRequiredServerFiles("not-json", privateRoots), { code: "MATERIALIZE_REQUIRED_SERVER_FILES_INVALID" });
+});
+
 test("materializes standalone server and rejects private path residue in any text output", async (t) => {
   const { source, destination } = await fixture(t);
   await mkdir(path.join(source, "apps/web"), { recursive: true });
+  await mkdir(path.join(source, "apps/web/.next"), { recursive: true });
   await writeFile(path.join(source, "apps/web/server.js"), serverWithConfig({ outputFileTracingRoot: privateRoots.checkoutRoot, turbopack: { root: privateRoots.checkoutRoot }, allowedDevOrigins: ["http://192.168.1.12:3000"] }));
+  await writeFile(path.join(source, "apps/web/.next/required-server-files.json"), JSON.stringify({ appDir: `${privateRoots.checkoutRoot}/apps/web`, config: { outputFileTracingRoot: privateRoots.checkoutRoot, configOrigin: `${privateRoots.checkoutRoot}/apps/web/next.config.mjs` }, configFile: `${privateRoots.checkoutRoot}/apps/web/next.config.mjs` }));
   await writeFile(path.join(source, "apps/web/other.js"), "const clean = true;\n");
   await materializeBuildOutput({ sourceRoot: source, destinationRoot: destination, buildStartedAtMs: 0, privateRoots });
   const server = await readFile(path.join(destination, "apps/web/server.js"), "utf8");
+  const required = JSON.parse(await readFile(path.join(destination, "apps/web/.next/required-server-files.json"), "utf8"));
   assert.match(server, /outputFileTracingRoot":"\."/u);
+  assert.equal(required.appDir, "apps/web");
+  assert.equal(required.config.outputFileTracingRoot, ".");
   assert.doesNotMatch(server, /private|192\.168\.1\.12/u);
 });
