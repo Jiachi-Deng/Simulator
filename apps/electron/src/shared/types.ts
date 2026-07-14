@@ -906,6 +906,13 @@ export interface ProjectsNavigationState {
   rightSidebar?: RightSidebarPanel
 }
 
+/** App-level Module center and optional running Module stage. */
+export interface ModulesNavigationState {
+  navigator: 'modules'
+  details: { type: 'module'; moduleId: 'open-design' } | null
+  rightSidebar?: RightSidebarPanel
+}
+
 /**
  * Unified navigation state
  */
@@ -916,6 +923,7 @@ export type NavigationState =
   | SkillsNavigationState
   | AutomationsNavigationState
   | ProjectsNavigationState
+  | ModulesNavigationState
 
 export const isSessionsNavigation = (
   state: NavigationState
@@ -940,6 +948,10 @@ export const isAutomationsNavigation = (
 export const isProjectsNavigation = (
   state: NavigationState
 ): state is ProjectsNavigationState => state.navigator === 'projects'
+
+export const isModulesNavigation = (
+  state: NavigationState
+): state is ModulesNavigationState => state.navigator === 'modules'
 
 export const DEFAULT_NAVIGATION_STATE: NavigationState = {
   navigator: 'sessions',
@@ -971,6 +983,9 @@ export const getNavigationStateKey = (state: NavigationState): string => {
       return `projects/project/${state.details.projectSlug}`
     }
     return 'projects'
+  }
+  if (state.navigator === 'modules') {
+    return state.details ? `modules/${state.details.moduleId}` : 'modules'
   }
   if (state.navigator === 'settings') {
     if (state.subpage === null) return 'settings'
@@ -1037,6 +1052,11 @@ export const parseNavigationStateKey = (key: string): NavigationState | null => 
     if (isValidSettingsSubpage(subpage)) {
       return { navigator: 'settings', subpage }
     }
+  }
+
+  if (key === 'modules') return { navigator: 'modules', details: null }
+  if (key === 'modules/open-design') {
+    return { navigator: 'modules', details: { type: 'module', moduleId: 'open-design' } }
   }
 
   // Handle sessions

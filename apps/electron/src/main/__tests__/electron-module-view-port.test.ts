@@ -22,9 +22,11 @@ function createManagerHarness() {
         ...options,
         partition: `module-test-${attachedOptions.length}`,
         webContentsId: attachedOptions.length,
-        rect: { x: 0, y: 0, width: 800, height: 600 },
+        rect: options.rect && options.rect !== 'full-content'
+          ? options.rect
+          : { x: 0, y: 0, width: 800, height: 600 },
         attached: true,
-        visible: true,
+        visible: options.visible ?? true,
         state: 'ready' as const,
       }
       records.set(options.viewInstanceId, snapshot)
@@ -37,11 +39,52 @@ function createManagerHarness() {
     destroy(identity) {
       return records.delete(identity.viewInstanceId)
     },
+    resize(identity, rect) {
+      const snapshot = { ...records.get(identity.viewInstanceId), rect }
+      records.set(identity.viewInstanceId, snapshot)
+      return snapshot
+    },
+    hide(identity) {
+      const snapshot = { ...records.get(identity.viewInstanceId), visible: false }
+      records.set(identity.viewInstanceId, snapshot)
+      return snapshot
+    },
+    show(identity) {
+      const snapshot = { ...records.get(identity.viewInstanceId), visible: true }
+      records.set(identity.viewInstanceId, snapshot)
+      return snapshot
+    },
   }
   return { attachedOptions, manager, records }
 }
 
 describe('ElectronModuleViewPort', () => {
+  it('keeps the native view hidden until the Host supplies a bounded content slot', async () => {
+    const harness = createManagerHarness()
+    const hostWindow = { isDestroyed: () => false, getContentSize: () => [1200, 800] as [number, number] }
+    const port = new ElectronModuleViewPort({ manager: harness.manager, hostWindow: () => hostWindow as any })
+    const healthy = daemon()
+    const rect = { x: 220, y: 48, width: 980, height: 752 }
+
+    port.setPresentation(healthy.id, { rect, visible: false })
+    await port.attach({ moduleId: healthy.id, version: healthy.version, daemon: healthy })
+
+    expect(harness.attachedOptions.at(-1)).toMatchObject({ rect, visible: false })
+    port.setPresentation(healthy.id, { visible: true })
+    expect([...harness.records.values()][0]).toMatchObject({ rect, visible: true })
+  })
+
+  it('rejects a Module view rectangle that overlaps the Host shell boundary', () => {
+    const harness = createManagerHarness()
+    const hostWindow = { isDestroyed: () => false, getContentSize: () => [1200, 800] as [number, number] }
+    const port = new ElectronModuleViewPort({ manager: harness.manager, hostWindow: () => hostWindow as any })
+
+    expect(() => port.setPresentation(daemon().id, {
+      rect: { x: 220, y: 48, width: 981, height: 752 },
+      visible: true,
+    })).toThrow('inside the Host content area')
+  })
+
   it('waits for preload readiness and destroys the WebContentsView on detach', async () => {
     const records = new Map<string, any>()
     const manager: ElectronViewManagerPort = {
@@ -67,6 +110,21 @@ describe('ElectronModuleViewPort', () => {
       },
       destroy(identity) {
         return records.delete(identity.viewInstanceId)
+      },
+      resize(identity, rect) {
+        const snapshot = { ...records.get(identity.viewInstanceId), rect }
+        records.set(identity.viewInstanceId, snapshot)
+        return snapshot
+      },
+      hide(identity) {
+        const snapshot = { ...records.get(identity.viewInstanceId), visible: false }
+        records.set(identity.viewInstanceId, snapshot)
+        return snapshot
+      },
+      show(identity) {
+        const snapshot = { ...records.get(identity.viewInstanceId), visible: true }
+        records.set(identity.viewInstanceId, snapshot)
+        return snapshot
       },
     }
     const hostWindow = { isDestroyed: () => false }
@@ -105,6 +163,9 @@ describe('ElectronModuleViewPort', () => {
       },
       get: () => snapshot,
       destroy: () => { snapshot = undefined; return true },
+      resize: (_identity, rect) => (snapshot = { ...snapshot, rect }),
+      hide: () => (snapshot = { ...snapshot, visible: false }),
+      show: () => (snapshot = { ...snapshot, visible: true }),
     }
     const port = new ElectronModuleViewPort({
       manager,
@@ -155,6 +216,9 @@ describe('ElectronModuleViewPort', () => {
       },
       get: () => undefined,
       destroy: () => true,
+      resize: () => ({} as any),
+      hide: () => ({} as any),
+      show: () => ({} as any),
     }
     const port = new ElectronModuleViewPort({
       manager,

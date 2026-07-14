@@ -5,7 +5,7 @@ import { OPEN_DESIGN_MODULE_CHANNELS } from '../../shared/open-design-module-ipc
 type Listener = (...args: any[]) => void
 
 const ipcListeners = new Map<string, Listener>()
-const invoke = mock(async (channel: string) => ({ status: channel.endsWith('get-state') ? 'available' : 'running' }))
+const invoke = mock(async (channel: string, ..._args: unknown[]) => ({ status: channel.endsWith('get-state') ? 'available' : 'running' }))
 const removeListener = mock((channel: string, listener: Listener) => {
   if (ipcListeners.get(channel) === listener) ipcListeners.delete(channel)
 })
@@ -68,12 +68,20 @@ describe('OpenDesign preload facade', () => {
     await facade.install()
     await facade.start()
     await facade.stop()
+    await facade.setViewPresentation({
+      visible: true,
+      bounds: { x: 220, y: 48, width: 980, height: 752 },
+    })
 
     expect(invoke.mock.calls).toEqual([
       [OPEN_DESIGN_MODULE_CHANNELS.GET_STATE],
       [OPEN_DESIGN_MODULE_CHANNELS.INSTALL],
       [OPEN_DESIGN_MODULE_CHANNELS.START],
       [OPEN_DESIGN_MODULE_CHANNELS.STOP],
+      [OPEN_DESIGN_MODULE_CHANNELS.SET_VIEW_PRESENTATION, {
+        visible: true,
+        bounds: { x: 220, y: 48, width: 980, height: 752 },
+      }],
     ])
   })
 

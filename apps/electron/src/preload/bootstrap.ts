@@ -41,6 +41,7 @@ import {
   OPEN_DESIGN_MODULE_CHANNELS,
   type OpenDesignModuleFacade,
   type OpenDesignModuleState,
+  type OpenDesignModuleViewPresentation,
 } from '../shared/open-design-module-ipc'
 
 type OpenDesignIpcRenderer = Pick<typeof ipcRenderer, 'invoke' | 'on' | 'removeListener'>
@@ -52,6 +53,8 @@ export function createOpenDesignModuleFacade(ipc: OpenDesignIpcRenderer): OpenDe
     install: () => invoke(OPEN_DESIGN_MODULE_CHANNELS.INSTALL),
     start: () => invoke(OPEN_DESIGN_MODULE_CHANNELS.START),
     stop: () => invoke(OPEN_DESIGN_MODULE_CHANNELS.STOP),
+    setViewPresentation: (presentation: OpenDesignModuleViewPresentation) =>
+      ipc.invoke(OPEN_DESIGN_MODULE_CHANNELS.SET_VIEW_PRESENTATION, presentation),
     onStateChanged(listener: (state: OpenDesignModuleState) => void) {
       const handler = (_event: Electron.IpcRendererEvent, state: OpenDesignModuleState) => listener(state)
       let subscribed = true

@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'bun:test'
+import { describe, expect, it, mock } from 'bun:test'
 import type { BrowserWindow, IpcMain } from 'electron'
 import type { ModuleId, ModuleVersion } from '@simulator/module-contract'
 import type {
@@ -252,7 +252,7 @@ interface Harness {
 }
 
 function createHarness(installed = false): Harness {
-  const sender = {}
+  const sender = { mainFrame: {} }
   const emitted: OpenDesignModuleState[] = []
   const listeners = new Set<(snapshot: ModuleDaemonSnapshot) => void>()
   let sequence = 0
@@ -316,6 +316,7 @@ function createHarness(installed = false): Harness {
     },
     view: {
       query: async () => harness.view,
+      setPresentation: mock(() => {}),
     },
   }
   harness.host = {
@@ -668,16 +669,31 @@ describe('OpenDesign module IPC', () => {
     } as unknown as Pick<IpcMain, 'handle' | 'removeHandler'>
 
     const first = registerOpenDesignModuleIpc(ipc, controller)
-    expect(handlers.size).toBe(4)
+    expect(handlers.size).toBe(5)
     const getState = handlers.get(OPEN_DESIGN_MODULE_CHANNELS.GET_STATE)!
     await expect(Promise.resolve().then(() => getState({ sender: {} }))).rejects.toThrow('sender was rejected')
-    await expect(Promise.resolve().then(() => getState({ sender: harness.sender }, {}))).rejects.toThrow('do not accept input')
-    expect(await getState({ sender: harness.sender })).toEqual({ status: 'not-installed' })
+    const sender = harness.sender as { mainFrame: object }
+    const event = { sender, senderFrame: sender.mainFrame }
+    await expect(Promise.resolve().then(() => getState(event, {}))).rejects.toThrow('do not accept input')
+    await expect(Promise.resolve().then(() => getState({ sender, senderFrame: {} }))).rejects.toThrow('main frame')
+    expect(await getState(event)).toEqual({ status: 'not-installed' })
+
+    const setPresentation = handlers.get(OPEN_DESIGN_MODULE_CHANNELS.SET_VIEW_PRESENTATION)!
+    expect(await setPresentation(event, {
+      visible: true,
+      bounds: { x: 220, y: 48, width: 980, height: 752 },
+    })).toEqual({ status: 'not-installed' })
+    expect(harness.runtime.view.setPresentation).toHaveBeenCalledWith(MODULE_ID, {
+      visible: true,
+      rect: { x: 220, y: 48, width: 980, height: 752 },
+    })
+    await expect(Promise.resolve().then(() => setPresentation(event, { visible: true })))
+      .rejects.toThrow('requires bounds')
 
     const second = registerOpenDesignModuleIpc(ipc, controller)
-    expect(handlers.size).toBe(4)
+    expect(handlers.size).toBe(5)
     first.dispose()
-    expect(handlers.size).toBe(4)
+    expect(handlers.size).toBe(5)
     second.dispose()
     second.dispose()
     expect(handlers.size).toBe(0)

@@ -32,5 +32,8 @@ export function isDetailNavState(navState: NavigationState | null): boolean {
     case 'automations':
     case 'projects':
       return navState.details !== null
+    case 'modules':
+      // The Module Center is itself a full content page; it has no list navigator.
+      return true
   }
 }

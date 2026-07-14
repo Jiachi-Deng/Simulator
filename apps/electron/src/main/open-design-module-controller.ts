@@ -18,6 +18,8 @@ import {
   type OpenDesignModuleAction,
   type OpenDesignModuleProgress,
   type OpenDesignModuleState,
+  type OpenDesignModuleViewBounds,
+  type OpenDesignModuleViewPresentation,
 } from '../shared/open-design-module-ipc'
 
 const POLL_INTERVAL_MS = 150
@@ -29,7 +31,12 @@ export interface OpenDesignModuleRuntime {
   readonly coordinator: Pick<ModuleCoordinator, 'install' | 'start' | 'stop' | 'snapshot'>
   readonly registry: Pick<ModuleRegistry, 'snapshot'>
   readonly daemon: Pick<ModuleDaemonManager, 'get' | 'subscribe'>
-  readonly view: Pick<ModuleViewPort, 'query'>
+  readonly view: Pick<ModuleViewPort, 'query'> & {
+    setPresentation(moduleId: ModuleId, presentation: {
+      readonly rect?: OpenDesignModuleViewBounds
+      readonly visible: boolean
+    }): void
+  }
 }
 
 export type OpenDesignModuleRuntimeLookup =
@@ -347,6 +354,16 @@ export class OpenDesignModuleController {
     }))
   }
 
+  async setViewPresentation(presentation: OpenDesignModuleViewPresentation): Promise<OpenDesignModuleState> {
+    const lookup = this.#runtimeLookup()
+    if (lookup.status !== 'ready') return this.getState()
+    lookup.runtime.view.setPresentation(OPEN_DESIGN_COORDINATOR_MODULE_ID, {
+      ...(presentation.bounds ? { rect: presentation.bounds } : {}),
+      visible: presentation.visible,
+    })
+    return this.getState()
+  }
+
   /** Single host-view escape hatch; integration should route host.close here instead of destroying the view. */
   async stopForHostView(): Promise<OpenDesignModuleState> {
     return this.#stopForLifecycleCleanup()
@@ -557,8 +574,64 @@ function assertIpcInvocation(
   event: IpcMainInvokeEvent,
   args: readonly unknown[],
 ): void {
-  if (!controller.isAllowedSender(event.sender)) throw new Error('OpenDesign IPC sender was rejected')
+  assertIpcSender(controller, event)
   if (args.length !== 0) throw new Error('OpenDesign IPC commands do not accept input')
+}
+
+function assertIpcSender(controller: OpenDesignModuleController, event: IpcMainInvokeEvent): void {
+  if (!controller.isAllowedSender(event.sender)) throw new Error('OpenDesign IPC sender was rejected')
+  if (!event.senderFrame || event.senderFrame !== event.sender.mainFrame) {
+    throw new Error('OpenDesign IPC must originate from the Host main frame')
+  }
+}
+
+function readPlainValue(record: object, key: string): unknown {
+  const descriptor = Object.getOwnPropertyDescriptor(record, key)
+  if (!descriptor || !('value' in descriptor)) throw new Error(`OpenDesign IPC field ${key} is invalid`)
+  return descriptor.value
+}
+
+function assertExactPlainRecord(value: unknown, keys: readonly string[], label: string): asserts value is Record<string, unknown> {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} must be an object`)
+  const prototype = Object.getPrototypeOf(value)
+  if (prototype !== Object.prototype && prototype !== null) throw new Error(`${label} must be a plain object`)
+  const actual = Reflect.ownKeys(value)
+  if (actual.some((key) => typeof key !== 'string') || actual.length !== keys.length
+    || keys.some((key) => !actual.includes(key))) {
+    throw new Error(`${label} has unexpected fields`)
+  }
+}
+
+function parseViewBounds(value: unknown): OpenDesignModuleViewBounds {
+  const keys = ['x', 'y', 'width', 'height'] as const
+  assertExactPlainRecord(value, keys, 'OpenDesign view bounds')
+  const parsed = Object.fromEntries(keys.map((key) => [key, readPlainValue(value, key)])) as Record<typeof keys[number], unknown>
+  for (const key of keys) {
+    if (!Number.isSafeInteger(parsed[key]) || (parsed[key] as number) < 0) {
+      throw new Error(`OpenDesign view bounds ${key} is invalid`)
+    }
+  }
+  if (parsed.width === 0 || parsed.height === 0) throw new Error('OpenDesign view bounds must be positive')
+  return Object.freeze(parsed as unknown as OpenDesignModuleViewBounds)
+}
+
+function parseViewPresentation(args: readonly unknown[]): OpenDesignModuleViewPresentation {
+  if (args.length !== 1) throw new Error('OpenDesign view presentation requires one argument')
+  const value = args[0]
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('OpenDesign view presentation must be an object')
+  }
+  const actual = Reflect.ownKeys(value)
+  const allowed = new Set(['visible', 'bounds'])
+  if (actual.some((key) => typeof key !== 'string' || !allowed.has(key))
+    || !actual.includes('visible') || actual.length > 2) {
+    throw new Error('OpenDesign view presentation has unexpected fields')
+  }
+  const visible = readPlainValue(value, 'visible')
+  if (typeof visible !== 'boolean') throw new Error('OpenDesign view presentation visible is invalid')
+  const bounds = actual.includes('bounds') ? parseViewBounds(readPlainValue(value, 'bounds')) : undefined
+  if (visible && !bounds) throw new Error('Visible OpenDesign view presentation requires bounds')
+  return Object.freeze({ visible, ...(bounds ? { bounds } : {}) })
 }
 
 export function registerOpenDesignModuleIpc(
@@ -601,6 +674,11 @@ export function registerOpenDesignModuleIpc(
     register(OPEN_DESIGN_MODULE_CHANNELS.INSTALL, () => controller.install())
     register(OPEN_DESIGN_MODULE_CHANNELS.START, () => controller.start())
     register(OPEN_DESIGN_MODULE_CHANNELS.STOP, () => controller.stop())
+    ipc.handle(OPEN_DESIGN_MODULE_CHANNELS.SET_VIEW_PRESENTATION, (event, ...args) => {
+      assertIpcSender(controller, event)
+      return controller.setViewPresentation(parseViewPresentation(args))
+    })
+    installed.push(OPEN_DESIGN_MODULE_CHANNELS.SET_VIEW_PRESENTATION)
   } catch (error) {
     registration.dispose()
     throw error

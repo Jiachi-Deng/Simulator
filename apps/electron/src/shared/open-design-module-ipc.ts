@@ -8,6 +8,7 @@ export const OPEN_DESIGN_MODULE_CHANNELS = Object.freeze({
   INSTALL: 'open-design-module:install',
   START: 'open-design-module:start',
   STOP: 'open-design-module:stop',
+  SET_VIEW_PRESENTATION: 'open-design-module:set-view-presentation',
   STATE_CHANGED: 'open-design-module:state-changed',
 })
 
@@ -30,6 +31,20 @@ export interface OpenDesignModuleProgress {
   readonly total: number
 }
 
+/** BrowserWindow-content coordinates in Electron device-independent pixels. */
+export interface OpenDesignModuleViewBounds {
+  readonly x: number
+  readonly y: number
+  readonly width: number
+  readonly height: number
+}
+
+/** Host-owned placement for the fixed OpenDesign view. */
+export interface OpenDesignModuleViewPresentation {
+  readonly visible: boolean
+  readonly bounds?: OpenDesignModuleViewBounds
+}
+
 export interface OpenDesignModuleState {
   readonly status: OpenDesignModuleStatus
   readonly operationId?: string
@@ -42,11 +57,12 @@ export interface OpenDesignModuleState {
   readonly progress?: OpenDesignModuleProgress
 }
 
-/** Renderer-facing facade. Every command has a fixed target and accepts no caller-controlled input. */
+/** Renderer-facing facade. Every command has a fixed OpenDesign target. */
 export interface OpenDesignModuleFacade {
   getState(): Promise<OpenDesignModuleState>
   install(): Promise<OpenDesignModuleState>
   start(): Promise<OpenDesignModuleState>
   stop(): Promise<OpenDesignModuleState>
+  setViewPresentation(presentation: OpenDesignModuleViewPresentation): Promise<OpenDesignModuleState>
   onStateChanged(listener: (state: OpenDesignModuleState) => void): () => void
 }

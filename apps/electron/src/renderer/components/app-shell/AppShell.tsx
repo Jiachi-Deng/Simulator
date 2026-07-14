@@ -33,6 +33,7 @@ import {
   Info,
   MailOpen,
   FolderKanban,
+  Blocks,
 } from "lucide-react"
 // SessionStatusIcons no longer used - icons come from dynamic sessionStatuses
 import { SourceAvatar } from "@/components/ui/source-avatar"
@@ -116,6 +117,7 @@ import {
   isSkillsNavigation,
   isAutomationsNavigation,
   isProjectsNavigation,
+  isModulesNavigation,
   type NavigationState,
 } from "@/contexts/NavigationContext"
 import type { SettingsSubpage } from "../../../shared/types"
@@ -632,6 +634,7 @@ function AppShellContent({
   // Board view replaces the session-list navigator with the full-width Kanban panel,
   // so the navigator (and its resize handle) collapse to zero width while it's active.
   const isBoardView = isSessionsNavigation(navState) && navState.viewMode === 'board'
+  const isModulesView = isModulesNavigation(navState)
 
   // Derive source filter from navigation state (only when in sources navigator)
   const sourceFilter: SourceFilter | null = isSourcesNavigation(navState) ? navState.filter ?? null : null
@@ -1830,6 +1833,10 @@ function AppShellContent({
     navigate(routes.view.projects())
   }, [])
 
+  const handleModulesClick = useCallback(() => {
+    navigate(routes.view.modules())
+  }, [])
+
   const handleAutomationsScheduledClick = useCallback(() => {
     navigate(routes.view.automationsScheduled())
   }, [])
@@ -2112,6 +2119,9 @@ function AppShellContent({
   const unifiedSidebarItems = React.useMemo((): SidebarItem[] => {
     const result: SidebarItem[] = []
 
+    // Module Center is a fixed primary action directly below New Session.
+    result.push({ id: 'nav:modules', type: 'nav', action: handleModulesClick })
+
     // 1. Sessions section: All Sessions (expandable) with status items, Flagged, Archived as children
     result.push({ id: 'nav:allSessions', type: 'nav', action: handleAllSessionsClick })
     for (const state of effectiveSessionStatuses) {
@@ -2141,7 +2151,7 @@ function AppShellContent({
     result.push({ id: 'nav:whats-new', type: 'nav', action: handleWhatsNewClick })
 
     return result
-  }, [handleAllSessionsClick, handleFlaggedClick, handleArchivedClick, handleSessionStatusClick, effectiveSessionStatuses, handleLabelClick, labelConfigs, labelTree, viewConfigs, handleViewClick, handleSourcesClick, handleSkillsClick, handleAutomationsClick, handleSettingsClick, handleWhatsNewClick])
+  }, [handleModulesClick, handleAllSessionsClick, handleFlaggedClick, handleArchivedClick, handleSessionStatusClick, effectiveSessionStatuses, handleLabelClick, labelConfigs, labelTree, viewConfigs, handleViewClick, handleSourcesClick, handleSkillsClick, handleAutomationsClick, handleSettingsClick, handleWhatsNewClick])
 
   // Toggle folder expanded state
   const handleToggleFolder = React.useCallback((path: string) => {
@@ -2264,6 +2274,8 @@ function AppShellContent({
     if (isProjectsNavigation(navState)) {
       return t("sidebar.allProjects")
     }
+
+    if (isModulesNavigation(navState)) return t("modules.title")
 
     // Automations navigator
     if (isAutomationsNavigation(navState)) {
@@ -2434,6 +2446,22 @@ function AppShellContent({
                     </TooltipTrigger>
                     <TooltipContent side="right">{newChatHotkey}</TooltipContent>
                   </Tooltip>
+                </div>
+                <div className="px-2 pb-2 shrink-0">
+                  <Button
+                    {...getSidebarItemProps('nav:modules')}
+                    variant="ghost"
+                    onClick={handleModulesClick}
+                    className={cn(
+                      "w-full justify-start gap-2 py-[7px] px-2 text-[13px] font-normal rounded-[6px] shadow-minimal bg-background",
+                      isModulesView && "bg-accent/10 text-accent hover:bg-accent/10",
+                    )}
+                    data-tutorial="modules-button"
+                    data-testid="modules-sidebar-button"
+                  >
+                    <Blocks className="h-3.5 w-3.5 shrink-0" />
+                    {t("sidebar.modules")}
+                  </Button>
                 </div>
                 {/* Primary Nav: All Sessions (▸ Statuses, Flagged, Archived), Labels | Sources, Skills | Settings */}
                 {/* pb-4 provides clearance so the last item scrolls above the mask-fade-bottom gradient */}
@@ -3601,7 +3629,7 @@ function AppShellContent({
             )}
             </div>
           }
-          navigatorWidth={isAutoCompact ? sessionListWidth : (effectiveSidebarAndNavigatorHidden || isBoardView ? 0 : sessionListWidth)}
+          navigatorWidth={isAutoCompact ? sessionListWidth : (effectiveSidebarAndNavigatorHidden || isBoardView || isModulesView ? 0 : sessionListWidth)}
           isSidebarAndNavigatorHidden={effectiveSidebarAndNavigatorHidden}
           isRightSidebarVisible={false}
           isCompact={isAutoCompact}

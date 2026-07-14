@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto'
-import type { BrowserWindow } from 'electron'
+import type { BrowserWindow, Rectangle } from 'electron'
 import type { ModuleId } from '@simulator/module-contract'
 import type {
   ModuleViewAttachRequest,
@@ -18,6 +18,9 @@ interface ElectronViewManagerPort {
   attach(options: ModuleViewAttachOptions): Promise<ModuleViewSnapshot>
   get(identity: ModuleViewIdentity): ModuleViewSnapshot | undefined
   destroy(identity: ModuleViewIdentity): boolean
+  resize(identity: ModuleViewIdentity, rect: Rectangle | 'full-content'): ModuleViewSnapshot
+  hide(identity: ModuleViewIdentity): ModuleViewSnapshot
+  show(identity: ModuleViewIdentity): ModuleViewSnapshot
 }
 
 export interface ElectronModuleViewPortOptions {
@@ -33,6 +36,27 @@ export interface ElectronModuleViewPortOptions {
 interface AttachedView {
   readonly identity: ModuleViewIdentity
   readonly version: CoordinatorViewSnapshot['version']
+}
+
+export interface ElectronModuleViewPresentation {
+  readonly rect?: Rectangle
+  readonly visible: boolean
+}
+
+function validatePresentationRect(hostWindow: BrowserWindow, rect: Rectangle): Rectangle {
+  const [contentWidth, contentHeight] = hostWindow.getContentSize()
+  for (const [name, value] of Object.entries(rect)) {
+    if (!Number.isSafeInteger(value) || value < 0) {
+      throw new TypeError(`OpenDesign view ${name} must be a non-negative safe integer`)
+    }
+  }
+  if (rect.width === 0 || rect.height === 0) {
+    throw new TypeError('OpenDesign view bounds must have positive width and height')
+  }
+  if (rect.x + rect.width > contentWidth || rect.y + rect.height > contentHeight) {
+    throw new TypeError('OpenDesign view bounds must remain inside the Host content area')
+  }
+  return Object.freeze({ ...rect })
 }
 
 function isHostClosePayload(payload: unknown): payload is { readonly type: 'host.close' } {
@@ -58,6 +82,7 @@ export class ElectronModuleViewPort implements ModuleViewPort {
   readonly #onViewFailure: ElectronModuleViewPortOptions['onViewFailure']
   readonly #onViewFailureError: ElectronModuleViewPortOptions['onViewFailureError']
   readonly #views = new Map<ModuleId, AttachedView>()
+  readonly #presentations = new Map<ModuleId, ElectronModuleViewPresentation>()
   readonly #hostCloseFlights = new Map<ModuleId, Promise<void>>()
 
   constructor(options: ElectronModuleViewPortOptions) {
@@ -88,6 +113,7 @@ export class ElectronModuleViewPort implements ModuleViewPort {
     let readyResolve!: () => void
     let readyReject!: (error: Error) => void
     let preloadReady = false
+    const presentation = this.#presentations.get(request.moduleId)
     const ready = new Promise<void>((resolve, reject) => {
       readyResolve = resolve
       readyReject = reject
@@ -101,8 +127,8 @@ export class ElectronModuleViewPort implements ModuleViewPort {
         hostWindow,
         frontendUrl: `${origin}/`,
         allowedFrontendOrigins: [origin],
-        rect: 'full-content',
-        visible: true,
+        rect: presentation?.rect ?? 'full-content',
+        visible: presentation?.visible ?? false,
         onReady: () => {
           preloadReady = true
           readyResolve()
@@ -180,8 +206,32 @@ export class ElectronModuleViewPort implements ModuleViewPort {
     }
   }
 
+  /** Cache Host layout before attach, then apply it to the current fixed Module view. */
+  setPresentation(moduleId: ModuleId, presentation: ElectronModuleViewPresentation): void {
+    const hostWindow = this.#hostWindow()
+    if (!hostWindow || hostWindow.isDestroyed()) {
+      throw new Error('OpenDesign view presentation requires a live Host window')
+    }
+    const previous = this.#presentations.get(moduleId)
+    const rect = presentation.rect
+      ? validatePresentationRect(hostWindow, presentation.rect)
+      : previous?.rect
+    if (presentation.visible && !rect) {
+      throw new TypeError('Visible OpenDesign view presentation requires bounds')
+    }
+    const next = Object.freeze({ ...(rect ? { rect } : {}), visible: presentation.visible })
+    this.#presentations.set(moduleId, next)
+
+    const record = this.#views.get(moduleId)
+    if (!record) return
+    if (rect) this.#manager.resize(record.identity, rect)
+    if (presentation.visible) this.#manager.show(record.identity)
+    else this.#manager.hide(record.identity)
+  }
+
   dispose(): void {
     for (const moduleId of [...this.#views.keys()]) void this.detach(moduleId)
+    this.#presentations.clear()
   }
 
   #requestHostClose(moduleId: ModuleId): Promise<void> {
