@@ -134,6 +134,13 @@ test("fails closed for malformed or incomplete required-server-files JSON", () =
   assert.throws(() => normalizeRequiredServerFiles("not-json", privateRoots), { code: "MATERIALIZE_REQUIRED_SERVER_FILES_INVALID" });
 });
 
+test("allows optional Next root fields to be absent while rejecting a present wrong type", () => {
+  const minimal = JSON.stringify({ appDir: `${privateRoots.checkoutRoot}/apps/web`, config: { outputFileTracingRoot: privateRoots.checkoutRoot, experimental: {} } });
+  assert.equal(JSON.parse(normalizeRequiredServerFiles(minimal, privateRoots)).config.experimental.turbopackRoot, undefined);
+  const invalid = JSON.stringify({ appDir: `${privateRoots.checkoutRoot}/apps/web`, config: { outputFileTracingRoot: privateRoots.checkoutRoot, experimental: { turbopackRoot: null } } });
+  assert.throws(() => normalizeRequiredServerFiles(invalid, privateRoots), { code: "MATERIALIZE_REQUIRED_SERVER_FILES_INVALID" });
+});
+
 test("materializes standalone server and rejects private path residue in any text output", async (t) => {
   const { source, destination } = await fixture(t);
   await mkdir(path.join(source, "apps/web"), { recursive: true });

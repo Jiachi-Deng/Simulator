@@ -195,7 +195,9 @@ async function normalizeRequiredServerFilesFile(destinationRoot, roots) {
 function normalizeOptionalRoot(config, parentKey, rootKey, roots) {
   const parent = config[parentKey];
   if (parent == null) return;
-  stagingAssert(isPlainObject(parent) && typeof parent[rootKey] === "string", "MATERIALIZE_REQUIRED_SERVER_FILES_INVALID", `required-server-files ${parentKey}.${rootKey} must be a string`);
+  stagingAssert(isPlainObject(parent), "MATERIALIZE_REQUIRED_SERVER_FILES_INVALID", `required-server-files ${parentKey} must be an object`);
+  if (!Object.hasOwn(parent, rootKey)) return;
+  stagingAssert(typeof parent[rootKey] === "string", "MATERIALIZE_REQUIRED_SERVER_FILES_INVALID", `required-server-files ${parentKey}.${rootKey} must be a string`);
   assertRuntimePath(parent[rootKey], roots);
   parent[rootKey] = ".";
 }
