@@ -10,7 +10,7 @@ import {
   type InstallProgress,
 } from './types.ts'
 
-const WINDOWS_DEVICE = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i
+const WINDOWS_DEVICE = /^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9]|lpt[1-9])(?:\..*)?$/i
 const DRIVE_OR_UNC = /^(?:[A-Za-z]:|[/\\]{2})/
 const SAFE_ARCHIVE_PAYLOAD_SEGMENT = /^[A-Za-z0-9._$@+~\x5b\x5d-]+$/
 const TAR_BLOCK_SIZE = 512

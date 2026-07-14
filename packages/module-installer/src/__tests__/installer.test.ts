@@ -362,6 +362,8 @@ describe('malicious archive matrix', () => {
     { name: 'Windows backslash', entries: [{ path: 'module\\bin\\module', mode: 0o755, content: 'x' }] },
     { name: 'Windows alternate data stream colon', entries: [{ path: 'module/data.txt:stream', content: 'x' }] },
     { name: 'Windows device name', entries: [...VALID_ENTRIES, { path: 'module/CON.txt', content: 'x' }] },
+    { name: 'Windows console input device', entries: [...VALID_ENTRIES, { path: 'module/CONIN$', content: 'x' }] },
+    { name: 'Windows console output device with extension', entries: [...VALID_ENTRIES, { path: 'module/CONOUT$.txt', content: 'x' }] },
     { name: 'Windows trailing dot', entries: [...VALID_ENTRIES, { path: 'module/data.', content: 'x' }] },
     { name: 'unexpected top-level layout', entries: [{ path: 'payload/bin/module', mode: 0o755, content: 'x' }] },
     { name: 'duplicate path', entries: [...VALID_ENTRIES, { path: 'module/data.txt', content: 'again' }] },
@@ -406,6 +408,8 @@ describe('malicious archive matrix', () => {
     'caf\u00e9',
     'name!',
     'CON',
+    'CONIN$',
+    'conout$.txt',
     'lpt1.log',
     'trailing.',
   ])('rejects non-portable payload segment %j before or after extraction', (segment) => {
