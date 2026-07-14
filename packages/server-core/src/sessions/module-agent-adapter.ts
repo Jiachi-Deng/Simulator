@@ -55,7 +55,11 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
       throw new Error('Craft created an invalid hidden module session')
     }
     try {
-      registerModuleAgentToolBoundary(session.id, authorizedWorkingRoot, workingDirectory)
+      // The launch grant may cover the Module's whole data area so it can
+      // select a project, but an Agent session is confined to the one
+      // canonical project directory selected at creation time. This prevents
+      // one OpenDesign project from reading sibling projects or daemon data.
+      registerModuleAgentToolBoundary(session.id, workingDirectory, workingDirectory)
     } catch (error) {
       await this.sessions.deleteSession(session.id).catch(() => undefined)
       throw error

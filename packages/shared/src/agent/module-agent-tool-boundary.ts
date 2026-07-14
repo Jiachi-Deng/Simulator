@@ -9,6 +9,8 @@ interface ModuleAgentToolBoundary {
 export interface ModuleAgentToolBoundaryResult {
   allowed: boolean;
   reason?: string;
+  /** Canonical Host path for validated file/search tools. */
+  canonicalPath?: string;
 }
 
 const boundaries = new Map<string, ModuleAgentToolBoundary>();
@@ -65,7 +67,7 @@ function validatePath(rawPath: unknown, boundary: ModuleAgentToolBoundary): Modu
     }
   }
 
-  return { allowed: true };
+  return { allowed: true, canonicalPath: candidate };
 }
 
 /**

@@ -79,7 +79,7 @@ index 0459682890700a2bf5f2afc9938e91bbd4a18128..2bf8646a63a61c02e4721e997b105186
      try {
        config = await readAppConfig(RUNTIME_DATA_DIR);
 diff --git a/apps/daemon/src/routes/vela.ts b/apps/daemon/src/routes/vela.ts
-index 07b8f1cc9d229138be744ae8ea833c0bda8ae76d..f3e8619ab9869246d4751e1dc73bcdb4b2ab731b 100644
+index 07b8f1cc9d229138be744ae8ea833c0bda8ae76d..c7b0afeda8103feac8b020f55333ffd2a4eea629 100644
 --- a/apps/daemon/src/routes/vela.ts
 +++ b/apps/daemon/src/routes/vela.ts
 @@ -41,6 +41,7 @@ import {
@@ -94,7 +94,7 @@ index 07b8f1cc9d229138be744ae8ea833c0bda8ae76d..f3e8619ab9869246d4751e1dc73bcdb4
  
  export function registerVelaRoutes(app: Express, deps: RegisterVelaRoutesDeps): void {
    const env = deps.env ?? process.env;
-+  if (isSimulatorHostAgentMode(env)) return;
++  if (isSimulatorHostAgentMode()) return;
    const { RUNTIME_DATA_DIR } = deps.paths;
    const { readAppConfig } = deps.appConfig;
    const getPublicBaseUrl = deps.http.getPublicBaseUrl ?? ((req: Request) => {
@@ -233,14 +233,15 @@ index ce6b33acb0461d0448b8ad01735f95a0d01d4fec..fb2d24d1d802b2cccfe517720b1a4010
          try {
            run.acpSession.abort();
 diff --git a/apps/daemon/src/server.ts b/apps/daemon/src/server.ts
-index d383bb87a90aa4c3298a94d5dbd41624238782a2..8cc287ca408c037d5f9b1c9c5fb80338667eecd7 100644
+index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f67d12c9d 100644
 --- a/apps/daemon/src/server.ts
 +++ b/apps/daemon/src/server.ts
-@@ -355,6 +355,11 @@ import { importFigmaFromBytes } from './figma/figma-import.js';
+@@ -355,6 +355,12 @@ import { importFigmaFromBytes } from './figma/figma-import.js';
  import { renderDesignSystemPreview } from './design-systems/preview.js';
  import { renderDesignSystemShowcase } from './design-systems/showcase.js';
  import { createChatRunService } from './runtimes/runs.js';
 +import {
++  disposeSimulatorHostAgentSessions,
 +  isSimulatorHostAgentMode,
 +  runSimulatorHostAgentTurn,
 +  SIMULATOR_HOST_AGENT_ID,
@@ -248,6 +249,19 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..8cc287ca408c037d5f9b1c9c5fb80338
  import {
    createRunLifecycleTracer,
    runLifecycleMarkersForStreamEvent,
+@@ -2871,11 +2877,11 @@ export async function startServer({
+     validation: validationDeps,
+   });
+-  registerTerminalRoutes(app, {
++  if (!isSimulatorHostAgentMode()) registerTerminalRoutes(app, {
+     db,
+     http: httpDeps,
+     paths: pathDeps,
+     projectStore: projectStoreDeps,
+     projectFiles: projectFileDeps,
+     terminals: terminalService,
+   });
+   registerImportRoutes(app, {
 @@ -4020,6 +4025,15 @@ export async function startServer({
      lifecycle.mark('chat_run_started');
      /** @type {Partial<ChatRequest> & { imagePaths?: string[] }} */
@@ -285,13 +299,17 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..8cc287ca408c037d5f9b1c9c5fb80338
      const commentHint = renderCommentAttachmentHint(safeCommentAttachments);
  
      // Resolve external MCP config + stored OAuth tokens up-front so the
-@@ -5177,6 +5194,15 @@ export async function startServer({
+@@ -5177,6 +5194,19 @@ export async function startServer({
        design.runs.finish(run, status, code, signal);
        return false;
      };
 +    if (def.id === SIMULATOR_HOST_AGENT_ID) {
 +      return runSimulatorHostAgentTurn({
 +        prompt: composed,
++        continuationPrompt: [
++          `# User request\n\n${composeChatUserRequestForAgent(message, currentPrompt, { skipTranscript: true })}${attachmentHint}${commentHint}`,
++          promptImagePaths.length ? `\n\n${promptImagePaths.map((p) => `@${p}`).join(' ')}` : '',
++        ].join(''),
 +        workingDirectory: effectiveCwd,
 +        run,
 +        send,
@@ -329,12 +347,21 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..8cc287ca408c037d5f9b1c9c5fb80338
      if (!agentId) {
        const agents = await detectAgents(appConfig.agentCliEnv ?? {}).catch(() => []);
        agentId = agents.find((agent) => agent.available)?.id ?? null;
+@@ -8205,7 +8236,8 @@ export async function startServer({
+       daemonShutdownStarted = true;
+       daemonShuttingDown = true;
+       await design.runs.shutdownActive({ graceMs: resolveChatRunShutdownGraceMs() });
++      await disposeSimulatorHostAgentSessions().catch((error) => console.warn('[od] Host session cleanup failed', error));
+       await terminalService.shutdownActive();
+       await design.analytics.shutdown();
+     };
+     let server;
 diff --git a/apps/daemon/src/simulator-host-agent.ts b/apps/daemon/src/simulator-host-agent.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..0b59c34b399ec2c48ba0480aa7ea4559aa91b653
+index 0000000000000000000000000000000000000000..2cdc1a275b12f41f40ec647b0bad56a1e281deaf
 --- /dev/null
 +++ b/apps/daemon/src/simulator-host-agent.ts
-@@ -0,0 +1,554 @@
+@@ -0,0 +1,730 @@
 +// @ts-nocheck
 +
 +import { constants as fsConstants } from 'node:fs';
@@ -350,6 +377,17 @@ index 0000000000000000000000000000000000000000..0b59c34b399ec2c48ba0480aa7ea4559
 +const MAX_PROMPT_BYTES = 2 * 1024 * 1024;
 +const REQUEST_TIMEOUT_MS = 30_000;
 +const STREAM_TIMEOUT_MS = 10 * 60_000;
++const hostLaunchEnvironment = Object.freeze({
++  SIMULATOR_HOST_AGENT_URL: process.env.SIMULATOR_HOST_AGENT_URL,
++  SIMULATOR_HOST_AGENT_TOKEN_FILE: process.env.SIMULATOR_HOST_AGENT_TOKEN_FILE,
++});
++delete process.env.SIMULATOR_HOST_AGENT_URL;
++delete process.env.SIMULATOR_HOST_AGENT_TOKEN_FILE;
++const cachedSessions = new Map();
++const MAX_CACHED_SESSIONS = 4;
++let cacheClock = 0;
++let cacheAdmissionTail = Promise.resolve();
++let cacheDisposal = null;
 +
 +const EVENT_TYPES = new Set([
 +  'session.ready',
@@ -375,11 +413,11 @@ index 0000000000000000000000000000000000000000..0b59c34b399ec2c48ba0480aa7ea4559
 +  throw new SimulatorHostAgentError(code, message);
 +}
 +
-+export function isSimulatorHostAgentMode(env = process.env) {
++export function isSimulatorHostAgentMode(env = hostLaunchEnvironment) {
 +  return Boolean(env.SIMULATOR_HOST_AGENT_URL || env.SIMULATOR_HOST_AGENT_TOKEN_FILE);
 +}
 +
-+export function simulatorHostAgentInfo(env = process.env) {
++export function simulatorHostAgentInfo(env = hostLaunchEnvironment) {
 +  const configured = Boolean(
 +    env.SIMULATOR_HOST_AGENT_URL?.trim()
 +    && env.SIMULATOR_HOST_AGENT_TOKEN_FILE?.trim(),
@@ -611,7 +649,7 @@ index 0000000000000000000000000000000000000000..0b59c34b399ec2c48ba0480aa7ea4559
 +    this.fetchImpl = fetchImpl;
 +  }
 +
-+  static async fromEnvironment(env = process.env, fetchImpl = globalThis.fetch) {
++  static async fromEnvironment(env = hostLaunchEnvironment, fetchImpl = globalThis.fetch) {
 +    if (typeof fetchImpl !== 'function') fail('CONFIGURATION_INVALID', 'Simulator Host Runtime configuration is invalid.');
 +    const baseUrl = parseBaseUrl(env.SIMULATOR_HOST_AGENT_URL);
 +    const token = await readTokenFile(env.SIMULATOR_HOST_AGENT_TOKEN_FILE);
@@ -774,12 +812,161 @@ index 0000000000000000000000000000000000000000..0b59c34b399ec2c48ba0480aa7ea4559
 +  return completedText;
 +}
 +
-+export async function runSimulatorHostAgentTurn({ prompt, workingDirectory, run, send, finish, env = process.env, fetchImpl = globalThis.fetch }) {
-+  if (typeof prompt !== 'string' || Buffer.byteLength(prompt, 'utf8') > MAX_PROMPT_BYTES) {
++function withCacheAdmission(operation) {
++  const admitted = cacheAdmissionTail.then(operation, operation);
++  cacheAdmissionTail = admitted.then(() => undefined, () => undefined);
++  return admitted;
++}
++
++function cacheIdentityForRun(run) {
++  const conversationId = typeof run?.conversationId === 'string' ? run.conversationId.trim() : '';
++  const runId = typeof run?.id === 'string' ? run.id.trim() : '';
++  if (conversationId) return `conversation:${conversationId}`;
++  if (runId) return `run:${runId}`;
++  fail('INPUT_INVALID', 'Simulator Host Runtime run identity is invalid.');
++}
++
++function releaseCachedSession(record) {
++  if (!record || record.closing || record.closeFailed) return;
++  record.busy = false;
++  record.lastUsed = ++cacheClock;
++}
++
++async function closeCachedSession(record) {
++  if (!record) return;
++  if (record.closing) return record.closing;
++  record.busy = true;
++  const operation = (async () => {
++    if (record.creating) {
++      try {
++        await record.creating;
++      } catch {
++        if (cachedSessions.get(record.cacheKey) === record) cachedSessions.delete(record.cacheKey);
++        record.session = null;
++        record.closeFailed = false;
++        return;
++      }
++    }
++    if (!record.session) {
++      if (cachedSessions.get(record.cacheKey) === record) cachedSessions.delete(record.cacheKey);
++      record.closeFailed = false;
++      return;
++    }
++    try {
++      await record.client.close(record.session.sessionHandle);
++    } catch (error) {
++      // Keep the opaque handle reachable and non-reusable. A later dispose or
++      // LRU admission can retry the same DELETE instead of orphaning it.
++      record.closeFailed = true;
++      record.busy = false;
++      throw error;
++    }
++    if (cachedSessions.get(record.cacheKey) === record) cachedSessions.delete(record.cacheKey);
++    record.session = null;
++    record.closeFailed = false;
++    record.busy = false;
++  })();
++  record.closing = operation;
++  try {
++    await operation;
++  } finally {
++    if (record.closing === operation) record.closing = null;
++  }
++}
++
++async function acquireCachedSession(client, workingDirectory, run) {
++  const identity = cacheIdentityForRun(run);
++  const cacheKey = JSON.stringify([workingDirectory, identity]);
++  return withCacheAdmission(async () => {
++    if (cacheDisposal) fail('SESSION_UNAVAILABLE', 'Simulator Host Runtime session cache is shutting down.');
++    let record = cachedSessions.get(cacheKey);
++    if (record) {
++      if (record.creating) await record.creating;
++      if (!record.session || record.closing || record.closeFailed) {
++        fail('SESSION_UNAVAILABLE', 'Simulator Host Runtime session is unavailable.');
++      }
++      if (record.busy) fail('SESSION_BUSY', 'Simulator Host Runtime session is already processing a turn.');
++      record.busy = true;
++      record.lastUsed = ++cacheClock;
++      return record;
++    }
++
++    while (cachedSessions.size >= MAX_CACHED_SESSIONS) {
++      const candidate = [...cachedSessions.values()]
++        .filter((entry) => !entry.busy && !entry.creating && !entry.closing)
++        .sort((left, right) => left.lastUsed - right.lastUsed)[0];
++      if (!candidate) fail('SESSION_LIMIT', 'Simulator Host Runtime session cache is full.');
++      await closeCachedSession(candidate);
++    }
++    if (cacheDisposal) fail('SESSION_UNAVAILABLE', 'Simulator Host Runtime session cache is shutting down.');
++
++    record = {
++      cacheKey,
++      identity,
++      workingDirectory,
++      client,
++      session: null,
++      creating: null,
++      closing: null,
++      closeFailed: false,
++      busy: true,
++      completedTurns: 0,
++      lastSequence: 0,
++      lastUsed: ++cacheClock,
++    };
++    record.creating = client.createSession(workingDirectory)
++      .then((session) => {
++        record.session = session;
++        return session;
++      })
++      .catch((error) => {
++        if (cachedSessions.get(cacheKey) === record) cachedSessions.delete(cacheKey);
++        throw error;
++      })
++      .finally(() => { record.creating = null; });
++    cachedSessions.set(cacheKey, record);
++    await record.creating;
++    if (!record.session || record.closing || record.closeFailed || cacheDisposal) {
++      fail('SESSION_UNAVAILABLE', 'Simulator Host Runtime session is unavailable.');
++    }
++    return record;
++  });
++}
++
++export async function disposeSimulatorHostAgentSessions() {
++  if (cacheDisposal) return cacheDisposal;
++  const operation = (async () => {
++    let firstError;
++    for (const record of [...cachedSessions.values()]) {
++      try {
++        await closeCachedSession(record);
++      } catch (error) {
++        firstError ??= error;
++      }
++    }
++    if (firstError) throw firstError;
++  })();
++  cacheDisposal = operation;
++  try {
++    await operation;
++  } finally {
++    if (cacheDisposal === operation) cacheDisposal = null;
++  }
++}
++
++export async function runSimulatorHostAgentTurn({ prompt, continuationPrompt, workingDirectory, run, send, finish, env = hostLaunchEnvironment, fetchImpl = globalThis.fetch }) {
++  if (
++    typeof prompt !== 'string'
++    || typeof continuationPrompt !== 'string'
++    || Buffer.byteLength(prompt, 'utf8') > MAX_PROMPT_BYTES
++    || Buffer.byteLength(continuationPrompt, 'utf8') > MAX_PROMPT_BYTES
++  ) {
 +    fail('INPUT_INVALID', 'Simulator Host Runtime prompt is invalid.');
 +  }
 +  const client = await SimulatorHostAgentClient.fromEnvironment(env, fetchImpl);
 +  const lifecycleAbort = new AbortController();
++  let sessionRecord;
++  let sessionAcquisition;
 +  let session;
 +  let turn;
 +  let terminal = null;
@@ -792,11 +979,20 @@ index 0000000000000000000000000000000000000000..0b59c34b399ec2c48ba0480aa7ea4559
 +    lifecycleAbort.abort();
 +    fail('REQUEST_ABORTED', 'Simulator Host Runtime request was cancelled.');
 +  };
-+  const cancelHostSession = () => {
++  const cancelHostSession = async () => {
 +    lifecycleAbort.abort();
-+    if (!session || terminal) return Promise.resolve();
-+    if (!cancelPromise) cancelPromise = client.cancel(session.sessionHandle);
-+    return cancelPromise;
++    if (!sessionRecord && sessionAcquisition) {
++      try { sessionRecord = await sessionAcquisition; } catch { return; }
++    }
++    session = sessionRecord?.session ?? session;
++    if (!session || terminal) return;
++    let cancelError;
++    if (turn && !cancelPromise) cancelPromise = client.cancel(session.sessionHandle);
++    if (cancelPromise) {
++      try { await cancelPromise; } catch (error) { cancelError = error; }
++    }
++    await closeCachedSession(sessionRecord);
++    if (cancelError) throw cancelError;
 +  };
 +
 +  // Install cancellation before the first Host request. This closes the race
@@ -808,12 +1004,19 @@ index 0000000000000000000000000000000000000000..0b59c34b399ec2c48ba0480aa7ea4559
 +    throwIfCancelled();
 +    const capabilities = await client.capabilities({ signal: lifecycleAbort.signal });
 +    throwIfCancelled();
-+    if (Buffer.byteLength(prompt, 'utf8') > capabilities.limits.maxPromptBytes) {
++    // Session creation intentionally keeps its own bounded request timeout.
++    // Aborting after the Host accepts the request could otherwise strand an
++    // opaque hidden session before this process receives its handle.
++    sessionAcquisition = acquireCachedSession(client, workingDirectory, run);
++    sessionRecord = await sessionAcquisition;
++    session = sessionRecord.session;
++    lastSequence = sessionRecord.lastSequence;
++    throwIfCancelled();
++    const turnPrompt = sessionRecord.completedTurns > 0 ? continuationPrompt : prompt;
++    if (Buffer.byteLength(turnPrompt, 'utf8') > capabilities.limits.maxPromptBytes) {
 +      fail('INPUT_INVALID', 'Simulator Host Runtime prompt exceeds the Host limit.');
 +    }
-+    session = await client.createSession(workingDirectory, { signal: lifecycleAbort.signal });
-+    throwIfCancelled();
-+    turn = await client.createTurn(session.sessionHandle, prompt, { signal: lifecycleAbort.signal });
++    turn = await client.createTurn(session.sessionHandle, turnPrompt, { signal: lifecycleAbort.signal });
 +    throwIfCancelled();
 +    run.status = 'running';
 +    run.updatedAt = Date.now();
@@ -863,16 +1066,15 @@ index 0000000000000000000000000000000000000000..0b59c34b399ec2c48ba0480aa7ea4559
 +        },
 +      );
 +      lastSequence = result.lastSequence;
++      sessionRecord.lastSequence = lastSequence;
 +    }
 +    if (!terminal) fail('STREAM_ENDED', 'Simulator Host Runtime event stream ended unexpectedly.');
 +    if (run.cancelRequested || lifecycleAbort.signal.aborted) terminal = 'canceled';
 +    if (cancelPromise) await cancelPromise.catch(() => undefined);
-+    try {
-+      await client.close(session.sessionHandle);
-+      session = undefined;
-+    } catch (error) {
-+      if (terminal === 'succeeded') throw error;
++    if (terminal === 'succeeded') {
++      sessionRecord.completedTurns += 1;
 +    }
++    else await closeCachedSession(sessionRecord).catch(() => undefined);
 +    if (terminal === 'succeeded') finish(run, 'succeeded', 0, null);
 +    else if (terminal === 'failed') finish(run, 'failed', 1, null);
 +    else finish(run, 'canceled', null, 'SIGTERM');
@@ -882,11 +1084,12 @@ index 0000000000000000000000000000000000000000..0b59c34b399ec2c48ba0480aa7ea4559
 +  } finally {
 +    run.externalCancel = null;
 +    lifecycleAbort.abort();
-+    if (run.cancelRequested && session && !terminal && !cancelPromise) {
++    if (run.cancelRequested && session && turn && !terminal && !cancelPromise) {
 +      cancelPromise = client.cancel(session.sessionHandle);
 +    }
 +    if (cancelPromise) await cancelPromise.catch(() => undefined);
-+    if (session) await client.close(session.sessionHandle).catch(() => undefined);
++    if (terminal !== 'succeeded' && sessionRecord) await closeCachedSession(sessionRecord).catch(() => undefined);
++    else if (sessionRecord) releaseCachedSession(sessionRecord);
 +  }
 +}
 diff --git a/apps/web/src/components/EntryShell.tsx b/apps/web/src/components/EntryShell.tsx

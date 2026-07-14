@@ -29,9 +29,34 @@ test("pinned patch covers every Simulator Host-only integration surface", () => 
   assert.match(additions, /meta\.agentId = SIMULATOR_HOST_AGENT_ID/);
   assert.match(additions, /agents: \[agent\]/);
   assert.match(additions, /return runSimulatorHostAgentTurn/);
-  assert.match(additions, /if \(isSimulatorHostAgentMode\(env\)\) return;/);
+  assert.match(additions, /continuationPrompt:[\s\S]*skipTranscript: true/);
+  assert.match(additions, /delete process\.env\.SIMULATOR_HOST_AGENT_TOKEN_FILE/);
+  assert.match(additions, /if \(!isSimulatorHostAgentMode\(\)\) registerTerminalRoutes/);
+  assert.match(additions, /disposeSimulatorHostAgentSessions/);
+  assert.match(additions, /if \(isSimulatorHostAgentMode\(\)\) return;/);
+  assert.doesNotMatch(additions, /isSimulatorHostAgentMode\(process\.env\)|isSimulatorHostAgentMode\(env\)/);
   assert.match(additions, /agentId: SIMULATOR_HOST_AGENT_ID,[\s\S]*model: null,[\s\S]*reasoning: null/);
   assert.doesNotMatch(additions, /PromaHost|PROMA_HOST|OD_RESOURCE_ROOT|resolveAmrPreflight|detectAgents\(/);
+});
+
+test("Host mode captures then scrubs the bearer environment before child processes can inherit it", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "simulator-host-env-scrub-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const previousUrl = process.env.SIMULATOR_HOST_AGENT_URL;
+  const previousTokenFile = process.env.SIMULATOR_HOST_AGENT_TOKEN_FILE;
+  process.env.SIMULATOR_HOST_AGENT_URL = "http://127.0.0.1:43123/";
+  process.env.SIMULATOR_HOST_AGENT_TOKEN_FILE = path.join(root, "grant-token");
+  t.after(() => {
+    if (previousUrl === undefined) delete process.env.SIMULATOR_HOST_AGENT_URL;
+    else process.env.SIMULATOR_HOST_AGENT_URL = previousUrl;
+    if (previousTokenFile === undefined) delete process.env.SIMULATOR_HOST_AGENT_TOKEN_FILE;
+    else process.env.SIMULATOR_HOST_AGENT_TOKEN_FILE = previousTokenFile;
+  });
+  const adapter = await importMaterializedAdapter(root);
+  assert.equal(process.env.SIMULATOR_HOST_AGENT_URL, undefined);
+  assert.equal(process.env.SIMULATOR_HOST_AGENT_TOKEN_FILE, undefined);
+  assert.equal(adapter.isSimulatorHostAgentMode(), true);
+  assert.equal(adapter.isSimulatorHostAgentMode(process.env), false);
 });
 
 test("built web Host policy suppresses every Vela and AMR request after one Host-mode probe", async (t) => {
@@ -81,6 +106,7 @@ test("a run canceled before adapter entry performs zero Host I/O", async (t) => 
   let finished;
   await adapter.runSimulatorHostAgentTurn({
     prompt: "Must not leave Open Design",
+    continuationPrompt: "Must not leave Open Design",
     workingDirectory: "/tmp/project",
     run,
     env: hostEnv(tokenFile),
@@ -96,7 +122,7 @@ test("a run canceled before adapter entry performs zero Host I/O", async (t) => 
   assert.equal(run.externalCancel, null);
 });
 
-test("Host Runtime adapter streams one turn through the launch-scoped gateway and closes the opaque session", async (t) => {
+test("Host Runtime adapter reuses one conversation session across turns and closes it at daemon shutdown", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "simulator-host-runtime-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const token = "ab".repeat(32);
@@ -105,6 +131,7 @@ test("Host Runtime adapter streams one turn through the launch-scoped gateway an
   await chmod(tokenFile, 0o600);
   const adapter = await importMaterializedAdapter(root);
   const requests = [];
+  let turnCount = 0;
   const fetchImpl = async (input, options = {}) => {
     const url = new URL(input);
     const request = { method: options.method, url: `${url.pathname}${url.search}`, authorization: options.headers?.authorization, body: options.body ?? "" };
@@ -117,17 +144,25 @@ test("Host Runtime adapter streams one turn through the launch-scoped gateway an
       return json(200, { contractVersion: 1, sessionHandle: "opaque-session", state: "idle" });
     }
     if (request.method === "POST" && request.url === "/v1/module-sessions/opaque-session/turns") {
-      return json(200, { contractVersion: 1, turnId: "opaque-turn", state: "running" });
+      turnCount += 1;
+      return json(200, { contractVersion: 1, turnId: `opaque-turn-${turnCount}`, state: "running" });
     }
-    if (request.method === "GET" && request.url === "/v1/module-sessions/opaque-session/events?afterSequence=0") {
-      const frames = [
+    if (request.method === "GET" && request.url.startsWith("/v1/module-sessions/opaque-session/events")) {
+      const currentTurn = `opaque-turn-${turnCount}`;
+      const frames = turnCount === 1 ? [
         envelope(1, "session.ready", {}),
-        envelope(2, "turn.started", {}, "opaque-turn"),
-        envelope(3, "message.delta", { delta: "Hello" }, "opaque-turn"),
-        envelope(4, "message.completed", { text: "Hello world" }, "opaque-turn"),
-        envelope(5, "turn.completed", { text: "Hello world" }, "opaque-turn"),
-      ].map((event) => `event: module-agent.event\nid: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`).join("");
-      return new Response(frames, { status: 200, headers: { "content-type": "text/event-stream" } });
+        envelope(2, "turn.started", {}, currentTurn),
+        envelope(3, "message.delta", { delta: "Hello" }, currentTurn),
+        envelope(4, "message.completed", { text: "Hello world" }, currentTurn),
+        envelope(5, "turn.completed", { text: "Hello world" }, currentTurn),
+      ] : [
+        envelope(6, "turn.started", {}, currentTurn),
+        envelope(7, "message.delta", { delta: "Revised" }, currentTurn),
+        envelope(8, "message.completed", { text: "Revised design" }, currentTurn),
+        envelope(9, "turn.completed", { text: "Revised design" }, currentTurn),
+      ];
+      const payload = frames.map((event) => `event: module-agent.event\nid: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`).join("");
+      return new Response(payload, { status: 200, headers: { "content-type": "text/event-stream" } });
     }
     if (request.method === "DELETE" && request.url === "/v1/module-sessions/opaque-session") {
       return new Response(null, { status: 204 });
@@ -135,25 +170,320 @@ test("Host Runtime adapter streams one turn through the launch-scoped gateway an
     return json(404, {});
   };
   const sent = [];
-  let finished;
-  const run = { id: "run-1", projectId: "project-1", status: "starting", updatedAt: 0, cancelRequested: false };
+  const finished = [];
+  const run = { id: "run-1", projectId: "project-1", conversationId: "conversation-1", status: "starting", updatedAt: 0, cancelRequested: false };
   await adapter.runSimulatorHostAgentTurn({
     prompt: "Design the landing page",
+    continuationPrompt: "Design the landing page",
     workingDirectory: "/tmp/project",
     run,
     env: { SIMULATOR_HOST_AGENT_URL: "http://127.0.0.1:43123/", SIMULATOR_HOST_AGENT_TOKEN_FILE: tokenFile },
     fetchImpl,
     send: (event, data) => sent.push({ event, data }),
-    finish: (...args) => { finished = args; },
+    finish: (...args) => { finished.push(args); },
   });
-  assert.deepEqual(finished?.slice(1), ["succeeded", 0, null]);
+  await adapter.runSimulatorHostAgentTurn({
+    prompt: "Revise the same design",
+    continuationPrompt: "Only the latest revision request",
+    workingDirectory: "/tmp/project",
+    run: { id: "run-2", projectId: "project-1", conversationId: "conversation-1", status: "starting", updatedAt: 0, cancelRequested: false },
+    env: { SIMULATOR_HOST_AGENT_URL: "http://127.0.0.1:43123/", SIMULATOR_HOST_AGENT_TOKEN_FILE: tokenFile },
+    fetchImpl,
+    send: (event, data) => sent.push({ event, data }),
+    finish: (...args) => { finished.push(args); },
+  });
+  assert.deepEqual(finished.map((entry) => entry.slice(1)), [["succeeded", 0, null], ["succeeded", 0, null]]);
   assert.deepEqual(sent.filter((entry) => entry.event === "agent").map((entry) => entry.data), [
     { type: "text_delta", delta: "Hello" },
     { type: "text_delta", delta: " world" },
+    { type: "text_delta", delta: "Revised" },
+    { type: "text_delta", delta: " design" },
   ]);
   assert.deepEqual(JSON.parse(requests.find((entry) => entry.url === "/v1/module-sessions")?.body ?? "null"), { contractVersion: 1, workingDirectory: "/tmp/project" });
-  assert.deepEqual(JSON.parse(requests.find((entry) => entry.url?.endsWith("/turns"))?.body ?? "null"), { contractVersion: 1, prompt: "Design the landing page" });
+  assert.deepEqual(
+    requests.filter((entry) => entry.url?.endsWith("/turns")).map((entry) => JSON.parse(entry.body)),
+    [
+      { contractVersion: 1, prompt: "Design the landing page" },
+      { contractVersion: 1, prompt: "Only the latest revision request" },
+    ],
+  );
+  assert.equal(requests.filter((entry) => entry.method === "POST" && entry.url === "/v1/module-sessions").length, 1);
+  assert.equal(requests.filter((entry) => entry.method === "POST" && entry.url.endsWith("/turns")).length, 2);
+  assert.equal(requests.some((entry) => entry.method === "DELETE"), false);
+  await adapter.disposeSimulatorHostAgentSessions();
   assert.equal(requests.at(-1)?.method, "DELETE");
+});
+
+test("different conversations in one project never share a Host session", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "simulator-host-conversation-isolation-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tokenFile = await writeGrantToken(root);
+  const adapter = await importMaterializedAdapter(root);
+  const host = createSuccessfulHostFetch();
+
+  for (const conversationId of ["conversation-a", "conversation-b"]) {
+    await adapter.runSimulatorHostAgentTurn({
+      prompt: `full transcript ${conversationId}`,
+      continuationPrompt: `latest turn ${conversationId}`,
+      workingDirectory: "/tmp/shared-project",
+      run: { id: `run-${conversationId}`, conversationId, status: "starting", updatedAt: 0, cancelRequested: false },
+      env: hostEnv(tokenFile),
+      fetchImpl: host.fetchImpl,
+      send: () => {},
+      finish: () => {},
+    });
+  }
+
+  assert.equal(host.requests.filter((request) => request.method === "POST" && request.url === "/v1/module-sessions").length, 2);
+  assert.deepEqual(host.turnPrompts(), ["full transcript conversation-a", "full transcript conversation-b"]);
+  await adapter.disposeSimulatorHostAgentSessions();
+});
+
+test("finish re-entry releases once and cannot unlock a newer active turn", async (t) => {
+  const adapterSource = materializedNewFileSource("apps/daemon/src/simulator-host-agent.ts");
+  assert.equal(adapterSource.match(/releaseCachedSession\(sessionRecord\)/g)?.length, 1);
+  const root = await mkdtemp(path.join(os.tmpdir(), "simulator-host-finish-reentry-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tokenFile = await writeGrantToken(root);
+  const adapter = await importMaterializedAdapter(root);
+  const host = createSuccessfulHostFetch({ gateTurnNumber: 2 });
+  let reentrantTurn;
+
+  await adapter.runSimulatorHostAgentTurn({
+    prompt: "initial full transcript",
+    continuationPrompt: "initial latest turn",
+    workingDirectory: "/tmp/reentrant-project",
+    run: { id: "run-reentrant-1", conversationId: "conversation-reentrant", status: "starting", updatedAt: 0, cancelRequested: false },
+    env: hostEnv(tokenFile),
+    fetchImpl: host.fetchImpl,
+    send: () => {},
+    finish: (finishedRun) => {
+      if (finishedRun.id !== "run-reentrant-1") return;
+      reentrantTurn = adapter.runSimulatorHostAgentTurn({
+        prompt: "must not resend the initial transcript",
+        continuationPrompt: "reentrant latest turn",
+        workingDirectory: "/tmp/reentrant-project",
+        run: { id: "run-reentrant-2", conversationId: "conversation-reentrant", status: "starting", updatedAt: 0, cancelRequested: false },
+        env: hostEnv(tokenFile),
+        fetchImpl: host.fetchImpl,
+        send: () => {},
+        finish: () => {},
+      });
+    },
+  });
+
+  assert.ok(reentrantTurn);
+  await host.gatedTurnStarted;
+  await assert.rejects(adapter.runSimulatorHostAgentTurn({
+    prompt: "concurrent full transcript",
+    continuationPrompt: "concurrent latest turn",
+    workingDirectory: "/tmp/reentrant-project",
+    run: { id: "run-reentrant-3", conversationId: "conversation-reentrant", status: "starting", updatedAt: 0, cancelRequested: false },
+    env: hostEnv(tokenFile),
+    fetchImpl: host.fetchImpl,
+    send: () => {},
+    finish: () => {},
+  }));
+  assert.deepEqual(host.turnPrompts(), ["initial full transcript", "reentrant latest turn"]);
+  host.releaseGatedTurn();
+  await reentrantTurn;
+  await adapter.disposeSimulatorHostAgentSessions();
+});
+
+test("the fifth idle project evicts the least-recently-used Host session", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "simulator-host-session-lru-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tokenFile = await writeGrantToken(root);
+  const adapter = await importMaterializedAdapter(root);
+  const host = createSuccessfulHostFetch();
+
+  for (let index = 1; index <= 5; index += 1) {
+    await adapter.runSimulatorHostAgentTurn({
+      prompt: `full project ${index}`,
+      continuationPrompt: `latest project ${index}`,
+      workingDirectory: `/tmp/project-${index}`,
+      run: { id: `run-${index}`, conversationId: `conversation-${index}`, status: "starting", updatedAt: 0, cancelRequested: false },
+      env: hostEnv(tokenFile),
+      fetchImpl: host.fetchImpl,
+      send: () => {},
+      finish: () => {},
+    });
+  }
+
+  const creates = host.requests.filter((request) => request.method === "POST" && request.url === "/v1/module-sessions");
+  const deletesBeforeDispose = host.requests.filter((request) => request.method === "DELETE");
+  assert.equal(creates.length, 5);
+  assert.deepEqual(deletesBeforeDispose.map((request) => request.url), ["/v1/module-sessions/opaque-session-1"]);
+  assert.ok(host.requests.indexOf(deletesBeforeDispose[0]) < host.requests.indexOf(creates[4]));
+  await adapter.disposeSimulatorHostAgentSessions();
+  assert.equal(host.requests.filter((request) => request.method === "DELETE").length, 5);
+});
+
+test("LRU admission retries a retained closeFailed opaque handle", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "simulator-host-lru-close-retry-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tokenFile = await writeGrantToken(root);
+  const adapter = await importMaterializedAdapter(root);
+  const host = createSuccessfulHostFetch({ closeFailures: 1 });
+  const runProject = (index) => adapter.runSimulatorHostAgentTurn({
+    prompt: `full project ${index}`,
+    continuationPrompt: `latest project ${index}`,
+    workingDirectory: `/tmp/lru-retry-project-${index}`,
+    run: { id: `run-lru-retry-${index}`, conversationId: `conversation-lru-retry-${index}`, status: "starting", updatedAt: 0, cancelRequested: false },
+    env: hostEnv(tokenFile),
+    fetchImpl: host.fetchImpl,
+    send: () => {},
+    finish: () => {},
+  });
+  for (let index = 1; index <= 4; index += 1) await runProject(index);
+
+  await assert.rejects(runProject(5));
+  assert.equal(host.requests.filter((request) => request.method === "POST" && request.url === "/v1/module-sessions").length, 4);
+  assert.deepEqual(host.requests.filter((request) => request.method === "DELETE").map((request) => request.url), [
+    "/v1/module-sessions/opaque-session-1",
+  ]);
+
+  await runProject(5);
+  assert.equal(host.requests.filter((request) => request.method === "POST" && request.url === "/v1/module-sessions").length, 5);
+  assert.deepEqual(host.requests.filter((request) => request.method === "DELETE").map((request) => request.url), [
+    "/v1/module-sessions/opaque-session-1",
+    "/v1/module-sessions/opaque-session-1",
+  ]);
+  await adapter.disposeSimulatorHostAgentSessions();
+});
+
+test("daemon disposal waits for an in-flight create and closes the resulting opaque session", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "simulator-host-create-dispose-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tokenFile = await writeGrantToken(root);
+  const adapter = await importMaterializedAdapter(root);
+  let markCreateStarted;
+  let releaseCreate;
+  const createStarted = new Promise((resolve) => { markCreateStarted = resolve; });
+  const createGate = new Promise((resolve) => { releaseCreate = resolve; });
+  const requests = [];
+  const fetchImpl = async (input, options = {}) => {
+    const url = new URL(input);
+    const request = { method: options.method, url: `${url.pathname}${url.search}` };
+    requests.push(request);
+    if (request.method === "GET" && request.url === "/v1/capabilities") return capabilitiesResponse();
+    if (request.method === "POST" && request.url === "/v1/module-sessions") {
+      markCreateStarted();
+      await createGate;
+      return json(200, { contractVersion: 1, sessionHandle: "dispose-session", state: "idle" });
+    }
+    if (request.method === "DELETE" && request.url === "/v1/module-sessions/dispose-session") {
+      return new Response(null, { status: 204 });
+    }
+    return json(500, {});
+  };
+  const turn = adapter.runSimulatorHostAgentTurn({
+    prompt: "full prompt",
+    continuationPrompt: "latest prompt",
+    workingDirectory: "/tmp/dispose-project",
+    run: { id: "run-dispose", conversationId: "conversation-dispose", status: "starting", updatedAt: 0, cancelRequested: false },
+    env: hostEnv(tokenFile),
+    fetchImpl,
+    send: () => {},
+    finish: () => {},
+  });
+  const rejectedTurn = assert.rejects(turn);
+  await createStarted;
+  const disposal = adapter.disposeSimulatorHostAgentSessions();
+  releaseCreate();
+  await Promise.all([rejectedTurn, disposal]);
+  assert.equal(requests.some((request) => request.url.endsWith("/turns")), false);
+  assert.deepEqual(requests.filter((request) => request.method === "DELETE").map((request) => request.url), [
+    "/v1/module-sessions/dispose-session",
+  ]);
+});
+
+test("a failed close retains the opaque handle for a later disposal retry", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "simulator-host-close-retry-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tokenFile = await writeGrantToken(root);
+  const adapter = await importMaterializedAdapter(root);
+  const host = createSuccessfulHostFetch({ closeFailures: 1 });
+  await adapter.runSimulatorHostAgentTurn({
+    prompt: "full prompt",
+    continuationPrompt: "latest prompt",
+    workingDirectory: "/tmp/retry-project",
+    run: { id: "run-retry", conversationId: "conversation-retry", status: "starting", updatedAt: 0, cancelRequested: false },
+    env: hostEnv(tokenFile),
+    fetchImpl: host.fetchImpl,
+    send: () => {},
+    finish: () => {},
+  });
+
+  await assert.rejects(adapter.disposeSimulatorHostAgentSessions());
+  await assert.rejects(adapter.runSimulatorHostAgentTurn({
+    prompt: "must not reuse failed close",
+    continuationPrompt: "must not reuse failed close",
+    workingDirectory: "/tmp/retry-project",
+    run: { id: "run-retry-2", conversationId: "conversation-retry", status: "starting", updatedAt: 0, cancelRequested: false },
+    env: hostEnv(tokenFile),
+    fetchImpl: host.fetchImpl,
+    send: () => {},
+    finish: () => {},
+  }));
+  assert.deepEqual(host.turnPrompts(), ["full prompt"]);
+  await adapter.disposeSimulatorHostAgentSessions();
+  assert.deepEqual(host.requests.filter((request) => request.method === "DELETE").map((request) => request.url), [
+    "/v1/module-sessions/opaque-session-1",
+    "/v1/module-sessions/opaque-session-1",
+  ]);
+});
+
+test("cancel during gated session creation waits for the opaque handle and closes it", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "simulator-host-create-cancel-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tokenFile = await writeGrantToken(root);
+  const adapter = await importMaterializedAdapter(root);
+  let markCreateStarted;
+  let releaseCreate;
+  const createStarted = new Promise((resolve) => { markCreateStarted = resolve; });
+  const createGate = new Promise((resolve) => { releaseCreate = resolve; });
+  const requests = [];
+  const fetchImpl = async (input, options = {}) => {
+    const url = new URL(input);
+    const request = { method: options.method, url: `${url.pathname}${url.search}` };
+    requests.push(request);
+    if (request.method === "GET" && request.url === "/v1/capabilities") {
+      return json(200, { contractVersion: 1, capability: "host-agent.use", features: { streaming: true, cancellation: true, multiTurn: true }, limits: { maxPromptBytes: 2 * 1024 * 1024, maxReplayEvents: 10_000 } });
+    }
+    if (request.method === "POST" && request.url === "/v1/module-sessions") {
+      markCreateStarted();
+      await createGate;
+      assert.equal(options.signal.aborted, false);
+      return json(200, { contractVersion: 1, sessionHandle: "gated-session", state: "idle" });
+    }
+    if (request.method === "DELETE" && request.url === "/v1/module-sessions/gated-session") {
+      return new Response(null, { status: 204 });
+    }
+    return json(500, {});
+  };
+  const run = { id: "run-create-cancel", status: "queued", updatedAt: 0, cancelRequested: false };
+  let finished;
+  const turn = adapter.runSimulatorHostAgentTurn({
+    prompt: "Cancel while creating",
+    continuationPrompt: "Cancel while creating",
+    workingDirectory: "/tmp/gated-project",
+    run,
+    env: hostEnv(tokenFile),
+    fetchImpl,
+    send: () => {},
+    finish: (...args) => { finished = args; },
+  });
+  await createStarted;
+  run.cancelRequested = true;
+  const cancel = run.externalCancel();
+  releaseCreate();
+  await cancel;
+  await turn;
+  assert.equal(finished, undefined);
+  assert.equal(run.externalCancel, null);
+  assert.equal(requests.some((request) => request.url.endsWith("/turns")), false);
+  assert.equal(requests.filter((request) => request.method === "DELETE").length, 1);
 });
 
 test("cancel aborts streaming and closes the Host session even when the cancel request fails", async (t) => {
@@ -199,6 +529,7 @@ test("cancel aborts streaming and closes the Host session even when the cancel r
   let finished;
   const turnPromise = adapter.runSimulatorHostAgentTurn({
     prompt: "Cancel this turn",
+    continuationPrompt: "Cancel this turn",
     workingDirectory: "/tmp/project",
     run,
     env: hostEnv(tokenFile),
@@ -219,21 +550,98 @@ test("cancel aborts streaming and closes the Host session even when the cancel r
   assert.equal(requests.at(-1)?.url, "/v1/module-sessions/cancel-session");
 });
 
+function createSuccessfulHostFetch({ closeFailures = 0, gateTurnNumber = null } = {}) {
+  const requests = [];
+  const sequenceBySession = new Map();
+  const turnBySession = new Map();
+  let sessionCount = 0;
+  let turnCount = 0;
+  let remainingCloseFailures = closeFailures;
+  let markGatedTurnStarted;
+  let releaseGatedTurn;
+  const gatedTurnStarted = new Promise((resolve) => { markGatedTurnStarted = resolve; });
+  const gatedTurn = new Promise((resolve) => { releaseGatedTurn = resolve; });
+  const fetchImpl = async (input, options = {}) => {
+    const url = new URL(input);
+    const request = {
+      method: options.method,
+      url: `${url.pathname}${url.search}`,
+      body: options.body ?? "",
+    };
+    requests.push(request);
+    if (request.method === "GET" && request.url === "/v1/capabilities") return capabilitiesResponse();
+    if (request.method === "POST" && request.url === "/v1/module-sessions") {
+      sessionCount += 1;
+      return json(200, { contractVersion: 1, sessionHandle: `opaque-session-${sessionCount}`, state: "idle" });
+    }
+    const turnMatch = /^\/v1\/module-sessions\/(opaque-session-\d+)\/turns$/.exec(request.url);
+    if (request.method === "POST" && turnMatch) {
+      turnCount += 1;
+      const turnId = `opaque-turn-${turnCount}`;
+      turnBySession.set(turnMatch[1], turnId);
+      return json(200, { contractVersion: 1, turnId, state: "running" });
+    }
+    const eventMatch = /^\/v1\/module-sessions\/(opaque-session-\d+)\/events\?afterSequence=(\d+)$/.exec(request.url);
+    if (request.method === "GET" && eventMatch) {
+      const sessionHandle = eventMatch[1];
+      const turnId = turnBySession.get(sessionHandle);
+      let sequence = sequenceBySession.get(sessionHandle) ?? 0;
+      assert.equal(Number(eventMatch[2]), sequence);
+      const frames = [];
+      if (sequence === 0) frames.push(envelope(++sequence, "session.ready", {}, undefined, sessionHandle));
+      frames.push(envelope(++sequence, "turn.started", {}, turnId, sessionHandle));
+      frames.push(envelope(++sequence, "message.completed", { text: `result-${turnId}` }, turnId, sessionHandle));
+      frames.push(envelope(++sequence, "turn.completed", { text: `result-${turnId}` }, turnId, sessionHandle));
+      sequenceBySession.set(sessionHandle, sequence);
+      if (Number(turnId?.split("-").at(-1)) === gateTurnNumber) {
+        markGatedTurnStarted();
+        await gatedTurn;
+      }
+      return new Response(
+        frames.map((event) => `event: module-agent.event\nid: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    }
+    const closeMatch = /^\/v1\/module-sessions\/(opaque-session-\d+)$/.exec(request.url);
+    if (request.method === "DELETE" && closeMatch) {
+      if (remainingCloseFailures > 0) {
+        remainingCloseFailures -= 1;
+        return json(500, { error: { code: "CLOSE_FAILED" } });
+      }
+      return new Response(null, { status: 204 });
+    }
+    return json(404, {});
+  };
+  return {
+    fetchImpl,
+    requests,
+    gatedTurnStarted,
+    releaseGatedTurn: () => releaseGatedTurn(),
+    turnPrompts: () => requests
+      .filter((request) => request.method === "POST" && request.url.endsWith("/turns"))
+      .map((request) => JSON.parse(request.body).prompt),
+  };
+}
+
 async function importMaterializedAdapter(root) {
   return await importMaterializedNewFile(root, "apps/daemon/src/simulator-host-agent.ts");
 }
 
 async function importMaterializedNewFile(root, sourcePath) {
+  const source = materializedNewFileSource(sourcePath);
+  const filename = path.join(root, `${path.basename(sourcePath).replace(/\.[^.]+$/, "")}-${Date.now()}.mjs`);
+  await writeFile(filename, `${source}\n`);
+  return await import(`${new URL(`file://${filename}`).href}?test=${Date.now()}`);
+}
+
+function materializedNewFileSource(sourcePath) {
   const marker = `diff --git a/${sourcePath} b/${sourcePath}\n`;
   const start = patchText.indexOf(marker);
   assert.notEqual(start, -1);
   const sectionStart = start + marker.length;
   const next = patchText.indexOf("\ndiff --git ", sectionStart);
   const section = patchText.slice(sectionStart, next === -1 ? undefined : next);
-  const source = section.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++")).map((line) => line.slice(1)).join("\n");
-  const filename = path.join(root, `${path.basename(sourcePath).replace(/\.[^.]+$/, "")}-${Date.now()}.mjs`);
-  await writeFile(filename, `${source}\n`);
-  return await import(`${new URL(`file://${filename}`).href}?test=${Date.now()}`);
+  return section.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++")).map((line) => line.slice(1)).join("\n");
 }
 
 async function writeGrantToken(root) {
@@ -250,8 +658,17 @@ function hostEnv(tokenFile) {
   };
 }
 
-function envelope(sequence, type, data, turnId) {
-  return { contractVersion: 1, sequence, sessionHandle: "opaque-session", ...(turnId ? { turnId } : {}), type, occurredAt: sequence, data };
+function envelope(sequence, type, data, turnId, sessionHandle = "opaque-session") {
+  return { contractVersion: 1, sequence, sessionHandle, ...(turnId ? { turnId } : {}), type, occurredAt: sequence, data };
+}
+
+function capabilitiesResponse() {
+  return json(200, {
+    contractVersion: 1,
+    capability: "host-agent.use",
+    features: { streaming: true, cancellation: true, multiTurn: true },
+    limits: { maxPromptBytes: 2 * 1024 * 1024, maxReplayEvents: 10_000 },
+  });
 }
 
 function json(status, value) {

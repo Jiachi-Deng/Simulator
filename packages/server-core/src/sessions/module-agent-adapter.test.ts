@@ -20,8 +20,15 @@ describe('CraftModuleAgentSessionPort', () => {
     const container = await mkdtemp(join(tmpdir(), 'module-agent-adapter-'))
     temporaryRoots.push(container)
     const workspaceRoot = join(container, 'workspace')
-    const projectRoot = join(container, 'projects', 'design')
-    await Promise.all([mkdir(workspaceRoot, { recursive: true }), mkdir(projectRoot, { recursive: true })])
+    const moduleRoot = join(container, 'module-data', 'open-design')
+    const projectRoot = join(moduleRoot, 'projects', 'design')
+    const siblingProject = join(moduleRoot, 'projects', 'other-design')
+    const daemonData = join(moduleRoot, 'open-design.db')
+    await Promise.all([
+      mkdir(workspaceRoot, { recursive: true }),
+      mkdir(projectRoot, { recursive: true }),
+      mkdir(siblingProject, { recursive: true }),
+    ])
     let createOptions: Record<string, unknown> | undefined
     let internalOptions: Record<string, unknown> | undefined
     const manager = {
@@ -44,7 +51,7 @@ describe('CraftModuleAgentSessionPort', () => {
     const created = await port.createSession({
       workspaceId: 'workspace',
       workspaceRoot,
-      authorizedWorkingRoot: projectRoot,
+      authorizedWorkingRoot: moduleRoot,
       workingDirectory: projectRoot,
     })
 
@@ -53,6 +60,9 @@ describe('CraftModuleAgentSessionPort', () => {
     expect(createOptions).not.toHaveProperty('llmConnection')
     expect(internalOptions).toEqual({ emitCreatedEvent: false })
     expect(checkModuleAgentToolBoundary('raw', 'Bash', { command: 'pwd' }).allowed).toBe(false)
+    expect(checkModuleAgentToolBoundary('raw', 'Read', { file_path: join(projectRoot, 'index.ts') }).allowed).toBe(true)
+    expect(checkModuleAgentToolBoundary('raw', 'Read', { file_path: join(siblingProject, 'secret.ts') }).allowed).toBe(false)
+    expect(checkModuleAgentToolBoundary('raw', 'Write', { file_path: daemonData }).allowed).toBe(false)
     await port.deleteSession('raw')
     expect(checkModuleAgentToolBoundary('raw', 'Bash', { command: 'pwd' }).allowed).toBe(true)
   })

@@ -15,6 +15,16 @@ import {
 } from './types.ts'
 import { ModuleAgentGateway } from './gateway.ts'
 
+export function writeModuleAgentSseChunk(
+  response: Pick<ServerResponse, 'write'>,
+  chunk: string,
+  onBackpressure: () => void,
+): boolean {
+  if (response.write(chunk)) return true
+  onBackpressure()
+  return false
+}
+
 async function unlinkTokenFile(path: string): Promise<void> {
   try {
     await unlink(path)
@@ -119,7 +129,9 @@ export class ModuleAgentGatewayServer {
 
     let disposed = false
     let disposal: Promise<void> | undefined
-    let expiryTimer: ReturnType<typeof setTimeout> | undefined
+    let renewalTimer: ReturnType<typeof setTimeout> | undefined
+    const grantTtlMs = Math.max(2, spec.expiresAt - Date.now())
+    const renewalDelayMs = Math.max(1, Math.floor(grantTtlMs / 2))
     const authorization = this.#gateway.authorizationForGrant(grant.grantToken)
     const lease: ModuleAgentLaunchLease = {
       grantToken: grant.grantToken,
@@ -133,7 +145,7 @@ export class ModuleAgentGatewayServer {
         if (disposed) return
         if (disposal) return disposal
         disposal = (async () => {
-          if (expiryTimer) clearTimeout(expiryTimer)
+          if (renewalTimer) clearTimeout(renewalTimer)
           await this.#gateway.revokeGrant(grant.grantToken)
           await unlinkTokenFile(tokenFile)
           disposed = true
@@ -147,10 +159,20 @@ export class ModuleAgentGatewayServer {
       },
     }
     this.#leases.set(grant.grantToken, lease)
-    expiryTimer = setTimeout(() => {
-      void lease.dispose().catch(() => undefined)
-    }, Math.max(1, Math.min(2_147_483_647, spec.expiresAt - Date.now())))
-    expiryTimer.unref()
+    const renew = async () => {
+      if (disposed) return
+      try {
+        this.#gateway.renewGrant(grant.grantToken, Date.now() + grantTtlMs)
+        renewalTimer = setTimeout(() => { void renew() }, Math.min(2_147_483_647, renewalDelayMs))
+        renewalTimer.unref()
+      } catch {
+        // Fail closed if the trusted renewal path breaks: revoke the launch
+        // authority and remove the bearer file rather than leaving stale state.
+        await lease.dispose().catch(() => undefined)
+      }
+    }
+    renewalTimer = setTimeout(() => { void renew() }, Math.min(2_147_483_647, renewalDelayMs))
+    renewalTimer.unref()
     return lease
   }
 
@@ -188,7 +210,7 @@ export class ModuleAgentGatewayServer {
       if (request.method === 'POST' && pathname === '/v1/module-sessions') {
         const body = await this.#jsonBody<CreateModuleAgentSessionRequest>(request)
         this.#exactKeys(body, ['contractVersion', 'workingDirectory'])
-        this.#json(response, 201, await this.#gateway.createSession(authorization, body))
+        await this.#createSessionForConnectedClient(request, response, authorization, body)
         return
       }
 
@@ -293,6 +315,76 @@ export class ModuleAgentGatewayServer {
     }
   }
 
+  async #createSessionForConnectedClient(
+    request: IncomingMessage,
+    response: ServerResponse,
+    authorization: ModuleAgentAuthorization,
+    body: CreateModuleAgentSessionRequest,
+  ): Promise<void> {
+    let disconnected = request.aborted || response.destroyed || request.socket.destroyed
+    let deliveryOutcome: 'pending' | 'finished' | 'disconnected' = 'pending'
+    let resolveDelivery!: (outcome: 'finished' | 'disconnected') => void
+    const delivery = new Promise<'finished' | 'disconnected'>((resolve) => { resolveDelivery = resolve })
+    const settleDelivery = (outcome: 'finished' | 'disconnected') => {
+      if (deliveryOutcome !== 'pending') return
+      deliveryOutcome = outcome
+      resolveDelivery(outcome)
+    }
+    const markRequestAborted = () => { disconnected = true }
+    const markResponseClosed = () => {
+      if (deliveryOutcome === 'finished' || response.writableFinished) return
+      disconnected = true
+      settleDelivery('disconnected')
+    }
+    const markSocketClosed = () => {
+      // A client can upload the complete request body and then disconnect
+      // while Host session creation is still pending. In that state Node does
+      // not necessarily emit `request.aborted`, so the transport socket is the
+      // authoritative lifetime boundary.
+      if (deliveryOutcome === 'finished' || response.writableFinished) return
+      disconnected = true
+      settleDelivery('disconnected')
+    }
+    const markResponseFinished = () => settleDelivery('finished')
+    const markTransportError = () => {
+      disconnected = true
+      settleDelivery('disconnected')
+    }
+    request.once('aborted', markRequestAborted)
+    response.once('close', markResponseClosed)
+    response.once('finish', markResponseFinished)
+    response.once('error', markTransportError)
+    request.socket.once('close', markSocketClosed)
+    request.socket.once('error', markTransportError)
+    try {
+      const created = await this.#gateway.createSession(authorization, body)
+      if (!disconnected && !request.aborted && !response.destroyed && !request.socket.destroyed) {
+        this.#json(response, 201, created)
+        const outcome = await delivery
+        // A peer reset may only become observable after the first response
+        // write. Keep the close/error listeners through one event-loop turn
+        // before treating `finish` as successful delivery.
+        if (outcome === 'finished') await new Promise<void>((resolve) => setImmediate(resolve))
+        if (!disconnected) return
+      }
+      try {
+        await this.#gateway.closeSession(authorization, created.sessionHandle)
+      } catch {
+        // A disconnected caller can no longer name the opaque handle. If the
+        // narrow close fails, revoke the launch grant so no hidden session or
+        // bearer authority survives as an orphan.
+        await this.#gateway.revokeGrant(authorization.grantToken)
+      }
+    } finally {
+      request.off('aborted', markRequestAborted)
+      response.off('close', markResponseClosed)
+      response.off('finish', markResponseFinished)
+      response.off('error', markTransportError)
+      request.socket.off('close', markSocketClosed)
+      request.socket.off('error', markTransportError)
+    }
+  }
+
   #stream(
     response: ServerResponse,
     authorization: ModuleAgentAuthorization,
@@ -309,7 +401,7 @@ export class ModuleAgentGatewayServer {
         replay.push(event)
         return
       }
-      this.#writeEvent(response, event)
+      if (!this.#writeEvent(response, event, finish)) return
       if (event.type === 'session.closed') finish()
     }
     // Authorize handle and establish replay before committing HTTP 200. This
@@ -328,16 +420,22 @@ export class ModuleAgentGatewayServer {
       response.end()
     }
     const keepAlive = setInterval(() => {
-      if (!ended) response.write(': keepalive\n\n')
+      if (!ended) writeModuleAgentSseChunk(response, ': keepalive\n\n', finish)
     }, this.#options.keepAliveMs)
     keepAlive.unref()
     response.on('close', finish)
     live = true
-    for (const event of replay) this.#writeEvent(response, event)
+    for (const event of replay) {
+      if (!this.#writeEvent(response, event, finish)) break
+    }
   }
 
-  #writeEvent(response: ServerResponse, event: ModuleAgentEvent): void {
-    response.write(`event: ${MODULE_AGENT_SSE_EVENT}\nid: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`)
+  #writeEvent(response: ServerResponse, event: ModuleAgentEvent, finish: () => void): boolean {
+    return writeModuleAgentSseChunk(
+      response,
+      `event: ${MODULE_AGENT_SSE_EVENT}\nid: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`,
+      finish,
+    )
   }
 
   #json(response: ServerResponse, status: number, body: unknown): void {

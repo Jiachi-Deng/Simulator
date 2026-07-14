@@ -13,7 +13,7 @@ function setup(overrides: {
   maxEventTextLength?: number
   maxSessionsPerGrant?: number
 } = {}) {
-  const now = overrides.now ?? 1_000
+  let now = overrides.now ?? 1_000
   const port = new FakeModuleAgentSessionPort()
   const paths = new MemoryModuleAgentPathAuthority()
   const gateway = new ModuleAgentGateway({
@@ -38,7 +38,7 @@ function setup(overrides: {
     defaultWorkingDirectory: '/module/projects/design-1',
     expiresAt: now + 60_000,
   }
-  return { gateway, port, spec }
+  return { gateway, port, spec, advance: (milliseconds: number) => { now += milliseconds } }
 }
 
 async function grantAndSession(setupResult: ReturnType<typeof setup>) {
@@ -49,6 +49,28 @@ async function grantAndSession(setupResult: ReturnType<typeof setup>) {
 }
 
 describe('ModuleAgentGateway', () => {
+  it('renews a live launch grant before its original expiry', async () => {
+    const state = setup()
+    const grant = await state.gateway.issueGrant(state.spec)
+    const auth: ModuleAgentAuthorization = { grantToken: grant.grantToken, ...state.spec }
+    state.advance(59_000)
+    const renewed = state.gateway.renewGrant(grant.grantToken, state.spec.expiresAt + 60_000)
+    expect(renewed.expiresAt).toBe(state.spec.expiresAt + 60_000)
+    state.advance(2_000)
+    expect(state.gateway.getCapabilities(auth).capability).toBe('host-agent.use')
+  })
+
+  it('cannot renew or resurrect an already expired launch grant', async () => {
+    const state = setup()
+    const grant = await state.gateway.issueGrant(state.spec)
+    const auth: ModuleAgentAuthorization = { grantToken: grant.grantToken, ...state.spec }
+    state.advance(60_001)
+    expect(() => state.gateway.renewGrant(grant.grantToken, state.spec.expiresAt + 60_000))
+      .toThrow(expect.objectContaining({ code: 'GRANT_EXPIRED' }))
+    expect(() => state.gateway.getCapabilities(auth))
+      .toThrow(expect.objectContaining({ code: 'GRANT_EXPIRED' }))
+  })
+
   it('creates a hidden Host session with no raw session or connection identifier in the response', async () => {
     const state = setup()
     const { auth, session } = await grantAndSession(state)

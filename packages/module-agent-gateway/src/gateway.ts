@@ -141,6 +141,25 @@ export class ModuleAgentGateway {
     }
   }
 
+  /** Trusted launch supervisor renewal. Never exposed through the Module HTTP API. */
+  renewGrant(grantToken: string, expiresAt: number): ModuleAgentGrant {
+    const grant = this.#grants.get(grantToken)
+    if (!grant || grant.revoked) throw new ModuleAgentGatewayError('UNAUTHORIZED', 'Unknown launch grant')
+    // Renewal may extend a live lease but must never resurrect an authority
+    // whose original expiry elapsed during sleep or event-loop suspension.
+    this.#assertGrantActive(grant)
+    if (!Number.isFinite(expiresAt) || expiresAt <= this.#now()) {
+      throw new ModuleAgentGatewayError('INVALID_REQUEST', 'Grant expiry must be in the future')
+    }
+    grant.expiresAt = expiresAt
+    return {
+      contractVersion: MODULE_AGENT_CONTRACT_VERSION,
+      capability: MODULE_AGENT_CAPABILITY,
+      grantToken,
+      expiresAt,
+    }
+  }
+
   getCapabilities(authorization: ModuleAgentAuthorization): ModuleAgentCapabilitiesResponse {
     this.#authorize(authorization)
     return {
