@@ -19,17 +19,25 @@ import { ModuleDownloader, type DownloaderResponse } from '@simulator/module-dow
 import { ManualClock, MemoryModuleDownloaderCache } from '@simulator/module-downloader/testing'
 import { encodeCanonicalCatalog } from '@simulator/module-release-trust'
 import {
+  DEVELOPMENT_MODULE_BUNDLE_SCHEMA_VERSION,
   DevelopmentModuleBundleError,
   loadDevelopmentModuleBundle,
   type LoadedDevelopmentModuleBundle,
 } from '../development-module-bundle.ts'
 
-const NOW = Date.parse('2026-07-14T12:00:00.000Z')
+const NOW = Date.now()
+const HOUR_MS = 60 * 60 * 1_000
+const ISSUED_AT = new Date(NOW - HOUR_MS).toISOString()
+const EXPIRES_AT = new Date(NOW + 20 * HOUR_MS).toISOString()
+const KEY_ACTIVE_FROM = new Date(NOW - 24 * HOUR_MS).toISOString()
+const KEY_ACTIVE_UNTIL = new Date(NOW + 7 * 24 * HOUR_MS).toISOString()
 const MODULE_ID = 'org.simulator.open-design'
 const CATALOG_URL = 'https://open-design.development.invalid/catalog/catalog-v1.json'
 const ARCHIVE_URL = 'https://open-design.development.invalid/releases/open-design-1.0.0-darwin-arm64.tar.gz'
 const CATALOG_ETAG = '"catalog-v1"'
 const ARCHIVE_ETAG = '"archive-v1"'
+const EXTRACTED_MANIFEST_SHA256 = 'e'.repeat(64)
+const HOST_VERSION_RANGE = '>=0.11.0 <1.0.0'
 const execFileAsync = promisify(execFile)
 
 interface ResourceDescriptorFixture {
@@ -46,6 +54,7 @@ interface BundleDescriptorFixture {
   nonPromotable: boolean
   moduleId: string
   release: { version: string; platform: string }
+  install: { extractedManifestSha256: string; hostVersionRange: string }
   trustedKey: {
     developmentOnly: boolean
     keyId: string
@@ -57,6 +66,28 @@ interface BundleDescriptorFixture {
     catalog: ResourceDescriptorFixture
     archive: ResourceDescriptorFixture
   }
+}
+
+interface CatalogFixture {
+  schemaVersion: number
+  sequence: number
+  issuedAt: string
+  expiresAt: string
+  releases: Array<{
+    manifest: {
+      schemaVersion: number
+      id: string
+      version: string
+      artifacts: Array<{
+        platform: string
+        entrypoint: string
+        url: string
+        sha256: string
+      }>
+      capabilities: string[]
+    }
+    artifactSizes: Array<{ platform: string; size: number }>
+  }>
 }
 
 interface BundleFixture {
@@ -77,6 +108,7 @@ afterEach(async () => {
 
 async function fixture(
   mutate?: (descriptor: BundleDescriptorFixture) => void,
+  mutateCatalog?: (catalog: CatalogFixture) => void,
 ): Promise<BundleFixture> {
   const root = await realpath(await mkdtemp(join(tmpdir(), 'simulator-development-module-bundle-')))
   cleanupRoots.push(root)
@@ -87,11 +119,11 @@ async function fixture(
   const publicKey = Buffer.from(publicDer.subarray(publicDer.byteLength - 32))
   const archiveBytes = Uint8Array.from({ length: 160_000 }, (_, index) => (index * 31) % 251)
   const archiveSha256 = sha256(archiveBytes)
-  const catalog = {
+  const catalog: CatalogFixture = {
     schemaVersion: 1,
     sequence: 1,
-    issuedAt: '2026-07-14T11:00:00.000Z',
-    expiresAt: '2026-07-15T11:00:00.000Z',
+    issuedAt: ISSUED_AT,
+    expiresAt: EXPIRES_AT,
     releases: [{
       manifest: {
         schemaVersion: 1,
@@ -108,6 +140,7 @@ async function fixture(
       artifactSizes: [{ platform: 'darwin-arm64', size: archiveBytes.byteLength }],
     }],
   }
+  mutateCatalog?.(catalog)
   const canonicalCatalog = encodeCanonicalCatalog(catalog)
   const catalogBytes = new TextEncoder().encode(JSON.stringify({
     schemaVersion: 1,
@@ -116,17 +149,21 @@ async function fixture(
     signature: Buffer.from(sign(null, canonicalCatalog, pair.privateKey)).toString('base64'),
   }))
   const descriptor: BundleDescriptorFixture = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     developmentOnly: true,
     nonPromotable: true,
     moduleId: MODULE_ID,
     release: { version: '1.0.0', platform: 'darwin-arm64' },
+    install: {
+      extractedManifestSha256: EXTRACTED_MANIFEST_SHA256,
+      hostVersionRange: HOST_VERSION_RANGE,
+    },
     trustedKey: {
       developmentOnly: true,
       keyId: 'development-open-design-v1',
       publicKey: publicKey.toString('base64'),
-      activeFrom: '2026-07-13T00:00:00.000Z',
-      activeUntil: '2026-07-20T00:00:00.000Z',
+      activeFrom: KEY_ACTIVE_FROM,
+      activeUntil: KEY_ACTIVE_UNTIL,
     },
     resources: {
       catalog: {
@@ -190,6 +227,7 @@ describe('development module bundle fetch adapter', () => {
     const input = await fixture()
     const loaded = await load(input)
 
+    expect(DEVELOPMENT_MODULE_BUNDLE_SCHEMA_VERSION).toBe(2)
     expect(loaded.catalogUrl).toBe(CATALOG_URL)
     expect(loaded.release).toEqual({
       developmentOnly: true,
@@ -204,9 +242,39 @@ describe('development module bundle fetch adapter', () => {
     expect(loaded.trustedKeys).toHaveLength(1)
     expect(loaded.trustedKeys[0]).toMatchObject({
       keyId: 'development-open-design-v1',
-      activeFrom: '2026-07-13T00:00:00.000Z',
-      activeUntil: '2026-07-20T00:00:00.000Z',
+      activeFrom: KEY_ACTIVE_FROM,
+      activeUntil: KEY_ACTIVE_UNTIL,
     })
+    expect(loaded.installRequest as unknown).toEqual({
+      catalogUrl: CATALOG_URL,
+      descriptor: {
+        verified: true,
+        manifest: {
+          schemaVersion: 1,
+          id: MODULE_ID,
+          version: '1.0.0',
+          artifacts: [{
+            platform: 'darwin-arm64',
+            entrypoint: 'bin/open-design',
+            url: ARCHIVE_URL,
+            sha256: sha256(input.archiveBytes),
+          }],
+          capabilities: ['artifact.read'],
+        },
+        artifact: {
+          platform: 'darwin-arm64',
+          entrypoint: 'bin/open-design',
+          url: ARCHIVE_URL,
+          sha256: sha256(input.archiveBytes),
+        },
+        extractedManifestSha256: EXTRACTED_MANIFEST_SHA256,
+        format: 'tar.gz',
+      },
+      hostVersionRange: HOST_VERSION_RANGE,
+    })
+    expect(Object.isFrozen(loaded.installRequest)).toBe(true)
+    expect(Object.isFrozen(loaded.installRequest.descriptor)).toBe(true)
+    expect(Object.isFrozen(loaded.installRequest.descriptor.manifest)).toBe(true)
 
     const response = await request(loaded, CATALOG_URL)
     expect(response.status).toBe(200)
@@ -355,36 +423,88 @@ describe('ModuleDownloader integration', () => {
     expect(staleCache.partials).toHaveLength(0)
   })
 
-  it('does not promote a different valid Ed25519 key into release trust', async () => {
+  it('rejects a different valid Ed25519 key before exposing downloader inputs', async () => {
     const otherPair = generateKeyPairSync('ed25519')
     const otherDer = otherPair.publicKey.export({ format: 'der', type: 'spki' })
     const input = await fixture((descriptor) => {
       descriptor.trustedKey.publicKey = Buffer.from(otherDer.subarray(otherDer.byteLength - 32)).toString('base64')
     })
-    const loaded = await load(input)
-    const downloader = new ModuleDownloader({
-      fetch: loaded.fetchAdapter,
-      cache: new MemoryModuleDownloaderCache(),
-      clock: new ManualClock(NOW),
-      trustedKeys: loaded.trustedKeys,
-      retry: { maxAttempts: 1 },
-    })
+    await expect(load(input)).rejects.toMatchObject({ code: 'CATALOG_TRUST_FAILED' })
+  })
+})
 
-    await expect(downloader.fetchCatalog(loaded.catalogUrl)).rejects.toMatchObject({ code: 'CATALOG_NOT_VERIFIED' })
+describe('verified install request derivation', () => {
+  it('normalizes a valid host version range for coordinator and registry persistence', async () => {
+    const input = await fixture((descriptor) => { descriptor.install.hostVersionRange = '^0.11.0' })
+    expect((await load(input)).installRequest.hostVersionRange).toBe('>=0.11.0 <0.12.0-0')
+  })
+
+  it('rejects catalog signature tampering even when the owner descriptor hash matches the tampered envelope', async () => {
+    const input = await fixture()
+    const wire = JSON.parse(new TextDecoder().decode(input.catalogBytes)) as { signature: string }
+    const signature = Buffer.from(wire.signature, 'base64')
+    signature[0] = signature[0]! ^ 0xff
+    wire.signature = signature.toString('base64')
+    const tamperedBytes = new TextEncoder().encode(JSON.stringify(wire))
+    input.descriptor.resources.catalog.size = tamperedBytes.byteLength
+    input.descriptor.resources.catalog.sha256 = sha256(tamperedBytes)
+    await secureWrite(input.catalogPath, tamperedBytes)
+    await secureWrite(input.descriptorPath, JSON.stringify(input.descriptor))
+
+    try {
+      await load(input)
+      throw new Error('Expected catalog trust failure')
+    } catch (cause) {
+      expect(cause).toMatchObject({ code: 'CATALOG_TRUST_FAILED' })
+      expect(String((cause as Error).message)).not.toContain(input.root)
+      expect((cause as Error & { cause?: unknown }).cause).toBeUndefined()
+    }
+  })
+
+  it('rejects missing and duplicate moduleId+version releases', async () => {
+    const missing = await fixture(undefined, (catalog) => {
+      catalog.releases[0]!.manifest.version = '2.0.0'
+    })
+    await expect(load(missing)).rejects.toMatchObject({ code: 'RELEASE_MISSING' })
+
+    const duplicate = await fixture(undefined, (catalog) => {
+      catalog.releases.push(structuredClone(catalog.releases[0]!))
+    })
+    await expect(load(duplicate)).rejects.toMatchObject({ code: 'RELEASE_DUPLICATE' })
+  })
+
+  it('rejects catalog archive URL, SHA-256, size, and platform metadata mismatches', async () => {
+    const mutations: Array<(catalog: CatalogFixture) => void> = [
+      (catalog) => { catalog.releases[0]!.manifest.artifacts[0]!.url = 'https://open-design.development.invalid/releases/other.tar.gz' },
+      (catalog) => { catalog.releases[0]!.manifest.artifacts[0]!.sha256 = 'f'.repeat(64) },
+      (catalog) => { catalog.releases[0]!.artifactSizes[0]!.size -= 1 },
+      (catalog) => {
+        catalog.releases[0]!.manifest.artifacts[0]!.platform = 'darwin-x64'
+        catalog.releases[0]!.artifactSizes[0]!.platform = 'darwin-x64'
+      },
+    ]
+    for (const mutateCatalog of mutations) {
+      const input = await fixture(undefined, mutateCatalog)
+      await expect(load(input)).rejects.toMatchObject({ code: 'RELEASE_MISMATCH' })
+    }
   })
 })
 
 describe('descriptor and filesystem policy', () => {
   it('rejects unsupported schema, wrong module, invalid keys, extra resources, and unsafe paths', async () => {
     const cases: Array<(descriptor: BundleDescriptorFixture) => void> = [
-      (descriptor) => { descriptor.schemaVersion = 2 },
+      (descriptor) => { descriptor.schemaVersion = 1 },
+      (descriptor) => { delete (descriptor as Partial<BundleDescriptorFixture>).install },
       (descriptor) => { descriptor.moduleId = 'org.simulator.wrong-module' },
       (descriptor) => { descriptor.developmentOnly = false },
       (descriptor) => { descriptor.nonPromotable = false },
       (descriptor) => { descriptor.trustedKey.developmentOnly = false },
       (descriptor) => { descriptor.trustedKey.publicKey = 'not-canonical-base64' },
       (descriptor) => { descriptor.trustedKey.activeUntil = descriptor.trustedKey.activeFrom },
-      (descriptor) => { descriptor.trustedKey.activeUntil = '2027-07-20T00:00:00.000Z' },
+      (descriptor) => { descriptor.trustedKey.activeUntil = new Date(NOW + 32 * 24 * HOUR_MS).toISOString() },
+      (descriptor) => { descriptor.install.extractedManifestSha256 = 'not-a-sha256' },
+      (descriptor) => { descriptor.install.hostVersionRange = 'not a semver range' },
+      (descriptor) => { descriptor.install.hostVersionRange = '' },
       (descriptor) => { descriptor.resources.archive.path = '../outside.tar.gz' },
       (descriptor) => { descriptor.resources.archive.path = descriptor.resources.catalog.path },
       (descriptor) => {

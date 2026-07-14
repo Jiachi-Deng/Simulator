@@ -2,15 +2,19 @@ import { createHash } from 'node:crypto'
 import { constants, type BigIntStats } from 'node:fs'
 import { lstat, open, realpath, type FileHandle } from 'node:fs/promises'
 import { dirname, isAbsolute, normalize, relative, resolve } from 'node:path'
-import type {
-  DownloaderFetchAdapter,
-  DownloaderFetchRequest,
-  DownloaderHeaders,
-  DownloaderResponse,
+import type { ModuleSha256 } from '@simulator/module-contract'
+import type { ModuleCoordinatorInstallRequest } from '@simulator/module-coordinator'
+import {
+  decodeCatalogEnvelope,
+  type DownloaderFetchAdapter,
+  type DownloaderFetchRequest,
+  type DownloaderHeaders,
+  type DownloaderResponse,
 } from '@simulator/module-downloader'
-import type { TrustedReleaseKey } from '@simulator/module-release-trust'
+import { verifyModuleReleaseCatalog, type TrustedReleaseKey } from '@simulator/module-release-trust'
+import { validRange } from 'semver'
 
-const DESCRIPTOR_SCHEMA_VERSION = 1
+export const DEVELOPMENT_MODULE_BUNDLE_SCHEMA_VERSION = 2 as const
 const MAX_DESCRIPTOR_BYTES = 64 * 1024
 const MAX_CATALOG_BYTES = 4 * 1024 * 1024
 const MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
@@ -42,6 +46,10 @@ export type DevelopmentModuleBundleErrorCode =
   | 'ABORTED'
   | 'BODY_ALREADY_CONSUMED'
   | 'BODY_DISPOSED'
+  | 'CATALOG_TRUST_FAILED'
+  | 'RELEASE_MISSING'
+  | 'RELEASE_DUPLICATE'
+  | 'RELEASE_MISMATCH'
 
 export class DevelopmentModuleBundleError extends Error {
   readonly code: DevelopmentModuleBundleErrorCode
@@ -70,6 +78,7 @@ export interface LoadedDevelopmentModuleBundle {
   readonly fetchAdapter: DownloaderFetchAdapter
   /** Informational only. The signed catalog remains authoritative for release selection. */
   readonly release: DevelopmentModuleBundleReleaseMetadata
+  readonly installRequest: Readonly<ModuleCoordinatorInstallRequest>
 }
 
 export interface LoadDevelopmentModuleBundleOptions {
@@ -96,8 +105,15 @@ interface ParsedDescriptor {
   readonly version: string
   readonly platform: 'darwin-arm64'
   readonly trustedKey: TrustedReleaseKey
+  readonly extractedManifestSha256: ModuleSha256
+  readonly hostVersionRange: string
   readonly catalog: ParsedResource
   readonly archive: ParsedResource
+}
+
+interface PinnedResourceResult {
+  readonly resource: PinnedResource
+  readonly verifiedBytes?: Uint8Array
 }
 
 interface FileIdentity {
@@ -146,9 +162,13 @@ export async function loadDevelopmentModuleBundle(
     invalidDescriptor('Catalog and archive URLs must share one synthetic origin')
   }
 
-  const catalog = await pinResource(root, descriptor.catalog, ownerUid)
-  const archive = await pinResource(root, descriptor.archive, ownerUid)
+  const catalogResult = await pinResource(root, descriptor.catalog, ownerUid, true)
+  const archiveResult = await pinResource(root, descriptor.archive, ownerUid)
+  const catalog = catalogResult.resource
+  const archive = archiveResult.resource
+  if (!catalogResult.verifiedBytes) catalogTrustFailed()
   const trustedKey = Object.freeze({ ...descriptor.trustedKey, publicKey: Uint8Array.from(descriptor.trustedKey.publicKey) })
+  const installRequest = createInstallRequest(catalogResult.verifiedBytes, catalog, archive, descriptor, trustedKey)
 
   return Object.freeze({
     catalogUrl: catalog.url,
@@ -164,6 +184,7 @@ export async function loadDevelopmentModuleBundle(
       archiveSha256: archive.sha256,
       archiveSize: archive.size,
     }),
+    installRequest,
   })
 }
 
@@ -300,7 +321,9 @@ async function readDescriptor(descriptorPath: string, root: string, ownerUid: bi
     if (!sameIdentity(identity(pathInfo), identity(before)) || before.size <= 0n || before.size > BigInt(MAX_DESCRIPTOR_BYTES)) {
       throw new DevelopmentModuleBundleError('INSECURE_DESCRIPTOR', 'Descriptor file identity or size is invalid')
     }
-    const bytes = await readExact(handle, Number(before.size))
+    const bytes = await readExact(handle, Number(before.size), () => {
+      throw new DevelopmentModuleBundleError('INSECURE_DESCRIPTOR', 'Descriptor file ended while being read')
+    })
     const after = await handle.stat({ bigint: true })
     if (!sameIdentity(identity(before), identity(after))) {
       throw new DevelopmentModuleBundleError('INSECURE_DESCRIPTOR', 'Descriptor file changed while being read')
@@ -322,9 +345,9 @@ function parseDescriptor(bytes: Uint8Array, expectedModuleId: string): ParsedDes
     invalidDescriptor('Descriptor must be valid UTF-8 JSON')
   }
   const root = exactRecord(value, [
-    'schemaVersion', 'developmentOnly', 'nonPromotable', 'moduleId', 'release', 'trustedKey', 'resources',
+    'schemaVersion', 'developmentOnly', 'nonPromotable', 'moduleId', 'release', 'install', 'trustedKey', 'resources',
   ], 'Descriptor')
-  if (root.schemaVersion !== DESCRIPTOR_SCHEMA_VERSION) invalidDescriptor('Descriptor schemaVersion is unsupported')
+  if (root.schemaVersion !== DEVELOPMENT_MODULE_BUNDLE_SCHEMA_VERSION) invalidDescriptor('Descriptor schemaVersion is unsupported')
   if (root.developmentOnly !== true || root.nonPromotable !== true) {
     invalidDescriptor('Descriptor must be development-only and non-promotable')
   }
@@ -336,6 +359,7 @@ function parseDescriptor(bytes: Uint8Array, expectedModuleId: string): ParsedDes
   }
   if (release.platform !== 'darwin-arm64') invalidDescriptor('Development bundle platform must be darwin-arm64')
 
+  const install = parseInstallMetadata(root.install)
   const trustedKey = parseTrustedKey(root.trustedKey)
   const resources = exactRecord(root.resources, ['catalog', 'archive'], 'Resources')
   const catalog = parseResource('catalog', resources.catalog)
@@ -345,9 +369,33 @@ function parseDescriptor(bytes: Uint8Array, expectedModuleId: string): ParsedDes
     version: release.version,
     platform: 'darwin-arm64',
     trustedKey,
+    extractedManifestSha256: install.extractedManifestSha256,
+    hostVersionRange: install.hostVersionRange,
     catalog,
     archive,
   }
+}
+
+function parseInstallMetadata(value: unknown): Pick<ParsedDescriptor, 'extractedManifestSha256' | 'hostVersionRange'> {
+  const record = exactRecord(value, ['extractedManifestSha256', 'hostVersionRange'], 'Install metadata')
+  if (typeof record.extractedManifestSha256 !== 'string' || !SHA256_PATTERN.test(record.extractedManifestSha256)) {
+    invalidDescriptor('Extracted manifest SHA-256 is invalid')
+  }
+  if (typeof record.hostVersionRange !== 'string' || record.hostVersionRange.length === 0
+    || record.hostVersionRange.length > 256 || record.hostVersionRange.trim() !== record.hostVersionRange) {
+    invalidDescriptor('Host version range is invalid')
+  }
+  let hostVersionRange: string | null
+  try {
+    hostVersionRange = validRange(record.hostVersionRange)
+  } catch {
+    invalidDescriptor('Host version range is invalid')
+  }
+  if (!hostVersionRange || hostVersionRange.length > 256) invalidDescriptor('Host version range is invalid')
+  return Object.freeze({
+    extractedManifestSha256: record.extractedManifestSha256 as ModuleSha256,
+    hostVersionRange,
+  })
 }
 
 function parseTrustedKey(value: unknown): TrustedReleaseKey {
@@ -396,7 +444,68 @@ function parseResource(role: ResourceRole, value: unknown): ParsedResource {
   })
 }
 
-async function pinResource(root: string, resource: ParsedResource, ownerUid: bigint): Promise<PinnedResource> {
+function createInstallRequest(
+  catalogBytes: Uint8Array,
+  catalog: PinnedResource,
+  archive: PinnedResource,
+  descriptor: ParsedDescriptor,
+  trustedKey: TrustedReleaseKey,
+): Readonly<ModuleCoordinatorInstallRequest> {
+  let envelope: ReturnType<typeof decodeCatalogEnvelope>
+  try {
+    envelope = decodeCatalogEnvelope(catalogBytes)
+  } catch {
+    catalogTrustFailed()
+  }
+  const verified = verifyModuleReleaseCatalog(envelope, {
+    trustedKeys: [trustedKey],
+    state: { highestSequence: 0 },
+    now: Date.now(),
+  })
+  if (!verified.ok) {
+    if (verified.diagnostics.some((diagnostic) => diagnostic.code === 'DUPLICATE_MODULE_VERSION')) releaseDuplicate()
+    catalogTrustFailed()
+  }
+
+  const releases = verified.catalog.releases.filter((release) => (
+    release.manifest.id === descriptor.moduleId && release.manifest.version === descriptor.version
+  ))
+  if (releases.length === 0) {
+    throw new DevelopmentModuleBundleError('RELEASE_MISSING', 'Verified catalog does not contain the requested development release')
+  }
+  if (releases.length !== 1) releaseDuplicate()
+  const release = releases[0]!
+  const artifacts = release.manifest.artifacts.filter((artifact) => artifact.platform === descriptor.platform)
+  const artifactSizes = release.artifactSizes.filter((item) => item.platform === descriptor.platform)
+  if (artifacts.length !== 1 || artifactSizes.length !== 1) releaseMismatch()
+  const artifact = artifacts[0]!
+  const artifactSize = artifactSizes[0]!.size
+  if (artifact.url !== archive.url || artifact.sha256 !== archive.sha256 || artifactSize !== archive.size
+    || !new URL(artifact.url).pathname.endsWith('.tar.gz')) {
+    releaseMismatch()
+  }
+
+  const installRequest: ModuleCoordinatorInstallRequest = Object.freeze({
+    catalogUrl: catalog.url,
+    descriptor: Object.freeze({
+      verified: true,
+      manifest: release.manifest,
+      artifact,
+      extractedManifestSha256: descriptor.extractedManifestSha256,
+      format: 'tar.gz',
+    }),
+    hostVersionRange: descriptor.hostVersionRange,
+  })
+  return installRequest
+}
+
+async function pinResource(
+  root: string,
+  resource: ParsedResource,
+  ownerUid: bigint,
+  captureVerifiedBytes = false,
+): Promise<PinnedResourceResult> {
+  if (captureVerifiedBytes && resource.role !== 'catalog') invalidResource(resource.role, 'cannot be captured as catalog bytes')
   const absolutePath = resolve(root, ...resource.relativePath.split('/'))
   if (!isContained(root, absolutePath)) invalidResource(resource.role, 'path containment failed')
   await validateDirectoryChain(root, resource.relativePath, ownerUid)
@@ -413,12 +522,18 @@ async function pinResource(root: string, resource: ParsedResource, ownerUid: big
     if (!sameIdentity(identity(pathInfo), pinned) || before.size !== BigInt(resource.size)) {
       invalidResource(resource.role, 'identity or size does not match the descriptor')
     }
-    const digest = await hashFile(handle, resource.size)
+    const verifiedBytes = captureVerifiedBytes
+      ? await readExact(handle, resource.size, () => invalidResource(resource.role, 'ended while being verified'))
+      : undefined
+    const digest = verifiedBytes ? createHash('sha256').update(verifiedBytes).digest('hex') : await hashFile(handle, resource.size)
     const after = await handle.stat({ bigint: true })
     if (!sameIdentity(pinned, identity(after)) || digest !== resource.sha256) {
       invalidResource(resource.role, 'bytes do not match the descriptor')
     }
-    return Object.freeze({ ...resource, absolutePath, identity: pinned })
+    return Object.freeze({
+      resource: Object.freeze({ ...resource, absolutePath, identity: pinned }),
+      ...(verifiedBytes ? { verifiedBytes } : {}),
+    })
   } catch (cause) {
     if (cause instanceof DevelopmentModuleBundleError) throw cause
     invalidResource(resource.role, 'could not be opened safely')
@@ -583,12 +698,12 @@ async function hashFile(handle: FileHandle, size: number, signal?: AbortSignal):
   return digest.digest('hex')
 }
 
-async function readExact(handle: FileHandle, size: number): Promise<Uint8Array> {
+async function readExact(handle: FileHandle, size: number, onShortRead: () => never): Promise<Uint8Array> {
   const bytes = Buffer.allocUnsafe(size)
   let position = 0
   while (position < size) {
     const result = await handle.read(bytes, position, size - position, position)
-    if (result.bytesRead === 0) throw new DevelopmentModuleBundleError('INSECURE_DESCRIPTOR', 'Descriptor file ended while being read')
+    if (result.bytesRead === 0) onShortRead()
     position += result.bytesRead
   }
   return Uint8Array.from(bytes)
@@ -727,6 +842,18 @@ function resourceChanged(role: ResourceRole): never {
 
 function requestRefused(): never {
   throw new DevelopmentModuleBundleError('REQUEST_REFUSED', 'Development bundle request was refused')
+}
+
+function catalogTrustFailed(): never {
+  throw new DevelopmentModuleBundleError('CATALOG_TRUST_FAILED', 'Development bundle catalog trust verification failed')
+}
+
+function releaseDuplicate(): never {
+  throw new DevelopmentModuleBundleError('RELEASE_DUPLICATE', 'Verified catalog contains a duplicate development release')
+}
+
+function releaseMismatch(): never {
+  throw new DevelopmentModuleBundleError('RELEASE_MISMATCH', 'Verified catalog release metadata does not match the development bundle')
 }
 
 async function closeQuietly(handle: FileHandle | undefined): Promise<void> {
