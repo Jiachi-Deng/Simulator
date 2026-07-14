@@ -398,14 +398,19 @@ describe('production filesystem cache', () => {
   it('does not reclaim an active artifact owner paused beyond stale age', async () => {
     const directory = await root(); let reached!: () => void; let resume!: () => void
     const atClaim = new Promise<void>((resolve) => { reached = resolve }); const gate = new Promise<void>((resolve) => { resume = resolve })
-    const first = new NodeFilesystemModuleDownloaderCache(directory, { staleLeaseMs: 1, leasePollMs: 1, checkpoint: async (point) => { if (point === 'artifact-claim-published') { reached(); await gate } } })
+    const processIdentity = async () => 'active-owner-process-start'
+    const first = new NodeFilesystemModuleDownloaderCache(directory, { staleLeaseMs: 1, leasePollMs: 1, processIdentity, checkpoint: async (point) => { if (point === 'artifact-claim-published') { reached(); await gate } } })
     const bytes = Buffer.from('active owner'); const sha256 = createHash('sha256').update(bytes).digest('hex')
     const firstPartial = await first.createPartial({ sha256, sourceUrl: 'https://example.test/a', expectedSize: bytes.length, updatedAt: 1 }); await first.appendPartial(firstPartial.id, bytes, 2)
     const publishing = first.publishPartial(firstPartial.id, { sha256, size: bytes.length, committedAt: 3 }); await atClaim
-    const competitor = new NodeFilesystemModuleDownloaderCache(directory, { staleLeaseMs: 1, leasePollMs: 1, maxStaleRecoveries: 1, now: () => Date.now() + 1_000_000 })
-    const secondPartial = await competitor.createPartial({ sha256, sourceUrl: 'https://example.test/a', expectedSize: bytes.length, updatedAt: 4 }); await competitor.appendPartial(secondPartial.id, bytes, 5)
-    await expect(competitor.publishPartial(secondPartial.id, { sha256, size: bytes.length, committedAt: 6 })).rejects.toThrow('live or unverifiable owner')
-    resume(); expect(await publishing).toBe('published')
+    try {
+      const competitor = new NodeFilesystemModuleDownloaderCache(directory, { staleLeaseMs: 1, leasePollMs: 1, maxStaleRecoveries: 1, now: () => Date.now() + 1_000_000, processIdentity })
+      const secondPartial = await competitor.createPartial({ sha256, sourceUrl: 'https://example.test/a', expectedSize: bytes.length, updatedAt: 4 }); await competitor.appendPartial(secondPartial.id, bytes, 5)
+      await expect(competitor.publishPartial(secondPartial.id, { sha256, size: bytes.length, committedAt: 6 })).rejects.toThrow('live or unverifiable owner')
+    } finally {
+      resume(); await publishing
+    }
+    expect(await publishing).toBe('published')
   })
 
   it('fails closed for partial data and record leaf symlinks without touching targets', async () => {
