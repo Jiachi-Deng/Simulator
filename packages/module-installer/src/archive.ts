@@ -12,7 +12,7 @@ import {
 
 const WINDOWS_DEVICE = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i
 const DRIVE_OR_UNC = /^(?:[A-Za-z]:|[/\\]{2})/
-const SAFE_PATH_SEGMENT = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
+const SAFE_ARCHIVE_PAYLOAD_SEGMENT = /^[A-Za-z0-9._$@+~\x5b\x5d-]+$/
 const TAR_BLOCK_SIZE = 512
 const TAR_METADATA_TYPES = new Set(['g', 'x', 'X', 'L', 'K', 'N'])
 
@@ -57,6 +57,17 @@ function limitExceeded(message: string): never {
   throw new ModuleInstallerError('ARCHIVE_LIMIT_EXCEEDED', message)
 }
 
+// Archive payloads may contain package-manager and framework-generated names.
+// Manifest executable paths remain governed by the stricter module contract.
+export function isPortableArchivePayloadSegment(segment: string): boolean {
+  return segment !== ''
+    && segment !== '.'
+    && segment !== '..'
+    && SAFE_ARCHIVE_PAYLOAD_SEGMENT.test(segment)
+    && !segment.endsWith('.')
+    && !WINDOWS_DEVICE.test(segment)
+}
+
 function validatePath(path: string, limits: InstallLimits): string {
   if (path.length === 0 || path.includes('\0') || /[\u0000-\u001f\u007f]/.test(path)) {
     invalidEntry('Archive contains an empty path or control characters')
@@ -76,10 +87,10 @@ function validatePath(path: string, limits: InstallLimits): string {
     limitExceeded(`Archive path exceeds maximum depth ${limits.maxDepth}`)
   }
   for (const segment of segments) {
-    if (!SAFE_PATH_SEGMENT.test(segment)) {
+    if (!SAFE_ARCHIVE_PAYLOAD_SEGMENT.test(segment)) {
       invalidEntry(`Archive path is outside the safe ASCII segment contract: ${JSON.stringify(path)}`)
     }
-    if (segment.endsWith('.') || WINDOWS_DEVICE.test(segment)) {
+    if (!isPortableArchivePayloadSegment(segment)) {
       invalidEntry(`Archive path has a platform-ambiguous component: ${JSON.stringify(path)}`)
     }
   }

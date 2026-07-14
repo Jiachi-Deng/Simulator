@@ -3,8 +3,8 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync, gunzipSync } from 'node:zlib'
-import type { ModuleId, ModuleSha256, ModuleVersion } from '@simulator/module-contract'
-import { inspectArchive } from '../archive.ts'
+import { parseModuleManifest, type ModuleId, type ModuleSha256, type ModuleVersion } from '@simulator/module-contract'
+import { inspectArchive, isPortableArchivePayloadSegment } from '../archive.ts'
 import { ModuleInstaller } from '../installer.ts'
 import {
   ModuleInstallerError,
@@ -26,6 +26,20 @@ import {
 
 const roots: string[] = []
 const MODULE_ID = 'org.simulator.fixture' as ModuleId
+const OPEN_DESIGN_PATH_EVIDENCE = Object.freeze({
+  legacyRejectedPathCount: 3_428,
+  uniqueLegacyRejectedSegmentCount: 136,
+  requiredAdditionalCharacters: Object.freeze(['$', '+', '@', '[', ']', '~']),
+  representativeSegments: Object.freeze([
+    '.pnpm',
+    '_not-found',
+    '@open-design',
+    '[[...slug]]',
+    '@img+sharp-darwin-arm64@0.34.5',
+    '$oc$slug',
+    '0a~oa.js',
+  ]),
+})
 
 class TestUsageGuard implements ModuleUsageGuard {
   readonly inUse = new Set<string>()
@@ -124,6 +138,57 @@ describe('ModuleInstaller production tar.gz path', () => {
       archivePath: source.path,
     })
     expect(result.extractedManifestSha256).toBe(descriptor(source.archive, entries).extractedManifestSha256)
+  })
+
+  it('installs the exact safe ASCII segment additions evidenced by OpenDesign staging', async () => {
+    expect(OPEN_DESIGN_PATH_EVIDENCE).toMatchObject({
+      legacyRejectedPathCount: 3_428,
+      uniqueLegacyRejectedSegmentCount: 136,
+    })
+    const additionalCharacters = [...new Set(
+      OPEN_DESIGN_PATH_EVIDENCE.representativeSegments
+        .join('')
+        .split('')
+        .filter((character) => !/[A-Za-z0-9._-]/.test(character)),
+    )].sort()
+    expect(additionalCharacters).toEqual([...OPEN_DESIGN_PATH_EVIDENCE.requiredAdditionalCharacters])
+
+    const root = await tempRoot()
+    const entries = [
+      ...VALID_ENTRIES,
+      { path: 'module/.pnpm', type: '5' },
+      { path: 'module/_not-found', content: 'underscore' },
+      { path: 'module/@open-design', type: '5' },
+      { path: 'module/@open-design/[[...slug]]', type: '5' },
+      { path: 'module/@open-design/[[...slug]]/$oc$slug', content: 'route' },
+      { path: 'module/@img+sharp-darwin-arm64@0.34.5', type: '5' },
+      { path: 'module/0a~oa.js', content: 'tilde' },
+    ] as const satisfies readonly TarFixtureEntry[]
+    const source = await artifactAt(root, entries)
+    const result = await new ModuleInstaller(join(root, 'modules-root')).install({
+      descriptor: descriptor(source.archive, entries),
+      archivePath: source.path,
+    })
+
+    expect(await readFile(join(result.installedPath, '@open-design', '[[...slug]]', '$oc$slug'), 'utf8')).toBe('route')
+    expect(await readFile(join(result.installedPath, '0a~oa.js'), 'utf8')).toBe('tilde')
+  })
+
+  it('keeps the manifest executable path contract stricter than archive payload segments', () => {
+    expect(isPortableArchivePayloadSegment('@open-design')).toBe(true)
+    const parsed = parseModuleManifest({
+      schemaVersion: 1,
+      id: 'org.simulator.fixture',
+      version: '1.0.0',
+      artifacts: [{
+        platform: 'darwin-arm64',
+        entrypoint: '@open-design',
+        url: 'https://modules.example.test/fixture.tar.gz',
+        sha256: '0'.repeat(64),
+      }],
+      capabilities: ['workspace.read'],
+    })
+    expect(parsed.ok).toBe(false)
   })
 
   it('retains LKG, rolls back atomically, and protects active/LKG/in-use versions from uninstall', async () => {
@@ -287,13 +352,21 @@ describe('ModuleInstaller production tar.gz path', () => {
 
 describe('malicious archive matrix', () => {
   const malicious: ReadonlyArray<{ name: string; entries: readonly TarFixtureEntry[] }> = [
+    { name: 'empty path segment', entries: [{ path: 'module//escape', content: 'x' }] },
+    { name: 'dot path segment', entries: [{ path: 'module/./escape', content: 'x' }] },
     { name: 'traversal', entries: [{ path: 'module/../escape', content: 'x' }] },
     { name: 'absolute path', entries: [{ path: '/module/bin/module', mode: 0o755, content: 'x' }] },
     { name: 'Windows drive path', entries: [{ path: 'C:/module/bin/module', mode: 0o755, content: 'x' }] },
+    { name: 'Windows UNC path', entries: [{ path: '//server/share/module', content: 'x' }] },
     { name: 'Windows backslash', entries: [{ path: 'module\\bin\\module', mode: 0o755, content: 'x' }] },
+    { name: 'Windows alternate data stream colon', entries: [{ path: 'module/data.txt:stream', content: 'x' }] },
+    { name: 'Windows device name', entries: [...VALID_ENTRIES, { path: 'module/CON.txt', content: 'x' }] },
+    { name: 'Windows trailing dot', entries: [...VALID_ENTRIES, { path: 'module/data.', content: 'x' }] },
     { name: 'unexpected top-level layout', entries: [{ path: 'payload/bin/module', mode: 0o755, content: 'x' }] },
     { name: 'duplicate path', entries: [...VALID_ENTRIES, { path: 'module/data.txt', content: 'again' }] },
     { name: 'case-fold collision', entries: [...VALID_ENTRIES, { path: 'module/DATA.txt', content: 'again' }] },
+    { name: 'macOS leading-dot case-fold collision', entries: [...VALID_ENTRIES, { path: 'module/.next', content: 'a' }, { path: 'module/.NEXT', content: 'b' }] },
+    { name: 'Windows scoped-package case-fold collision', entries: [...VALID_ENTRIES, { path: 'module/@scope', content: 'a' }, { path: 'module/@SCOPE', content: 'b' }] },
     { name: 'Unicode normalization collision', entries: [...VALID_ENTRIES, { path: 'module/d\u0061\u0301ta', content: 'a' }, { path: 'module/d\u00e1ta', content: 'b' }] },
     { name: 'symbolic link', entries: [...VALID_ENTRIES, { path: 'module/link', type: '2', linkpath: '../../escape' }] },
     { name: 'hard link', entries: [...VALID_ENTRIES, { path: 'module/link', type: '1', linkpath: '../../escape' }] },
@@ -303,6 +376,8 @@ describe('malicious archive matrix', () => {
     { name: 'contiguous/special file', entries: [...VALID_ENTRIES, { path: 'module/special', type: '7' }] },
     { name: 'extra executable', entries: [...VALID_ENTRIES, { path: 'module/helper', mode: 0o755, content: 'x' }] },
     { name: 'group-only executable entrypoint', entries: VALID_ENTRIES.map((entry) => entry.path === 'module/bin/module' ? { ...entry, mode: 0o050 } : entry) },
+    { name: 'space in path', entries: [...VALID_ENTRIES, { path: 'module/not portable', content: 'x' }] },
+    { name: 'control character in path', entries: [...VALID_ENTRIES, { path: 'module/control\tname', content: 'x' }] },
     { name: 'non-ASCII path', entries: [...VALID_ENTRIES, { path: 'module/caf\u00e9', content: 'x' }] },
   ]
 
@@ -318,6 +393,23 @@ describe('malicious archive matrix', () => {
       expect((await installer.getState(MODULE_ID)).activeVersion).toBeNull()
     })
   }
+
+  it.each([
+    '',
+    '.',
+    '..',
+    'contains space',
+    'control\u0000name',
+    'control\u001fname',
+    'control\u007fname',
+    'caf\u00e9',
+    'name!',
+    'CON',
+    'lpt1.log',
+    'trailing.',
+  ])('rejects non-portable payload segment %j before or after extraction', (segment) => {
+    expect(isPortableArchivePayloadSegment(segment)).toBe(false)
+  })
 
   it('rejects zip input as an unsupported production format before parsing', async () => {
     const root = await tempRoot()

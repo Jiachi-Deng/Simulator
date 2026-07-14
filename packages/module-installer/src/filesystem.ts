@@ -13,6 +13,7 @@ import {
 } from 'node:fs/promises'
 import { dirname, join, relative, sep } from 'node:path'
 import type { ModuleSha256 } from '@simulator/module-contract'
+import { isPortableArchivePayloadSegment } from './archive.ts'
 import {
   ModuleInstallerError,
   SimulatedInstallerCrash,
@@ -128,10 +129,8 @@ function portableRelative(root: string, path: string): string {
   return relative(root, path).split(sep).join('/')
 }
 
-const SAFE_PATH_SEGMENT = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
-
 function assertSafeExtractedPath(path: string): void {
-  if (!path.split('/').every((segment) => SAFE_PATH_SEGMENT.test(segment))) {
+  if (!path.split('/').every(isPortableArchivePayloadSegment)) {
     throw new ModuleInstallerError('ARCHIVE_INVALID', `Extracted path is outside the safe ASCII contract: ${JSON.stringify(path)}`)
   }
 }
