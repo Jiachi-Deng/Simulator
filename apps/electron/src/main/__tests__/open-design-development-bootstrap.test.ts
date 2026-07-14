@@ -1,4 +1,5 @@
 import { describe, expect, it, mock } from 'bun:test'
+import { parseModuleManifest } from '@simulator/module-contract'
 import type { LoadedDevelopmentModuleBundle } from '../development-module-bundle'
 import {
   loadOpenDesignDevelopmentBootstrap,
@@ -7,20 +8,47 @@ import {
 import { OPEN_DESIGN_MODULE_ID } from '../../shared/open-design-module-ipc'
 
 const DESCRIPTOR_PATH = '/private/tmp/open-design-development/bundle-descriptor.json'
+const ARCHIVE_URL = 'https://m1-development.invalid/open-design/module.tar.gz'
+const ARCHIVE_SHA256 = 'a'.repeat(64)
+const parsedManifest = parseModuleManifest({
+  schemaVersion: 1,
+  id: OPEN_DESIGN_MODULE_ID,
+  version: '0.14.1-development.1',
+  artifacts: [{
+    platform: 'darwin-arm64',
+    entrypoint: 'runtime/open-design-launcher',
+    url: ARCHIVE_URL,
+    sha256: ARCHIVE_SHA256,
+  }],
+  capabilities: [],
+})
+if (!parsedManifest.ok) throw new Error('Test OpenDesign manifest must be valid')
+const TEST_MANIFEST = parsedManifest.value
 
 function loadedBundle(overrides: Partial<LoadedDevelopmentModuleBundle['release']> = {}): LoadedDevelopmentModuleBundle {
   return {
     catalogUrl: 'https://m1-development.invalid/open-design/catalog-envelope.json',
     trustedKeys: [],
     fetchAdapter: { fetch: mock(async () => { throw new Error('not used') }) },
+    installRequest: {
+      catalogUrl: 'https://m1-development.invalid/open-design/catalog-envelope.json',
+      descriptor: {
+        verified: true,
+        manifest: TEST_MANIFEST,
+        artifact: TEST_MANIFEST.artifacts[0]!,
+        extractedManifestSha256: TEST_MANIFEST.artifacts[0]!.sha256,
+        format: 'tar.gz',
+      },
+      hostVersionRange: '*',
+    },
     release: {
       developmentOnly: true,
       nonPromotable: true,
       moduleId: OPEN_DESIGN_MODULE_ID,
       version: '0.14.1-development.1',
       platform: 'darwin-arm64',
-      archiveUrl: 'https://m1-development.invalid/open-design/module.tar.gz',
-      archiveSha256: 'a'.repeat(64),
+      archiveUrl: ARCHIVE_URL,
+      archiveSha256: ARCHIVE_SHA256,
       archiveSize: 1024,
       ...overrides,
     },
