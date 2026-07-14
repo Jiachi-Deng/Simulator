@@ -77,6 +77,31 @@ describe('production filesystem cache', () => {
     expect((await readdir(join(directory, 'leases', 'claims'))).some((name) => name.includes('.released-'))).toBe(false)
   })
 
+  it.skipIf(process.platform !== 'win32')('defers released-marker scans when Windows lstat is transiently blocked', async () => {
+    const directory = await root(); let scanFaults = 1
+    const setup = new NodeFilesystemModuleDownloaderCache(directory)
+    await setup.readCatalog()
+    const key = 'blocked released-marker scan'
+    const base = createHash('sha256').update(key).digest('hex')
+    const token = '00000000-0000-4000-8000-000000000000'
+    const marker = join(directory, 'leases', 'claims', `${base}.released-${token}`)
+    await writeFile(marker, token)
+
+    const cache = new NodeFilesystemModuleDownloaderCache(directory, {
+      leasePollMs: 1,
+      faultInjector(point, path) {
+        if (point === 'cleanup' && path === marker && scanFaults > 0) {
+          scanFaults -= 1
+          throw Object.assign(new Error('transient Windows marker lstat contention'), { code: 'EPERM' })
+        }
+      },
+    })
+    const lease = await cache.acquireLease(key, AbortSignal.timeout(5_000))
+    await lease.release()
+    expect(scanFaults).toBe(0)
+    expect((await readdir(join(directory, 'leases', 'claims'))).some((name) => name.includes('.released-'))).toBe(false)
+  })
+
   it.skipIf(process.platform !== 'win32')('treats a released marker that vanishes after EEXIST as a completed release', async () => {
     const directory = await root()
     const cache = new NodeFilesystemModuleDownloaderCache(directory, {

@@ -352,11 +352,12 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     }
     if (process.platform === 'win32') {
       const released = await this.#releasedLeaseTokens(base)
-      if (!token && released.length === 1) {
-        await this.#removeClaim(base, released[0]!)
+      if (released.cleanupBlocked) return 'cleanup-blocked'
+      if (!token && released.tokens.length === 1) {
+        await this.#removeClaim(base, released.tokens[0]!)
         return await this.#releasedLeaseCleared(base, lock)
       }
-      if (!token && released.length > 1) throw new Error('Ambiguous released lease markers')
+      if (!token && released.tokens.length > 1) throw new Error('Ambiguous released lease markers')
     }
     const stale = token ? await this.#ownerDeadOrStale(token, lock) : this.#now() - info.mtimeMs > this.#staleMs
     if (!stale) return 'blocked'
@@ -428,25 +429,29 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
       return 'published'
     }
   }
-  async #releasedLeaseTokens(base: string): Promise<string[]> {
+  async #releasedLeaseTokens(base: string): Promise<{ tokens: string[]; cleanupBlocked: boolean }> {
     const prefix = `${baseName(base)}.released-`
     const tokens: string[] = []
     for (const name of (await directoryNames(dirname(base))).filter((value) => value.startsWith(prefix))) {
       const token = name.slice(prefix.length)
       if (!UUID.test(token)) continue
+      const marker = join(dirname(base), name)
       let bytes: Buffer
-      try { bytes = await safeReadFile(join(dirname(base), name), this.root) }
+      try { await this.#faultAt('cleanup', marker); bytes = await safeReadFile(marker, this.root) }
       catch (cause) {
         if (hasCode(cause, 'ENOENT')) continue
+        if (isDeferredWindowsCleanup(cause)) return { tokens, cleanupBlocked: true }
         throw cause
       }
       if (bytes.toString() !== token) throw new Error('Invalid released lease marker')
       tokens.push(token)
     }
-    return tokens
+    return { tokens, cleanupBlocked: false }
   }
   async #clearReleasedLeaseMarkers(base: string): Promise<boolean> {
-    for (const token of await this.#releasedLeaseTokens(base)) {
+    const released = await this.#releasedLeaseTokens(base)
+    if (released.cleanupBlocked) return false
+    for (const token of released.tokens) {
       const marker = this.#leaseReleaseMarker(base, token)
       try { await this.#faultAt('cleanup', marker); await safeRemoveFile(marker, this.root) }
       catch (cause) {
@@ -529,7 +534,8 @@ export class NodeFilesystemModuleDownloaderCache implements ModuleDownloaderCach
     for (const name of await directoryNames(artifactOwners)) {
       if (!remaining) return
       if (!/^([a-f0-9-]{36})\.json$/.test(name)) continue
-      const path = join(artifactOwners, name); const info = await lstat(path)
+      const path = join(artifactOwners, name); const info = await lstat(path).catch((cause) => { if (hasCode(cause, 'ENOENT')) return undefined; throw cause })
+      if (!info) continue
       if (!info.isFile() || info.isSymbolicLink()) throw new Error('Unsafe artifact owner')
       if (info.nlink > 1) continue
       const owner = await safeReadJson<OwnerRecord>(path, this.root).catch(() => undefined)
