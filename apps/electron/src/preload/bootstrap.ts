@@ -37,6 +37,33 @@ import type { ConfirmDialogSpec, FileDialogSpec, BrowserCapabilityRequest } from
 import type { RpcClient } from '@craft-agent/server-core/transport'
 import type { RemoteServerConfig } from '@craft-agent/core/types'
 import type { ElectronAPI } from '../shared/types'
+import {
+  OPEN_DESIGN_MODULE_CHANNELS,
+  type OpenDesignModuleFacade,
+  type OpenDesignModuleState,
+} from '../shared/open-design-module-ipc'
+
+type OpenDesignIpcRenderer = Pick<typeof ipcRenderer, 'invoke' | 'on' | 'removeListener'>
+
+export function createOpenDesignModuleFacade(ipc: OpenDesignIpcRenderer): OpenDesignModuleFacade {
+  const invoke = (channel: string): Promise<OpenDesignModuleState> => ipc.invoke(channel)
+  return Object.freeze({
+    getState: () => invoke(OPEN_DESIGN_MODULE_CHANNELS.GET_STATE),
+    install: () => invoke(OPEN_DESIGN_MODULE_CHANNELS.INSTALL),
+    start: () => invoke(OPEN_DESIGN_MODULE_CHANNELS.START),
+    stop: () => invoke(OPEN_DESIGN_MODULE_CHANNELS.STOP),
+    onStateChanged(listener: (state: OpenDesignModuleState) => void) {
+      const handler = (_event: Electron.IpcRendererEvent, state: OpenDesignModuleState) => listener(state)
+      let subscribed = true
+      ipc.on(OPEN_DESIGN_MODULE_CHANNELS.STATE_CHANGED, handler)
+      return () => {
+        if (!subscribed) return
+        subscribed = false
+        ipc.removeListener(OPEN_DESIGN_MODULE_CHANNELS.STATE_CHANGED, handler)
+      }
+    },
+  })
+}
 
 // ---------------------------------------------------------------------------
 // Client interface — common surface for both RoutedClient and WsRpcClient
@@ -179,6 +206,10 @@ client.handleCapability(CLIENT_BROWSER_INVOKE, async (req: BrowserCapabilityRequ
 const api = buildClientApi(client, CHANNEL_MAP, (ch) => client.isChannelAvailable(ch))
 
 ;(api as any).getRuntimeEnvironment = (): 'electron' | 'web' => 'electron'
+
+if (process.platform === 'darwin' && process.arch === 'arm64') {
+  ;(api as ElectronAPI).openDesignModule = createOpenDesignModuleFacade(ipcRenderer)
+}
 
 // ---------------------------------------------------------------------------
 // Transport connection state logging (for remote connections)
