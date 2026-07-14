@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
@@ -93,6 +93,7 @@ if (ipcServer) {
 }
 
 function stop() {
+  if (existsSync(path.join(dataRoot, "ignore-sigterm"))) return;
   let remaining = ipcServer ? 2 : 1;
   const closed = () => {
     remaining -= 1;

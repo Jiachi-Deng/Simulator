@@ -10,7 +10,10 @@ import { StringDecoder } from "node:string_decoder";
 const LOOPBACK = "127.0.0.1";
 const OUTPUT_LIMIT_BYTES = 1024 * 1024;
 const READY_TIMEOUT_MS = 30_000;
-const STOP_GRACE_MS = 5_000;
+// The host supervisor escalates after 2 seconds. Keep both the graceful and
+// forced child-process waits inside that outer budget so the launcher still
+// has time to remove its private run root before the host kills the group.
+const STOP_GRACE_MS = 750;
 const MAX_PROXY_BODY_BYTES = 32 * 1024 * 1024;
 const FORWARDED_HEADERS = new Set([
   "forwarded", "x-forwarded-for", "x-forwarded-host", "x-forwarded-port",

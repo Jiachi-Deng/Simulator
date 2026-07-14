@@ -43,7 +43,10 @@ test("bootstrap launches sealed sidecars, proxies HTTP/WebSocket, preserves data
   }
   assert.equal(await stat(runtime.runtimeRoot).then(() => true), true);
   const firstPids = await readPids(fixture.dataRoot);
+  await writeFile(path.join(fixture.dataRoot, "open-design", "ignore-sigterm"), "1\n");
+  const stopStartedAt = Date.now();
   await stopLauncher(first);
+  assert.ok(Date.now() - stopStartedAt < 1_900, "launcher must clean up before the host supervisor escalates");
   await assertExited(firstPids);
   await assert.rejects(stat(runtime.runtimeRoot), { code: "ENOENT" });
   assert.deepEqual(await readdir(path.join(fixture.dataRoot, "open-design", "runs")), []);
