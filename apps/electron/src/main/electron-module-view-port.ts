@@ -23,6 +23,8 @@ export interface ElectronModuleViewPortOptions {
   readonly manager: ElectronViewManagerPort
   readonly hostWindow: () => BrowserWindow | undefined
   readonly readyTimeoutMs?: number
+  readonly onHostClose?: (moduleId: ModuleId) => void | Promise<void>
+  readonly onHostCloseError?: (error: unknown, moduleId: ModuleId) => void | Promise<void>
 }
 
 interface AttachedView {
@@ -30,16 +32,34 @@ interface AttachedView {
   readonly version: CoordinatorViewSnapshot['version']
 }
 
+function isHostClosePayload(payload: unknown): payload is { readonly type: 'host.close' } {
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) return false
+  try {
+    const prototype = Object.getPrototypeOf(payload)
+    if (prototype !== Object.prototype && prototype !== null) return false
+    const keys = Reflect.ownKeys(payload)
+    if (keys.length !== 1 || keys[0] !== 'type') return false
+    const descriptor = Object.getOwnPropertyDescriptor(payload, 'type')
+    return !!descriptor && 'value' in descriptor && descriptor.value === 'host.close'
+  } catch {
+    return false
+  }
+}
+
 export class ElectronModuleViewPort implements ModuleViewPort {
   readonly #manager: ElectronViewManagerPort
   readonly #hostWindow: ElectronModuleViewPortOptions['hostWindow']
   readonly #readyTimeoutMs: number
+  readonly #onHostClose: ElectronModuleViewPortOptions['onHostClose']
+  readonly #onHostCloseError: ElectronModuleViewPortOptions['onHostCloseError']
   readonly #views = new Map<ModuleId, AttachedView>()
 
   constructor(options: ElectronModuleViewPortOptions) {
     this.#manager = options.manager
     this.#hostWindow = options.hostWindow
     this.#readyTimeoutMs = options.readyTimeoutMs ?? 10_000
+    this.#onHostClose = options.onHostClose
+    this.#onHostCloseError = options.onHostCloseError
     if (!Number.isSafeInteger(this.#readyTimeoutMs) || this.#readyTimeoutMs <= 0) {
       throw new TypeError('Electron module view ready timeout must be a positive integer')
     }
@@ -76,6 +96,21 @@ export class ElectronModuleViewPort implements ModuleViewPort {
         visible: true,
         onReady: readyResolve,
         onFailure: (failure) => readyReject(new Error(`${failure.code}: ${failure.message}`)),
+        onMessage: (payload, boundIdentity) => {
+          const current = this.#views.get(request.moduleId)
+          if (
+            !current
+            || current.identity.moduleId !== identity.moduleId
+            || current.identity.viewInstanceId !== identity.viewInstanceId
+            || boundIdentity.moduleId !== identity.moduleId
+            || boundIdentity.viewInstanceId !== identity.viewInstanceId
+            || !isHostClosePayload(payload)
+            || !this.#onHostClose
+          ) {
+            return
+          }
+          void this.#notifyHostClose(request.moduleId)
+        },
       })
       await ready
       const snapshot = await this.query(request.moduleId)
@@ -118,6 +153,18 @@ export class ElectronModuleViewPort implements ModuleViewPort {
 
   dispose(): void {
     for (const moduleId of [...this.#views.keys()]) void this.detach(moduleId)
+  }
+
+  async #notifyHostClose(moduleId: ModuleId): Promise<void> {
+    try {
+      await this.#onHostClose?.(moduleId)
+    } catch (error) {
+      try {
+        await this.#onHostCloseError?.(error, moduleId)
+      } catch {
+        // Host callback failures must not escape into the module transport.
+      }
+    }
   }
 }
 

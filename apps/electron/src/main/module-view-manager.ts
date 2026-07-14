@@ -77,6 +77,7 @@ interface ModuleViewRecord extends ModuleViewIdentity {
   allowedFrontendOrigins: readonly string[]
   partition: string
   view: WebContentsView
+  rectIntent: Rectangle | 'full-content'
   rect: Rectangle
   attached: boolean
   reattachAfterRecreate: boolean
@@ -87,6 +88,9 @@ interface ModuleViewRecord extends ModuleViewIdentity {
   onFailure?: ModuleViewAttachOptions['onFailure']
   onReady?: ModuleViewAttachOptions['onReady']
   hostClosedHandler: () => void
+  hostBoundsHandler: () => void
+  hostClosedListenerBound: boolean
+  hostBoundsListenersBound: boolean
 }
 
 export interface ModuleViewManagerOptions {
@@ -175,10 +179,12 @@ export function getModuleViewFullContentRect(hostWindow: BrowserWindow): Rectang
   return validateRect({ x: 0, y: 0, width, height })
 }
 
-function resolveRect(hostWindow: BrowserWindow, rect: Rectangle | 'full-content' | undefined): Rectangle {
-  return rect === undefined || rect === 'full-content'
-    ? getModuleViewFullContentRect(hostWindow)
-    : validateRect(rect)
+function normalizeRectIntent(rect: Rectangle | 'full-content' | undefined): Rectangle | 'full-content' {
+  return rect === undefined || rect === 'full-content' ? 'full-content' : validateRect(rect)
+}
+
+function resolveRect(hostWindow: BrowserWindow, rectIntent: Rectangle | 'full-content'): Rectangle {
+  return rectIntent === 'full-content' ? getModuleViewFullContentRect(hostWindow) : rectIntent
 }
 
 function isAllowedRequest(urlString: string, allowedOrigins: readonly string[]): boolean {
@@ -237,13 +243,16 @@ export class ModuleViewManager {
 
     const allowedFrontendOrigins = validateFrontend(options.frontendUrl, options.allowedFrontendOrigins)
     const partition = createPartition(options)
-    const rect = resolveRect(options.hostWindow, options.rect)
+    const rectIntent = normalizeRectIntent(options.rect)
+    const rect = resolveRect(options.hostWindow, rectIntent)
     const visible = options.visible ?? true
     this.configureSession(partition, allowedFrontendOrigins)
 
     const view = this.createView(options, partition)
-    const hostClosedHandler = () => this.destroy(options)
-    const record: ModuleViewRecord = {
+    let record!: ModuleViewRecord
+    const hostClosedHandler = () => this.destroy(record)
+    const hostBoundsHandler = () => this.handleHostBoundsChange(record)
+    record = {
       moduleId: options.moduleId,
       viewInstanceId: options.viewInstanceId,
       hostWindow: options.hostWindow,
@@ -251,6 +260,7 @@ export class ModuleViewManager {
       allowedFrontendOrigins,
       partition,
       view,
+      rectIntent,
       rect,
       attached: true,
       reattachAfterRecreate: false,
@@ -261,15 +271,19 @@ export class ModuleViewManager {
       onFailure: options.onFailure,
       onReady: options.onReady,
       hostClosedHandler,
+      hostBoundsHandler,
+      hostClosedListenerBound: false,
+      hostBoundsListenersBound: false,
     }
 
     this.records.set(key, record)
     this.keyByWebContentsId.set(view.webContents.id, key)
-    options.hostWindow.once('closed', hostClosedHandler)
+    this.bindHostClosedListener(record)
     options.hostWindow.contentView.addChildView(view)
     view.setBounds(rect)
     view.setVisible(visible)
     this.bindViewEvents(record)
+    this.bindHostBoundsListeners(record)
 
     try {
       await view.webContents.loadURL(options.frontendUrl)
@@ -285,10 +299,12 @@ export class ModuleViewManager {
 
   detach(identity: ModuleViewIdentity): ModuleViewSnapshot {
     const record = this.requireRecord(identity)
-    if (record.attached && !record.hostWindow.isDestroyed()) {
+    const wasAttached = record.attached
+    record.attached = false
+    this.unbindHostBoundsListeners(record)
+    if (wasAttached && !record.hostWindow.isDestroyed()) {
       record.hostWindow.contentView.removeChildView(record.view)
     }
-    record.attached = false
     return this.snapshot(record)
   }
 
@@ -297,27 +313,50 @@ export class ModuleViewManager {
     if (record.state === 'crashed' || record.state === 'failed') {
       throw new ModuleViewManagerError('INVALID_ARGUMENT', 'Unavailable module views require explicit recreation')
     }
-    if (record.attached) return this.snapshot(record)
-    if (hostWindow) {
-      if (hostWindow.isDestroyed()) {
-        throw new ModuleViewManagerError('INVALID_ARGUMENT', 'Cannot attach a module view to a destroyed window')
-      }
-      record.hostWindow.removeListener('closed', record.hostClosedHandler)
-      record.hostWindow = hostWindow
-      record.hostWindow.once('closed', record.hostClosedHandler)
-      record.rect = getModuleViewFullContentRect(hostWindow)
+    const nextHostWindow = hostWindow ?? record.hostWindow
+    if (nextHostWindow.isDestroyed()) {
+      throw new ModuleViewManagerError('INVALID_ARGUMENT', 'Cannot attach a module view to a destroyed window')
     }
+    if (record.view.webContents.isDestroyed()) {
+      throw new ModuleViewManagerError('INVALID_ARGUMENT', 'Cannot reattach a destroyed module view')
+    }
+
+    const replacingHostWindow = nextHostWindow !== record.hostWindow
+    if (record.attached && !replacingHostWindow) return this.snapshot(record)
+    if (record.attached) {
+      record.attached = false
+      this.unbindHostBoundsListeners(record)
+      if (!record.hostWindow.isDestroyed()) record.hostWindow.contentView.removeChildView(record.view)
+    }
+    if (replacingHostWindow) {
+      this.unbindHostClosedListener(record)
+      record.hostWindow = nextHostWindow
+      this.bindHostClosedListener(record)
+    }
+    if (record.rectIntent === 'full-content') record.rect = resolveRect(record.hostWindow, record.rectIntent)
     record.hostWindow.contentView.addChildView(record.view)
     record.view.setBounds(record.rect)
     record.view.setVisible(record.visible)
     record.attached = true
+    this.bindHostBoundsListeners(record)
     return this.snapshot(record)
   }
 
   resize(identity: ModuleViewIdentity, rect: Rectangle | 'full-content'): ModuleViewSnapshot {
     const record = this.requireRecord(identity)
-    record.rect = resolveRect(record.hostWindow, rect)
-    if (record.state !== 'crashed' && record.state !== 'failed') record.view.setBounds(record.rect)
+    const rectIntent = normalizeRectIntent(rect)
+    const resolvedRect = resolveRect(record.hostWindow, rectIntent)
+    this.unbindHostBoundsListeners(record)
+    record.rectIntent = rectIntent
+    record.rect = resolvedRect
+    if (
+      record.state !== 'crashed'
+      && record.state !== 'failed'
+      && !record.view.webContents.isDestroyed()
+    ) {
+      record.view.setBounds(record.rect)
+    }
+    this.bindHostBoundsListeners(record)
     return this.snapshot(record)
   }
 
@@ -368,6 +407,7 @@ export class ModuleViewManager {
 
     const oldView = record.view
     const shouldReattach = record.reattachAfterRecreate
+    this.unbindHostBoundsListeners(record)
     if (record.attached && !record.hostWindow.isDestroyed()) {
       record.hostWindow.contentView.removeChildView(oldView)
     }
@@ -383,11 +423,15 @@ export class ModuleViewManager {
     record.restoreVisibleAfterRecreate = false
     this.keyByWebContentsId.set(replacement.webContents.id, keyOf(record))
     this.bindViewEvents(record)
+    if (shouldReattach && record.rectIntent === 'full-content' && !record.hostWindow.isDestroyed()) {
+      record.rect = resolveRect(record.hostWindow, record.rectIntent)
+    }
     replacement.setBounds(record.rect)
     replacement.setVisible(replacementVisible)
     if (shouldReattach && !record.hostWindow.isDestroyed()) {
       record.hostWindow.contentView.addChildView(replacement)
       record.attached = true
+      this.bindHostBoundsListeners(record)
     }
 
     try {
@@ -419,7 +463,8 @@ export class ModuleViewManager {
 
     this.records.delete(key)
     this.keyByWebContentsId.delete(record.view.webContents.id)
-    record.hostWindow.removeListener('closed', record.hostClosedHandler)
+    this.unbindHostBoundsListeners(record)
+    this.unbindHostClosedListener(record)
     if (record.attached && !record.hostWindow.isDestroyed()) {
       record.hostWindow.contentView.removeChildView(record.view)
     }
@@ -441,6 +486,74 @@ export class ModuleViewManager {
 
   private assertActive(): void {
     if (this.disposed) throw new ModuleViewManagerError('INVALID_ARGUMENT', 'ModuleViewManager has been disposed')
+  }
+
+  private bindHostClosedListener(record: ModuleViewRecord): void {
+    if (record.hostClosedListenerBound) return
+    record.hostWindow.once('closed', record.hostClosedHandler)
+    record.hostClosedListenerBound = true
+  }
+
+  private unbindHostClosedListener(record: ModuleViewRecord): void {
+    if (!record.hostClosedListenerBound) return
+    record.hostWindow.removeListener('closed', record.hostClosedHandler)
+    record.hostClosedListenerBound = false
+  }
+
+  private bindHostBoundsListeners(record: ModuleViewRecord): void {
+    if (
+      record.hostBoundsListenersBound
+      || !record.attached
+      || record.rectIntent !== 'full-content'
+      || record.state === 'crashed'
+      || record.state === 'failed'
+      || record.hostWindow.isDestroyed()
+      || record.view.webContents.isDestroyed()
+    ) {
+      return
+    }
+    record.hostWindow.on('resize', record.hostBoundsHandler)
+    record.hostWindow.on('maximize', record.hostBoundsHandler)
+    record.hostWindow.on('unmaximize', record.hostBoundsHandler)
+    record.hostWindow.on('restore', record.hostBoundsHandler)
+    record.hostBoundsListenersBound = true
+  }
+
+  private unbindHostBoundsListeners(record: ModuleViewRecord): void {
+    if (!record.hostBoundsListenersBound) return
+    record.hostWindow.removeListener('resize', record.hostBoundsHandler)
+    record.hostWindow.removeListener('maximize', record.hostBoundsHandler)
+    record.hostWindow.removeListener('unmaximize', record.hostBoundsHandler)
+    record.hostWindow.removeListener('restore', record.hostBoundsHandler)
+    record.hostBoundsListenersBound = false
+  }
+
+  private handleHostBoundsChange(record: ModuleViewRecord): void {
+    try {
+      if (
+        this.disposed
+        || this.records.get(keyOf(record)) !== record
+        || !record.hostBoundsListenersBound
+        || !record.attached
+        || record.rectIntent !== 'full-content'
+        || record.state === 'crashed'
+        || record.state === 'failed'
+        || record.hostWindow.isDestroyed()
+        || record.view.webContents.isDestroyed()
+      ) {
+        return
+      }
+
+      const rect = resolveRect(record.hostWindow, record.rectIntent)
+      record.view.setBounds(rect)
+      record.rect = rect
+    } catch (error) {
+      mainLog.warn('[module-view] failed to synchronize full-content bounds', {
+        moduleId: record.moduleId,
+        viewInstanceId: record.viewInstanceId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
   }
 
   private createView(identity: ModuleViewIdentity, partition: string): WebContentsView {
@@ -610,8 +723,11 @@ export class ModuleViewManager {
     record.reattachAfterRecreate = record.attached
     record.restoreVisibleAfterRecreate = record.visible
     record.visible = false
-    record.view.setVisible(false)
-    record.view.setBounds(QUARANTINED_VIEW_BOUNDS)
+    this.unbindHostBoundsListeners(record)
+    if (!expectedWebContents.isDestroyed()) {
+      record.view.setVisible(false)
+      record.view.setBounds(QUARANTINED_VIEW_BOUNDS)
+    }
     if (record.attached && !record.hostWindow.isDestroyed()) {
       record.hostWindow.contentView.removeChildView(record.view)
     }
