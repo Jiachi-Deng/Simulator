@@ -42,7 +42,7 @@ type MenuActionHandlers = {
 }
 
 type MenuTranslate = (key: string, options?: Record<string, string | number>) => string
-export type OpenDesignMenuCommand = OpenDesignModuleAction | 'retry'
+export type OpenDesignMenuCommand = OpenDesignModuleAction
 
 export interface OpenDesignMenuPresentation {
   readonly statusKey: string
@@ -122,18 +122,14 @@ export function getOpenDesignMenuPresentation(
     case 'disabled':
       return { statusKey: 'menu.openDesignStatusDisabled', actionDisabled: true }
     case 'not-ready':
-      return {
-        statusKey: 'menu.openDesignStatusNotReady',
-        action: 'retry',
-        actionKey: 'menu.openDesignActionRetry',
-        actionDisabled: commandInFlight,
-      }
+      return { statusKey: 'menu.openDesignStatusNotReady', actionDisabled: true }
     case 'error':
+      if (state.errorCode === 'CONTROLLER_UNAVAILABLE') {
+        return { statusKey: 'menu.openDesignStatusUnavailable', actionDisabled: true }
+      }
       return {
-        statusKey: state.errorCode === 'CONTROLLER_UNAVAILABLE'
-          ? 'menu.openDesignStatusUnavailable'
-          : 'menu.openDesignStatusError',
-        action: 'retry',
+        statusKey: 'menu.openDesignStatusError',
+        action: state.version ? 'start' : 'install',
         actionKey: 'menu.openDesignActionRetry',
         actionDisabled: commandInFlight,
       }
@@ -303,9 +299,7 @@ export function DesktopAppMenu({
     openDesignCommandInFlight.current = true
     setOpenDesignCommand(command)
     try {
-      const state = command === 'retry'
-        ? await openDesignModule.getState()
-        : await openDesignModule[command]()
+      const state = await openDesignModule[command]()
       setOpenDesignState(state)
     } catch {
       setOpenDesignState(unavailableOpenDesignState())
@@ -444,9 +438,7 @@ function renderOpenDesignMenuItems(
     ? Icons.Download
     : presentation.action === 'start'
       ? Icons.Play
-      : presentation.action === 'stop'
-        ? Icons.Square
-        : Icons.RotateCw
+      : Icons.Square
 
   return (
     <>

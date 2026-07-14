@@ -37,23 +37,22 @@ describe('OpenDesign Debug menu presentation', () => {
         actionKey: 'menu.openDesignActionStop',
       },
       { state: { status: 'disabled' }, statusKey: 'menu.openDesignStatusDisabled' },
-      {
-        state: { status: 'not-ready' },
-        statusKey: 'menu.openDesignStatusNotReady',
-        action: 'retry',
-        actionKey: 'menu.openDesignActionRetry',
-      },
+      { state: { status: 'not-ready' }, statusKey: 'menu.openDesignStatusNotReady' },
       {
         state: { status: 'error', errorCode: 'FAILED' },
         statusKey: 'menu.openDesignStatusError',
-        action: 'retry',
+        action: 'install',
+        actionKey: 'menu.openDesignActionRetry',
+      },
+      {
+        state: { status: 'error', errorCode: 'FAILED', version: '0.14.1-development.1' },
+        statusKey: 'menu.openDesignStatusError',
+        action: 'start',
         actionKey: 'menu.openDesignActionRetry',
       },
       {
         state: { status: 'error', errorCode: 'CONTROLLER_UNAVAILABLE' },
         statusKey: 'menu.openDesignStatusUnavailable',
-        action: 'retry',
-        actionKey: 'menu.openDesignActionRetry',
       },
     ]
 
@@ -86,7 +85,7 @@ describe('OpenDesign Debug menu presentation', () => {
   })
 
   it('disables every action while a command is in flight', () => {
-    for (const status of ['not-installed', 'available', 'running', 'not-ready', 'error'] as const) {
+    for (const status of ['not-installed', 'available', 'running', 'error'] as const) {
       expect(getOpenDesignMenuPresentation({ status }, true).actionDisabled).toBe(true)
     }
   })
