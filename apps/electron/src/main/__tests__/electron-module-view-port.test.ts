@@ -160,6 +160,30 @@ describe('ElectronModuleViewPort', () => {
     expect(onHostClose).toHaveBeenCalledTimes(1)
   })
 
+  it('routes a native BrowserWindow close through the same deduplicated coordinator stop path', async () => {
+    const harness = createManagerHarness()
+    let releaseStop!: () => void
+    const stopGate = new Promise<void>((resolve) => { releaseStop = resolve })
+    const onHostClose = mock(async (_moduleId: ModuleId) => stopGate)
+    const port = new ElectronModuleViewPort({
+      manager: harness.manager,
+      hostWindow: () => ({ isDestroyed: () => false }) as any,
+      onHostClose,
+    })
+    const healthy = daemon()
+    await port.attach({ moduleId: healthy.id, version: healthy.version, daemon: healthy })
+    const attached = harness.attachedOptions.at(-1)
+    const identity = { moduleId: attached.moduleId, viewInstanceId: attached.viewInstanceId }
+
+    attached.onHostClosed?.(identity)
+    attached.onMessage?.({ type: 'host.close' }, identity)
+    expect(onHostClose).toHaveBeenCalledTimes(1)
+    expect(onHostClose).toHaveBeenCalledWith(healthy.id)
+
+    releaseStop()
+    await stopGate
+  })
+
   it('contains asynchronous host.close callback failures and reports them through the injected handler', async () => {
     const harness = createManagerHarness()
     const callbackError = new Error('coordinator stop failed')

@@ -53,6 +53,7 @@ export class ElectronModuleViewPort implements ModuleViewPort {
   readonly #onHostClose: ElectronModuleViewPortOptions['onHostClose']
   readonly #onHostCloseError: ElectronModuleViewPortOptions['onHostCloseError']
   readonly #views = new Map<ModuleId, AttachedView>()
+  readonly #hostCloseFlights = new Map<ModuleId, Promise<void>>()
 
   constructor(options: ElectronModuleViewPortOptions) {
     this.#manager = options.manager
@@ -109,7 +110,18 @@ export class ElectronModuleViewPort implements ModuleViewPort {
           ) {
             return
           }
-          void this.#notifyHostClose(request.moduleId)
+          void this.#requestHostClose(request.moduleId)
+        },
+        onHostClosed: (boundIdentity) => {
+          const current = this.#views.get(request.moduleId)
+          if (
+            !current
+            || current.identity.moduleId !== boundIdentity.moduleId
+            || current.identity.viewInstanceId !== boundIdentity.viewInstanceId
+          ) {
+            return
+          }
+          void this.#requestHostClose(request.moduleId)
         },
       })
       await ready
@@ -153,6 +165,17 @@ export class ElectronModuleViewPort implements ModuleViewPort {
 
   dispose(): void {
     for (const moduleId of [...this.#views.keys()]) void this.detach(moduleId)
+  }
+
+  #requestHostClose(moduleId: ModuleId): Promise<void> {
+    const existing = this.#hostCloseFlights.get(moduleId)
+    if (existing) return existing
+    const flight = this.#notifyHostClose(moduleId)
+    this.#hostCloseFlights.set(moduleId, flight)
+    void flight.finally(() => {
+      if (this.#hostCloseFlights.get(moduleId) === flight) this.#hostCloseFlights.delete(moduleId)
+    }).catch(() => undefined)
+    return flight
   }
 
   async #notifyHostClose(moduleId: ModuleId): Promise<void> {

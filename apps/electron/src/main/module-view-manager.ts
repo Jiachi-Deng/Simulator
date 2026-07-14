@@ -58,6 +58,7 @@ export interface ModuleViewAttachOptions extends ModuleViewIdentity {
   readonly onMessage?: (payload: ModuleViewJsonValue, identity: ModuleViewIdentity) => void
   readonly onFailure?: (failure: ModuleViewFailure) => void
   readonly onReady?: (identity: ModuleViewIdentity) => void
+  readonly onHostClosed?: (identity: ModuleViewIdentity) => void
 }
 
 export interface ModuleViewSnapshot extends ModuleViewIdentity {
@@ -250,7 +251,17 @@ export class ModuleViewManager {
 
     const view = this.createView(options, partition)
     let record!: ModuleViewRecord
-    const hostClosedHandler = () => this.destroy(record)
+    const hostClosedHandler = () => {
+      try {
+        options.onHostClosed?.({ moduleId: record.moduleId, viewInstanceId: record.viewInstanceId })
+      } catch (error) {
+        mainLog.error('Module view host-close callback failed', {
+          moduleId: record.moduleId,
+          errorType: error instanceof Error ? error.name : typeof error,
+        })
+      }
+      this.destroy(record)
+    }
     const hostBoundsHandler = () => this.handleHostBoundsChange(record)
     record = {
       moduleId: options.moduleId,

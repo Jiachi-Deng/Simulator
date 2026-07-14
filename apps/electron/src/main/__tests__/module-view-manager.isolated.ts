@@ -263,7 +263,8 @@ describe('ModuleViewManager', () => {
     const firstHost = createHostWindow(1000, 700)
     const replacementHost = createHostWindow(1400, 900)
     const manager = new ModuleViewManager()
-    await manager.attach({ ...attachOptions(firstHost), rect: 'full-content' })
+    const onHostClosed = mock(() => {})
+    await manager.attach({ ...attachOptions(firstHost), rect: 'full-content', onHostClosed })
     const view = createdViews[0]
 
     manager.detach(identity)
@@ -280,6 +281,8 @@ describe('ModuleViewManager', () => {
 
     replacementHost._destroy()
     expect(manager.get(identity)).toBeUndefined()
+    expect(onHostClosed).toHaveBeenCalledTimes(1)
+    expect(onHostClosed).toHaveBeenCalledWith(identity)
     expect(replacementHost._listenerCount('resize')).toBe(0)
     expect(view.webContents.close).toHaveBeenCalledTimes(1)
 
