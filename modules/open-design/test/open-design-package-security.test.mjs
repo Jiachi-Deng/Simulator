@@ -62,7 +62,7 @@ test("tampered archive is rejected by the existing ModuleInstaller", { skip: !su
   }), (error) => error.code === "ARCHIVE_HASH_MISMATCH");
 });
 
-test("Vela package provenance and fixed production digests fail closed", { skip: !supported, timeout: 120_000 }, async (t) => {
+test("Node and Vela provenance digests fail closed", { skip: !supported, timeout: 120_000 }, async (t) => {
   const fixture = await createFixture(t);
   const fixedPolicyOutput = path.join(fixture.root, "fixed-policy-output");
   await assert.rejects(buildOpenDesignDevelopmentPackage({
@@ -75,8 +75,15 @@ test("Vela package provenance and fixed production digests fail closed", { skip:
     output: fixedPolicyOutput,
     developmentLocalOnly: true,
     allowUnreviewedLocalArtifact: true,
-  }), (error) => error.code === "PACKAGE_VELA_TARBALL_DIGEST_MISMATCH");
+  }), (error) => error.code === "PACKAGE_NODE_LICENSE_DIGEST_MISMATCH");
   await assert.rejects(lstat(fixedPolicyOutput), { code: "ENOENT" });
+
+  const originalNodeLicense = await readFile(fixture.nodeLicense);
+  await writeFile(fixture.nodeLicense, Buffer.concat([originalNodeLicense, Buffer.from("tampered\n")]), { mode: 0o600 });
+  const tamperedNodeLicenseOutput = path.join(fixture.root, "tampered-node-license-output");
+  await assert.rejects(packageFixture(fixture, tamperedNodeLicenseOutput), (error) => error.code === "PACKAGE_NODE_LICENSE_DIGEST_MISMATCH");
+  await assert.rejects(lstat(tamperedNodeLicenseOutput), { code: "ENOENT" });
+  await writeFile(fixture.nodeLicense, originalNodeLicense, { mode: 0o600 });
 
   const originalVela = await readFile(fixture.velaPath);
   originalVela[0] ^= 0x01;
@@ -129,6 +136,7 @@ async function createFixture(t) {
   await writeFile(velaPlatformTarball, tarballBytes, { mode: 0o600 });
   const fixtureBinarySha256 = sha256(fixtureMachO);
   const velaFixtureDigests = {
+    nodeLicenseSha256: sha256(await readFile(nodeLicense)),
     tarballSha1: createHash("sha1").update(tarballBytes).digest("hex"),
     velaSha256: fixtureBinarySha256,
     opencodeSha256: fixtureBinarySha256,

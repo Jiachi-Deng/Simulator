@@ -51,8 +51,12 @@ export const OPEN_DESIGN_MODULE_ID = "org.simulator.open-design";
 export const OPEN_DESIGN_MODULE_VERSION = "0.14.1-development.1";
 export const OPEN_DESIGN_MODULE_PLATFORM = "darwin-arm64";
 export const OPEN_DESIGN_ENTRYPOINT = "runtime/open-design-launcher";
-export const OPEN_DESIGN_VELA_EXECUTABLE = "resources/open-design/bin/vela";
-export const OPEN_DESIGN_OPENCODE_EXECUTABLE = "resources/open-design/bin/libexec/opencode/opencode";
+// The upstream daemon only accepts OD_RESOURCE_ROOT below its resolved project
+// root (runtime/daemon) or an application resources directory. Keep the
+// development-only toolchain inside that fail-closed boundary instead of
+// placing it at the Module root.
+export const OPEN_DESIGN_VELA_EXECUTABLE = "runtime/daemon/resources/open-design/bin/vela";
+export const OPEN_DESIGN_OPENCODE_EXECUTABLE = "runtime/daemon/resources/open-design/bin/libexec/opencode/opencode";
 export const OPEN_DESIGN_AUXILIARY_EXECUTABLES = Object.freeze([
   "runtime/node/bin/node",
   "runtime/daemon/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper",
@@ -83,15 +87,21 @@ const VELA_PLATFORM_PACKAGE_LICENSE = "UNLICENSED";
 const VELA_PLATFORM_TARBALL_SHA1 = "1e95a458d9798f39fd0305190f7ff30c55f3e273";
 const VELA_BINARY_SHA256 = "310d7d91e876a1767ba4c0d475433828c1357a4a40565124f0f19c9b203f2c62";
 const OPENCODE_BINARY_SHA256 = "c0a95a0a4924ba872a93b840e12a011f9a2289c9f4b1b421bb4c2fb052e532f1";
+const NODE_RUNTIME_VERSION = "24.14.1";
+const NODE_LICENSE_SHA256 = "4573185d56580da2b890ba34a85a409257640f1c5632eade4300137266194d18";
 
 const OFFICIAL_VELA_PLATFORM_POLICY = createVelaPlatformPolicy({
   tarballSha1: VELA_PLATFORM_TARBALL_SHA1,
   velaSha256: VELA_BINARY_SHA256,
   opencodeSha256: OPENCODE_BINARY_SHA256,
 });
+const OFFICIAL_NODE_RUNTIME_POLICY = createNodeRuntimePolicy({
+  version: NODE_RUNTIME_VERSION,
+  licenseSha256: NODE_LICENSE_SHA256,
+});
 
 export function buildOpenDesignDevelopmentPackage(options = {}) {
-  return buildOpenDesignDevelopmentPackageWithPolicy(options, OFFICIAL_VELA_PLATFORM_POLICY);
+  return buildOpenDesignDevelopmentPackageWithPolicy(options, OFFICIAL_VELA_PLATFORM_POLICY, OFFICIAL_NODE_RUNTIME_POLICY);
 }
 
 // Test-only digest seam for small self-contained fixtures. The production
@@ -102,7 +112,10 @@ export function buildOpenDesignDevelopmentPackageForTest(options, fixtureDigests
     ...options,
     catalogIssuedAt,
     catalogVerificationTimeMs: options.catalogVerificationTimeMs ?? Date.parse(catalogIssuedAt) + 1_000,
-  }, createVelaPlatformPolicy(fixtureDigests));
+  }, createVelaPlatformPolicy(fixtureDigests), createNodeRuntimePolicy({
+    version: NODE_RUNTIME_VERSION,
+    licenseSha256: fixtureDigests?.nodeLicenseSha256,
+  }));
 }
 
 async function buildOpenDesignDevelopmentPackageWithPolicy({
@@ -116,7 +129,7 @@ async function buildOpenDesignDevelopmentPackageWithPolicy({
   output,
   developmentLocalOnly = false,
   allowUnreviewedLocalArtifact = false,
-} = {}, velaPlatformPolicy) {
+} = {}, velaPlatformPolicy, nodeRuntimePolicy) {
   assertDevelopmentAuthorization({ developmentLocalOnly, allowUnreviewedLocalArtifact });
   const catalogWindow = createDevelopmentCatalogWindow(catalogIssuedAt, catalogVerificationTimeMs);
   stagingAssert(path.isAbsolute(stagingRoot ?? ""), "PACKAGE_STAGING_INVALID", "sealed staging root must be absolute");
@@ -142,7 +155,7 @@ async function buildOpenDesignDevelopmentPackageWithPolicy({
     assertDevelopmentStaging(inventory, attestation);
     await verifySealedStaging(stagingRoot, inventory);
 
-    const node = await inspectNodeInput({ nodeBin, nodeLicense, inventory, attestation });
+    const node = await inspectNodeInput({ nodeBin, nodeLicense, inventory, attestation, policy: nodeRuntimePolicy });
     const velaPlatform = await inspectVelaPlatformInput({
       packageRoot: velaPlatformPackageRoot,
       tarball: velaPlatformTarball,
@@ -235,6 +248,12 @@ async function buildOpenDesignDevelopmentPackageWithPolicy({
         expiresAt: catalogWindow.expiresAt,
       },
       provenance: {
+        nodeRuntime: {
+          version: node.version,
+          executableSha256: node.sha256,
+          licenseSha256: node.licenseSha256,
+          verification: "sealed-attestation-executable-sha256-and-pinned-license-sha256",
+        },
         velaPlatformPackage: {
           developmentOnly: true,
           nonPromotable: true,
@@ -369,6 +388,12 @@ function createVelaPlatformPolicy({ tarballSha1, velaSha256, opencodeSha256 } = 
   });
 }
 
+function createNodeRuntimePolicy({ version, licenseSha256 } = {}) {
+  stagingAssert(/^24\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(version ?? ""), "PACKAGE_NODE_POLICY_INVALID", "Node runtime version policy is invalid");
+  stagingAssert(/^[a-f0-9]{64}$/u.test(licenseSha256 ?? ""), "PACKAGE_NODE_POLICY_INVALID", "Node LICENSE SHA-256 policy is invalid");
+  return Object.freeze({ version, licenseSha256 });
+}
+
 async function prepareOutputTarget(output) {
   const basename = path.basename(output);
   stagingAssert(basename.length > 0 && basename !== "." && basename !== "..", "PACKAGE_OUTPUT_INVALID", "output basename is invalid");
@@ -483,7 +508,7 @@ async function verifySealedStaging(stagingRoot, inventory) {
   await verifySealedCandidate({ target: { published: false, sealed: true, tempRoot: stagingRoot }, inventory });
 }
 
-async function inspectNodeInput({ nodeBin, nodeLicense, inventory, attestation }) {
+async function inspectNodeInput({ nodeBin, nodeLicense, inventory, attestation, policy }) {
   const nodeInfo = await lstat(nodeBin).catch((error) => stagingFail("PACKAGE_NODE_INVALID", error.message));
   assertRegularExternalInput(nodeInfo, "Node binary", DEFAULT_INSTALL_LIMITS.maxExecutableFileBytes);
   const native = await inspectNativeBinary(nodeBin, "Node binary");
@@ -503,7 +528,7 @@ async function inspectNodeInput({ nodeBin, nodeLicense, inventory, attestation }
     stagingFail("PACKAGE_NODE_INVALID", `Node runtime inspection failed: ${error.message}`);
   }
   const expectedVersion = String(attestation.toolchain.nodeVersion ?? "").replace(/^v/u, "");
-  stagingAssert(/^24\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$/u.test(expectedVersion), "PACKAGE_NODE_INVALID", "sealed attestation does not require an exact Node 24 version");
+  stagingAssert(expectedVersion === policy.version, "PACKAGE_NODE_INVALID", "sealed attestation does not match the pinned Node runtime version");
   stagingAssert(String(runtime.nodeVersion ?? "").replace(/^v/u, "") === expectedVersion, "PACKAGE_NODE_INVALID", "Node version does not match the sealed build attestation");
   stagingAssert(runtime.nodeAbi === attestation.toolchain.nodeAbi && runtime.nodeAbi === inventory.target.nodeAbi, "PACKAGE_NODE_INVALID", "Node ABI does not match the sealed staging target");
   stagingAssert(runtime.platform === "darwin" && runtime.arch === "arm64", "PACKAGE_NODE_INVALID", "Node runtime did not report darwin-arm64");
@@ -514,7 +539,9 @@ async function inspectNodeInput({ nodeBin, nodeLicense, inventory, attestation }
   const licenseText = licenseBytes.toString("utf8");
   stagingAssert(Buffer.from(licenseText, "utf8").equals(licenseBytes), "PACKAGE_NODE_LICENSE_INVALID", "Node LICENSE must be valid UTF-8");
   stagingAssert(licenseText.startsWith("Node.js is licensed for use as follows:"), "PACKAGE_NODE_LICENSE_INVALID", "Node LICENSE does not have the official Node.js license preamble");
-  return { sha256, licenseSha256: createHash("sha256").update(licenseBytes).digest("hex") };
+  const licenseSha256 = createHash("sha256").update(licenseBytes).digest("hex");
+  stagingAssert(licenseSha256 === policy.licenseSha256, "PACKAGE_NODE_LICENSE_DIGEST_MISMATCH", "Node LICENSE SHA-256 does not match the pinned runtime provenance");
+  return { version: expectedVersion, sha256, licenseSha256 };
 }
 
 async function inspectVelaPlatformInput({ packageRoot, tarball, policy }) {

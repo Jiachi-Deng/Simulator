@@ -92,6 +92,12 @@ test("development package is deterministic, signed, owner-only, and installer-ve
   assert.equal(artifactMetadata.archiveSha256, first.archiveSha256);
   assert.equal(artifactMetadata.archiveSize, first.archiveSize);
   assert.equal(artifactMetadata.extractedManifestSha256, first.extractedManifestSha256);
+  assert.deepEqual(artifactMetadata.provenance.nodeRuntime, {
+    executableSha256: fixture.nodeSha256,
+    licenseSha256: fixture.velaFixtureDigests.nodeLicenseSha256,
+    verification: "sealed-attestation-executable-sha256-and-pinned-license-sha256",
+    version: "24.14.1",
+  });
   assert.deepEqual(artifactMetadata.provenance.velaPlatformPackage, {
     binaries: fixture.velaBinaries.map((binary) => ({
       packagePath: binary.packagePath,
@@ -252,13 +258,14 @@ async function createPackageFixture(t, { distribution = { class: "development-lo
   await writeFile(velaPlatformTarball, tarballBytes, { mode: 0o600 });
   const fixtureBinarySha256 = sha256(fixtureMachO);
   const velaFixtureDigests = {
+    nodeLicenseSha256: sha256(await readFile(nodeLicense)),
     tarballSha1: createHash("sha1").update(tarballBytes).digest("hex"),
     velaSha256: fixtureBinarySha256,
     opencodeSha256: fixtureBinarySha256,
   };
   const velaBinaries = [
-    { packagePath: "bin/vela", targetPath: "resources/open-design/bin/vela", size: fixtureMachO.length, sha256: fixtureBinarySha256 },
-    { packagePath: "bin/libexec/opencode/opencode", targetPath: "resources/open-design/bin/libexec/opencode/opencode", size: fixtureMachO.length, sha256: fixtureBinarySha256 },
+    { packagePath: "bin/vela", targetPath: "runtime/daemon/resources/open-design/bin/vela", size: fixtureMachO.length, sha256: fixtureBinarySha256 },
+    { packagePath: "bin/libexec/opencode/opencode", targetPath: "runtime/daemon/resources/open-design/bin/libexec/opencode/opencode", size: fixtureMachO.length, sha256: fixtureBinarySha256 },
   ];
 
   const stagingRoot = path.join(root, "staging");
@@ -286,6 +293,7 @@ async function createPackageFixture(t, { distribution = { class: "development-lo
     stagingRoot,
     nodeBin,
     nodeLicense,
+    nodeSha256,
     velaPlatformPackageRoot,
     velaPlatformTarball,
     velaTarballSize: tarballBytes.length,

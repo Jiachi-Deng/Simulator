@@ -53,7 +53,7 @@ async function readConfig() {
   const daemonEntry = await installedFile(root, "runtime/daemon/dist/sidecar/index.js");
   const webEntry = await installedFile(root, "runtime/packages/web-sidecar/dist/sidecar/index.js");
   const standaloneRoot = await installedDirectory(root, "web/standalone");
-  const resourceRoot = await installedDirectory(root, "resources/open-design");
+  const resourceRoot = await installedDirectory(root, "runtime/daemon/resources/open-design");
   return { id, version, healthHost, healthPort, dataRoot, root, daemonEntry, webEntry, standaloneRoot, resourceRoot };
 }
 

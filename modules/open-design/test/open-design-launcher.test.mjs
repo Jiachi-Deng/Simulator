@@ -37,7 +37,7 @@ test("bootstrap launches sealed sidecars, proxies HTTP/WebSocket, preserves data
 
   const runtime = JSON.parse((await request(first.port, "/runtime")).body);
   assert.equal(runtime.dataRoot, path.join(fixture.dataRoot, "open-design"));
-  assert.equal(runtime.resourceRoot, await realpath(path.join(fixture.root, "resources", "open-design")));
+  assert.equal(runtime.resourceRoot, await realpath(path.join(fixture.root, "runtime", "daemon", "resources", "open-design")));
   assert.equal(await stat(runtime.runtimeRoot).then(() => true), true);
   const firstPids = await readPids(fixture.dataRoot);
   await stopLauncher(first);
@@ -106,7 +106,7 @@ async function createFixture() {
     mkdir(path.dirname(daemonEntry), { recursive: true, mode: 0o700 }),
     mkdir(path.dirname(webEntry), { recursive: true, mode: 0o700 }),
     mkdir(path.join(root, "web", "standalone"), { recursive: true, mode: 0o700 }),
-    mkdir(path.join(root, "resources", "open-design"), { recursive: true, mode: 0o700 }),
+    mkdir(path.join(runtime, "daemon", "resources", "open-design"), { recursive: true, mode: 0o700 }),
     mkdir(path.join(runtime, "node", "bin"), { recursive: true, mode: 0o700 }),
   ]);
   await Promise.all([
