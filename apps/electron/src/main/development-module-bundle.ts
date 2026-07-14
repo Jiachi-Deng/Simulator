@@ -11,13 +11,14 @@ import {
   type DownloaderHeaders,
   type DownloaderResponse,
 } from '@simulator/module-downloader'
+import { DEFAULT_INSTALL_LIMITS } from '@simulator/module-installer'
 import { verifyModuleReleaseCatalog, type TrustedReleaseKey } from '@simulator/module-release-trust'
 import { validRange } from 'semver'
 
 export const DEVELOPMENT_MODULE_BUNDLE_SCHEMA_VERSION = 2 as const
 const MAX_DESCRIPTOR_BYTES = 64 * 1024
 const MAX_CATALOG_BYTES = 4 * 1024 * 1024
-const MAX_ARCHIVE_BYTES = 128 * 1024 * 1024
+const MAX_ARCHIVE_BYTES = DEFAULT_INSTALL_LIMITS.maxArchiveBytes
 const MAX_RELATIVE_PATH_BYTES = 512
 const MAX_URL_BYTES = 2 * 1024
 const MAX_ETAG_BYTES = 130
