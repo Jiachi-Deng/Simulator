@@ -95,7 +95,7 @@ import { createMessagingBootstrap, type MessagingBootstrapHandle } from '@craft-
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { initModelRefreshService, getModelRefreshService, setFetcherPlatform } from '@craft-agent/server-core/model-fetchers'
 import { setSearchPlatform, setImageProcessor } from '@craft-agent/server-core/services'
-import { createApplicationMenu } from './menu'
+import { createApplicationMenu, setOpenDesignModuleEscapeHandler } from './menu'
 import { WindowManager } from './window-manager'
 import { loadWindowState, saveWindowState } from './window-state'
 import { getWorkspaces, getWorkspaceByNameOrId, loadStoredConfig, addWorkspace, saveConfig } from '@craft-agent/shared/config'
@@ -115,6 +115,17 @@ import {
   currentModulePlatform,
   type HostModuleCoordinatorRuntime,
 } from './host-module-coordinator'
+import {
+  createOpenDesignModuleBrowserWindowAdapter,
+  OpenDesignModuleController,
+  registerOpenDesignModuleIpc,
+  type OpenDesignModuleIpcRegistration,
+} from './open-design-module-controller'
+import {
+  loadOpenDesignDevelopmentBootstrap,
+  type OpenDesignDevelopmentBootstrap,
+} from './open-design-development-bootstrap'
+import { OPEN_DESIGN_MODULE_ID } from '../shared/open-design-module-ipc'
 import { isModuleViewSmokeRequested, runModuleViewSmokeIfRequested } from './module-view-smoke'
 import {
   isHostModuleCoordinatorSmokeRequested,
@@ -229,6 +240,9 @@ let sessionManager: SessionManager | null = null
 let browserPaneManager: BrowserPaneManager | null = null
 let moduleViewManager: ModuleViewManager | null = null
 let hostModuleCoordinator: HostModuleCoordinatorRuntime | null = null
+let openDesignDevelopmentBootstrap: OpenDesignDevelopmentBootstrap = Object.freeze({ status: 'disabled' })
+let openDesignModuleController: OpenDesignModuleController | null = null
+let openDesignModuleIpc: OpenDesignModuleIpcRegistration | null = null
 let stopServer: (() => Promise<void>) | null = null
 let embeddedServer: { host: string; port: number } | null = null
 let oauthFlowStore: OAuthFlowStore | null = null
@@ -1034,23 +1048,53 @@ app.whenReady().then(async () => {
     // In headless mode the server runs without any UI — skip window creation.
     if (!isHeadless) {
       await createInitialWindows()
-      hostModuleCoordinator = createHostModuleCoordinator({
-        root: getHostModuleCoordinatorSmokeRoot() ?? join(app.getPath('userData'), 'optional-modules'),
-        hostVersion: app.getVersion(),
+      openDesignDevelopmentBootstrap = await loadOpenDesignDevelopmentBootstrap({
+        argv: process.argv,
         platform: currentModulePlatform(),
-        // Product release keys are injected when a catalog source is configured.
-        // An empty set keeps network installation fail-closed while recovery of
-        // already verified and installed modules remains available.
-        trustedKeys: [],
-        moduleViewManager,
-        hostWindow: () => windowManager?.getLastActiveWindow() ?? undefined,
       })
-      await hostModuleCoordinator.coordinator.recover()
+      const developmentBundle = openDesignDevelopmentBootstrap.status === 'ready'
+        ? openDesignDevelopmentBootstrap.bundle
+        : undefined
+      try {
+        hostModuleCoordinator = createHostModuleCoordinator({
+          root: getHostModuleCoordinatorSmokeRoot() ?? join(app.getPath('userData'), 'optional-modules'),
+          hostVersion: app.getVersion(),
+          platform: currentModulePlatform(),
+          // Public builds remain fail-closed. The fixed development key and local
+          // HTTPS adapter exist only after the explicit double opt-in is verified.
+          trustedKeys: developmentBundle?.trustedKeys ?? [],
+          moduleViewManager,
+          hostWindow: () => windowManager?.getLastActiveWindow() ?? undefined,
+          fetch: developmentBundle?.fetchAdapter,
+          onHostClose: async (moduleId) => {
+            if (moduleId !== OPEN_DESIGN_MODULE_ID) return
+            const controller = openDesignModuleController
+            if (!controller) throw new Error('OpenDesign controller is unavailable')
+            await controller.stopForHostView()
+          },
+          onHostCloseError: (_error, moduleId) => {
+            mainLog.error('Module host close failed', { moduleId })
+          },
+        })
+        await hostModuleCoordinator.coordinator.recover()
+      } catch (error) {
+        if (isHostModuleCoordinatorSmokeRequested()) throw error
+        mainLog.error('Optional Module coordinator is unavailable', {
+          errorType: error instanceof Error ? error.name : typeof error,
+        })
+        try {
+          await hostModuleCoordinator?.dispose()
+        } catch {
+          // Optional Module teardown must not block the built-in Agent runtime.
+        }
+        hostModuleCoordinator = null
+      }
       if (isHostModuleCoordinatorSmokeRequested()) {
         const hostWindow = windowManager?.getLastActiveWindow()
-        if (!sessionManager || !embeddedServer || !hostWindow) throw new Error('Built-in runtime was incomplete before module smoke')
+        const smokeRuntime = hostModuleCoordinator
+        if (!sessionManager || !embeddedServer || !hostWindow || !smokeRuntime) throw new Error('Built-in runtime was incomplete before module smoke')
         await runHostModuleCoordinatorSmokeIfRequested({
-          runtime: hostModuleCoordinator,
+          runtime: smokeRuntime,
           manager: moduleViewManager,
           sessionManager,
           hostWindow,
@@ -1058,6 +1102,36 @@ app.whenReady().then(async () => {
           serverPort: embeddedServer.port,
         })
         return
+      }
+
+      const hostAdapter = createOpenDesignModuleBrowserWindowAdapter(
+        () => windowManager?.getLastActiveWindow() ?? undefined,
+      )
+      openDesignModuleController = new OpenDesignModuleController({
+        getRuntime: () => {
+          if (openDesignDevelopmentBootstrap.status === 'disabled') return { status: 'disabled' }
+          const runtime = hostModuleCoordinator
+          if (openDesignDevelopmentBootstrap.status !== 'ready' || !runtime) return { status: 'not-ready' }
+          return { status: 'ready', runtime }
+        },
+        getInstallRequest: () => openDesignDevelopmentBootstrap.status === 'ready'
+          ? openDesignDevelopmentBootstrap.bundle.installRequest
+          : undefined,
+        host: hostAdapter,
+      })
+      try {
+        openDesignModuleIpc = registerOpenDesignModuleIpc(ipcMain, openDesignModuleController)
+        setOpenDesignModuleEscapeHandler(async () => {
+          await openDesignModuleController?.stopForHostView()
+        })
+      } catch (error) {
+        mainLog.error('OpenDesign Module control surface is unavailable', {
+          errorType: error instanceof Error ? error.name : typeof error,
+        })
+        openDesignModuleIpc?.dispose()
+        openDesignModuleIpc = null
+        openDesignModuleController.dispose()
+        openDesignModuleController = null
       }
     }
 
@@ -1193,6 +1267,13 @@ async function cleanupBeforeQuit(): Promise<void> {
   let viewsDisposed = false
   // Ensure Cmd+Q/app quit bypasses layered window close interception (Cmd+W behavior).
   windowManager?.setAppQuitting(true)
+
+  setOpenDesignModuleEscapeHandler(null)
+  openDesignModuleIpc?.dispose()
+  openDesignModuleIpc = null
+  openDesignModuleController?.dispose()
+  openDesignModuleController = null
+  openDesignDevelopmentBootstrap = Object.freeze({ status: 'disabled' })
 
   if (windowManager) {
     const windows = windowManager.getWindowStates()
