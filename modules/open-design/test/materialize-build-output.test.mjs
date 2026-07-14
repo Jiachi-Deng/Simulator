@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { hoistMaterializedPnpmAliases, materializeBuildOutput } from "../src/materialize-build-output.mjs";
+import { hoistMaterializedPnpmAliases, materializeBuildOutput, normalizeStandaloneServer } from "../src/materialize-build-output.mjs";
 
 async function fixture(t) {
   const parent = await mkdtemp(path.join(os.tmpdir(), "open-design-materialize-"));
@@ -61,4 +61,56 @@ test("materializes pnpm virtual-store aliases at the root for symlink-free ESM r
   assert.equal(result.virtualStorePackagesHoisted, 1);
   assert.equal(await readFile(path.join(destination, "node_modules/zod/index.js"), "utf8"), "export const ok = true;\n");
   assert.equal((await lstat(path.join(destination, "node_modules/zod/index.js"))).nlink, 1);
+});
+
+const privateRoots = {
+  checkoutRoot: "/private/tmp/build-123/checkout",
+  workspaceRoot: "/private/tmp/build-123",
+  sourceRoot: "/private/tmp/build-123/checkout/apps/web/.next/standalone",
+};
+
+function serverWithConfig(config) {
+  return `const nextConfig = ${JSON.stringify(config)};\nmodule.exports = { nextConfig };\n`;
+}
+
+test("rewrites standalone nextConfig paths and removes build-machine origins", () => {
+  const input = serverWithConfig({ outputFileTracingRoot: privateRoots.checkoutRoot, turbopack: { root: privateRoots.checkoutRoot }, allowedDevOrigins: ["http://192.168.1.12:3000", "http://localhost:3000"] });
+  const output = normalizeStandaloneServer(input, privateRoots);
+  assert.equal(output, 'const nextConfig = {"outputFileTracingRoot":".","turbopack":{"root":"."},"allowedDevOrigins":[]};\nmodule.exports = { nextConfig };\n');
+  assert.equal(output.includes("192.168.1.12"), false);
+  assert.equal(output.includes("/private/tmp"), false);
+});
+
+test("parses braces and escaped quotes inside JSON strings", () => {
+  const input = serverWithConfig({ outputFileTracingRoot: privateRoots.checkoutRoot, turbopack: { root: privateRoots.checkoutRoot }, allowedDevOrigins: ["http://10.0.0.4:3000"], note: "brace } and quote \\\"" });
+  const output = normalizeStandaloneServer(input, privateRoots);
+  assert.match(output, /"note":/u);
+  assert.equal(output.includes("brace } and quote"), true);
+});
+
+test("fails closed for duplicate, missing, malformed, and wrong-type nextConfig", () => {
+  const valid = { outputFileTracingRoot: privateRoots.checkoutRoot, turbopack: { root: privateRoots.checkoutRoot }, allowedDevOrigins: [] };
+  assert.throws(() => normalizeStandaloneServer(`${serverWithConfig(valid)}const nextConfig = {};`, privateRoots), { code: "MATERIALIZE_NEXT_CONFIG_INVALID" });
+  assert.throws(() => normalizeStandaloneServer("module.exports = {};", privateRoots), { code: "MATERIALIZE_NEXT_CONFIG_INVALID" });
+  assert.throws(() => normalizeStandaloneServer('const nextConfig = {"outputFileTracingRoot":"/private/tmp/build-123/checkout",};', privateRoots), { code: "MATERIALIZE_NEXT_CONFIG_INVALID" });
+  assert.throws(() => normalizeStandaloneServer(serverWithConfig({ ...valid, turbopack: "/private/tmp/build-123/checkout" }), privateRoots), { code: "MATERIALIZE_NEXT_CONFIG_INVALID" });
+  assert.throws(() => normalizeStandaloneServer(serverWithConfig({ ...valid, outputFileTracingRoot: "/private/attacker/checkout" }), privateRoots), { code: "MATERIALIZE_NEXT_CONFIG_INVALID" });
+});
+
+test("rejects extra private absolute paths and produces deterministic output", () => {
+  const malicious = { outputFileTracingRoot: privateRoots.checkoutRoot, turbopack: { root: privateRoots.checkoutRoot }, allowedDevOrigins: [], extra: `${privateRoots.workspaceRoot}/secret` };
+  assert.throws(() => normalizeStandaloneServer(serverWithConfig(malicious), privateRoots), { code: "MATERIALIZE_PRIVATE_PATH_RESIDUAL" });
+  const input = serverWithConfig({ outputFileTracingRoot: privateRoots.checkoutRoot, turbopack: { root: privateRoots.checkoutRoot }, allowedDevOrigins: ["http://172.16.0.8:3000"] });
+  assert.equal(normalizeStandaloneServer(input, privateRoots), normalizeStandaloneServer(input, privateRoots));
+});
+
+test("materializes standalone server and rejects private path residue in any text output", async (t) => {
+  const { source, destination } = await fixture(t);
+  await mkdir(path.join(source, "apps/web"), { recursive: true });
+  await writeFile(path.join(source, "apps/web/server.js"), serverWithConfig({ outputFileTracingRoot: privateRoots.checkoutRoot, turbopack: { root: privateRoots.checkoutRoot }, allowedDevOrigins: ["http://192.168.1.12:3000"] }));
+  await writeFile(path.join(source, "apps/web/other.js"), "const clean = true;\n");
+  await materializeBuildOutput({ sourceRoot: source, destinationRoot: destination, buildStartedAtMs: 0, privateRoots });
+  const server = await readFile(path.join(destination, "apps/web/server.js"), "utf8");
+  assert.match(server, /outputFileTracingRoot":"\."/u);
+  assert.doesNotMatch(server, /private|192\.168\.1\.12/u);
 });

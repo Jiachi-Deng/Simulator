@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { constants as fsConstants } from "node:fs";
-import { chmod, lstat, mkdir, open, opendir, readlink, realpath, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, opendir, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { stagingAssert, stagingFail } from "./staging-error.mjs";
@@ -9,7 +9,7 @@ const NATIVE_EXTENSIONS = new Set([".node", ".so", ".dylib", ".dll", ".exe"]);
 const MAX_ENTRIES = 200_000;
 const MAX_DEPTH = 256;
 
-export async function materializeBuildOutput({ sourceRoot, destinationRoot, buildStartedAtMs } = {}) {
+export async function materializeBuildOutput({ sourceRoot, destinationRoot, buildStartedAtMs, privateRoots } = {}) {
   stagingAssert(path.isAbsolute(sourceRoot ?? "") && path.isAbsolute(destinationRoot ?? ""), "MATERIALIZE_ROOT_INVALID", "source and destination roots must be absolute");
   stagingAssert(Number.isFinite(buildStartedAtMs), "MATERIALIZE_TIME_INVALID", "build start time is required");
   const sourceReal = await realpath(sourceRoot).catch((error) => stagingFail("MATERIALIZE_SOURCE_INVALID", error.message));
@@ -25,6 +25,11 @@ export async function materializeBuildOutput({ sourceRoot, destinationRoot, buil
   const nativeOrigins = [];
   try {
     await copyDirectory(sourceReal, destinationRoot, "", new Set(), 0);
+    const roots = privateRoots ?? inferPrivateRoots(sourceRoot);
+    if (roots != null) {
+      await normalizeStandaloneServerFile(destinationRoot, roots);
+      await assertNoPrivatePathResiduals(destinationRoot, validatePrivateRoots(roots));
+    }
     return { root: destinationRoot, symlinksMaterialized, hardlinksMaterialized, nativeOrigins: nativeOrigins.sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path))) };
   } catch (error) {
     await rm(destinationRoot, { recursive: true, force: true }).catch(() => undefined);
@@ -124,6 +129,134 @@ export async function materializeBuildOutput({ sourceRoot, destinationRoot, buil
       await input.close().catch(() => undefined);
     }
   }
+}
+
+export function normalizeStandaloneServer(serverText, { checkoutRoot, workspaceRoot, sourceRoot } = {}) {
+  const roots = validatePrivateRoots({ checkoutRoot, workspaceRoot, sourceRoot });
+  const assignment = findNextConfigAssignment(serverText);
+  const config = parseExactJsonObject(serverText, assignment.objectStart);
+  stagingAssert(isPlainObject(config), "MATERIALIZE_NEXT_CONFIG_INVALID", "embedded nextConfig must be a JSON object");
+  stagingAssert(Object.hasOwn(config, "outputFileTracingRoot") && typeof config.outputFileTracingRoot === "string", "MATERIALIZE_NEXT_CONFIG_INVALID", "nextConfig outputFileTracingRoot must be a string");
+  stagingAssert(Object.hasOwn(config, "turbopack") && isPlainObject(config.turbopack) && typeof config.turbopack.root === "string", "MATERIALIZE_NEXT_CONFIG_INVALID", "nextConfig turbopack.root must be a string");
+  stagingAssert(Object.hasOwn(config, "allowedDevOrigins") && Array.isArray(config.allowedDevOrigins) && config.allowedDevOrigins.every((origin) => typeof origin === "string"), "MATERIALIZE_NEXT_CONFIG_INVALID", "nextConfig allowedDevOrigins must be a string array");
+  assertRuntimePath(config.outputFileTracingRoot, roots);
+  assertRuntimePath(config.turbopack.root, roots);
+  config.outputFileTracingRoot = ".";
+  config.turbopack.root = ".";
+  config.allowedDevOrigins = [];
+  assertNoPrivateStrings(config, roots);
+  const replacement = JSON.stringify(config);
+  const objectEnd = assignment.objectEnd;
+  return `${serverText.slice(0, assignment.objectStart)}${replacement}${serverText.slice(objectEnd)}`;
+}
+
+async function normalizeStandaloneServerFile(destinationRoot, roots) {
+  const serverPath = path.join(destinationRoot, "apps/web/server.js");
+  const source = await readFile(serverPath).catch((error) => error.code === "ENOENT" ? null : stagingFail("MATERIALIZE_NEXT_CONFIG_READ_FAILED", error.message));
+  if (source == null) return;
+  const text = decodeText(source, serverPath);
+  const normalized = normalizeStandaloneServer(text, roots);
+  await writeFile(serverPath, normalized, { mode: 0o644 }).catch((error) => stagingFail("MATERIALIZE_NEXT_CONFIG_WRITE_FAILED", error.message));
+}
+
+async function assertNoPrivatePathResiduals(root, roots) {
+  const files = await listRegularFiles(root);
+  for (const filename of files) {
+    const bytes = await readFile(filename).catch((error) => stagingFail("MATERIALIZE_TEXT_SCAN_FAILED", error.message));
+    if (bytes.includes(0)) continue;
+    const text = decodeText(bytes, filename);
+    for (const privateRoot of roots) {
+      stagingAssert(!text.includes(privateRoot), "MATERIALIZE_PRIVATE_PATH_RESIDUAL", `private build path remains in ${path.relative(root, filename)}`);
+    }
+  }
+}
+
+async function listRegularFiles(root, relative = "", result = []) {
+  const directory = await opendir(path.join(root, relative)).catch((error) => stagingFail("MATERIALIZE_TEXT_SCAN_FAILED", error.message));
+  for await (const entry of directory) {
+    const child = relative ? path.join(relative, entry.name) : entry.name;
+    const filename = path.join(root, child);
+    const stat = await lstat(filename).catch((error) => stagingFail("MATERIALIZE_TEXT_SCAN_FAILED", error.message));
+    if (stat.isDirectory()) await listRegularFiles(root, child, result);
+    else if (stat.isFile()) result.push(filename);
+  }
+  return result;
+}
+
+function inferPrivateRoots(sourceRoot) {
+  const standalone = path.normalize(sourceRoot).endsWith(`${path.sep}.next${path.sep}standalone`);
+  if (!standalone) return null;
+  const checkoutRoot = path.resolve(sourceRoot, "../../../../");
+  return { checkoutRoot, workspaceRoot: path.dirname(checkoutRoot), sourceRoot };
+}
+
+function validatePrivateRoots({ checkoutRoot, workspaceRoot, sourceRoot } = {}) {
+  const roots = [checkoutRoot, workspaceRoot, sourceRoot];
+  stagingAssert(roots.every((root) => typeof root === "string" && path.isAbsolute(root)), "MATERIALIZE_PRIVATE_ROOTS_INVALID", "private roots must be absolute paths");
+  return [...new Set(roots.map((root) => path.normalize(root)))].sort((left, right) => right.length - left.length);
+}
+
+function findNextConfigAssignment(source) {
+  const matches = [];
+  const pattern = /\bconst\s+nextConfig\s*=\s*/gu;
+  for (let match; (match = pattern.exec(source)) !== null;) matches.push(match.index + match[0].length);
+  stagingAssert(matches.length === 1, "MATERIALIZE_NEXT_CONFIG_INVALID", "server.js must contain exactly one nextConfig assignment");
+  const objectStart = skipWhitespace(source, matches[0]);
+  stagingAssert(source[objectStart] === "{", "MATERIALIZE_NEXT_CONFIG_INVALID", "nextConfig assignment must contain a JSON object");
+  return { objectStart, objectEnd: findBalancedObjectEnd(source, objectStart) };
+}
+
+function findBalancedObjectEnd(source, start) {
+  let depth = 0;
+  let escaped = false;
+  let inString = false;
+  for (let index = start; index < source.length; index += 1) {
+    const character = source[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') { inString = true; continue; }
+    if (character === "{") depth += 1;
+    else if (character === "}" && --depth === 0) return index + 1;
+  }
+  stagingFail("MATERIALIZE_NEXT_CONFIG_INVALID", "nextConfig JSON object is unterminated");
+}
+
+function parseExactJsonObject(source, start) {
+  const end = findBalancedObjectEnd(source, start);
+  try { return JSON.parse(source.slice(start, end)); }
+  catch (error) { stagingFail("MATERIALIZE_NEXT_CONFIG_INVALID", `nextConfig is not JSON: ${error.message}`); }
+}
+
+function assertNoPrivateStrings(value, roots) {
+  if (typeof value === "string") {
+    stagingAssert(!roots.some((root) => value.includes(root)), "MATERIALIZE_PRIVATE_PATH_RESIDUAL", "nextConfig contains a private build path");
+  } else if (Array.isArray(value)) value.forEach((entry) => assertNoPrivateStrings(entry, roots));
+  else if (isPlainObject(value)) Object.values(value).forEach((entry) => assertNoPrivateStrings(entry, roots));
+}
+
+function assertRuntimePath(value, roots) {
+  if (!path.isAbsolute(value)) return;
+  const normalized = path.normalize(value);
+  stagingAssert(roots.some((root) => normalized === root || normalized.startsWith(`${root}${path.sep}`)), "MATERIALIZE_NEXT_CONFIG_INVALID", "nextConfig runtime path is an unexpected absolute path");
+}
+
+function decodeText(bytes, filename) {
+  const text = bytes.toString("utf8");
+  stagingAssert(Buffer.from(text, "utf8").equals(bytes), "MATERIALIZE_TEXT_SCAN_FAILED", `output is not valid UTF-8: ${filename}`);
+  return text;
+}
+
+function skipWhitespace(source, index) {
+  while (/\s/u.test(source[index] ?? "")) index += 1;
+  return index;
+}
+
+function isPlainObject(value) {
+  return value != null && typeof value === "object" && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
 }
 
 export async function hoistMaterializedPnpmAliases({ materialized, buildStartedAtMs } = {}) {
