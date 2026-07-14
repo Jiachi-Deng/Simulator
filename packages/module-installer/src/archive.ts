@@ -173,7 +173,7 @@ async function inspectRawTarHeaders(path: string, limits: InstallLimits, signal?
   if (dataBytesRemaining !== 0 || buffer.length !== 0 || !ended) invalidEntry('Tar archive is truncated or lacks a canonical end marker')
 }
 
-function asPlan(entry: ReadEntry, limits: InstallLimits): ArchiveEntryPlan {
+function asPlan(entry: ReadEntry, limits: InstallLimits, executablePaths: ReadonlySet<string>): ArchiveEntryPlan {
   if (entry.type !== 'File' && entry.type !== 'Directory') {
     invalidEntry(`Archive entry type ${entry.type} is forbidden: ${JSON.stringify(entry.path)}`)
   }
@@ -182,8 +182,9 @@ function asPlan(entry: ReadEntry, limits: InstallLimits): ArchiveEntryPlan {
   if (entry.linkpath) invalidEntry(`Archive links are forbidden: ${JSON.stringify(entry.path)}`)
   if (!Number.isSafeInteger(entry.size) || entry.size < 0) invalidEntry('Archive entry has an invalid size')
   if (entry.type === 'Directory' && entry.size !== 0) invalidEntry('Archive directory has a non-zero size')
-  if (entry.size > limits.maxFileBytes) {
-    limitExceeded(`Archive file exceeds ${limits.maxFileBytes} bytes: ${JSON.stringify(entry.path)}`)
+  const maxFileBytes = executablePaths.has(relativePath) ? limits.maxExecutableFileBytes : limits.maxFileBytes
+  if (entry.size > maxFileBytes) {
+    limitExceeded(`Archive file exceeds ${maxFileBytes} bytes: ${JSON.stringify(entry.path)}`)
   }
   return {
     archivePath,
@@ -215,6 +216,7 @@ export async function assertGzipFile(path: string): Promise<void> {
 export async function inspectArchive(
   archivePath: string,
   limits: InstallLimits,
+  executablePaths: ReadonlySet<string>,
   signal: AbortSignal | undefined,
   report: ProgressReporter,
 ): Promise<ArchivePlan> {
@@ -238,7 +240,7 @@ export async function inspectArchive(
         try {
           abortIfRequested(signal)
           if (entries.size >= limits.maxEntries) limitExceeded(`Archive exceeds ${limits.maxEntries} entries`)
-          const planned = asPlan(entry, limits)
+          const planned = asPlan(entry, limits, executablePaths)
           if (entries.has(planned.archivePath)) invalidEntry(`Archive has a duplicate path: ${JSON.stringify(entry.path)}`)
           const key = collisionKey(planned.archivePath)
           const prior = collisionKeys.get(key)
@@ -287,6 +289,7 @@ export async function extractArchive(
   destination: string,
   plan: ArchivePlan,
   limits: InstallLimits,
+  executablePaths: ReadonlySet<string>,
   signal: AbortSignal | undefined,
   report: ProgressReporter,
 ): Promise<void> {
@@ -313,7 +316,7 @@ export async function extractArchive(
         try {
           abortIfRequested(signal)
           const entry = rawEntry as ReadEntry
-          const actual = asPlan(entry, limits)
+          const actual = asPlan(entry, limits, executablePaths)
           const expected = plan.entries.get(actual.archivePath)
           if (!expected || seen.has(actual.archivePath)) invalidEntry(`Archive changed between inspection and extraction: ${JSON.stringify(path)}`)
           if (actual.type !== expected.type || actual.size !== expected.size || actual.mode !== expected.mode) {
@@ -347,14 +350,16 @@ export async function extractArchive(
   if (seenExtracted !== expectedExtracted) invalidEntry('Archive extraction entry count mismatch')
 }
 
-export function validateEntrypointPlan(plan: ArchivePlan, entrypoint: string): void {
-  const planned = plan.entries.get(posix.join('module', entrypoint))
-  if (!planned || planned.type !== 'file' || (planned.mode & 0o100) === 0) {
-    throw new ModuleInstallerError('ENTRYPOINT_INVALID', 'Declared entrypoint must be an owner-executable regular file')
+export function validateEntrypointPlan(plan: ArchivePlan, executablePaths: ReadonlySet<string>): void {
+  for (const path of executablePaths) {
+    const planned = plan.entries.get(posix.join('module', path))
+    if (!planned || planned.type !== 'file' || (planned.mode & 0o100) === 0) {
+      throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Declared executable must be an owner-executable regular file: ${JSON.stringify(path)}`)
+    }
   }
   for (const entry of plan.entries.values()) {
-    if (entry.type === 'file' && (entry.mode & 0o111) !== 0 && entry.relativePath !== entrypoint) {
-      throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Executable file is not the declared entrypoint: ${JSON.stringify(entry.relativePath)}`)
+    if (entry.type === 'file' && (entry.mode & 0o111) !== 0 && !executablePaths.has(entry.relativePath)) {
+      throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Executable file is not declared by the artifact allowlist: ${JSON.stringify(entry.relativePath)}`)
     }
   }
 }

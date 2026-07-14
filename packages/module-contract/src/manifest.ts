@@ -3,10 +3,12 @@ import {
   MODULE_MANIFEST_SCHEMA_VERSION,
   MODULE_PLATFORMS,
   MAX_MODULE_ARTIFACTS,
+  MAX_MODULE_AUXILIARY_EXECUTABLES,
   MAX_MODULE_CAPABILITIES,
   type ManifestValidationError,
   type ManifestValidationErrorCode,
   type ModuleArtifact,
+  type ModuleAuxiliaryExecutable,
   type ModuleArtifactUrl,
   type ModuleCapability,
   type ModuleEntrypoint,
@@ -21,7 +23,7 @@ import { valid as validSemver } from 'semver'
 type DataRecord = Record<string, unknown>
 
 const ROOT_FIELDS = ['schemaVersion', 'id', 'version', 'artifacts', 'capabilities'] as const
-const ARTIFACT_FIELDS = ['platform', 'entrypoint', 'url', 'sha256'] as const
+const ARTIFACT_FIELDS = ['platform', 'entrypoint', 'auxiliaryExecutables', 'url', 'sha256'] as const
 const ID_PATTERN = /^(?=.{3,128}$)[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$/
 const VERSION_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/
 const ENTRYPOINT_SEGMENT_PATTERN = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
@@ -171,6 +173,9 @@ function parseArtifact(
 
   const platform = stringField(record, 'platform', path, errors)
   const entrypoint = stringField(record, 'entrypoint', path, errors)
+  const auxiliaryExecutableValues = Object.hasOwn(record, 'auxiliaryExecutables')
+    ? asDataArray(record.auxiliaryExecutables, `${path}/auxiliaryExecutables`, MAX_MODULE_AUXILIARY_EXECUTABLES, errors)
+    : undefined
   const url = stringField(record, 'url', path, errors)
   const sha256 = stringField(record, 'sha256', path, errors)
   let valid = true
@@ -182,6 +187,36 @@ function parseArtifact(
   if (entrypoint !== undefined && !isValidEntrypoint(entrypoint)) {
     errors.push(error('INVALID_ENTRYPOINT', `${path}/entrypoint`, 'Entrypoint must be a safe relative POSIX path'))
     valid = false
+  }
+  const auxiliaryExecutables: ModuleAuxiliaryExecutable[] = []
+  if (auxiliaryExecutableValues) {
+    const seenAuxiliaryExecutables = new Set<string>()
+    for (let auxiliaryIndex = 0; auxiliaryIndex < auxiliaryExecutableValues.length; auxiliaryIndex += 1) {
+      const auxiliaryPath = `${path}/auxiliaryExecutables/${auxiliaryIndex}`
+      const auxiliaryExecutable = auxiliaryExecutableValues[auxiliaryIndex]
+      if (!Object.hasOwn(auxiliaryExecutableValues, auxiliaryIndex) || typeof auxiliaryExecutable !== 'string') {
+        errors.push(error('INVALID_TYPE', auxiliaryPath, 'Auxiliary executable must be a string'))
+        valid = false
+        continue
+      }
+      if (!isValidEntrypoint(auxiliaryExecutable)) {
+        errors.push(error('INVALID_AUXILIARY_EXECUTABLE', auxiliaryPath, 'Auxiliary executable must be a safe relative POSIX path'))
+        valid = false
+        continue
+      }
+      if (auxiliaryExecutable === entrypoint) {
+        errors.push(error('DUPLICATE_DECLARATION', auxiliaryPath, 'Auxiliary executable must not equal the entrypoint'))
+        valid = false
+        continue
+      }
+      if (seenAuxiliaryExecutables.has(auxiliaryExecutable)) {
+        errors.push(error('DUPLICATE_DECLARATION', auxiliaryPath, 'Auxiliary executable is declared more than once'))
+        valid = false
+        continue
+      }
+      seenAuxiliaryExecutables.add(auxiliaryExecutable)
+      auxiliaryExecutables.push(auxiliaryExecutable as ModuleAuxiliaryExecutable)
+    }
   }
   if (url !== undefined && !isValidArtifactUrl(url)) {
     errors.push(error('INVALID_URL', `${path}/url`, 'Artifact URL must be a canonical absolute HTTPS URL without credentials or fragments'))
@@ -196,6 +231,7 @@ function parseArtifact(
   return {
     platform: platform as ModulePlatform,
     entrypoint: entrypoint as ModuleEntrypoint,
+    ...(auxiliaryExecutableValues === undefined ? {} : { auxiliaryExecutables }),
     url: url as ModuleArtifactUrl,
     sha256: sha256 as ModuleSha256,
   }

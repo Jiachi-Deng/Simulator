@@ -173,6 +173,17 @@ function validateLimits(overrides?: Partial<InstallLimits>): InstallLimits {
   return Object.freeze(limits)
 }
 
+function sameStringArray(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+  const normalizedLeft = left ?? []
+  const normalizedRight = right ?? []
+  return normalizedLeft.length === normalizedRight.length
+    && normalizedLeft.every((value, index) => value === normalizedRight[index])
+}
+
+function executablePaths(artifact: ResolvedDescriptor['artifact']): ReadonlySet<string> {
+  return new Set([artifact.entrypoint, ...(artifact.auxiliaryExecutables ?? [])])
+}
+
 function resolveDescriptor(descriptor: VerifiedArtifactDescriptor): ResolvedDescriptor {
   if (!isPlainObject(descriptor) || descriptor.verified !== true || descriptor.format !== 'tar.gz') {
     throw new ModuleInstallerError('DESCRIPTOR_INVALID', 'Installer requires a verified tar.gz artifact descriptor')
@@ -186,6 +197,7 @@ function resolveDescriptor(descriptor: VerifiedArtifactDescriptor): ResolvedDesc
   const artifact = parsed.value.artifacts.find((candidate) => candidate.platform === descriptor.artifact?.platform)
   if (!artifact
     || artifact.entrypoint !== descriptor.artifact.entrypoint
+    || !sameStringArray(artifact.auxiliaryExecutables, descriptor.artifact.auxiliaryExecutables)
     || artifact.url !== descriptor.artifact.url
     || artifact.sha256 !== descriptor.artifact.sha256) {
     throw new ModuleInstallerError('DESCRIPTOR_INVALID', 'Descriptor artifact does not exactly match its verified manifest')
@@ -267,24 +279,26 @@ export class ModuleInstaller {
         await this.#fault('after-archive-copy')
         await assertGzipFile(archive)
 
-        const plan = await inspectArchive(archive, this.#limits, request.signal, report)
-        validateEntrypointPlan(plan, descriptor.artifact.entrypoint)
+        const declaredExecutablePaths = executablePaths(descriptor.artifact)
+        const plan = await inspectArchive(archive, this.#limits, declaredExecutablePaths, request.signal, report)
+        validateEntrypointPlan(plan, declaredExecutablePaths)
         await this.#fault('after-archive-inspection')
-        await extractArchive(archive, payload, plan, this.#limits, request.signal, report)
+        await extractArchive(archive, payload, plan, this.#limits, declaredExecutablePaths, request.signal, report)
         await this.#fault('after-extraction')
-        await normalizeAndVerifyModes(payload, descriptor.artifact.entrypoint)
+        await normalizeAndVerifyModes(payload, declaredExecutablePaths)
 
-        const tree = await hashExtractedTree(payload, this.#limits, request.signal, report, descriptor.artifact.entrypoint)
+        const tree = await hashExtractedTree(payload, this.#limits, request.signal, report, declaredExecutablePaths)
         if (tree.sha256 !== descriptor.extractedManifestSha256) {
           throw new ModuleInstallerError('TREE_HASH_MISMATCH', 'Extracted file manifest SHA-256 does not match verified descriptor')
         }
-        const entrypoint = tree.files.get(descriptor.artifact.entrypoint)
-        if (!entrypoint?.executable) {
-          throw new ModuleInstallerError('ENTRYPOINT_INVALID', 'Extracted entrypoint is missing or not executable')
+        for (const executablePath of declaredExecutablePaths) {
+          if (!tree.files.get(executablePath)?.executable) {
+            throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Extracted declared executable is missing or not executable: ${JSON.stringify(executablePath)}`)
+          }
         }
         for (const [path, file] of tree.files) {
-          if (file.executable && path !== descriptor.artifact.entrypoint) {
-            throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Extracted executable is not the declared entrypoint: ${JSON.stringify(path)}`)
+          if (file.executable && !declaredExecutablePaths.has(path)) {
+            throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Extracted executable is not declared by the artifact allowlist: ${JSON.stringify(path)}`)
           }
         }
 

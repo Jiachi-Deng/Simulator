@@ -141,7 +141,7 @@ export async function hashExtractedTree(
   limits: InstallLimits,
   signal: AbortSignal | undefined,
   report: ProgressReporter,
-  entrypoint?: string,
+  executablePaths: ReadonlySet<string>,
 ): Promise<TreeManifestResult> {
   const records: TreeRecord[] = []
   const files = new Map<string, { size: number; executable: boolean; sha256: string }>()
@@ -178,13 +178,18 @@ export async function hashExtractedTree(
       }
 
       totalBytes += info.size
-      if (info.size > limits.maxFileBytes || totalBytes > limits.maxTotalBytes) {
+      const maxFileBytes = executablePaths.has(path) ? limits.maxExecutableFileBytes : limits.maxFileBytes
+      if (info.size > maxFileBytes || totalBytes > limits.maxTotalBytes) {
         throw new ModuleInstallerError('ARCHIVE_LIMIT_EXCEEDED', 'Extracted tree exceeds byte limits')
       }
       const sha256 = await hashFile(absolute)
-      const executable = path === entrypoint
-        ? process.platform === 'win32' || (info.mode & 0o111) !== 0
-        : (info.mode & 0o111) !== 0
+      const executable = executablePaths.has(path)
+      if (executable && process.platform !== 'win32' && (info.mode & 0o100) === 0) {
+        throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Declared executable lost its owner execute bit: ${JSON.stringify(path)}`)
+      }
+      if (!executable && (info.mode & 0o111) !== 0) {
+        throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Undeclared executable is present after normalization: ${JSON.stringify(path)}`)
+      }
       files.set(path, { size: info.size, executable, sha256 })
       records.push({ path, value: `F\t${JSON.stringify(path)}\t${info.size}\t${executable ? 1 : 0}\t${sha256}` })
       report({
@@ -209,7 +214,7 @@ export async function hashExtractedTree(
   }
 }
 
-export async function normalizeAndVerifyModes(root: string, entrypoint: string): Promise<void> {
+export async function normalizeAndVerifyModes(root: string, executablePaths: ReadonlySet<string>): Promise<void> {
   async function visit(directory: string): Promise<void> {
     await chmod(directory, 0o700)
     for (const child of await readdir(directory, { withFileTypes: true })) {
@@ -218,7 +223,7 @@ export async function normalizeAndVerifyModes(root: string, entrypoint: string):
       if (child.isDirectory()) {
         await visit(absolute)
       } else if (child.isFile()) {
-        await chmod(absolute, relativePath === entrypoint ? 0o700 : 0o600)
+        await chmod(absolute, executablePaths.has(relativePath) ? 0o700 : 0o600)
       } else {
         throw new ModuleInstallerError('ARCHIVE_INVALID', `Cannot normalize mode for non-regular entry: ${JSON.stringify(relativePath)}`)
       }
@@ -227,12 +232,14 @@ export async function normalizeAndVerifyModes(root: string, entrypoint: string):
 
   try {
     await visit(root)
-    const entrypointPath = join(root, ...entrypoint.split('/'))
-    const info = await lstat(entrypointPath)
-    if (!info.isFile() || info.isSymbolicLink() || (process.platform !== 'win32' && (info.mode & 0o100) === 0)) {
-      throw new ModuleInstallerError('ENTRYPOINT_INVALID', 'Extracted entrypoint is not an owner-executable regular file')
+    for (const executablePath of executablePaths) {
+      const absolute = join(root, ...executablePath.split('/'))
+      const info = await lstat(absolute)
+      if (!info.isFile() || info.isSymbolicLink() || (process.platform !== 'win32' && (info.mode & 0o100) === 0)) {
+        throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Declared executable is not an owner-executable regular file: ${JSON.stringify(executablePath)}`)
+      }
+      await access(absolute, constants.X_OK)
     }
-    await access(entrypointPath, constants.X_OK)
   } catch (error) {
     throw filesystemError('Could not normalize or verify extracted file modes', error)
   }

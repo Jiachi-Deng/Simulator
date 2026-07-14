@@ -6,6 +6,7 @@ export const GOLDEN_MODULE_MANIFEST_INPUT = Object.freeze({
     Object.freeze({
       platform: 'darwin-arm64',
       entrypoint: 'bin/fake-module',
+      auxiliaryExecutables: Object.freeze(['runtime/fake-node', 'bin/spawn-helper']),
       url: 'https://modules.example.test/org.simulator.fake/1.0.0/darwin-arm64.tar.gz',
       sha256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
     }),

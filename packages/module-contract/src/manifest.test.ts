@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { isValidatedModuleManifest, parseModuleManifest } from './manifest.ts'
-import { MAX_MODULE_ARTIFACTS, MAX_MODULE_CAPABILITIES } from './manifest-types.ts'
+import { MAX_MODULE_ARTIFACTS, MAX_MODULE_AUXILIARY_EXECUTABLES, MAX_MODULE_CAPABILITIES } from './manifest-types.ts'
 import { GOLDEN_MODULE_MANIFEST_INPUT } from './testing/golden-manifest.ts'
 
 function manifest(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -39,6 +39,7 @@ describe('parseModuleManifest', () => {
     expect(Object.isFrozen(result.value)).toBe(true)
     expect(Object.isFrozen(result.value.artifacts)).toBe(true)
     expect(Object.isFrozen(result.value.artifacts[0])).toBe(true)
+    expect(Object.isFrozen(result.value.artifacts[0]!.auxiliaryExecutables)).toBe(true)
     expect(Object.isFrozen(result.value.capabilities)).toBe(true)
     expect(isValidatedModuleManifest(result.value)).toBe(true)
   })
@@ -123,6 +124,57 @@ describe('parseModuleManifest', () => {
     const input = manifest()
     ;(input.artifacts as Array<Record<string, unknown>>)[0]!.entrypoint = entrypoint
     expect(errorsFor(input)[0]?.code).toBe('INVALID_ENTRYPOINT')
+  })
+
+  it('accepts, freezes, and preserves a declared auxiliary executable allowlist', () => {
+    const input = manifest()
+    ;(input.artifacts as Array<Record<string, unknown>>)[0]!.auxiliaryExecutables = ['runtime/node', 'bin/spawn-helper']
+    const result = parseModuleManifest(input)
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('Expected auxiliary executable manifest to parse')
+    expect(result.value.artifacts[0]!.auxiliaryExecutables as readonly string[]).toEqual(['runtime/node', 'bin/spawn-helper'])
+    expect(Object.isFrozen(result.value.artifacts[0]!.auxiliaryExecutables)).toBe(true)
+  })
+
+  it('leaves omitted auxiliary executables absent for v1 manifest compatibility', () => {
+    const result = parseModuleManifest(manifest())
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('Expected manifest to parse')
+    expect(result.value.artifacts[0]).not.toHaveProperty('auxiliaryExecutables')
+  })
+
+  it.each([
+    ['/runtime/node', 'INVALID_AUXILIARY_EXECUTABLE'],
+    ['../runtime/node', 'INVALID_AUXILIARY_EXECUTABLE'],
+    ['runtime/../node', 'INVALID_AUXILIARY_EXECUTABLE'],
+    ['runtime\\node', 'INVALID_AUXILIARY_EXECUTABLE'],
+    ['runtime//node', 'INVALID_AUXILIARY_EXECUTABLE'],
+    ['bin/fake-module', 'DUPLICATE_DECLARATION'],
+  ] as const)('rejects unsafe or entrypoint-equal auxiliary executable %p', (auxiliaryExecutable, code) => {
+    const input = manifest()
+    ;(input.artifacts as Array<Record<string, unknown>>)[0]!.auxiliaryExecutables = [auxiliaryExecutable]
+    expect(errorsFor(input)[0]?.code).toBe(code)
+  })
+
+  it('rejects duplicate, sparse, non-string, and oversized auxiliary executable declarations', () => {
+    const duplicate = manifest()
+    ;(duplicate.artifacts as Array<Record<string, unknown>>)[0]!.auxiliaryExecutables = ['runtime/node', 'runtime/node']
+    expect(errorsFor(duplicate)[0]).toMatchObject({ code: 'DUPLICATE_DECLARATION', path: '/artifacts/0/auxiliaryExecutables/1' })
+
+    const sparse = manifest()
+    ;(sparse.artifacts as Array<Record<string, unknown>>)[0]!.auxiliaryExecutables = new Array(1)
+    expect(errorsFor(sparse)[0]).toMatchObject({ code: 'INVALID_TYPE', path: '/artifacts/0/auxiliaryExecutables/0' })
+
+    const nonString = manifest()
+    ;(nonString.artifacts as Array<Record<string, unknown>>)[0]!.auxiliaryExecutables = [1]
+    expect(errorsFor(nonString)[0]).toMatchObject({ code: 'INVALID_TYPE', path: '/artifacts/0/auxiliaryExecutables/0' })
+
+    const oversized = manifest()
+    ;(oversized.artifacts as Array<Record<string, unknown>>)[0]!.auxiliaryExecutables = Array.from(
+      { length: MAX_MODULE_AUXILIARY_EXECUTABLES + 1 },
+      (_, index) => `runtime/node-${index}`,
+    )
+    expect(errorsFor(oversized)[0]).toMatchObject({ code: 'LIMIT_EXCEEDED', path: '/artifacts/0/auxiliaryExecutables' })
   })
 
   it.each([

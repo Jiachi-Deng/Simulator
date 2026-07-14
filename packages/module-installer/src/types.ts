@@ -9,8 +9,10 @@ import type {
 
 export const DEFAULT_INSTALL_LIMITS = Object.freeze({
   maxArchiveBytes: 128 * 1024 * 1024,
-  maxEntries: 4_096,
+  // OpenDesign staging contains 4,777 files; retain a bounded headroom without relaxing byte-based limits.
+  maxEntries: 8_192,
   maxFileBytes: 64 * 1024 * 1024,
+  maxExecutableFileBytes: 128 * 1024 * 1024,
   maxTotalBytes: 512 * 1024 * 1024,
   maxPathBytes: 512,
   maxDepth: 32,
@@ -24,6 +26,7 @@ export interface InstallLimits {
   readonly maxArchiveBytes: number
   readonly maxEntries: number
   readonly maxFileBytes: number
+  readonly maxExecutableFileBytes: number
   readonly maxTotalBytes: number
   readonly maxPathBytes: number
   readonly maxDepth: number

@@ -4,10 +4,12 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync, gunzipSync } from 'node:zlib'
 import type { ModuleId, ModuleSha256, ModuleVersion } from '@simulator/module-contract'
+import { inspectArchive } from '../archive.ts'
 import { ModuleInstaller } from '../installer.ts'
 import {
   ModuleInstallerError,
   SimulatedInstallerCrash,
+  DEFAULT_INSTALL_LIMITS,
   type InstallLimits,
   type InstallerFaultPoint,
   type ModuleUsageGuard,
@@ -15,6 +17,7 @@ import {
 import {
   buildTarGz,
   descriptor,
+  expectedTreeHash,
   sha256,
   VALID_ENTRIES,
   writeArtifact,
@@ -154,6 +157,94 @@ describe('ModuleInstaller production tar.gz path', () => {
     expect((await stat(join(result.installedPath, 'bin'))).mode & 0o777).toBe(0o700)
     expect((await stat(join(result.installedPath, 'bin', 'module'))).mode & 0o777).toBe(0o700)
     expect((await stat(join(result.installedPath, 'data.txt'))).mode & 0o777).toBe(0o600)
+  })
+
+  it('allows only declared auxiliary executables, normalizes their modes, and includes them in the tree hash', async () => {
+    const root = await tempRoot()
+    const entries = [
+      ...VALID_ENTRIES,
+      { path: 'module/runtime', type: '5', mode: 0o755 },
+      { path: 'module/runtime/node', type: '0', mode: 0o755, content: 'runtime-binary' },
+      { path: 'module/bin/spawn-helper', type: '0', mode: 0o755, content: 'helper' },
+    ] as const satisfies readonly TarFixtureEntry[]
+    const source = await artifactAt(root, entries)
+    const valid = descriptor(source.archive, entries, '1.0.0', ['runtime/node', 'bin/spawn-helper'])
+    const result = await new ModuleInstaller(join(root, 'modules-root')).install({ descriptor: valid, archivePath: source.path })
+
+    expect((await stat(join(result.installedPath, 'runtime', 'node'))).mode & 0o777).toBe(0o700)
+    expect((await stat(join(result.installedPath, 'bin', 'spawn-helper'))).mode & 0o777).toBe(0o700)
+    expect(result.extractedManifestSha256).toBe(valid.extractedManifestSha256)
+  })
+
+  it.each([
+    {
+      name: 'a missing declared auxiliary executable',
+      entries: VALID_ENTRIES,
+      auxiliaryExecutables: ['runtime/node'],
+    },
+    {
+      name: 'a declared auxiliary executable directory',
+      entries: [...VALID_ENTRIES, { path: 'module/runtime', type: '5', mode: 0o755 }, { path: 'module/runtime/node', type: '5', mode: 0o755 }],
+      auxiliaryExecutables: ['runtime/node'],
+    },
+    {
+      name: 'a declared auxiliary executable without owner execute permission',
+      entries: [...VALID_ENTRIES, { path: 'module/runtime', type: '5', mode: 0o755 }, { path: 'module/runtime/node', mode: 0o644, content: 'runtime' }],
+      auxiliaryExecutables: ['runtime/node'],
+    },
+  ] as const)('rejects $name', async ({ entries, auxiliaryExecutables }) => {
+    const root = await tempRoot()
+    const source = await artifactAt(root, entries)
+    const installer = new ModuleInstaller(join(root, 'modules-root'))
+    await expect(installer.install({
+      descriptor: descriptor(source.archive, entries, '1.0.0', auxiliaryExecutables),
+      archivePath: source.path,
+    })).rejects.toMatchObject({ code: 'ENTRYPOINT_INVALID' })
+  })
+
+  it('permits the larger executable limit only for declared auxiliary executables', async () => {
+    const root = await tempRoot()
+    const runtimeEntries = [
+      ...VALID_ENTRIES,
+      { path: 'module/runtime', type: '5', mode: 0o755 },
+      { path: 'module/runtime/node', mode: 0o755, content: 'r'.repeat(25) },
+    ] as const satisfies readonly TarFixtureEntry[]
+    const runtime = await artifactAt(root, runtimeEntries)
+    const limits = { maxFileBytes: 24, maxExecutableFileBytes: 26 }
+    await expect(new ModuleInstaller(join(root, 'runtime-module'), { limits }).install({
+      descriptor: descriptor(runtime.archive, runtimeEntries, '1.0.0', ['runtime/node']),
+      archivePath: runtime.path,
+    })).resolves.toMatchObject({ activeVersion: '1.0.0' })
+
+    const ordinaryEntries = [...VALID_ENTRIES, { path: 'module/runtime.bin', content: 'r'.repeat(25) }] as const satisfies readonly TarFixtureEntry[]
+    const ordinary = await artifactAt(root, ordinaryEntries)
+    await expect(new ModuleInstaller(join(root, 'ordinary-module'), { limits }).install({
+      descriptor: descriptor(ordinary.archive, ordinaryEntries),
+      archivePath: ordinary.path,
+    })).rejects.toMatchObject({ code: 'ARCHIVE_LIMIT_EXCEEDED' })
+  })
+
+  it('accepts exactly 8,192 archive entries and rejects the next entry without relaxing other limits', async () => {
+    expect(DEFAULT_INSTALL_LIMITS.maxEntries).toBe(8_192)
+    const root = await tempRoot()
+    const entries = [
+      ...VALID_ENTRIES,
+      ...Array.from({ length: DEFAULT_INSTALL_LIMITS.maxEntries - VALID_ENTRIES.length }, (_, index) => ({
+        path: `module/files/f${index}`,
+        content: '',
+      })),
+    ] as const satisfies readonly TarFixtureEntry[]
+    const source = await artifactAt(root, entries)
+    const executablePaths = new Set(['bin/module'])
+    await expect(inspectArchive(source.path, DEFAULT_INSTALL_LIMITS, executablePaths, undefined, () => {})).resolves.toMatchObject({
+      entries: expect.any(Map),
+    })
+
+    const overflowEntries = [...entries, { path: 'module/files/overflow', content: '' }] as const satisfies readonly TarFixtureEntry[]
+    const overflow = await artifactAt(root, overflowEntries)
+    await expect(inspectArchive(overflow.path, DEFAULT_INSTALL_LIMITS, executablePaths, undefined, () => {})).rejects.toMatchObject({
+      code: 'ARCHIVE_LIMIT_EXCEEDED',
+    })
   })
 
   it('rejects archive and extracted-manifest hash mismatches without changing active state', async () => {
@@ -774,7 +865,15 @@ describe('descriptor and root validation', () => {
     await expect(installer.install({ descriptor: valid, archivePath: linkedArchive })).rejects.toMatchObject({ code: 'ARCHIVE_INVALID' })
   })
 
-  it('computes fixture hashes deterministically', () => {
+  it('computes executable-aware fixture hashes deterministically', () => {
     expect(sha256('same')).toBe(sha256('same'))
+    const entries = [
+      ...VALID_ENTRIES,
+      { path: 'module/runtime', type: '5', mode: 0o755 },
+      { path: 'module/runtime/node', mode: 0o755, content: 'runtime' },
+    ] as const satisfies readonly TarFixtureEntry[]
+    const executablePaths = new Set(['bin/module', 'runtime/node'])
+    expect(expectedTreeHash(entries, executablePaths)).toBe(expectedTreeHash([...entries].reverse(), executablePaths))
+    expect(expectedTreeHash(entries, executablePaths)).not.toBe(expectedTreeHash(entries))
   })
 })
