@@ -86,13 +86,19 @@ export async function smokeStagedRuntime({ artifactRoot, nodeBin, expectedInvent
     for (const port of [daemonReservation.port, webReservation.port]) {
       await assertPortClosed(port, 5_000).catch((error) => cleanupErrors.push(error));
     }
-    await rm(runtimeRoot, { recursive: true, force: true }).catch((error) => cleanupErrors.push(error));
+    await removeSmokeRuntimeRoot(runtimeRoot).catch((error) => cleanupErrors.push(error));
     if (cleanupErrors.length > 0 && primaryError == null) {
       const outputError = cleanupErrors.find((error) => error.code === "SMOKE_OUTPUT_LIMIT");
       if (outputError) throw outputError;
       stagingFail("SMOKE_CLEANUP_FAILED", cleanupErrors.map((error) => error.message).join("; "));
     }
   }
+}
+
+export async function removeSmokeRuntimeRoot(runtimeRoot, { remove = rm, stat = lstat } = {}) {
+  await remove(runtimeRoot, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
+  const remaining = await stat(runtimeRoot).catch((error) => error.code === "ENOENT" ? null : Promise.reject(error));
+  stagingAssert(remaining == null, "SMOKE_CLEANUP_FAILED", `runtime root remains after bounded cleanup: ${runtimeRoot}`);
 }
 
 async function launchSidecar({ app, entry, entrySha256, nodeBin, namespace, ipcBase, runtimeRoot, port, daemonPort, webPort, dataRoot, homeRoot, token, standaloneRoot, timeoutMs, maxOutputBytes, spawnProcess, onSpawn }) {

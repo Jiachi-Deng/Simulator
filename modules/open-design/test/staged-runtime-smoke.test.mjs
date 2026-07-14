@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { extractJsonObjects, smokeStagedRuntime } from "../src/staged-runtime-smoke.mjs";
+import { extractJsonObjects, removeSmokeRuntimeRoot, smokeStagedRuntime } from "../src/staged-runtime-smoke.mjs";
 
 async function artifactFixture(t, { wrongDaemonPid = false, startupNoiseBytes = 0 } = {}) {
   const parent = await mkdtemp(path.join(os.tmpdir(), "open-design-staged-smoke-"));
@@ -80,6 +80,15 @@ test("caps combined stdout and stderr while continuing to drain child pipes", as
 
 test("extracts pretty JSON status after arbitrary startup logs", () => {
   assert.deepEqual(extractJsonObjects('log line\n{\n  "pid": 42,\n  "state": "running"\n}\n'), [{ pid: 42, state: "running" }]);
+});
+
+test("uses bounded retries and verifies the runtime root is absent", async () => {
+  let options;
+  await removeSmokeRuntimeRoot("/tmp/od-smoke-test", {
+    remove: async (_root, value) => { options = value; },
+    stat: async () => { throw Object.assign(new Error("missing"), { code: "ENOENT" }); },
+  });
+  assert.deepEqual(options, { recursive: true, force: true, maxRetries: 8, retryDelay: 50 });
 });
 
 async function inventoryEntry(root, relativePath) {
