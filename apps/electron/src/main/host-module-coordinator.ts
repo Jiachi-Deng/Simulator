@@ -2,7 +2,7 @@ import { chmodSync, lstatSync, mkdirSync, realpathSync } from 'node:fs'
 import { lstat } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { BrowserWindow } from 'electron'
-import type { ModulePlatform } from '@simulator/module-contract'
+import type { ModuleId, ModulePlatform } from '@simulator/module-contract'
 import {
   ModuleCoordinator,
   ModuleRuntimeUseGate,
@@ -29,6 +29,8 @@ export interface HostModuleCoordinatorOptions {
   readonly trustedKeys: ModuleDownloaderOptions['trustedKeys']
   readonly moduleViewManager: ModuleViewManager
   readonly hostWindow: () => BrowserWindow | undefined
+  readonly onHostClose?: (moduleId: ModuleId) => void | Promise<void>
+  readonly onHostCloseError?: (error: unknown, moduleId: ModuleId) => void | Promise<void>
   readonly fetch?: ModuleDownloaderOptions['fetch']
   readonly clock?: HostModuleClock
   readonly daemonEnvironment?: Readonly<Record<string, string>>
@@ -96,6 +98,8 @@ export function createHostModuleCoordinator(options: HostModuleCoordinatorOption
   const view = new ElectronModuleViewPort({
     manager: options.moduleViewManager,
     hostWindow: options.hostWindow,
+    onHostClose: options.onHostClose,
+    onHostCloseError: options.onHostCloseError,
   })
   const coordinator = new ModuleCoordinator({
     downloader,
