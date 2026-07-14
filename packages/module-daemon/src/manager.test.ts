@@ -90,6 +90,24 @@ describe('ModuleDaemonManager', () => {
       .toThrow('duplicate entry')
     expect(() => createMinimalEnvironment({ SIMULATOR_MODULE_ID: 'shadow' }, values, 'linux'))
       .toThrow('cannot override host-owned')
+    expect(() => createMinimalEnvironment({ SIMULATOR_MODULE_DATA_ROOT: '/tmp/shadow' }, values, 'linux'))
+      .toThrow('cannot override host-owned')
+  })
+
+  test('injects a host-derived persistent data root without exposing it to base env overrides', async () => {
+    const root = await activatedRoot()
+    const moduleDataRoot = join(tmpdir(), 'simulator-module-data')
+    const { manager, processAdapter } = harness({ moduleDataRoot })
+
+    const started = await manager.start({ manifest: manifest(), activatedRoot: root, platform: currentPlatform() })
+    expect(processAdapter.requests[0]!.env.SIMULATOR_MODULE_DATA_ROOT)
+      .toBe(join(moduleDataRoot, 'org.simulator.daemon'))
+    await manager.stop(started.id)
+  })
+
+  test('rejects a relative or non-normalized module data root', () => {
+    expect(() => harness({ moduleDataRoot: 'relative' })).toThrow('normalized absolute path')
+    expect(() => harness({ moduleDataRoot: '/tmp/../tmp/modules' })).toThrow('normalized absolute path')
   })
 
   test('starts healthy with a contained entrypoint, minimal env, and shell disabled', async () => {

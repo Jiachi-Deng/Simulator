@@ -72,6 +72,7 @@ export function createHostModuleCoordinator(options: HostModuleCoordinatorOption
   }
   const cacheRoot = join(options.root, 'download-cache')
   const installedRoot = join(options.root, 'installed')
+  const moduleDataRoot = join(options.root, 'module-data')
   const clock = options.clock ?? new HostModuleClock()
   const usage = new ModuleRuntimeUseGate()
   const downloader = new ModuleDownloader({
@@ -90,6 +91,7 @@ export function createHostModuleCoordinator(options: HostModuleCoordinatorOption
     clock,
     health: new LoopbackHttpHealthAdapter(),
     baseEnvironment: options.daemonEnvironment,
+    moduleDataRoot,
   })
   const view = new ElectronModuleViewPort({
     manager: options.moduleViewManager,

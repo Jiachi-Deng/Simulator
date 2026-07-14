@@ -1,4 +1,5 @@
 import type { ModuleId, ModuleVersion } from '@simulator/module-contract'
+import { isAbsolute, join, normalize } from 'node:path'
 import { assertLoopbackEndpoint, createMinimalEnvironment, resolveActivatedEntrypoint, selectArtifact } from './safety.ts'
 import {
   ModuleDaemonError,
@@ -111,6 +112,7 @@ export class ModuleDaemonManager {
   private readonly idleTimeoutMs: number
   private readonly stopGraceMs: number
   private readonly baseEnvironment: Readonly<Record<string, string>>
+  private readonly moduleDataRoot?: string
   private draining = false
   private drainPromise?: Promise<void>
 
@@ -128,6 +130,12 @@ export class ModuleDaemonManager {
     }
     this.restartBackoffMs = Object.freeze([...backoff])
     this.baseEnvironment = Object.freeze({ ...(options.baseEnvironment ?? {}) })
+    if (options.moduleDataRoot !== undefined) {
+      if (!isAbsolute(options.moduleDataRoot) || normalize(options.moduleDataRoot) !== options.moduleDataRoot || options.moduleDataRoot.includes('\0')) {
+        throw new TypeError('moduleDataRoot must be a normalized absolute path')
+      }
+      this.moduleDataRoot = options.moduleDataRoot
+    }
   }
 
   start(request: StartModuleDaemonRequest): Promise<ModuleDaemonSnapshot> {
@@ -465,6 +473,7 @@ export class ModuleDaemonManager {
       id: record.id,
       version: record.version,
       endpoint,
+      ...(this.moduleDataRoot === undefined ? {} : { dataRoot: join(this.moduleDataRoot, record.id) }),
     })
     try {
       record.process = await this.options.process.spawn({

@@ -134,6 +134,8 @@ export interface ModuleDaemonManagerOptions {
   readonly idleTimeoutMs?: number
   readonly stopGraceMs?: number
   readonly baseEnvironment?: Readonly<Record<string, string>>
+  /** Host-owned parent used to derive one persistent data root per module ID. */
+  readonly moduleDataRoot?: string
   readonly onListenerError?: (error: unknown, snapshot: ModuleDaemonSnapshot) => void
 }
 
