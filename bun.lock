@@ -150,6 +150,7 @@
         "@radix-ui/react-label": "^2.1.8",
         "@radix-ui/react-popover": "^1.1.15",
         "@radix-ui/react-switch": "^1.2.6",
+        "@simulator/module-agent-gateway": "workspace:*",
         "@simulator/module-contract": "workspace:*",
         "@simulator/module-coordinator": "workspace:*",
         "@simulator/module-daemon": "workspace:*",
@@ -264,6 +265,14 @@
       },
       "devDependencies": {
         "@types/node": "^22.0.0",
+        "typescript": "^5.8.2",
+      },
+    },
+    "packages/module-agent-gateway": {
+      "name": "@simulator/module-agent-gateway",
+      "version": "0.11.1",
+      "devDependencies": {
+        "@types/node": "^25.0.8",
         "typescript": "^5.8.2",
       },
     },
@@ -405,6 +414,7 @@
         "@craft-agent/core": "workspace:*",
         "@craft-agent/shared": "workspace:*",
         "@earendil-works/pi-ai": "0.80.6",
+        "@simulator/module-agent-gateway": "workspace:*",
         "jose": "^6.0.0",
         "sharp": "0.34.5",
         "ws": "^8.19.0",
@@ -1407,6 +1417,8 @@
     "@shikijs/vscode-textmate": ["@shikijs/vscode-textmate@10.0.2", "", {}, "sha512-83yeghZ2xxin3Nj8z1NMd/NCuca+gsYXswywDy5bHvwlWL8tpTQmzGeUuHd9FC3E/SBEMvzJRwWEOz5gGes9Qg=="],
 
     "@silvia-odwyer/photon-node": ["@silvia-odwyer/photon-node@0.3.4", "", {}, "sha512-bnly4BKB3KDTFxrUIcgCLbaeVVS8lrAkri1pEzskpmxu9MdfGQTy8b8EgcD83ywD3RPMsIulY8xJH5Awa+t9fA=="],
+
+    "@simulator/module-agent-gateway": ["@simulator/module-agent-gateway@workspace:packages/module-agent-gateway"],
 
     "@simulator/module-contract": ["@simulator/module-contract@workspace:packages/module-contract"],
 

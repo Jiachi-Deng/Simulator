@@ -25,6 +25,7 @@ import type {
 } from '@craft-agent/shared/protocol'
 import type { SessionBundle, DispatchMode } from '@craft-agent/shared/sessions'
 import type { EventSink } from '../transport'
+import type { ModuleAgentPortEvent } from '@simulator/module-agent-gateway'
 
 export interface ISessionManager {
   // ---------------------------------------------------------------------------
@@ -35,6 +36,8 @@ export interface ISessionManager {
   initialize(): Promise<void>
   cleanup(): void
   setEventSink(sink: EventSink): void
+  /** Trusted, sanitized observer used by Module Agent Gateway adapters. */
+  onModuleAgentRuntimeEvent(listener: (event: ModuleAgentPortEvent) => void): () => void
   flushAllSessions(): Promise<void>
 
   // ---------------------------------------------------------------------------

@@ -1,6 +1,12 @@
 // Export ClaudeAgent (renamed from CraftAgent) and backward-compatible aliases
 export * from './claude-agent.ts';
 export * from './conversation-summary.ts';
+export {
+  checkModuleAgentToolBoundary,
+  registerModuleAgentToolBoundary,
+  unregisterModuleAgentToolBoundary,
+  type ModuleAgentToolBoundaryResult,
+} from './module-agent-tool-boundary.ts';
 
 // Export PiAgent for direct use
 export { PiAgent, PiBackend } from './pi-agent.ts';

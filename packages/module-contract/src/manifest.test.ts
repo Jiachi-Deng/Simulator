@@ -273,6 +273,13 @@ describe('parseModuleManifest', () => {
     })
   })
 
+  it('accepts the explicit host-owned agent runtime capability', () => {
+    const result = parseModuleManifest(manifest({ capabilities: ['host-agent.use'] }))
+    expect(result.ok).toBe(true)
+    if (!result.ok) throw new Error('Expected host-agent.use capability to parse')
+    expect(result.value.capabilities as readonly string[]).toEqual(['host-agent.use'])
+  })
+
   it.each(['host.secrets.read', 'process.spawn', 'approval.grant', 'network.fetch'])('rejects unsupported authority capability %p', (capability) => {
     expect(errorsFor(manifest({ capabilities: [capability] }))[0]?.code).toBe('INVALID_CAPABILITY')
   })

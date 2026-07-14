@@ -18,7 +18,13 @@ import {
 import { ModuleInstaller } from '@simulator/module-installer'
 import { ModuleRegistry } from '@simulator/module-registry'
 import { FilesystemModuleRegistryPersistence } from '@simulator/module-registry/filesystem'
-import { LoopbackHttpHealthAdapter, ModuleDaemonManager, RealClock, RealProcessAdapter } from '@simulator/module-daemon'
+import {
+  LoopbackHttpHealthAdapter,
+  ModuleDaemonManager,
+  RealClock,
+  RealProcessAdapter,
+  type PrepareModuleDaemonLaunch,
+} from '@simulator/module-daemon'
 import { ElectronModuleViewPort } from './electron-module-view-port'
 import type { ModuleViewFailure, ModuleViewManager } from './module-view-manager'
 
@@ -36,6 +42,7 @@ export interface HostModuleCoordinatorOptions {
   readonly fetch?: ModuleDownloaderOptions['fetch']
   readonly clock?: HostModuleClock
   readonly daemonEnvironment?: Readonly<Record<string, string>>
+  readonly prepareModuleAgentLaunch?: PrepareModuleDaemonLaunch
 }
 
 export class HostModuleClock extends RealClock {
@@ -96,6 +103,18 @@ export function createHostModuleCoordinator(options: HostModuleCoordinatorOption
     health: new LoopbackHttpHealthAdapter(),
     baseEnvironment: options.daemonEnvironment,
     moduleDataRoot,
+    prepareLaunch: async (context) => {
+      const installed = registry.snapshot().modules
+        .find((module) => module.id === context.id)
+        ?.versions.find((version) => version.version === context.version)
+      if (!installed?.manifest.capabilities.includes('host-agent.use')) {
+        return { cleanup: async () => undefined }
+      }
+      if (!options.prepareModuleAgentLaunch) {
+        throw new Error('Module declares host-agent.use but the Host Agent runtime is unavailable')
+      }
+      return options.prepareModuleAgentLaunch(context)
+    },
   })
   const view = new ElectronModuleViewPort({
     manager: options.moduleViewManager,

@@ -27,6 +27,7 @@
   "dependencies": {
     "@craft-agent/core": "workspace:*",
     "@craft-agent/shared": "workspace:*",
+    "@simulator/module-agent-gateway": "workspace:*",
     "jose": "^6.0.0",
     "ws": "^8.19.0",
     "sharp": "0.34.5",

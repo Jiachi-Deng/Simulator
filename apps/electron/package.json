@@ -53,6 +53,7 @@
     "@craft-agent/shared": "workspace:*",
     "@craft-agent/ui": "workspace:*",
     "@simulator/module-contract": "workspace:*",
+    "@simulator/module-agent-gateway": "workspace:*",
     "@simulator/module-coordinator": "workspace:*",
     "@simulator/module-daemon": "workspace:*",
     "@simulator/module-downloader": "workspace:*",

@@ -1,0 +1,23 @@
+{
+  "name": "@simulator/module-agent-gateway",
+  "version": "0.11.1",
+  "license": "Apache-2.0",
+  "description": "Host-owned, provider-neutral agent gateway for optional Simulator modules",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./node": "./src/node.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "test": "bun test src",
+    "typecheck": "tsc --noEmit",
+    "build": "bun build src/index.ts src/testing.ts --outdir dist --target browser --format esm --splitting && bun build src/node.ts --outfile dist/node.js --target node --format esm"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.8",
+    "typescript": "^5.8.2"
+  }
+}

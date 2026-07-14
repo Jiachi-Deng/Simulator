@@ -127,6 +127,10 @@ import {
   type OpenDesignDevelopmentBootstrap,
 } from './open-design-development-bootstrap'
 import { resolveHostModuleStorageRoot } from './host-module-storage-root'
+import {
+  createHostModuleAgentRuntime,
+  type HostModuleAgentRuntime,
+} from './module-agent-runtime'
 import { OPEN_DESIGN_MODULE_ID } from '../shared/open-design-module-ipc'
 import { isModuleViewSmokeRequested, runModuleViewSmokeIfRequested } from './module-view-smoke'
 import {
@@ -242,6 +246,7 @@ let sessionManager: SessionManager | null = null
 let browserPaneManager: BrowserPaneManager | null = null
 let moduleViewManager: ModuleViewManager | null = null
 let hostModuleCoordinator: HostModuleCoordinatorRuntime | null = null
+let hostModuleAgentRuntime: HostModuleAgentRuntime | null = null
 let openDesignDevelopmentBootstrap: OpenDesignDevelopmentBootstrap = Object.freeze({ status: 'disabled' })
 let openDesignModuleController: OpenDesignModuleController | null = null
 let openDesignModuleIpc: OpenDesignModuleIpcRegistration | null = null
@@ -1068,6 +1073,18 @@ app.whenReady().then(async () => {
           smokeRoot: getHostModuleCoordinatorSmokeRoot(),
           developmentBootstrapStatus: openDesignDevelopmentBootstrap.status,
         })
+        if (!sessionManager) throw new Error('Session manager is unavailable for the Module Agent runtime')
+        hostModuleAgentRuntime = await createHostModuleAgentRuntime({
+          storageRoot: moduleStorageRoot,
+          sessions: sessionManager,
+          resolveWorkspaceId: () => {
+            const hostWindow = windowManager?.getLastActiveWindow()
+            const activeWorkspaceId = hostWindow
+              ? windowManager?.getWorkspaceForWindow(hostWindow.webContents.id) ?? undefined
+              : undefined
+            return activeWorkspaceId ?? sessionManager?.getWorkspaces()[0]?.id
+          },
+        })
         const stopOpenDesignDirectly = async (moduleId: ModuleId, reason: 'host-close' | 'view-failure') => {
           const runtime = hostModuleCoordinator
           if (!runtime) throw new Error('OpenDesign coordinator is unavailable')
@@ -1087,6 +1104,11 @@ app.whenReady().then(async () => {
           moduleViewManager,
           hostWindow: () => windowManager?.getLastActiveWindow() ?? undefined,
           fetch: developmentBundle?.fetchAdapter,
+          prepareModuleAgentLaunch: (context) => {
+            const runtime = hostModuleAgentRuntime
+            if (!runtime) throw new Error('Module Agent runtime is unavailable')
+            return runtime.prepareLaunch(context)
+          },
           onHostClose: async (moduleId) => {
             if (moduleId !== OPEN_DESIGN_MODULE_ID) return
             const controller = openDesignModuleController
@@ -1118,11 +1140,20 @@ app.whenReady().then(async () => {
           // Optional Module teardown must not block the built-in Agent runtime.
         }
         hostModuleCoordinator = null
+        try {
+          await hostModuleAgentRuntime?.dispose()
+        } catch {
+          // Optional Module Agent teardown must not block the built-in Agent runtime.
+        }
+        hostModuleAgentRuntime = null
       }
       if (isHostModuleCoordinatorSmokeRequested()) {
         const hostWindow = windowManager?.getLastActiveWindow()
         const smokeRuntime = hostModuleCoordinator
-        if (!sessionManager || !embeddedServer || !hostWindow || !smokeRuntime) throw new Error('Built-in runtime was incomplete before module smoke')
+        const smokeAgentRuntime = hostModuleAgentRuntime
+        if (!sessionManager || !embeddedServer || !hostWindow || !smokeRuntime || !smokeAgentRuntime) {
+          throw new Error('Built-in runtime was incomplete before module smoke')
+        }
         await runHostModuleCoordinatorSmokeIfRequested({
           runtime: smokeRuntime,
           manager: moduleViewManager,
@@ -1130,6 +1161,7 @@ app.whenReady().then(async () => {
           hostWindow,
           serverHost: embeddedServer.host,
           serverPort: embeddedServer.port,
+          moduleAgentRuntime: smokeAgentRuntime,
         })
         return
       }
@@ -1308,6 +1340,7 @@ async function cleanupBeforeQuit(): Promise<void> {
   let sessionFlushed = false
   let serverStopped = false
   let viewsDisposed = false
+  let moduleAgentStopped = false
   // Ensure Cmd+Q/app quit bypasses layered window close interception (Cmd+W behavior).
   windowManager?.setAppQuitting(true)
 
@@ -1353,6 +1386,14 @@ async function cleanupBeforeQuit(): Promise<void> {
     mainLog.error('Failed to drain host module coordinator:', error)
   } finally {
     hostModuleCoordinator = null
+  }
+  try {
+    await hostModuleAgentRuntime?.dispose()
+    moduleAgentStopped = true
+  } catch (error) {
+    mainLog.error('Failed to stop Module Agent runtime:', error)
+  } finally {
+    hostModuleAgentRuntime = null
   }
   try {
     moduleViewManager?.dispose()
@@ -1437,7 +1478,13 @@ async function cleanupBeforeQuit(): Promise<void> {
     serverStopped = true
   }
   embeddedServer = null
-  completeHostModuleCoordinatorSmokeCleanup({ coordinatorDrained, sessionFlushed, serverStopped, viewsDisposed })
+  completeHostModuleCoordinatorSmokeCleanup({
+    coordinatorDrained,
+    sessionFlushed,
+    serverStopped,
+    viewsDisposed,
+    moduleAgentStopped,
+  })
 }
 
 const beforeQuitCleanup = new BeforeQuitCleanupController({

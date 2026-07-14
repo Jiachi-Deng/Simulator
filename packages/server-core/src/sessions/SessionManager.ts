@@ -97,6 +97,7 @@ import { ensureLabelsExist, ensureTaskItemLabel } from '@craft-agent/shared/labe
 import { loadStatusConfig } from '@craft-agent/shared/statuses/storage'
 import { AutomationSystem, createPromptHistoryEntry, appendAutomationHistoryEntry, type AutomationSystemMetadataSnapshot } from '@craft-agent/shared/automations'
 import { buildBackendRuntimeSignature, buildRestartRequiredSignature, filterAttachmentsForModelInput } from './runtime-config'
+import type { ModuleAgentPortEvent } from '@simulator/module-agent-gateway'
 
 // Import from server-core domain utilities
 import { sanitizeForTitle, shouldActivateBrowserOverlay, normalizeBrowserToolName, rollbackFailedBranchCreation, releaseBrowserOwnershipOnForcedStop } from '@craft-agent/server-core/domain'
@@ -166,6 +167,45 @@ export const AGENT_FLAGS = {
   /** Default modes enabled for new sessions */
   defaultModesEnabled: true,
 } as const
+
+/**
+ * Clean-room, allow-list-only projection for Module Agent consumers. Never add
+ * a default branch here: new SessionEvent variants must remain invisible until
+ * they receive an explicit security review.
+ */
+export function toModuleAgentPortEvent(event: SessionEvent): ModuleAgentPortEvent | undefined {
+  switch (event.type) {
+    case 'text_delta':
+      return { type: 'message.delta', sessionId: event.sessionId, delta: event.delta }
+    case 'text_complete':
+      return { type: 'message.completed', sessionId: event.sessionId, text: event.text }
+    case 'tool_start':
+      return {
+        type: 'activity',
+        sessionId: event.sessionId,
+        phase: 'started',
+        kind: 'tool',
+        label: sanitizeModuleAgentActivityLabel(event.toolName),
+      }
+    case 'tool_result':
+      return {
+        type: 'activity',
+        sessionId: event.sessionId,
+        phase: 'finished',
+        kind: 'tool',
+        label: sanitizeModuleAgentActivityLabel(event.toolName),
+      }
+    case 'status':
+      return { type: 'activity', sessionId: event.sessionId, phase: 'started', kind: 'runtime' }
+    default:
+      return undefined
+  }
+}
+
+function sanitizeModuleAgentActivityLabel(value: string): string | undefined {
+  const label = value.replace(/[^a-zA-Z0-9._:-]/g, '').slice(0, 80)
+  return label || undefined
+}
 
 const MAX_ADMIN_REMEMBER_MINUTES = 60
 const MAX_ANNOTATIONS_PER_MESSAGE = 200
@@ -1290,9 +1330,20 @@ export class SessionManager implements ISessionManager {
   /** Pinned desktop client per session for `client:browser:invoke` routing. */
   private browserHostByCanvas = new Map<string, string>()
   private eventSink: EventSink | null = null
+  private moduleAgentRuntimeListeners = new Set<(event: ModuleAgentPortEvent) => void>()
 
   setEventSink(sink: EventSink): void {
     this.eventSink = sink
+  }
+
+  /**
+   * Subscribe to the deliberately narrow Module Agent observer. Callers never
+   * receive SessionEvent, credential/auth/permission payloads, paths, tool
+   * inputs, or tool results.
+   */
+  onModuleAgentRuntimeEvent(listener: (event: ModuleAgentPortEvent) => void): () => void {
+    this.moduleAgentRuntimeListeners.add(listener)
+    return () => this.moduleAgentRuntimeListeners.delete(listener)
   }
 
   setBrowserPaneManager(bpm: IBrowserPaneManager): void {
@@ -8298,6 +8349,17 @@ export class SessionManager implements ISessionManager {
   }
 
   private sendEvent(event: SessionEvent, workspaceId?: string): void {
+    const moduleEvent = toModuleAgentPortEvent(event)
+    if (moduleEvent && this.moduleAgentRuntimeListeners.size > 0) {
+      for (const listener of this.moduleAgentRuntimeListeners) {
+        try {
+          listener(moduleEvent)
+        } catch (error) {
+          sessionLog.warn('Module Agent runtime observer threw; ignoring', error)
+        }
+      }
+    }
+
     if (!this.eventSink) {
       sessionLog.warn('Cannot send event - no event sink')
       return

@@ -1,12 +1,13 @@
 import { createServer, type Server } from 'node:http'
 import { createConnection } from 'node:net'
-import { readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { BrowserWindow, app, webContents } from 'electron'
 import { parseModuleManifest } from '@simulator/module-contract'
 import type { SessionManager } from '@craft-agent/server-core/sessions'
 import { addLlmConnection, getWorkspaces, setDefaultLlmConnection } from '@craft-agent/shared/config'
 import type { HostModuleCoordinatorRuntime } from './host-module-coordinator'
 import type { ModuleViewManager } from './module-view-manager'
+import type { HostModuleAgentRuntime } from './module-agent-runtime'
 import {
   HOST_MODULE_SMOKE_ROOT_PREFIX,
   isHostModuleSmokeAcceptanceRequested,
@@ -25,6 +26,7 @@ interface SmokeRuntime {
   readonly hostWindow: BrowserWindow
   readonly serverHost: string
   readonly serverPort: number
+  readonly moduleAgentRuntime: HostModuleAgentRuntime
 }
 
 interface CleanupEvidence {
@@ -32,6 +34,7 @@ interface CleanupEvidence {
   readonly sessionFlushed: boolean
   readonly serverStopped: boolean
   readonly viewsDisposed: boolean
+  readonly moduleAgentStopped: boolean
 }
 
 let pendingResult: Record<string, unknown> | undefined
@@ -231,13 +234,48 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
     if (!daemon?.endpoint || !daemon.pid) throw new Error('Healthy daemon endpoint disappeared')
     const resource = await fetch(`http://${daemon.endpoint.host}:${daemon.endpoint.port}/resource/data.txt`)
     const resourceText = await resource.text()
+    const firstHostAgentResponse = await fetch(`http://${daemon.endpoint.host}:${daemon.endpoint.port}/host-agent-smoke`)
+    const firstHostAgent = await firstHostAgentResponse.json() as {
+      ok: boolean
+      capability?: string
+      contractVersion?: number
+      replies?: string[]
+      tokenFile?: string
+      error?: string
+    }
+    if (!firstHostAgent.ok || firstHostAgent.capability !== 'host-agent.use'
+      || firstHostAgent.contractVersion !== 1
+      || firstHostAgent.replies?.length !== 2
+      || firstHostAgent.replies.some((reply) => !reply.includes(AGENT_REPLY))
+      || !firstHostAgent.tokenFile || !existsSync(firstHostAgent.tokenFile)) {
+      throw new Error(`First Module Host Agent journey failed: ${JSON.stringify(firstHostAgent)}`)
+    }
+    const firstTokenFile = firstHostAgent.tokenFile
+    const firstGatewaySnapshot = smoke.moduleAgentRuntime.debugSnapshot()
+    if (firstGatewaySnapshot.activeGrants !== 1 || firstGatewaySnapshot.activeSessions !== 0
+      || firstGatewaySnapshot.activeTurns !== 0 || firstGatewaySnapshot.activeSubscribers !== 0) {
+      throw new Error(`First Host Agent journey leaked session state: ${JSON.stringify(firstGatewaySnapshot)}`)
+    }
 
     process.kill(daemon.pid, 'SIGKILL')
+    await waitFor(() => !existsSync(firstTokenFile), 'old launch token revocation')
     await waitFor(() => {
       const current = smoke.runtime.daemon.get(manifest.id)
       return current?.state === 'healthy' && current.restartCount >= 1
     }, 'module daemon restart')
     await waitFor(() => smoke.manager.list()[0]?.state === 'ready' && smoke.manager.list()[0]?.attached === true, 'module view reattach')
+    const restartedDaemon = smoke.runtime.daemon.get(manifest.id)
+    if (!restartedDaemon?.endpoint) throw new Error('Restarted daemon endpoint disappeared')
+    const secondHostAgentResponse = await fetch(`http://${restartedDaemon.endpoint.host}:${restartedDaemon.endpoint.port}/host-agent-smoke`)
+    const secondHostAgent = await secondHostAgentResponse.json() as typeof firstHostAgent
+    if (!secondHostAgent.ok || secondHostAgent.capability !== 'host-agent.use'
+      || secondHostAgent.replies?.length !== 2
+      || secondHostAgent.replies.some((reply) => !reply.includes(AGENT_REPLY))
+      || !secondHostAgent.tokenFile || secondHostAgent.tokenFile === firstTokenFile
+      || !existsSync(secondHostAgent.tokenFile)) {
+      throw new Error(`Restarted Module Host Agent journey failed: ${JSON.stringify(secondHostAgent)}`)
+    }
+    const secondTokenFile = secondHostAgent.tokenFile
 
     const sessionDuringModule = await smoke.sessionManager.getSession(session.id)
     const builtInRuntimeUnaffected = Boolean(
@@ -252,6 +290,14 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
 
     const stopped = await smoke.runtime.coordinator.stop({ operationId: 'electron-product-smoke-stop', moduleId: manifest.id })
     if (!stopped.ok) throw new Error(stopped.error ?? 'Coordinator stop failed')
+    await waitFor(() => !existsSync(secondTokenFile), 'restarted launch token revocation')
+    const stoppedGatewaySnapshot = smoke.moduleAgentRuntime.debugSnapshot()
+    if (JSON.stringify(stoppedGatewaySnapshot) !== JSON.stringify({
+      activeGrants: 0,
+      activeSessions: 0,
+      activeTurns: 0,
+      activeSubscribers: 0,
+    })) throw new Error(`Coordinator stop leaked Host Agent state: ${JSON.stringify(stoppedGatewaySnapshot)}`)
     const orphan = smoke.manager.list().length !== 0 || webContents.fromId(firstView.webContentsId) !== undefined
     if (orphan) throw new Error('Coordinator stop left an orphan module WebContentsView')
 
@@ -261,6 +307,14 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
       packaged: app.isPackaged,
       coordinatorLifecycle: true,
       moduleCrashRestarted: true,
+      hostAgentRuntime: {
+        deterministicMultiTurn: true,
+        crashGrantRotated: true,
+        oldGrantRevoked: true,
+        stopGrantRevoked: true,
+        firstGatewaySnapshot,
+        stoppedGatewaySnapshot,
+      },
       moduleId: manifest.id,
       renderer,
       resourceText,

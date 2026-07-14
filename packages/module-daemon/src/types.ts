@@ -84,6 +84,40 @@ export interface StartModuleDaemonRequest {
   readonly platform: ModulePlatform
 }
 
+/** Immutable host-owned context for one daemon launch attempt. */
+export interface ModuleDaemonLaunchContext {
+  readonly id: ModuleId
+  readonly version: ModuleVersion
+  readonly activatedRoot: string
+  readonly executable: string
+  readonly endpoint: LoopbackEndpoint
+  readonly restartCount: number
+  readonly signal: AbortSignal
+}
+
+export type ModuleDaemonLaunchCleanupReason =
+  | 'spawn-failed'
+  | 'process-exit'
+  | 'stop'
+  | 'restart'
+  | 'drain'
+
+/**
+ * Per-launch resources prepared by the host before spawning a module daemon.
+ *
+ * `environment` is merged only into this spawn request; it is never retained
+ * in the manager's shared base environment. `cleanup` must revoke every
+ * resource represented by the environment (for example, an opaque grant).
+ */
+export interface ModuleDaemonLaunchLease {
+  readonly environment?: Readonly<Record<string, string>>
+  cleanup(reason: ModuleDaemonLaunchCleanupReason): Promise<void>
+}
+
+export type PrepareModuleDaemonLaunch = (
+  context: ModuleDaemonLaunchContext,
+) => Promise<ModuleDaemonLaunchLease>
+
 export type ModuleDaemonDiagnosticCode =
   | 'ENTRYPOINT_INVALID'
   | 'ENTRYPOINT_OUTSIDE_ACTIVATED_ROOT'
@@ -91,6 +125,9 @@ export type ModuleDaemonDiagnosticCode =
   | 'ARTIFACT_NOT_FOUND'
   | 'ENDPOINT_ALLOCATION_FAILED'
   | 'ENDPOINT_NOT_LOOPBACK'
+  | 'LAUNCH_PREPARATION_FAILED'
+  | 'LAUNCH_ENVIRONMENT_INVALID'
+  | 'LAUNCH_CLEANUP_FAILED'
   | 'SPAWN_FAILED'
   | 'STARTUP_TIMEOUT'
   | 'READINESS_MALFORMED'
@@ -134,6 +171,12 @@ export interface ModuleDaemonManagerOptions {
   readonly idleTimeoutMs?: number
   readonly stopGraceMs?: number
   readonly baseEnvironment?: Readonly<Record<string, string>>
+  /**
+   * Atomically prepares environment and revocable resources for each spawn.
+   * A restart invokes this hook again. The manager owns and cleans a returned
+   * lease once after success and retries cleanup only when it rejects.
+   */
+  readonly prepareLaunch?: PrepareModuleDaemonLaunch
   /** Host-owned parent used to derive one persistent data root per module ID. */
   readonly moduleDataRoot?: string
   readonly onListenerError?: (error: unknown, snapshot: ModuleDaemonSnapshot) => void

@@ -17,6 +17,7 @@ export const MAX_MODULE_AUXILIARY_EXECUTABLES = 8
 export const MODULE_CAPABILITIES = [
   'artifact.read',
   'artifact.write',
+  'host-agent.use',
   'workspace.read',
   'workspace.write',
 ] as const

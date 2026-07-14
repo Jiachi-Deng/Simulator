@@ -57,7 +57,7 @@ writeFileSync(manifestPath, `${JSON.stringify({
     url: 'https://modules.example.test/electron-product-smoke.tar.gz',
     sha256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
   }],
-  capabilities: [],
+  capabilities: ['host-agent.use'],
 })}\n`)
 
 function packagedExecutable(path: string): string {
@@ -114,9 +114,13 @@ try {
   if (result.packaged !== Boolean(packagedApp)) throw new Error(`Unexpected packaged state: ${JSON.stringify(result)}`)
   const cleanup = result.cleanup as Record<string, unknown> | undefined
   const builtInAgent = result.builtInAgent as Record<string, unknown> | undefined
+  const hostAgentRuntime = result.hostAgentRuntime as Record<string, unknown> | undefined
   if (result.preloadIsolated !== true || result.noOrphanWebContents !== true || result.builtInAgentIndependent !== true
     || result.moduleCrashRestarted !== true || result.beforeQuitObserved !== true || result.repeatedBeforeQuitIdempotent !== true
     || cleanup?.coordinatorDrained !== true || cleanup.sessionFlushed !== true || cleanup.serverStopped !== true || cleanup.viewsDisposed !== true
+    || cleanup.moduleAgentStopped !== true
+    || hostAgentRuntime?.deterministicMultiTurn !== true || hostAgentRuntime.crashGrantRotated !== true
+    || hostAgentRuntime.oldGrantRevoked !== true || hostAgentRuntime.stopGrantRevoked !== true
     || builtInAgent?.deterministicTurn !== true || builtInAgent.serverHealthyBeforeModule !== true || builtInAgent.serverHealthyAfterModule !== true) {
     throw new Error(`Electron host module smoke assertions failed: ${JSON.stringify(result)}`)
   }
