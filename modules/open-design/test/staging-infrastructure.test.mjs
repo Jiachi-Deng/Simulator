@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { copyStagingInputs } from "../src/staging-copier.mjs";
-import { createBuildAttestation, createBuildPlan, runBuildPlan, validateSbom, writeArtifactManifest } from "../src/stage-open-design.mjs";
+import { createBuildAttestation, createBuildPlan, resolveDistribution, runBuildPlan, validateSbom, writeArtifactManifest } from "../src/stage-open-design.mjs";
 import { canonicalJsonBytes } from "../src/validate-artifact.mjs";
 
 const moduleRoot = new URL("../", import.meta.url);
@@ -167,4 +167,10 @@ test("requires exact SBOM package, lock, checksum, license and notice coverage",
     mutate(changed);
     assert.throws(() => validateSbom({ sbom: changed, sha256: "a".repeat(64), provenance, policy }));
   }
+});
+
+test("requires both the development CLI intent and explicit environment authorization", () => {
+  assert.deepEqual(resolveDistribution(), { class: "public", nonPromotable: false });
+  assert.throws(() => resolveDistribution({ developmentLocalOnly: true }), { code: "DEVELOPMENT_ARTIFACT_NOT_ALLOWED" });
+  assert.deepEqual(resolveDistribution({ developmentLocalOnly: true, allowUnreviewedLocalArtifact: true }), { class: "development-local-only", nonPromotable: true });
 });

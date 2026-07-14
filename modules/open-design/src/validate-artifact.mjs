@@ -11,6 +11,14 @@ const textEncoder = new TextEncoder();
 const moduleRoot = new URL("../", import.meta.url);
 
 export function validateArtifact({ provenance, policy, decisions, attestation, inventory, schemas }) {
+  return validateArtifactForDistribution({ provenance, policy, decisions, attestation, inventory, schemas }, "public");
+}
+
+export function validateDevelopmentArtifact({ provenance, policy, decisions, attestation, inventory, schemas }) {
+  return validateArtifactForDistribution({ provenance, policy, decisions, attestation, inventory, schemas }, "development-local-only");
+}
+
+function validateArtifactForDistribution({ provenance, policy, decisions, attestation, inventory, schemas }, expectedDistributionClass) {
   const errors = [];
   const fail = (code, message) => errors.push({ code, message });
   const schemaInputs = [
@@ -27,6 +35,15 @@ export function validateArtifact({ provenance, policy, decisions, attestation, i
   if (!schemas?.inventoryFile) fail("SCHEMA_MISSING", "runtime schema is missing for inventory.file");
   else for (const [index, file] of (inventory?.files ?? []).entries()) validateSchema(file, schemas.inventoryFile, `inventory.files[${index}]`, fail);
   if (errors.length) return { ok: false, errors };
+
+  if (inventory.distribution.class !== expectedDistributionClass) {
+    fail(expectedDistributionClass === "public" ? "DEVELOPMENT_ARTIFACT_FORBIDDEN" : "DISTRIBUTION_CLASS_INVALID", `validator requires ${expectedDistributionClass} artifacts`);
+  }
+  if (inventory.distribution.class !== attestation.distribution.class || inventory.distribution.nonPromotable !== attestation.distribution.nonPromotable) {
+    fail("DISTRIBUTION_ATTESTATION_MISMATCH", "inventory and attestation distribution markings differ");
+  }
+  if (inventory.distribution.class === "development-local-only" && inventory.distribution.nonPromotable !== true) fail("DISTRIBUTION_CLASS_INVALID", "development artifacts must be non-promotable");
+  if (inventory.distribution.class === "public" && inventory.distribution.nonPromotable !== false) fail("DISTRIBUTION_CLASS_INVALID", "public artifacts cannot carry a development promotion marking");
 
   const pinned = provenance.source;
   if (!SHA40.test(pinned.commit) || /^(HEAD|main|master|develop)$/i.test(pinned.ref)) fail("SOURCE_NOT_PINNED", "source must use a pinned tag/commit and full SHA");
@@ -79,10 +96,9 @@ export function validateArtifact({ provenance, policy, decisions, attestation, i
       if (!file.symlinkTarget || !validateSymlinkTarget(file.path, file.symlinkTarget)) fail("SYMLINK_ESCAPE", `symlink target must stay inside artifact root: ${file.path}`);
     } else if (file.symlinkTarget !== undefined) fail("FILE_METADATA_INVALID", `regular file cannot declare symlinkTarget: ${file.path}`);
 
-    const inferredCategory = runtimeClass ? "native-binaries" : inferResourceCategory(extension, policy);
     const pathCategory = inferResourcePathCategory(file.path, policy);
+    const inferredCategory = runtimeClass ? "native-binaries" : pathCategory ?? inferResourceCategory(extension, policy);
     if (inferredCategory && file.resourceCategory !== inferredCategory) fail("UNEXPECTED_RESOURCE", `${inferredCategory} resource lacks its category/decision: ${file.path}`);
-    if (pathCategory && file.resourceCategory !== pathCategory) fail("UNEXPECTED_RESOURCE", `${pathCategory} resource lacks its category/decision: ${file.path}`);
     if (pathCategory !== undefined && !file.resourceCategory) fail("UNEXPECTED_RESOURCE", `resource path lacks its category/decision: ${file.path}`);
     if (file.resourceCategory) validateResource(file, decisionById, fail);
     else if (file.sourcePath !== undefined || file.decisionId !== undefined) fail("UNEXPECTED_RESOURCE", `resource metadata is incomplete: ${file.path}`);
@@ -111,6 +127,10 @@ function validateAttestation({ attestation, provenance, inventory }, fail) {
   }
   if (inventory.target.platform !== actual.platform || inventory.target.arch !== actual.arch || inventory.target.nodeAbi !== actual.nodeAbi) fail("ATTESTATION_TARGET_MISMATCH", "artifact target does not match attested toolchain");
   validateSbomEvidence(attestation.sbom, provenance, fail);
+  const metadataInput = attestation.inputs.find((entry) => entry.name === "resource-metadata.json");
+  if (!metadataInput || metadataInput.sha256 !== attestation.resourceMetadata.documentSha256) fail("ATTESTATION_RESOURCE_METADATA_MISMATCH", "resource metadata evidence does not bind the canonical input bytes");
+  const resourceCount = inventory.files.filter((file) => file.resourceCategory !== undefined).length;
+  if (attestation.resourceMetadata.resourceCount !== resourceCount) fail("ATTESTATION_RESOURCE_METADATA_MISMATCH", "resource metadata count does not match the final inventory");
   const closure = attestation.build.normalization.daemonClosure;
   const expectedExternals = ["better-sqlite3", "node-pty", "blake3-wasm"];
   const daemonEntry = inventory.files.find((file) => file.path === "runtime/daemon/dist/sidecar/index.js");
@@ -270,7 +290,9 @@ export function inferResourcePathCategory(artifactPath, policy) {
 function validateResource(file, decisions, fail) {
   if (!file.sourcePath || !validateNormalizedRelativePath(file.sourcePath)) fail("RESOURCE_SOURCE_INVALID", `resource sourcePath must be exact and normalized: ${file.path}`);
   const decision = decisions.get(file.decisionId);
-  if (!decision || decision.category !== file.resourceCategory || decision.sourcePath !== file.sourcePath) {
+  if (!decision) {
+    fail("RIGHTS_DECISION_MISSING", `no canonical rights decision exists for exact resource source: ${file.path}`);
+  } else if (decision.category !== file.resourceCategory || decision.sourcePath !== file.sourcePath) {
     fail("RESOURCE_DECISION_MISMATCH", `decisionId must match exact sourcePath and category: ${file.path}`);
   } else if (decision.status !== "include" || decision.rightsStatus !== "cleared" || !decision.license?.trim() || !decision.rightsEvidence) {
     fail("RESOURCE_EXCLUDED", `resource lacks an include+cleared decision with license evidence: ${file.path}`);
@@ -320,6 +342,10 @@ function validateRequiredFile(file, required, sourceCommit, inputs, fail) {
   if (required.path === "legal/SBOM.spdx.json") {
     const sbomInput = inputs.attestation.inputs.find((entry) => entry.name === "legal/SBOM.spdx.json");
     if (!sbomInput || file.sha256 !== sbomInput.sha256 || file.sha256 !== inputs.attestation.sbom.documentSha256) fail("CONTENT_DIGEST_MISMATCH", "staged SBOM bytes do not bind the hashed SBOM input and attestation evidence");
+  }
+  if (required.path === "resource-metadata.json") {
+    const metadataInput = inputs.attestation.inputs.find((entry) => entry.name === "resource-metadata.json");
+    if (!metadataInput || file.sha256 !== metadataInput.sha256 || file.sha256 !== inputs.attestation.resourceMetadata.documentSha256) fail("CONTENT_DIGEST_MISMATCH", "resource metadata bytes do not bind the attested canonical metadata input");
   }
   if (required.path === "artifact-manifest.json" && file.sha256 !== digestInventory(inputs.inventory)) fail("CONTENT_DIGEST_MISMATCH", "manifest digest does not bind the supplied inventory document");
 }

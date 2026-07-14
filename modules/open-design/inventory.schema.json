@@ -1,8 +1,9 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema", "$id": "open-design-artifact-inventory-v1", "type": "object",
-  "required": ["schemaVersion", "source", "target", "files"],
+  "required": ["schemaVersion", "distribution", "source", "target", "files"],
   "properties": {
     "schemaVersion": {"const": 1},
+    "distribution": {"type": "object", "required": ["class", "nonPromotable"], "properties": {"class": {"enum": ["public", "development-local-only"]}, "nonPromotable": {"type": "boolean"}}, "additionalProperties": false},
     "source": {"type": "object", "required": ["ref", "commit"], "properties": {"ref": {"type": "string", "minLength": 1, "maxLength": 256}, "commit": {"type": "string", "pattern": "^[0-9a-f]{40}$"}}, "additionalProperties": false},
     "target": {"type": "object", "required": ["platform", "arch", "nodeAbi", "libc"], "properties": {"platform": {"enum": ["darwin", "linux", "win32"]}, "arch": {"enum": ["arm64", "x64"]}, "nodeAbi": {"type": "string", "pattern": "^[0-9]{1,4}$"}, "libc": {"enum": ["none", "glibc", "musl", "msvcrt"]}}, "additionalProperties": false},
     "files": {"type": "array", "minItems": 1, "maxItems": 100000, "items": {"type": "object"}}

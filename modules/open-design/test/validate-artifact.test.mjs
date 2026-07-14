@@ -4,7 +4,7 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
-import { digestCanonicalJson, digestInventory, loadRuntimeSchemas, validateArtifact } from "../src/validate-artifact.mjs";
+import { digestCanonicalJson, digestInventory, loadRuntimeSchemas, validateArtifact, validateDevelopmentArtifact } from "../src/validate-artifact.mjs";
 
 const root = new URL("../", import.meta.url);
 const load = async (name) => JSON.parse(await readFile(new URL(name, root), "utf8"));
@@ -58,11 +58,21 @@ function refreshManifestDigest(inventory) {
 }
 
 function refreshAttestationAndManifest(input) {
+  input.attestation.resourceMetadata.resourceCount = input.inventory.files.filter((file) => file.resourceCategory !== undefined).length;
   input.inventory.files.find((file) => file.path === "build-attestation.json").sha256 = digestCanonicalJson(input.attestation);
   refreshManifestDigest(input.inventory);
 }
 
 test("accepts the minimal pinned artifact inventory", () => assert.deepEqual(validateArtifact(base), { ok: true, errors: [] }));
+
+test("public validator rejects an explicitly non-promotable development artifact", () => {
+  const input = structuredClone(base);
+  input.inventory.distribution = { class: "development-local-only", nonPromotable: true };
+  input.attestation.distribution = { class: "development-local-only", nonPromotable: true };
+  refreshAttestationAndManifest(input);
+  has(validateArtifact(input), "DEVELOPMENT_ARTIFACT_FORBIDDEN");
+  assert.deepEqual(validateDevelopmentArtifact(input), { ok: true, errors: [] });
+});
 
 test("validator CLI rejects unknown, duplicate and missing-value arguments", async () => {
   const rejectsCli = async (args, code) => {

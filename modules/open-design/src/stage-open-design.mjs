@@ -13,6 +13,8 @@ import { inspectNativeRuntime } from "./native-inventory.mjs";
 import { hoistMaterializedPnpmAliases, materializeBuildOutput } from "./materialize-build-output.mjs";
 import { createHermeticBuildEnvironment, createPrivateBuildWorkspace, verifyPostBuildWorkspace } from "./private-build-workspace.mjs";
 import { produceInventory } from "./produce-inventory.mjs";
+import { produceResourceMetadata } from "./produce-resource-metadata.mjs";
+import { produceSbom } from "./produce-sbom.mjs";
 import { copyStagingInputs } from "./staging-copier.mjs";
 import { smokeStagedRuntime } from "./staged-runtime-smoke.mjs";
 import { stagingAssert, stagingFail } from "./staging-error.mjs";
@@ -20,6 +22,13 @@ import { digestCanonicalJson } from "./validate-artifact.mjs";
 import { verifyUpstream } from "./verify-upstream.mjs";
 
 const moduleRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+export const PUBLIC_DISTRIBUTION = Object.freeze({ class: "public", nonPromotable: false });
+export const DEVELOPMENT_LOCAL_DISTRIBUTION = Object.freeze({ class: "development-local-only", nonPromotable: true });
+
+export function resolveDistribution({ developmentLocalOnly = false, allowUnreviewedLocalArtifact = false } = {}) {
+  if (developmentLocalOnly) stagingAssert(allowUnreviewedLocalArtifact === true, "DEVELOPMENT_ARTIFACT_NOT_ALLOWED", "development-local-only staging requires SIMULATOR_ALLOW_UNREVIEWED_LOCAL_ARTIFACT=1");
+  return developmentLocalOnly ? DEVELOPMENT_LOCAL_DISTRIBUTION : PUBLIC_DISTRIBUTION;
+}
 const BUILD_PACKAGES = Object.freeze([
   "@open-design/contracts",
   "@open-design/registry-protocol",
@@ -58,29 +67,26 @@ export async function prepareProductionStaging({
   sourceRoot,
   stagingRoot,
   workParent,
-  sbomPath,
-  metadataPath,
   targetPath,
   nodeBin,
   pnpmBin,
+  developmentLocalOnly = false,
+  allowUnreviewedLocalArtifact = false,
   dryRun = false,
   run,
   runCommand = defaultCommandRunner,
 } = {}) {
-  const [provenanceInput, policyInput, decisionsInput, metadataInput, targetInput, sbomInput] = await Promise.all([
+  const distribution = resolveDistribution({ developmentLocalOnly, allowUnreviewedLocalArtifact });
+  const [provenanceInput, policyInput, decisionsInput, targetInput] = await Promise.all([
     readJsonInput(path.join(moduleRoot, "provenance.json"), "PROVENANCE_INVALID"),
     readJsonInput(path.join(moduleRoot, "artifact-policy.json"), "STAGING_POLICY_INVALID"),
     readJsonInput(path.join(moduleRoot, "resource-decisions.json"), "RESOURCE_DECISIONS_INVALID"),
-    readJsonInput(metadataPath, "METADATA_INPUT_INVALID"),
     readJsonInput(targetPath, "TARGET_INPUT_INVALID"),
-    readJsonInput(sbomPath, "SBOM_INPUT_INVALID"),
   ]);
   const provenance = provenanceInput.value;
   const policy = policyInput.value;
   const decisions = decisionsInput.value;
-  const metadata = metadataInput.value;
   const target = targetInput.value;
-  const sbomEvidence = validateSbom({ sbom: sbomInput.value, sha256: sbomInput.sha256, provenance, policy });
   const verification = await verifyUpstream({ sourceRoot, provenance, nodeBin, pnpmBin, run });
   const atomicTarget = await createAtomicStagingTarget(stagingRoot);
   let workspace;
@@ -115,13 +121,17 @@ export async function prepareProductionStaging({
         { label: "web-sidecar-dist", source: path.join(normalization.web.root, "dist"), destination: "runtime/packages/web-sidecar/dist" },
         { label: "web-sidecar-manifest", source: path.join(normalization.web.root, "package.json"), destination: "runtime/packages/web-sidecar/package.json" },
         { label: "license", source: path.join(workspace.checkoutRoot, provenance.license.sourceFile), destination: "legal/LICENSE" },
-        { label: "sbom", source: sbomPath, destination: "legal/SBOM.spdx.json" },
       ],
     });
+    const resourceMetadata = await produceResourceMetadata({ artifactRoot: copied.root, provenance, policy, decisions, target });
+    await writeExclusiveCanonicalJson(path.join(copied.root, "resource-metadata.json"), resourceMetadata.document);
+    const sbom = await produceSbom({ sourceRoot: workspace.checkoutRoot, artifactRoot: copied.root, provenance, target });
+    await writeExclusiveCanonicalJson(path.join(copied.root, "legal/SBOM.spdx.json"), sbom.document);
+    const sbomEvidence = validateSbom({ sbom: sbom.document, sha256: sbom.sha256, provenance, policy });
     await writeExclusiveCanonicalJson(path.join(copied.root, "provenance.json"), provenance);
     const nativeInventory = await inspectNativeRuntime({
       artifactRoot: copied.root,
-      metadata,
+      metadata: resourceMetadata.document.resources,
       target,
       nodeBin: verification.toolchain.nodeExecutable,
       runtime: { platform: verification.toolchain.platform, arch: verification.toolchain.arch, nodeAbi: verification.toolchain.nodeAbi },
@@ -138,10 +148,12 @@ export async function prepareProductionStaging({
       nativeInventory,
       runtimeVerification,
       sbomEvidence,
+      resourceMetadataEvidence: { documentSha256: resourceMetadata.sha256, ...resourceMetadata.evidence },
+      distribution,
       externalInputs: [
         ...verification.inputs.map((input) => ({ name: input.path, sha256: input.sha256 })),
-        { name: "legal/SBOM.spdx.json", sha256: sbomInput.sha256 },
-        { name: "resource-metadata.json", sha256: metadataInput.sha256 },
+        { name: "legal/SBOM.spdx.json", sha256: sbom.sha256 },
+        { name: "resource-metadata.json", sha256: resourceMetadata.sha256 },
         { name: "target.json", sha256: targetInput.sha256 },
         { name: "provenance.json", sha256: digestCanonicalJson(provenance) },
         { name: "artifact-policy.json", sha256: policyInput.sha256 },
@@ -149,14 +161,14 @@ export async function prepareProductionStaging({
       ],
     });
     await writeExclusiveCanonicalJson(path.join(copied.root, "build-attestation.json"), attestation);
-    const produced = await produceInventory({ stagingRoot: copied.root, metadata, provenance, policy, decisions, attestation, target, deferRights: true });
+    const produced = await produceInventory({ stagingRoot: copied.root, metadata: resourceMetadata.document.resources, provenance, policy, decisions, attestation, target, distribution, deferRights: true });
     await writeArtifactManifest(copied.root, produced);
     await sealCandidate({ target: atomicTarget, inventory: produced.inventory });
     const runEvidence = await smokeStagedRuntime({ artifactRoot: copied.root, nodeBin: verification.toolchain.nodeExecutable, expectedInventory: produced.inventory });
     await verifySealedCandidate({ target: atomicTarget, inventory: produced.inventory });
-    if (produced.deferredRightsErrors.length > 0) stagingFail("RIGHTS_GATE_FAILED", produced.deferredRightsErrors.map((error) => `${error.code}: ${error.message}`).join("; "));
+    if (!developmentLocalOnly && produced.deferredRightsErrors.length > 0) stagingFail("RIGHTS_GATE_FAILED", produced.deferredRightsErrors.map((error) => `${error.code}: ${error.message}`).join("; "));
     const publish = await publishSealedCandidate({ target: atomicTarget, inventory: produced.inventory });
-    return { dryRun: false, verification, plan: publicPlan(plan), copied, nativeInventory, attestation, inventory: produced.inventory, runEvidence, publish };
+    return { dryRun: false, verification, plan: publicPlan(plan), copied, resourceMetadata, sbom, nativeInventory, attestation, inventory: produced.inventory, deferredRightsErrors: produced.deferredRightsErrors, runEvidence, publish };
   } catch (error) {
     primaryError = error;
     throw error;
@@ -185,10 +197,11 @@ export async function runBuildPlan(plan, runCommand = defaultCommandRunner, exec
   return evidence;
 }
 
-export function createBuildAttestation({ provenance, verification, environment, commandEvidence, postBuild, normalization, nativeInventory, runtimeVerification, sbomEvidence, externalInputs }) {
+export function createBuildAttestation({ provenance, verification, environment, commandEvidence, postBuild, normalization, nativeInventory, runtimeVerification, sbomEvidence, resourceMetadataEvidence, distribution = PUBLIC_DISTRIBUTION, externalInputs }) {
   const toolchain = verification.toolchain;
   return {
     schemaVersion: 1,
+    distribution: structuredClone(distribution),
     sourceCommit: provenance.source.commit,
     patch: {
       path: provenance.simulatorPatch.path,
@@ -208,6 +221,7 @@ export function createBuildAttestation({ provenance, verification, environment, 
     environment: reproducibleEnvironment(environment),
     inputs: [...externalInputs].sort((left, right) => Buffer.compare(Buffer.from(left.name), Buffer.from(right.name))),
     sbom: structuredClone(sbomEvidence),
+    resourceMetadata: structuredClone(resourceMetadataEvidence),
     commands: commandEvidence,
     build: {
       privateDetachedCheckout: true,
@@ -398,16 +412,21 @@ function parseArguments(argv) {
       options.dryRun = true;
       continue;
     }
+    if (token === "--development-local-only") {
+      stagingAssert(options.developmentLocalOnly !== true, "ARGUMENT_DUPLICATE", "duplicate --development-local-only");
+      options.developmentLocalOnly = true;
+      continue;
+    }
     stagingAssert(token?.startsWith("--"), "ARGUMENT_UNKNOWN", `unknown argument: ${token}`);
     const name = token.slice(2);
-    stagingAssert(["source", "staging-root", "work-parent", "sbom", "metadata", "target", "node-bin", "pnpm-bin"].includes(name), "ARGUMENT_UNKNOWN", `unknown argument: ${token}`);
+    stagingAssert(["source", "staging-root", "work-parent", "target", "node-bin", "pnpm-bin"].includes(name), "ARGUMENT_UNKNOWN", `unknown argument: ${token}`);
     stagingAssert(options[name] === undefined, "ARGUMENT_DUPLICATE", `duplicate argument: ${token}`);
     const value = argv[index + 1];
     stagingAssert(typeof value === "string" && value.length > 0 && !value.startsWith("--"), "ARGUMENT_MISSING", `missing value for ${token}`);
     options[name] = value;
     index += 1;
   }
-  for (const name of ["source", "staging-root", "work-parent", "sbom", "metadata", "target", "node-bin", "pnpm-bin"]) stagingAssert(options[name] !== undefined, "ARGUMENT_MISSING", `required argument: --${name}`);
+  for (const name of ["source", "staging-root", "work-parent", "target", "node-bin", "pnpm-bin"]) stagingAssert(options[name] !== undefined, "ARGUMENT_MISSING", `required argument: --${name}`);
   return options;
 }
 
@@ -417,16 +436,16 @@ async function main(argv) {
     sourceRoot: path.resolve(options.source),
     stagingRoot: path.resolve(options["staging-root"]),
     workParent: path.resolve(options["work-parent"]),
-    sbomPath: path.resolve(options.sbom),
-    metadataPath: path.resolve(options.metadata),
     targetPath: path.resolve(options.target),
     nodeBin: path.resolve(options["node-bin"]),
     pnpmBin: path.resolve(options["pnpm-bin"]),
     dryRun: options.dryRun === true,
+    developmentLocalOnly: options.developmentLocalOnly === true,
+    allowUnreviewedLocalArtifact: process.env.SIMULATOR_ALLOW_UNREVIEWED_LOCAL_ARTIFACT === "1",
   });
   const output = result.dryRun
     ? { dryRun: true, verification: result.verification, patch: { path: result.patch.path, sha256: result.patch.sha256 }, commands: result.plan.commands }
-    : { dryRun: false, stagingRoot: result.publish.root, files: result.inventory.files.length, nativeEntries: result.nativeInventory.length, smoke: result.runEvidence.ok, publish: result.publish };
+    : { dryRun: false, stagingRoot: result.publish.root, distribution: result.inventory.distribution, files: result.inventory.files.length, nativeEntries: result.nativeInventory.length, rightsErrors: result.deferredRightsErrors.length, smoke: result.runEvidence.ok, publish: result.publish };
   process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
 }
 

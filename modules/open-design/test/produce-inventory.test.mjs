@@ -35,6 +35,7 @@ async function fixture() {
   ]);
   const daemonPath = path.join(root, "runtime/daemon/dist/sidecar/index.js");
   const webPath = path.join(root, "runtime/packages/web-sidecar/dist/sidecar/index.js");
+  const resourceMetadataBytes = canonicalJsonBytes({ schemaVersion: 1, sourceCommit: base.provenance.source.commit, target: base.target, resources: {} });
   await Promise.all([
     writeFile(path.join(root, "web/standalone/server.js"), "server\n"),
     writeFile(daemonPath, "daemon\n"),
@@ -42,8 +43,12 @@ async function fixture() {
     writeFile(path.join(root, "legal/LICENSE"), "Apache License\n"),
     writeFile(path.join(root, "legal/SBOM.spdx.json"), sbomBytes),
     writeFile(path.join(root, "provenance.json"), canonicalJsonBytes(base.provenance)),
+    writeFile(path.join(root, "resource-metadata.json"), resourceMetadataBytes),
   ]);
   const attestation = structuredClone(base.attestation);
+  const resourceMetadataSha256 = createHash("sha256").update(resourceMetadataBytes).digest("hex");
+  attestation.inputs.find((entry) => entry.name === "resource-metadata.json").sha256 = resourceMetadataSha256;
+  attestation.resourceMetadata.documentSha256 = resourceMetadataSha256;
   const daemonSha256 = createHash("sha256").update(await readFile(daemonPath)).digest("hex");
   const webSha256 = createHash("sha256").update(await readFile(webPath)).digest("hex");
   attestation.runtimeVerification.entries[0].entrySha256 = daemonSha256;
