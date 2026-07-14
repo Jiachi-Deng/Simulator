@@ -16,7 +16,7 @@ export const DEVELOPMENT_ONLY_KEY_ACTIVE_FROM = "2026-07-14T00:00:00.000Z";
 // The public development key is accepted only by the explicit local-only
 // bootstrap path. Keep the key stable for M1 recovery while the signed catalog
 // below remains intentionally short-lived and non-promotable.
-export const DEVELOPMENT_ONLY_KEY_ACTIVE_UNTIL = "2027-07-14T00:00:00.000Z";
+export const DEVELOPMENT_ONLY_KEY_ACTIVE_UNTIL = "2026-08-14T00:00:00.000Z";
 export const DEVELOPMENT_ONLY_TEST_CATALOG_ISSUED_AT = "2026-07-14T00:00:00.000Z";
 
 export function developmentOnlyPublicKeyBytes() {
