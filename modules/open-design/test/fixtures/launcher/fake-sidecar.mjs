@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import http from "node:http";
+import net from "node:net";
 import path from "node:path";
 
 const app = process.argv.find((value) => value.startsWith("--od-stamp-app="))?.slice("--od-stamp-app=".length);
@@ -67,6 +68,8 @@ const server = http.createServer((request, response) => {
   response.end("not found");
 });
 
+const ipcServer = process.platform === "win32" ? null : net.createServer();
+
 server.on("upgrade", (request, socket) => {
   if (request.url !== "/ws" || app !== "web" || typeof request.headers["sec-websocket-key"] !== "string") {
     socket.destroy();
@@ -76,12 +79,27 @@ server.on("upgrade", (request, socket) => {
   socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\nfixture-upgrade`);
 });
 
-server.listen({ host: "127.0.0.1", port }, () => {
-  process.stdout.write(`${JSON.stringify({ state: "running", pid: process.pid, url: `http://127.0.0.1:${port}` })}\n`);
-});
+function listenHttp() {
+  server.listen({ host: "127.0.0.1", port }, () => {
+    process.stdout.write(`${JSON.stringify({ state: "running", pid: process.pid, url: `http://127.0.0.1:${port}` })}\n`);
+  });
+}
+
+if (ipcServer) {
+  mkdirSync(path.dirname(ipc), { recursive: true, mode: 0o700 });
+  ipcServer.listen(ipc, listenHttp);
+} else {
+  listenHttp();
+}
 
 function stop() {
-  server.close(() => process.exit(0));
+  let remaining = ipcServer ? 2 : 1;
+  const closed = () => {
+    remaining -= 1;
+    if (remaining === 0) process.exit(0);
+  };
+  server.close(closed);
+  ipcServer?.close(closed);
 }
 
 process.once("SIGTERM", stop);

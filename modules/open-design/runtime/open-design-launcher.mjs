@@ -113,7 +113,14 @@ async function createRuntime(config) {
   await ownerDirectory(persistentRoot, { recursive: true });
   const runsRoot = path.join(persistentRoot, "runs");
   await ownerDirectory(runsRoot, { recursive: true });
-  const runRoot = await mkdtemp(path.join(runsRoot, "run-"));
+  // Unix-domain socket paths are capped at roughly 100 bytes on macOS. The
+  // installed module and user-data roots can both be long, so keeping IPC
+  // beneath the persistent data directory makes an otherwise valid install
+  // fail at runtime. mkdtemp is atomic and creates a private per-run root;
+  // persistent state remains under dataRoot and this directory is removed on
+  // every shutdown path.
+  const transientParent = process.platform === "win32" ? runsRoot : "/tmp";
+  const runRoot = await mkdtemp(path.join(transientParent, "simulator-open-design-"));
   await chmod(runRoot, 0o700);
   const ipcBase = path.join(runRoot, "ipc");
   const homeRoot = path.join(persistentRoot, "home");

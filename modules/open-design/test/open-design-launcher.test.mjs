@@ -38,6 +38,9 @@ test("bootstrap launches sealed sidecars, proxies HTTP/WebSocket, preserves data
   const runtime = JSON.parse((await request(first.port, "/runtime")).body);
   assert.equal(runtime.dataRoot, path.join(fixture.dataRoot, "open-design"));
   assert.equal(runtime.resourceRoot, await realpath(path.join(fixture.root, "runtime", "daemon", "resources", "open-design")));
+  if (process.platform !== "win32") {
+    assert.match(runtime.runtimeRoot, /^\/tmp\/simulator-open-design-/);
+  }
   assert.equal(await stat(runtime.runtimeRoot).then(() => true), true);
   const firstPids = await readPids(fixture.dataRoot);
   await stopLauncher(first);
@@ -118,7 +121,9 @@ async function createFixture() {
   const nodeShim = `#!/bin/sh\nexec ${shellQuote(process.execPath)} "$@"\n`;
   await writeFile(path.join(runtime, "node", "bin", "node"), nodeShim, { mode: 0o700 });
   await Promise.all([chmod(path.join(runtime, "open-design-launcher"), 0o700), chmod(path.join(runtime, "node", "bin", "node"), 0o700)]);
-  const dataRoot = await realpath(await mkdtemp(path.join(root, "data-")));
+  const longDataParent = path.join(root, "intentionally-long-user-data-root-for-unix-socket-regression");
+  await mkdir(longDataParent, { recursive: true, mode: 0o700 });
+  const dataRoot = await realpath(await mkdtemp(path.join(longDataParent, "data-")));
   return { root, dataRoot, bootstrap: path.join(runtime, "open-design-launcher") };
 }
 
