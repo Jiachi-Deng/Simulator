@@ -348,19 +348,33 @@ export class OpenDesignModuleController {
   }
 
   /** Single host-view escape hatch; integration should route host.close here instead of destroying the view. */
-  stopForHostView(): Promise<OpenDesignModuleState> {
-    return this.stop()
+  async stopForHostView(): Promise<OpenDesignModuleState> {
+    return this.#stopForLifecycleCleanup()
   }
 
   /** Quarantined renderers must stop their daemon and leave an actionable state. */
   async stopForViewFailure(): Promise<OpenDesignModuleState> {
-    await this.stop()
+    await this.#stopForLifecycleCleanup()
     this.#lastError = {
       code: 'VIEW_CRASHED',
       message: 'The OpenDesign view stopped unexpectedly.',
     }
     const state = await this.getState()
     this.#emit(state)
+    return state
+  }
+
+  async #stopForLifecycleCleanup(): Promise<OpenDesignModuleState> {
+    const state = await this.stop()
+    const daemonStopped = state.daemonState === undefined || state.daemonState === 'stopped'
+    const viewStopped = state.viewState === undefined || state.viewState === 'detached'
+    const stateStopped = state.status === 'available' || state.status === 'not-installed'
+    if (!daemonStopped || !viewStopped || !stateStopped) {
+      throw new OpenDesignModuleControllerError(
+        'OPEN_DESIGN_STOP_FAILED',
+        'OpenDesign could not be stopped.',
+      )
+    }
     return state
   }
 

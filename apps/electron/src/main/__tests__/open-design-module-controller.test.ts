@@ -583,6 +583,43 @@ describe('OpenDesignModuleController', () => {
     controller.dispose()
   })
 
+  it('rejects host-view cleanup when the coordinator returns a failed stop', async () => {
+    const harness = createHarness(true)
+    harness.daemon = daemonSnapshot('healthy')
+    harness.view = viewSnapshot('attached')
+    harness.stopImpl = async (request) => operationResult('stop', request.operationId!, false)
+    const controller = createController(harness)
+
+    await expect(controller.stopForHostView()).rejects.toThrow('OpenDesign could not be stopped')
+    expect(await controller.getState()).toMatchObject({
+      status: 'error',
+      errorCode: 'OPEN_DESIGN_STOP_FAILED',
+      daemonState: 'healthy',
+      viewState: 'attached',
+    })
+    controller.dispose()
+  })
+
+  it('rejects view-failure cleanup without masking a thrown stop failure', async () => {
+    const harness = createHarness(true)
+    harness.daemon = daemonSnapshot('healthy')
+    harness.view = viewSnapshot('crashed')
+    harness.stopImpl = async () => { throw new Error('/private/secret stop failure') }
+    const controller = createController(harness)
+
+    await expect(controller.stopForViewFailure()).rejects.toThrow('OpenDesign could not be stopped')
+    const state = await controller.getState()
+    expect(state).toMatchObject({
+      status: 'error',
+      errorCode: 'OPEN_DESIGN_STOP_FAILED',
+      daemonState: 'healthy',
+      viewState: 'crashed',
+    })
+    expect(state.errorCode).not.toBe('VIEW_CRASHED')
+    expect(JSON.stringify(state)).not.toContain('/private/secret')
+    controller.dispose()
+  })
+
   it('reports disabled and not-ready runtime lookup states', async () => {
     const harness = createHarness()
     let lookup: OpenDesignModuleRuntimeLookup = { status: 'disabled' }
