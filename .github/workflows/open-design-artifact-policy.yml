@@ -5,7 +5,9 @@ on:
     paths:
       - ".github/workflows/open-design-artifact-policy.yml"
       - "bun.lock"
+      - "bunfig.toml"
       - "modules/open-design/**"
+      - "package.json"
       - "packages/module-contract/**"
       - "packages/module-installer/**"
       - "packages/module-release-trust/**"
@@ -15,7 +17,9 @@ on:
     paths:
       - ".github/workflows/open-design-artifact-policy.yml"
       - "bun.lock"
+      - "bunfig.toml"
       - "modules/open-design/**"
+      - "package.json"
       - "packages/module-contract/**"
       - "packages/module-installer/**"
       - "packages/module-release-trust/**"
