@@ -562,6 +562,27 @@ describe('OpenDesignModuleController', () => {
     controller.dispose()
   })
 
+  it('stops the daemon and publishes an actionable error after a view crash', async () => {
+    const harness = createHarness(true)
+    harness.daemon = daemonSnapshot('healthy')
+    harness.view = viewSnapshot('crashed')
+    const controller = createController(harness)
+
+    const state = await controller.stopForViewFailure()
+
+    expect(harness.calls.stop).toHaveLength(1)
+    expect(harness.daemon?.state).toBe('stopped')
+    expect(harness.view).toBeUndefined()
+    expect(state).toMatchObject({
+      status: 'error',
+      errorCode: 'VIEW_CRASHED',
+      errorMessage: 'The OpenDesign view stopped unexpectedly.',
+      version: VERSION,
+    })
+    expect(harness.emitted.at(-1)).toEqual(state)
+    controller.dispose()
+  })
+
   it('reports disabled and not-ready runtime lookup states', async () => {
     const harness = createHarness()
     let lookup: OpenDesignModuleRuntimeLookup = { status: 'disabled' }

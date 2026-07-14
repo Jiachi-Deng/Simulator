@@ -145,18 +145,18 @@ function unavailableOpenDesignState(): OpenDesignModuleState {
   }
 }
 
-const OPEN_DESIGN_STATE_RETRY_ATTEMPTS = 60
 const OPEN_DESIGN_STATE_RETRY_DELAY_MS = 250
 
 export async function loadOpenDesignStateWithRetry(
   module: Pick<OpenDesignModuleFacade, 'getState'>,
   wait: (milliseconds: number) => Promise<void> = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  shouldContinue: () => boolean = () => true,
 ): Promise<OpenDesignModuleState> {
-  for (let attempt = 0; attempt < OPEN_DESIGN_STATE_RETRY_ATTEMPTS; attempt += 1) {
+  while (shouldContinue()) {
     try {
       return await module.getState()
     } catch {
-      if (attempt + 1 < OPEN_DESIGN_STATE_RETRY_ATTEMPTS) await wait(OPEN_DESIGN_STATE_RETRY_DELAY_MS)
+      if (shouldContinue()) await wait(OPEN_DESIGN_STATE_RETRY_DELAY_MS)
     }
   }
   return unavailableOpenDesignState()
@@ -305,7 +305,7 @@ export function DesktopAppMenu({
     } catch {
       updateState(unavailableOpenDesignState())
     }
-    void loadOpenDesignStateWithRetry(openDesignModule).then(updateState)
+    void loadOpenDesignStateWithRetry(openDesignModule, undefined, () => active).then(updateState)
     return () => {
       active = false
       unsubscribe()

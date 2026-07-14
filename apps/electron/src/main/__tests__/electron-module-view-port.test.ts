@@ -116,6 +116,58 @@ describe('ElectronModuleViewPort', () => {
     expect(await port.query(healthy.id)).toMatchObject({ state: 'crashed' })
   })
 
+  it('routes a post-ready renderer failure to host cleanup', async () => {
+    const harness = createManagerHarness()
+    const onViewFailure = mock((_failure: unknown, _moduleId: ModuleId) => {})
+    const port = new ElectronModuleViewPort({
+      manager: harness.manager,
+      hostWindow: () => ({ isDestroyed: () => false }) as any,
+      onViewFailure,
+    })
+    const healthy = daemon()
+    await port.attach({ moduleId: healthy.id, version: healthy.version, daemon: healthy })
+    const attached = harness.attachedOptions.at(-1)
+    const failure = {
+      moduleId: healthy.id,
+      viewInstanceId: attached.viewInstanceId,
+      code: 'RENDERER_GONE',
+      message: 'Module frontend renderer exited',
+    }
+
+    attached.onFailure?.(failure)
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(onViewFailure).toHaveBeenCalledTimes(1)
+    expect(onViewFailure).toHaveBeenCalledWith(failure, healthy.id)
+  })
+
+  it('keeps initial view failures on the attach rejection path', async () => {
+    const onViewFailure = mock((_failure: unknown, _moduleId: ModuleId) => {})
+    const manager: ElectronViewManagerPort = {
+      async attach(options) {
+        options.onFailure?.({
+          moduleId: options.moduleId,
+          viewInstanceId: options.viewInstanceId,
+          code: 'LOAD_FAILED',
+          message: 'initial load failed',
+        })
+        return {} as any
+      },
+      get: () => undefined,
+      destroy: () => true,
+    }
+    const port = new ElectronModuleViewPort({
+      manager,
+      hostWindow: () => ({ isDestroyed: () => false }) as any,
+      onViewFailure,
+    })
+    const healthy = daemon()
+
+    await expect(port.attach({ moduleId: healthy.id, version: healthy.version, daemon: healthy }))
+      .rejects.toThrow('LOAD_FAILED')
+    expect(onViewFailure).not.toHaveBeenCalled()
+  })
+
   it('routes only an exact host.close payload from the currently bound module identity', async () => {
     const harness = createManagerHarness()
     const onHostClose = mock((_moduleId: ModuleId) => {})

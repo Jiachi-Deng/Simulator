@@ -8,6 +8,7 @@ import type {
 } from '@simulator/module-coordinator'
 import type {
   ModuleViewAttachOptions,
+  ModuleViewFailure,
   ModuleViewIdentity,
   ModuleViewManager,
   ModuleViewSnapshot,
@@ -25,6 +26,8 @@ export interface ElectronModuleViewPortOptions {
   readonly readyTimeoutMs?: number
   readonly onHostClose?: (moduleId: ModuleId) => void | Promise<void>
   readonly onHostCloseError?: (error: unknown, moduleId: ModuleId) => void | Promise<void>
+  readonly onViewFailure?: (failure: ModuleViewFailure, moduleId: ModuleId) => void | Promise<void>
+  readonly onViewFailureError?: (error: unknown, moduleId: ModuleId) => void | Promise<void>
 }
 
 interface AttachedView {
@@ -52,6 +55,8 @@ export class ElectronModuleViewPort implements ModuleViewPort {
   readonly #readyTimeoutMs: number
   readonly #onHostClose: ElectronModuleViewPortOptions['onHostClose']
   readonly #onHostCloseError: ElectronModuleViewPortOptions['onHostCloseError']
+  readonly #onViewFailure: ElectronModuleViewPortOptions['onViewFailure']
+  readonly #onViewFailureError: ElectronModuleViewPortOptions['onViewFailureError']
   readonly #views = new Map<ModuleId, AttachedView>()
   readonly #hostCloseFlights = new Map<ModuleId, Promise<void>>()
 
@@ -61,6 +66,8 @@ export class ElectronModuleViewPort implements ModuleViewPort {
     this.#readyTimeoutMs = options.readyTimeoutMs ?? 10_000
     this.#onHostClose = options.onHostClose
     this.#onHostCloseError = options.onHostCloseError
+    this.#onViewFailure = options.onViewFailure
+    this.#onViewFailureError = options.onViewFailureError
     if (!Number.isSafeInteger(this.#readyTimeoutMs) || this.#readyTimeoutMs <= 0) {
       throw new TypeError('Electron module view ready timeout must be a positive integer')
     }
@@ -80,6 +87,7 @@ export class ElectronModuleViewPort implements ModuleViewPort {
     let timeout: ReturnType<typeof setTimeout> | undefined
     let readyResolve!: () => void
     let readyReject!: (error: Error) => void
+    let preloadReady = false
     const ready = new Promise<void>((resolve, reject) => {
       readyResolve = resolve
       readyReject = reject
@@ -95,8 +103,17 @@ export class ElectronModuleViewPort implements ModuleViewPort {
         allowedFrontendOrigins: [origin],
         rect: 'full-content',
         visible: true,
-        onReady: readyResolve,
-        onFailure: (failure) => readyReject(new Error(`${failure.code}: ${failure.message}`)),
+        onReady: () => {
+          preloadReady = true
+          readyResolve()
+        },
+        onFailure: (failure) => {
+          if (!preloadReady) {
+            readyReject(new Error(`${failure.code}: ${failure.message}`))
+            return
+          }
+          void this.#notifyViewFailure(failure, request.moduleId)
+        },
         onMessage: (payload, boundIdentity) => {
           const current = this.#views.get(request.moduleId)
           if (
@@ -186,6 +203,18 @@ export class ElectronModuleViewPort implements ModuleViewPort {
         await this.#onHostCloseError?.(error, moduleId)
       } catch {
         // Host callback failures must not escape into the module transport.
+      }
+    }
+  }
+
+  async #notifyViewFailure(failure: ModuleViewFailure, moduleId: ModuleId): Promise<void> {
+    try {
+      await this.#onViewFailure?.(failure, moduleId)
+    } catch (error) {
+      try {
+        await this.#onViewFailureError?.(error, moduleId)
+      } catch {
+        // Failure reporting must not escape into the quarantined renderer path.
       }
     }
   }

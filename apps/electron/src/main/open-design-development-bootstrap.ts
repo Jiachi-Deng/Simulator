@@ -1,4 +1,5 @@
 import {
+  DevelopmentModuleBundleError,
   loadDevelopmentModuleBundle,
   type LoadedDevelopmentModuleBundle,
 } from './development-module-bundle'
@@ -42,7 +43,12 @@ export async function loadOpenDesignDevelopmentBootstrap(
       return notReady('DEVELOPMENT_BUNDLE_TARGET_MISMATCH')
     }
     return Object.freeze({ status: 'ready', bundle })
-  } catch {
+  } catch (error) {
+    if (error instanceof DevelopmentModuleBundleError) {
+      // The code is a closed enum and is safe to expose for actionable local
+      // diagnostics. Never forward the message, which may contain paths.
+      return notReady(`DEVELOPMENT_BUNDLE_${error.code}`)
+    }
     return notReady('DEVELOPMENT_BUNDLE_VERIFICATION_FAILED')
   }
 }

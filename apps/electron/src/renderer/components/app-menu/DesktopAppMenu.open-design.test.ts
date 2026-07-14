@@ -11,20 +11,35 @@ mock.module('pdfjs-dist', () => ({ GlobalWorkerOptions: { workerSrc: '' }, getDo
 const { getOpenDesignMenuPresentation, loadOpenDesignStateWithRetry } = await import('./DesktopAppMenu')
 
 describe('OpenDesign Debug menu presentation', () => {
-  it('retries startup IPC registration races and returns the first real state', async () => {
+  it('keeps retrying beyond the former startup window and returns the first real state', async () => {
     let attempts = 0
     const waits: number[] = []
     const state = await loadOpenDesignStateWithRetry({
       async getState() {
         attempts += 1
-        if (attempts < 3) throw new Error('IPC handler is not registered yet')
+        if (attempts < 75) throw new Error('IPC handler is not registered yet')
         return { status: 'not-installed' }
       },
     }, async (milliseconds) => { waits.push(milliseconds) })
 
     expect(state).toEqual({ status: 'not-installed' })
-    expect(attempts).toBe(3)
-    expect(waits).toEqual([250, 250])
+    expect(attempts).toBe(75)
+    expect(waits).toHaveLength(74)
+    expect(waits.every((milliseconds) => milliseconds === 250)).toBe(true)
+  })
+
+  it('stops retrying when the menu is unmounted', async () => {
+    let active = true
+    let attempts = 0
+    const state = await loadOpenDesignStateWithRetry({
+      async getState() {
+        attempts += 1
+        throw new Error('IPC handler is not registered yet')
+      },
+    }, async () => { active = false }, () => active)
+
+    expect(state).toMatchObject({ status: 'error', errorCode: 'CONTROLLER_UNAVAILABLE' })
+    expect(attempts).toBe(1)
   })
 
   it('maps stable states to the single appropriate action', () => {

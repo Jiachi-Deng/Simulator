@@ -20,7 +20,7 @@ import { ModuleRegistry } from '@simulator/module-registry'
 import { FilesystemModuleRegistryPersistence } from '@simulator/module-registry/filesystem'
 import { LoopbackHttpHealthAdapter, ModuleDaemonManager, RealClock, RealProcessAdapter } from '@simulator/module-daemon'
 import { ElectronModuleViewPort } from './electron-module-view-port'
-import type { ModuleViewManager } from './module-view-manager'
+import type { ModuleViewFailure, ModuleViewManager } from './module-view-manager'
 
 export interface HostModuleCoordinatorOptions {
   readonly root: string
@@ -31,6 +31,8 @@ export interface HostModuleCoordinatorOptions {
   readonly hostWindow: () => BrowserWindow | undefined
   readonly onHostClose?: (moduleId: ModuleId) => void | Promise<void>
   readonly onHostCloseError?: (error: unknown, moduleId: ModuleId) => void | Promise<void>
+  readonly onViewFailure?: (failure: ModuleViewFailure, moduleId: ModuleId) => void | Promise<void>
+  readonly onViewFailureError?: (error: unknown, moduleId: ModuleId) => void | Promise<void>
   readonly fetch?: ModuleDownloaderOptions['fetch']
   readonly clock?: HostModuleClock
   readonly daemonEnvironment?: Readonly<Record<string, string>>
@@ -100,6 +102,8 @@ export function createHostModuleCoordinator(options: HostModuleCoordinatorOption
     hostWindow: options.hostWindow,
     onHostClose: options.onHostClose,
     onHostCloseError: options.onHostCloseError,
+    onViewFailure: options.onViewFailure,
+    onViewFailureError: options.onViewFailureError,
   })
   const coordinator = new ModuleCoordinator({
     downloader,

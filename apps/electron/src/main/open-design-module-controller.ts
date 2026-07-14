@@ -352,6 +352,18 @@ export class OpenDesignModuleController {
     return this.stop()
   }
 
+  /** Quarantined renderers must stop their daemon and leave an actionable state. */
+  async stopForViewFailure(): Promise<OpenDesignModuleState> {
+    await this.stop()
+    this.#lastError = {
+      code: 'VIEW_CRASHED',
+      message: 'The OpenDesign view stopped unexpectedly.',
+    }
+    const state = await this.getState()
+    this.#emit(state)
+    return state
+  }
+
   dispose(): void {
     if (this.#disposed) return
     this.#disposed = true

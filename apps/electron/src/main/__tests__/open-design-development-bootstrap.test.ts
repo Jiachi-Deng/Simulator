@@ -5,6 +5,7 @@ import {
   loadOpenDesignDevelopmentBootstrap,
   OPEN_DESIGN_DEVELOPMENT_BUNDLE_ARGUMENT,
 } from '../open-design-development-bootstrap'
+import { DevelopmentModuleBundleError } from '../development-module-bundle'
 import { OPEN_DESIGN_MODULE_ID } from '../../shared/open-design-module-ipc'
 
 const DESCRIPTOR_PATH = '/private/tmp/open-design-development/bundle-descriptor.json'
@@ -97,7 +98,18 @@ describe('loadOpenDesignDevelopmentBootstrap', () => {
   })
 
   it('contains loader failures without exposing the descriptor path', async () => {
-    const loadBundle = mock(async () => { throw new Error(`failed at ${DESCRIPTOR_PATH}`) })
+    const loadBundle = mock(async () => { throw new DevelopmentModuleBundleError('INSECURE_BUNDLE_ROOT', `failed at ${DESCRIPTOR_PATH}`) })
+    const result = await loadOpenDesignDevelopmentBootstrap({
+      argv: ['--debug', `${OPEN_DESIGN_DEVELOPMENT_BUNDLE_ARGUMENT}${DESCRIPTOR_PATH}`],
+      platform: 'darwin-arm64',
+      loadBundle,
+    })
+    expect(result).toMatchObject({ status: 'not-ready', errorCode: 'DEVELOPMENT_BUNDLE_INSECURE_BUNDLE_ROOT' })
+    expect(JSON.stringify(result)).not.toContain(DESCRIPTOR_PATH)
+  })
+
+  it('keeps unexpected loader failures generic', async () => {
+    const loadBundle = mock(async () => { throw new Error(`unexpected at ${DESCRIPTOR_PATH}`) })
     const result = await loadOpenDesignDevelopmentBootstrap({
       argv: ['--debug', `${OPEN_DESIGN_DEVELOPMENT_BUNDLE_ARGUMENT}${DESCRIPTOR_PATH}`],
       platform: 'darwin-arm64',

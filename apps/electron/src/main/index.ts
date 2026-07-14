@@ -84,6 +84,7 @@ Sentry.setUser({ id: machineId })
 import { join, delimiter } from 'path'
 import { existsSync, readFileSync } from 'fs'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
+import type { ModuleId } from '@simulator/module-contract'
 import { SessionManager, setSessionPlatform, setSessionRuntimeHooks } from '@craft-agent/server-core/sessions'
 import { registerAllRpcHandlers } from './handlers/index'
 import { registerCoreRpcHandlers, cleanupSessionFileWatchForClient } from '@craft-agent/server-core/handlers/rpc'
@@ -125,6 +126,7 @@ import {
   loadOpenDesignDevelopmentBootstrap,
   type OpenDesignDevelopmentBootstrap,
 } from './open-design-development-bootstrap'
+import { resolveHostModuleStorageRoot } from './host-module-storage-root'
 import { OPEN_DESIGN_MODULE_ID } from '../shared/open-design-module-ipc'
 import { isModuleViewSmokeRequested, runModuleViewSmokeIfRequested } from './module-view-smoke'
 import {
@@ -1061,8 +1063,22 @@ app.whenReady().then(async () => {
         ? openDesignDevelopmentBootstrap.bundle
         : undefined
       try {
+        const moduleStorageRoot = resolveHostModuleStorageRoot({
+          userDataRoot: app.getPath('userData'),
+          smokeRoot: getHostModuleCoordinatorSmokeRoot(),
+          developmentBootstrapStatus: openDesignDevelopmentBootstrap.status,
+        })
+        const stopOpenDesignDirectly = async (moduleId: ModuleId, reason: 'host-close' | 'view-failure') => {
+          const runtime = hostModuleCoordinator
+          if (!runtime) throw new Error('OpenDesign coordinator is unavailable')
+          const result = await runtime.coordinator.stop({
+            moduleId,
+            operationId: `open-design-${reason}-${Date.now().toString(36)}-${randomUUID()}`,
+          })
+          if (!result.ok) throw new Error('OpenDesign coordinator stop failed')
+        }
         hostModuleCoordinator = createHostModuleCoordinator({
-          root: getHostModuleCoordinatorSmokeRoot() ?? join(app.getPath('userData'), 'optional-modules'),
+          root: moduleStorageRoot,
           hostVersion: app.getVersion(),
           platform: currentModulePlatform(),
           // Public builds remain fail-closed. The fixed development key and local
@@ -1074,11 +1090,20 @@ app.whenReady().then(async () => {
           onHostClose: async (moduleId) => {
             if (moduleId !== OPEN_DESIGN_MODULE_ID) return
             const controller = openDesignModuleController
-            if (!controller) throw new Error('OpenDesign controller is unavailable')
-            await controller.stopForHostView()
+            if (controller) await controller.stopForHostView()
+            else await stopOpenDesignDirectly(moduleId, 'host-close')
           },
           onHostCloseError: (_error, moduleId) => {
             mainLog.error('Module host close failed', { moduleId })
+          },
+          onViewFailure: async (_failure, moduleId) => {
+            if (moduleId !== OPEN_DESIGN_MODULE_ID) return
+            const controller = openDesignModuleController
+            if (controller) await controller.stopForViewFailure()
+            else await stopOpenDesignDirectly(moduleId, 'view-failure')
+          },
+          onViewFailureError: (_error, moduleId) => {
+            mainLog.error('Module view failure cleanup failed', { moduleId })
           },
         })
         await hostModuleCoordinator.coordinator.recover()
