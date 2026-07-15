@@ -350,7 +350,7 @@ function proxyRequest(value, request, response) {
     port: value.webReservation.port,
     method: request.method,
     path: request.url,
-    headers: proxyHeaders(request.headers),
+    headers: proxyHeaders(value, request.headers),
     agent: false,
   }, (upstream) => {
     if (isExternalLocation(upstream.headers.location)) {
@@ -387,7 +387,7 @@ function proxyUpgrade(value, request, socket, head) {
     port: value.webReservation.port,
     method: request.method,
     path: request.url,
-    headers: { ...proxyHeaders(request.headers), connection: "Upgrade", upgrade: "websocket" },
+    headers: { ...proxyHeaders(value, request.headers), connection: "Upgrade", upgrade: "websocket" },
     agent: false,
   });
   outbound.once("upgrade", (upstream, upstreamSocket, upstreamHead) => {
@@ -413,7 +413,7 @@ function isSafeProxyRequest(request) {
   return true;
 }
 
-function proxyHeaders(headers) {
+function proxyHeaders(runtimeValue, headers) {
   const result = Object.create(null);
   const connectionHeaders = new Set(String(headers.connection ?? "").split(",").map((name) => name.trim().toLowerCase()).filter(Boolean));
   for (const [name, value] of Object.entries(headers)) {
@@ -421,8 +421,23 @@ function proxyHeaders(headers) {
     if (FORWARDED_HEADERS.has(lower) || HOP_BY_HOP_HEADERS.has(lower) || connectionHeaders.has(lower) || lower === "host") continue;
     result[name] = value;
   }
-  result.host = `${LOOPBACK}:${runtime.webReservation.port}`;
+  const internalHost = `${LOOPBACK}:${runtimeValue.webReservation.port}`;
+  result.host = internalHost;
+  const outerHost = hostAuthority(runtimeValue.healthHost, runtimeValue.healthPort);
+  const incomingHost = firstHeaderValue(headers.host);
+  const incomingOrigin = firstHeaderValue(headers.origin);
+  if (incomingHost === outerHost && incomingOrigin === `http://${outerHost}`) {
+    result.origin = `http://${internalHost}`;
+  }
   return result;
+}
+
+function firstHeaderValue(value) {
+  return Array.isArray(value) ? value[0] : value;
+}
+
+function hostAuthority(host, port) {
+  return `${host.includes(":") ? `[${host}]` : host}:${port}`;
 }
 
 function responseHeaders(headers) {

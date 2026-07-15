@@ -30,6 +30,12 @@ test("bootstrap launches sealed sidecars, proxies HTTP/WebSocket, preserves data
   assert.equal(proxied.headers["x-from-fake"], "web");
   const forwarded = await request(first.port, "/proxy", { forwarded: "for=198.51.100.9" });
   assert.equal(forwarded.statusCode, 400);
+  const browserOrigin = `http://127.0.0.1:${first.port}`;
+  const sameOriginHeaders = JSON.parse((await request(first.port, "/request-headers", { origin: browserOrigin })).body);
+  assert.equal(sameOriginHeaders.origin, `http://${sameOriginHeaders.host}`);
+  assert.notEqual(sameOriginHeaders.origin, browserOrigin, "the trusted outer origin must map to the internal web sidecar");
+  const foreignOriginHeaders = JSON.parse((await request(first.port, "/request-headers", { origin: "https://attacker.example" })).body);
+  assert.equal(foreignOriginHeaders.origin, "https://attacker.example", "foreign origins must remain untrusted");
   const external = await request(first.port, "/redirect-external");
   assert.equal(external.statusCode, 502);
   assert.equal(external.body, "unsafe navigation");

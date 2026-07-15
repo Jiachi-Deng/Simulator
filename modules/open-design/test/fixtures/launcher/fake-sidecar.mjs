@@ -60,6 +60,14 @@ const server = http.createServer((request, response) => {
     response.end(JSON.stringify({ agentHome, dataRoot, runtimeRoot, hostAgentUrl, hostAgentTokenFile }));
     return;
   }
+  if (request.url === "/request-headers") {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      host: request.headers.host ?? null,
+      origin: request.headers.origin ?? null,
+    }));
+    return;
+  }
   if (request.url === "/redirect-external") {
     response.writeHead(302, { location: "https://outside.example.invalid/" });
     response.end();
