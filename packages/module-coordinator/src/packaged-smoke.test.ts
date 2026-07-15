@@ -1,4 +1,4 @@
-import { afterAll, afterEach, describe, expect, it } from 'bun:test'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test'
 import { createHash, generateKeyPairSync, sign } from 'node:crypto'
 import { chmod, mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -25,6 +25,8 @@ const PROCESS_EXIT_TIMEOUT_MS = 2_000
 const SUPERVISOR_CRASH_TIMEOUT_MS = 2_000
 const REPLACEMENT_READY_TIMEOUT_MS = 6_000
 const VIEW_REATTACH_TIMEOUT_MS = 3_000
+const PACKAGED_FIXTURE_BUILD_TIMEOUT_MS = 60_000
+const PACKAGED_LIFECYCLE_TIMEOUT_MS = 45_000
 const systems: PackagedSystem[] = []
 let compiledFixture: Promise<{ bytes: Buffer; entrypoint: string }> | undefined
 let compiledFixtureRoot: string | undefined
@@ -415,6 +417,10 @@ function expectOperationOk(result: ModuleCoordinatorOperationResult): void {
   if (!result.ok) throw new Error(`${result.kind} ${result.operationId} failed: ${result.error ?? 'unknown error'}`)
 }
 
+beforeAll(async () => {
+  await packagedArchive()
+}, PACKAGED_FIXTURE_BUILD_TIMEOUT_MS)
+
 afterEach(async () => {
   for (const system of systems.splice(0)) {
     await system.daemon.drain().catch(() => undefined)
@@ -448,7 +454,7 @@ describe('packaged fake module with production runtime adapters', () => {
     expect(await system.view.query(id as ModuleId)).toMatchObject({ state: 'attached' })
     expect(builtInAgent).toEqual(expectedAgent)
     await system.coordinator.stop({ operationId: 'production-stop', moduleId: id as ModuleId })
-  }, 30_000)
+  }, PACKAGED_LIFECYCLE_TIMEOUT_MS)
 
   it('restarts and reattaches after a bounded slow daemon startup', async () => {
     const packaged = await packagedArchive()
