@@ -94,6 +94,15 @@ export interface RetryPolicy {
   readonly maxDelayMs: number
 }
 
+/**
+ * Explicit opt-in for GitHub's exact-tag release asset redirect. The initial
+ * URL remains catalog-authenticated; this policy only narrows the transport hop.
+ */
+export interface GitHubReleaseRedirectPolicy {
+  readonly owner: string
+  readonly repository: string
+}
+
 export interface ModuleDownloaderOptions {
   readonly fetch: DownloaderFetchAdapter
   readonly clock: DownloaderClock
@@ -104,6 +113,7 @@ export interface ModuleDownloaderOptions {
   readonly artifactTimeoutMs?: number
   readonly retry?: Partial<RetryPolicy>
   readonly maxRedirects?: number
+  readonly githubReleaseRedirectPolicy?: GitHubReleaseRedirectPolicy
   readonly partialMaxAgeMs?: number
   readonly maxPartialsPerArtifact?: number
 }

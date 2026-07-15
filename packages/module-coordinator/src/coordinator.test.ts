@@ -134,7 +134,15 @@ interface System {
 interface PersistentFixture {
   readonly root: string
   readonly treeHash: ModuleSha256
-  readonly releases: readonly { readonly manifest: ModuleManifest; readonly artifactSizes: readonly { readonly platform: 'darwin-arm64'; readonly size: number }[] }[]
+  readonly releases: readonly {
+    readonly manifest: ModuleManifest
+    readonly artifactSizes: readonly { readonly platform: 'darwin-arm64'; readonly size: number }[]
+    readonly hostVersionRange: string
+    readonly artifactInstallMetadata: readonly {
+      readonly platform: 'darwin-arm64'
+      readonly extractedManifestSha256: ModuleSha256
+    }[]
+  }[]
   readonly key: TrustedReleaseKey
   readonly fetch: FixtureFetch
   readonly store: NodeFilesystemModuleCoordinatorStore
@@ -171,6 +179,8 @@ async function createFixture(): Promise<PersistentFixture> {
   const releases = versions.map((version) => ({
     manifest: manifest(version, archiveHash),
     artifactSizes: [{ platform: 'darwin-arm64' as const, size: archive.byteLength }],
+    hostVersionRange: '>=0.11.0 <0.12.0-0',
+    artifactInstallMetadata: [{ platform: 'darwin-arm64' as const, extractedManifestSha256: treeHash }],
   }))
   const pair = generateKeyPairSync('ed25519')
   const publicDer = pair.publicKey.export({ format: 'der', type: 'spki' })
@@ -180,7 +190,7 @@ async function createFixture(): Promise<PersistentFixture> {
     activeFrom: '2026-07-12T00:00:00.000Z',
   }
   const catalogBytes = encodeCanonicalCatalog({
-    schemaVersion: 1,
+    schemaVersion: 2,
     sequence: 1,
     issuedAt: '2026-07-12T17:00:00.000Z',
     expiresAt: '2026-07-13T17:00:00.000Z',
@@ -262,7 +272,7 @@ async function createSystem(
       extractedManifestSha256: treeHash,
       format: 'tar.gz' as const,
     },
-    hostVersionRange: '*',
+    hostVersionRange: '>=0.11.0 <0.12.0-0',
   })
   const system = { coordinator, store, process, clock, registry, view, usage: useGate, requestFor }
   systems.push(system)
@@ -276,6 +286,54 @@ afterEach(async () => {
 })
 
 describe('ModuleCoordinator packaged fake module E2E', () => {
+  it('constructs an install request from the same verified v2 catalog used by the coordinator', async () => {
+    const fixture = await createFixture()
+    const system = await createSystem(fixture)
+    const request = await system.coordinator.resolveInstallRequest({
+      catalogUrl: CATALOG_URL,
+      moduleId: MODULE_ID as ModuleId,
+      version: '1.0.0' as ModuleVersion,
+    })
+
+    expect(request).toEqual({
+      catalogUrl: CATALOG_URL,
+      descriptor: {
+        verified: true,
+        manifest: fixture.releases[0]!.manifest,
+        artifact: fixture.releases[0]!.manifest.artifacts[0]!,
+        extractedManifestSha256: fixture.treeHash,
+        format: 'tar.gz',
+      },
+      hostVersionRange: '>=0.11.0 <0.12.0-0',
+    })
+    expect(Object.isFrozen(request)).toBe(true)
+    expect((await system.coordinator.install({ ...request, operationId: 'resolved-install' })).ok).toBe(true)
+    // Resolver plus the coordinator's two durable verification checkpoints all
+    // use the same downloader/cache; only the first request carries catalog bytes.
+    expect(fixture.fetch.catalogRequests).toBe(3)
+    expect(fixture.fetch.artifactRequests).toBe(1)
+  })
+
+  it('rejects an install request whose signed v2 tree hash or host range was changed after resolution', async () => {
+    const fixture = await createFixture()
+    const system = await createSystem(fixture)
+    const request = await system.coordinator.resolveInstallRequest({
+      catalogUrl: CATALOG_URL,
+      moduleId: MODULE_ID as ModuleId,
+      version: '1.0.0' as ModuleVersion,
+    })
+    const result = await system.coordinator.install({
+      ...request,
+      descriptor: { ...request.descriptor, extractedManifestSha256: 'f'.repeat(64) as ModuleSha256 },
+      hostVersionRange: '*',
+      operationId: 'tampered-v2-install',
+    })
+
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('signed catalog release')
+    expect(fixture.fetch.artifactRequests).toBe(0)
+  })
+
   it('runs install, update, crash restart, stop, rollback, and uninstall through existing module APIs', async () => {
     const system = await createSystem()
     await system.coordinator.install(system.requestFor('1.0.0'))

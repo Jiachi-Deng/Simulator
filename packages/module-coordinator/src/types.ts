@@ -43,6 +43,13 @@ export interface ModuleCoordinatorInstallRequest extends ModuleOperationIdentity
   readonly hostVersionRange: string
 }
 
+/** Exact release selection resolved from the coordinator's own verified downloader. */
+export interface ModuleCoordinatorReleaseRequest {
+  readonly catalogUrl: string
+  readonly moduleId: ModuleId
+  readonly version: ModuleVersion
+}
+
 export interface ModuleCoordinatorModuleRequest extends ModuleOperationIdentity {
   readonly moduleId: ModuleId
 }
@@ -173,6 +180,7 @@ export interface ModuleCoordinatorDependencies {
 export type ModuleCoordinatorErrorCode =
   | 'ACTIVE_VERSION_MISSING'
   | 'ARTIFACT_MISSING'
+  | 'CATALOG_INSTALL_METADATA_MISSING'
   | 'CATALOG_RELEASE_MISSING'
   | 'CATALOG_RELEASE_MISMATCH'
   | 'INVALID_OPERATION'

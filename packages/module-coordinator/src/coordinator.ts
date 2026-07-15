@@ -11,6 +11,7 @@ import {
   type ModuleCoordinatorOperation,
   type ModuleCoordinatorOperationKind,
   type ModuleCoordinatorOperationResult,
+  type ModuleCoordinatorReleaseRequest,
   type ModuleCoordinatorRequest,
   type ModuleCoordinatorRollbackRequest,
   type ModuleCoordinatorSnapshot,
@@ -130,6 +131,46 @@ export class ModuleCoordinator {
       const task = this.#handleDaemonSnapshot(snapshot)
       this.#eventTasks.add(task)
       void task.finally(() => this.#eventTasks.delete(task)).catch(() => undefined)
+    })
+  }
+
+  /**
+   * Fetches and verifies the catalog through this coordinator's downloader, then
+   * binds the exact v2 release metadata into an immutable install request.
+   */
+  async resolveInstallRequest(request: ModuleCoordinatorReleaseRequest): Promise<ModuleCoordinatorInstallRequest> {
+    await this.#ready
+    const catalog = (await this.#dependencies.downloader.fetchCatalog(request.catalogUrl)).catalog
+    if (catalog.schemaVersion !== 2) {
+      throw new ModuleCoordinatorError(
+        'CATALOG_INSTALL_METADATA_MISSING',
+        'Verified catalog does not contain signed production install metadata',
+      )
+    }
+    const release = catalog.releases.find((candidate) => (
+      candidate.manifest.id === request.moduleId && candidate.manifest.version === request.version
+    ))
+    if (!release) throw new ModuleCoordinatorError('CATALOG_RELEASE_MISSING', 'Verified catalog does not contain the requested release')
+    const artifact = release.manifest.artifacts.find((candidate) => candidate.platform === this.#dependencies.platform)
+    const artifactSize = release.artifactSizes.find((candidate) => candidate.platform === this.#dependencies.platform)
+    const installMetadata = release.artifactInstallMetadata.find((candidate) => candidate.platform === this.#dependencies.platform)
+    if (!artifact || !artifactSize) throw new ModuleCoordinatorError('ARTIFACT_MISSING', 'Verified catalog has no host artifact')
+    if (!installMetadata) {
+      throw new ModuleCoordinatorError(
+        'CATALOG_INSTALL_METADATA_MISSING',
+        'Verified catalog has no signed install metadata for the host platform',
+      )
+    }
+    return Object.freeze({
+      catalogUrl: request.catalogUrl,
+      descriptor: Object.freeze({
+        verified: true,
+        manifest: release.manifest,
+        artifact,
+        extractedManifestSha256: installMetadata.extractedManifestSha256,
+        format: 'tar.gz',
+      }),
+      hostVersionRange: release.hostVersionRange,
     })
   }
 
@@ -559,6 +600,19 @@ export class ModuleCoordinator {
       || !sameStringArray(artifact.auxiliaryExecutables, descriptorArtifact.auxiliaryExecutables)
       || artifact.url !== descriptorArtifact.url) {
       throw new ModuleCoordinatorError('CATALOG_RELEASE_MISMATCH', 'Descriptor does not match the verified catalog release')
+    }
+    if (catalog.catalog.schemaVersion === 2) {
+      const productionRelease = catalog.catalog.releases.find((candidate) => (
+        candidate.manifest.id === parsed.value.id && candidate.manifest.version === parsed.value.version
+      ))
+      const installMetadata = productionRelease?.artifactInstallMetadata
+        .find((candidate) => candidate.platform === this.#dependencies.platform)
+      if (!productionRelease
+        || !installMetadata
+        || installMetadata.extractedManifestSha256 !== request.descriptor.extractedManifestSha256
+        || productionRelease.hostVersionRange !== request.hostVersionRange) {
+        throw new ModuleCoordinatorError('CATALOG_RELEASE_MISMATCH', 'Descriptor install metadata does not match the signed catalog release')
+      }
     }
     return { artifact, size }
   }

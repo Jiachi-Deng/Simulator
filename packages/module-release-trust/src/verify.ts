@@ -11,11 +11,14 @@ import {
   MAX_MODULE_RELEASE_CATALOG_TTL_MS,
   MAX_MODULE_RELEASE_CLOCK_SKEW_MS,
   MAX_TRUSTED_RELEASE_KEYS,
-  MODULE_RELEASE_CATALOG_SCHEMA_VERSION,
+  MODULE_RELEASE_CATALOG_SCHEMA_VERSION_V1,
+  MODULE_RELEASE_CATALOG_SCHEMA_VERSION_V2,
   MODULE_RELEASE_ENVELOPE_SCHEMA_VERSION,
+  type ModuleArtifactInstallMetadataV2,
   type ModuleArtifactSize,
-  type ModuleRelease,
   type ModuleReleaseCatalog,
+  type ModuleReleaseV1,
+  type ModuleReleaseV2,
   type ModuleReleaseTrustDiagnostic,
   type ModuleReleaseTrustDiagnosticCode,
   type ModuleReleaseTrustStage,
@@ -28,8 +31,10 @@ type DataRecord = Record<string, unknown>
 
 const ENVELOPE_FIELDS = ['schemaVersion', 'keyId', 'catalogBytes', 'signature'] as const
 const CATALOG_FIELDS = ['schemaVersion', 'sequence', 'issuedAt', 'expiresAt', 'releases'] as const
-const RELEASE_FIELDS = ['manifest', 'artifactSizes'] as const
+const RELEASE_V1_FIELDS = ['manifest', 'artifactSizes'] as const
+const RELEASE_V2_FIELDS = ['manifest', 'artifactSizes', 'hostVersionRange', 'artifactInstallMetadata'] as const
 const SIZE_FIELDS = ['platform', 'size'] as const
+const INSTALL_METADATA_FIELDS = ['platform', 'extractedManifestSha256'] as const
 const OPTIONS_FIELDS = ['trustedKeys', 'state', 'now', 'clockSkewMs'] as const
 const TRUSTED_KEY_FIELDS = ['keyId', 'publicKey', 'activeFrom', 'activeUntil', 'revokedAt'] as const
 const TRUST_STATE_FIELDS = ['highestSequence', 'latestIssuedAt'] as const
@@ -39,6 +44,8 @@ const MAX_RELEASES = 10_000
 const ED25519_PUBLIC_KEY_BYTES = 32
 const ED25519_SIGNATURE_BYTES = 64
 const ED25519_SPKI_PREFIX = Uint8Array.from([0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00])
+const SHA256_PATTERN = /^[0-9a-f]{64}$/
+const MAX_HOST_VERSION_RANGE_BYTES = 256
 
 function freeze<T>(value: T): Readonly<T> {
   if (value && typeof value === 'object' && !ArrayBuffer.isView(value) && !Object.isFrozen(value)) {
@@ -288,15 +295,88 @@ function parseArtifactSizes(
   return [...byPlatform.values()]
 }
 
+function parseHostVersionRange(
+  value: unknown,
+  releaseIndex: number,
+  diagnostics: ModuleReleaseTrustDiagnostic[],
+): string | undefined {
+  const path = `/releases/${releaseIndex}/hostVersionRange`
+  if (typeof value !== 'string' || value.length === 0 || value.length > MAX_HOST_VERSION_RANGE_BYTES
+    || value.trim() !== value || /[\u0000-\u001f\u007f]/.test(value)) {
+    diagnostics.push(diagnostic('INVALID_HOST_VERSION_RANGE', 'catalog', path, 'Host version range must be a bounded non-empty trimmed string'))
+    return undefined
+  }
+  return value
+}
+
+function parseArtifactInstallMetadata(
+  value: unknown,
+  manifest: ModuleManifest,
+  releaseIndex: number,
+  diagnostics: ModuleReleaseTrustDiagnostic[],
+): readonly ModuleArtifactInstallMetadataV2[] | undefined {
+  const path = `/releases/${releaseIndex}/artifactInstallMetadata`
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype || value.length > MODULE_PLATFORMS.length) {
+    diagnostics.push(diagnostic('INVALID_RELEASE', 'catalog', path, 'Artifact install metadata must be a bounded plain array'))
+    return undefined
+  }
+  const byPlatform = new Map<ModulePlatform, ModuleArtifactInstallMetadataV2>()
+  for (let index = 0; index < value.length; index += 1) {
+    const itemPath = `${path}/${index}`
+    if (!Object.hasOwn(value, index)) {
+      diagnostics.push(diagnostic('INVALID_RELEASE', 'catalog', itemPath, 'Sparse artifact install metadata arrays are not accepted'))
+      continue
+    }
+    const record = asRecord(value[index])
+    if (!record || !hasExactFields(record, INSTALL_METADATA_FIELDS)) {
+      diagnostics.push(diagnostic('INVALID_RELEASE', 'catalog', itemPath, 'Artifact install metadata must contain only platform and extractedManifestSha256'))
+      continue
+    }
+    const platform = record.platform
+    if (typeof platform !== 'string' || !PLATFORM_SET.has(platform)) {
+      diagnostics.push(diagnostic('UNKNOWN_PLATFORM_INSTALL_METADATA', 'catalog', `${itemPath}/platform`, 'Artifact install metadata references an unsupported platform'))
+      continue
+    }
+    if (typeof record.extractedManifestSha256 !== 'string' || !SHA256_PATTERN.test(record.extractedManifestSha256)) {
+      diagnostics.push(diagnostic('INVALID_EXTRACTED_MANIFEST_SHA256', 'catalog', `${itemPath}/extractedManifestSha256`, 'Extracted manifest SHA-256 must be lowercase hexadecimal'))
+      continue
+    }
+    const typedPlatform = platform as ModulePlatform
+    if (byPlatform.has(typedPlatform)) {
+      diagnostics.push(diagnostic('DUPLICATE_PLATFORM', 'catalog', `${itemPath}/platform`, 'Artifact install metadata platform is declared more than once'))
+      continue
+    }
+    byPlatform.set(typedPlatform, freeze({
+      platform: typedPlatform,
+      extractedManifestSha256: record.extractedManifestSha256 as ModuleArtifactInstallMetadataV2['extractedManifestSha256'],
+    }))
+  }
+
+  const manifestPlatforms = new Set(manifest.artifacts.map((artifact: ModuleArtifact) => artifact.platform))
+  for (const platform of manifestPlatforms) {
+    if (!byPlatform.has(platform)) {
+      diagnostics.push(diagnostic('MISSING_PLATFORM_INSTALL_METADATA', 'catalog', path, `Missing artifact install metadata for platform ${platform}`))
+    }
+  }
+  for (const platform of byPlatform.keys()) {
+    if (!manifestPlatforms.has(platform)) {
+      diagnostics.push(diagnostic('UNKNOWN_PLATFORM_INSTALL_METADATA', 'catalog', path, `Artifact install metadata has no manifest artifact for platform ${platform}`))
+    }
+  }
+  return [...byPlatform.values()]
+}
+
 function parseCatalog(value: unknown): { catalog?: ModuleReleaseCatalog; diagnostics: ModuleReleaseTrustDiagnostic[] } {
   const diagnostics: ModuleReleaseTrustDiagnostic[] = []
   const record = asRecord(value)
   if (!record || !hasExactFields(record, CATALOG_FIELDS)) {
-    return { diagnostics: [diagnostic('INVALID_CATALOG', 'catalog', '', 'Catalog must contain exactly the v1 catalog fields')] }
+    return { diagnostics: [diagnostic('INVALID_CATALOG', 'catalog', '', 'Catalog must contain exactly the supported catalog fields')] }
   }
-  if (record.schemaVersion !== MODULE_RELEASE_CATALOG_SCHEMA_VERSION) {
+  if (record.schemaVersion !== MODULE_RELEASE_CATALOG_SCHEMA_VERSION_V1
+    && record.schemaVersion !== MODULE_RELEASE_CATALOG_SCHEMA_VERSION_V2) {
     return { diagnostics: [diagnostic('UNSUPPORTED_CATALOG_SCHEMA', 'catalog', '/schemaVersion', 'Unsupported module release catalog schema version')] }
   }
+  const schemaVersion = record.schemaVersion
   if (!Number.isSafeInteger(record.sequence) || (record.sequence as number) < 1) {
     diagnostics.push(diagnostic('INVALID_SEQUENCE', 'catalog', '/sequence', 'Catalog sequence must be a positive safe integer'))
   }
@@ -316,7 +396,8 @@ function parseCatalog(value: unknown): { catalog?: ModuleReleaseCatalog; diagnos
     return { diagnostics }
   }
 
-  const releases: ModuleRelease[] = []
+  const releasesV1: ModuleReleaseV1[] = []
+  const releasesV2: ModuleReleaseV2[] = []
   const seenReleases = new Set<string>()
   for (let index = 0; index < record.releases.length; index += 1) {
     const path = `/releases/${index}`
@@ -325,8 +406,9 @@ function parseCatalog(value: unknown): { catalog?: ModuleReleaseCatalog; diagnos
       continue
     }
     const releaseRecord = asRecord(record.releases[index])
-    if (!releaseRecord || !hasExactFields(releaseRecord, RELEASE_FIELDS)) {
-      diagnostics.push(diagnostic('INVALID_RELEASE', 'catalog', path, 'Release must contain exactly manifest and artifactSizes'))
+    const releaseFields = schemaVersion === MODULE_RELEASE_CATALOG_SCHEMA_VERSION_V1 ? RELEASE_V1_FIELDS : RELEASE_V2_FIELDS
+    if (!releaseRecord || !hasExactFields(releaseRecord, releaseFields)) {
+      diagnostics.push(diagnostic('INVALID_RELEASE', 'catalog', path, `Release must contain exactly the schema v${schemaVersion} release fields`))
       continue
     }
     const manifestResult = parseModuleManifest(releaseRecord.manifest)
@@ -343,21 +425,36 @@ function parseCatalog(value: unknown): { catalog?: ModuleReleaseCatalog; diagnos
       seenReleases.add(identity)
     }
     const artifactSizes = parseArtifactSizes(releaseRecord.artifactSizes, manifestResult.value, index, diagnostics)
-    if (artifactSizes) releases.push(freeze({ manifest: manifestResult.value, artifactSizes: freeze([...artifactSizes]) }))
+    if (!artifactSizes) continue
+    if (schemaVersion === MODULE_RELEASE_CATALOG_SCHEMA_VERSION_V1) {
+      releasesV1.push(freeze({ manifest: manifestResult.value, artifactSizes: freeze([...artifactSizes]) }))
+      continue
+    }
+    const hostVersionRange = parseHostVersionRange(releaseRecord.hostVersionRange, index, diagnostics)
+    const artifactInstallMetadata = parseArtifactInstallMetadata(releaseRecord.artifactInstallMetadata, manifestResult.value, index, diagnostics)
+    if (hostVersionRange && artifactInstallMetadata) {
+      releasesV2.push(freeze({
+        manifest: manifestResult.value,
+        artifactSizes: freeze([...artifactSizes]),
+        hostVersionRange,
+        artifactInstallMetadata: freeze([...artifactInstallMetadata]),
+      }))
+    }
   }
 
   if (diagnostics.length > 0 || issuedAt === undefined || expiresAt === undefined || !Number.isSafeInteger(record.sequence)) {
     return { diagnostics }
   }
-  return {
-    diagnostics,
-    catalog: freeze({
-      schemaVersion: MODULE_RELEASE_CATALOG_SCHEMA_VERSION,
+  const common = {
       sequence: record.sequence as number,
       issuedAt: record.issuedAt as string,
       expiresAt: record.expiresAt as string,
-      releases: freeze(releases),
-    }),
+  }
+  return {
+    diagnostics,
+    catalog: schemaVersion === MODULE_RELEASE_CATALOG_SCHEMA_VERSION_V1
+      ? freeze({ schemaVersion, ...common, releases: freeze(releasesV1) })
+      : freeze({ schemaVersion, ...common, releases: freeze(releasesV2) }),
   }
 }
 

@@ -61,6 +61,27 @@ function catalog(overrides: Record<string, unknown> = {}) {
   }
 }
 
+function catalogV2(overrides: Record<string, unknown> = {}) {
+  return {
+    schemaVersion: 2,
+    sequence: 8,
+    issuedAt: ISSUED_AT,
+    expiresAt: EXPIRES_AT,
+    releases: [
+      {
+        manifest: manifest(),
+        artifactSizes: [{ platform: 'darwin-arm64', size: 4096 }],
+        hostVersionRange: '>=0.11.0 <0.12.0-0',
+        artifactInstallMetadata: [{
+          platform: 'darwin-arm64',
+          extractedManifestSha256: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+        }],
+      },
+    ],
+    ...overrides,
+  }
+}
+
 function envelopeFor(value: unknown, privateKey: ReturnType<typeof testKey>['pair']['privateKey'], keyId = 'release-2026') {
   const catalogBytes = encodeCanonicalCatalog(value)
   return {
@@ -112,6 +133,55 @@ describe('verifyModuleReleaseCatalog', () => {
     expect(Object.isFrozen(result.catalog)).toBe(true)
     expect(Object.isFrozen(release.manifest.artifacts[0]!)).toBe(true)
     expect(Object.isFrozen(release.artifactSizes[0]!)).toBe(true)
+  })
+
+  it('keeps v1 catalogs compatible while authenticating production install metadata in v2', () => {
+    const { pair, trustedKey } = testKey('release-2026')
+    const legacy = verify(envelopeFor(catalog(), pair.privateKey), [trustedKey])
+    const production = verify(envelopeFor(catalogV2(), pair.privateKey), [trustedKey])
+
+    expect(legacy.ok).toBe(true)
+    expect(production.ok).toBe(true)
+    if (!production.ok) throw new Error('Expected v2 catalog verification to succeed')
+    expect(production.catalog.schemaVersion).toBe(2)
+    const release = production.catalog.releases[0]!
+    expect(release).toMatchObject({
+      hostVersionRange: '>=0.11.0 <0.12.0-0',
+      artifactInstallMetadata: [{
+        platform: 'darwin-arm64',
+        extractedManifestSha256: 'abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
+      }],
+    })
+    expect(Object.isFrozen(release)).toBe(true)
+    expect(Object.isFrozen((release as { artifactInstallMetadata: readonly unknown[] }).artifactInstallMetadata)).toBe(true)
+  })
+
+  it('rejects incomplete or malformed v2 install metadata before returning a catalog', () => {
+    const { pair, trustedKey } = testKey('release-2026')
+    const base = catalogV2().releases[0]!
+    const invalidReleases = [
+      { ...base, hostVersionRange: '' },
+      { ...base, hostVersionRange: ' >=0.11.0' },
+      { ...base, artifactInstallMetadata: [] },
+      { ...base, artifactInstallMetadata: [{ platform: 'linux-x64', extractedManifestSha256: 'a'.repeat(64) }] },
+      { ...base, artifactInstallMetadata: [{ platform: 'darwin-arm64', extractedManifestSha256: 'not-a-sha256' }] },
+      { ...base, artifactInstallMetadata: [
+        { platform: 'darwin-arm64', extractedManifestSha256: 'a'.repeat(64) },
+        { platform: 'darwin-arm64', extractedManifestSha256: 'b'.repeat(64) },
+      ] },
+    ]
+
+    for (const release of invalidReleases) {
+      expect(verify(envelopeFor(catalogV2({ releases: [release] }), pair.privateKey), [trustedKey]).ok).toBe(false)
+    }
+  })
+
+  it('rejects v1 release shape under schema v2 and v2-only fields under schema v1', () => {
+    const { pair, trustedKey } = testKey('release-2026')
+    expect(diagnosticCodes(verify(envelopeFor(catalogV2({ releases: catalog().releases }), pair.privateKey), [trustedKey])))
+      .toContain('INVALID_RELEASE')
+    expect(diagnosticCodes(verify(envelopeFor(catalog({ releases: catalogV2().releases }), pair.privateKey), [trustedKey])))
+      .toContain('INVALID_RELEASE')
   })
 
   it('rejects mutation of any authenticated catalog byte', () => {
