@@ -112,12 +112,6 @@ describe("OpenDesign official release workflow", () => {
       expect(install.indexOf("bun install")).toBeLessThan(install.indexOf("npm ci"))
     }
 
-    const nestedInstall = spawnSync("npm", ["ci", "--ignore-scripts"], {
-      cwd: join(root, "modules/open-design"),
-      encoding: "utf8",
-    })
-    expect(nestedInstall.status, `${nestedInstall.stdout}\n${nestedInstall.stderr}`).toBe(0)
-
     const imported = spawnSync("node", [
       "--input-type=module",
       "--eval",
@@ -202,6 +196,10 @@ describe("OpenDesign official release workflow", () => {
   })
 
   test("is parsed and contract-tested by pull-request static validation", () => {
+    expect(staticValidation).toContain("Install exact OpenDesign publisher dependencies")
+    expect(staticValidation).toContain("bun install --frozen-lockfile --ignore-scripts")
+    expect(staticValidation).toContain("npm ci --ignore-scripts --prefix modules/open-design")
+    expect(staticValidation.indexOf("Install exact OpenDesign publisher dependencies")).toBeLessThan(staticValidation.indexOf("Run release unit tests"))
     expect(staticValidation).toContain(".github/workflows/open-design-release.yml")
     expect(staticValidation).toContain(".github/workflows/open-design-production-input.yml")
     expect(staticValidation).toContain(".github/workflows/open-design-release.md")
