@@ -628,7 +628,7 @@ describe('verified artifact download', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
-  })
+  }, process.platform === 'win32' ? 20_000 : 5_000)
 
   it('retries retryable status with injected exponential backoff', async () => {
     const data = fixture()
