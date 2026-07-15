@@ -49,7 +49,7 @@ pnpm --filter @simulator/open-design-artifact-policy package:production -- \
   --refresh \
   --bundle-root /absolute/path/to/verified-production-bundle \
   --output /absolute/path/to/new-refresh-assets \
-  --release-tag open-design-v0.14.2 \
+  --release-tag open-design-v0.14.3 \
   --catalog-sequence <next-sequence> \
   --catalog-issued-at <canonical-ISO-time> \
   --catalog-expires-at <canonical-ISO-time-within-24h> \
