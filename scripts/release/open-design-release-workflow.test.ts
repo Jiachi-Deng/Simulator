@@ -15,10 +15,17 @@ const documentation = readFileSync(documentationPath, "utf8")
 const staticValidation = readFileSync(staticValidationPath, "utf8")
 const producer = Bun.YAML.parse(producerSource) as Record<string, any>
 const workflow = Bun.YAML.parse(source) as Record<string, any>
+const staticWorkflow = Bun.YAML.parse(staticValidation) as Record<string, any>
 
 function step(jobName: "initial" | "refresh", name: string): Record<string, any> {
   const found = workflow.jobs[jobName].steps.find((candidate: Record<string, any>) => candidate.name === name)
   if (!found) throw new Error(`Missing ${jobName} step: ${name}`)
+  return found
+}
+
+function staticStep(name: string): Record<string, any> {
+  const found = staticWorkflow.jobs["release-static-validation"].steps.find((candidate: Record<string, any>) => candidate.name === name)
+  if (!found) throw new Error(`Missing static validation step: ${name}`)
   return found
 }
 
@@ -196,9 +203,12 @@ describe("OpenDesign official release workflow", () => {
   })
 
   test("is parsed and contract-tested by pull-request static validation", () => {
+    expect(staticStep("Setup Node").uses).toBe("actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e")
+    expect(staticStep("Setup Node").with["node-version"]).toBe("24.18.0")
     expect(staticValidation).toContain("Install exact OpenDesign publisher dependencies")
     expect(staticValidation).toContain("bun install --frozen-lockfile --ignore-scripts")
     expect(staticValidation).toContain("npm ci --ignore-scripts --prefix modules/open-design")
+    expect(staticValidation.indexOf("Setup Node")).toBeLessThan(staticValidation.indexOf("Install exact OpenDesign publisher dependencies"))
     expect(staticValidation.indexOf("Install exact OpenDesign publisher dependencies")).toBeLessThan(staticValidation.indexOf("Run release unit tests"))
     expect(staticValidation).toContain(".github/workflows/open-design-release.yml")
     expect(staticValidation).toContain(".github/workflows/open-design-production-input.yml")
