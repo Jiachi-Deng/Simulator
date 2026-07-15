@@ -15,10 +15,12 @@ export async function produceResourceMetadata({ artifactRoot, provenance, policy
   const rootStat = await lstat(root).catch((error) => stagingFail("RESOURCE_METADATA_ROOT_INVALID", error.message));
   stagingAssert(rootStat.isDirectory() && !rootStat.isSymbolicLink(), "RESOURCE_METADATA_ROOT_INVALID", "artifact root must be a real directory");
 
-  const decisionByIdentity = new Map(decisions.decisions.map((decision) => [`${decision.category}\0${decision.sourcePath}`, decision.id]));
+  const decisionByIdentity = new Map(decisions.decisions.map((decision) => [`${decision.category}\0${decision.sourcePath}`, decision]));
+  const usedDecisions = new Map();
   const resources = {};
   const packageCache = new Map();
   await visit(root, "");
+  await verifyRightsEvidence(root, [...usedDecisions.values()]);
   const orderedResources = Object.fromEntries(Object.entries(resources).sort(([left], [right]) => compareUtf8(left, right)));
   const document = {
     schemaVersion: 1,
@@ -55,7 +57,9 @@ export async function produceResourceMetadata({ artifactRoot, provenance, policy
       const category = resourceCategory(artifactPath, policy);
       if (category == null) continue;
       const sourcePath = await sourceIdentity(root, artifactPath, packageCache);
-      const decisionId = decisionByIdentity.get(`${category}\0${sourcePath}`) ?? `unreviewed-${slug(category)}-${createHash("sha256").update(sourcePath).digest("hex").slice(0, 16)}`;
+      const decision = decisionByIdentity.get(`${category}\0${sourcePath}`);
+      const decisionId = decision?.id ?? `unreviewed-${slug(category)}-${createHash("sha256").update(sourcePath).digest("hex").slice(0, 16)}`;
+      if (decision != null) usedDecisions.set(decision.id, decision);
       resources[artifactPath] = {
         resourceCategory: category,
         sourcePath,
@@ -65,6 +69,30 @@ export async function produceResourceMetadata({ artifactRoot, provenance, policy
     }
     const after = await lstat(absoluteDirectory).catch((error) => stagingFail("RESOURCE_METADATA_FILESYSTEM_ERROR", error.message));
     stagingAssert(sameIdentity(before, after), "RESOURCE_METADATA_CHANGED", `directory changed while producing metadata: ${relativeDirectory || "."}`);
+  }
+}
+
+async function verifyRightsEvidence(root, decisions) {
+  const verified = new Map();
+  for (const decision of decisions) {
+    if (decision.status !== "include") continue;
+    const evidence = decision.rightsEvidence;
+    stagingAssert(decision.rightsStatus === "cleared" && typeof decision.license === "string" && decision.license.length > 0 && evidence != null, "RIGHTS_EVIDENCE_INVALID", `included decision lacks cleared evidence: ${decision.id}`);
+    stagingAssert(isNormalizedArtifactPath(evidence.reference) && evidence.reference.startsWith("legal/"), "RIGHTS_EVIDENCE_INVALID", `rights evidence must be a packaged legal file: ${decision.id}`);
+    stagingAssert(/^[0-9a-f]{64}$/u.test(evidence.sha256), "RIGHTS_EVIDENCE_INVALID", `rights evidence hash is invalid: ${decision.id}`);
+    const previous = verified.get(evidence.reference);
+    if (previous != null) {
+      stagingAssert(previous === evidence.sha256, "RIGHTS_EVIDENCE_INVALID", `conflicting rights evidence hashes: ${evidence.reference}`);
+      continue;
+    }
+    const filename = path.join(root, ...evidence.reference.split("/"));
+    const before = await lstat(filename).catch((error) => stagingFail("RIGHTS_EVIDENCE_INVALID", `${decision.id}: ${error.message}`));
+    stagingAssert(before.isFile() && !before.isSymbolicLink() && before.nlink === 1, "RIGHTS_EVIDENCE_INVALID", `rights evidence is not an unlinked regular file: ${evidence.reference}`);
+    const bytes = await readFile(filename).catch((error) => stagingFail("RIGHTS_EVIDENCE_INVALID", `${decision.id}: ${error.message}`));
+    const after = await lstat(filename).catch((error) => stagingFail("RIGHTS_EVIDENCE_INVALID", `${decision.id}: ${error.message}`));
+    stagingAssert(sameIdentity(before, after), "RIGHTS_EVIDENCE_INVALID", `rights evidence changed while hashing: ${evidence.reference}`);
+    stagingAssert(createHash("sha256").update(bytes).digest("hex") === evidence.sha256, "RIGHTS_EVIDENCE_INVALID", `rights evidence hash mismatch: ${evidence.reference}`);
+    verified.set(evidence.reference, evidence.sha256);
   }
 }
 
@@ -117,6 +145,12 @@ function packageLocationForPath(artifactPath) {
 
 function isNativeResource(artifactPath) {
   return NATIVE_EXTENSIONS.has(path.posix.extname(artifactPath).toLowerCase()) || /\/node_modules\/node-pty\/prebuilds\/[^/]+\/spawn-helper$/u.test(artifactPath);
+}
+
+function isNormalizedArtifactPath(value) {
+  return typeof value === "string" && value.length > 0 && value === value.normalize("NFC") && !value.includes("\\") && !value.includes("\0")
+    && !path.posix.isAbsolute(value) && path.posix.normalize(value) === value
+    && !value.split("/").some((part) => part === "" || part === "." || part === "..") && !/[\u0000-\u001f\u007f]/u.test(value);
 }
 
 function nativeFormat(artifactPath) {

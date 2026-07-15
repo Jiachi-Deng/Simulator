@@ -40,6 +40,100 @@ test("copies only policy-allowed production files and excludes maps and dev arti
   assert.equal(await readFile(path.join(staging, "web/standalone/server.js"), "utf8"), "server\n");
 });
 
+test("removes bundled OpenDesign visual assets from the Host-only web surface", async (t) => {
+  const { source, staging } = await roots(t);
+  const files = [
+    "apps/web/public/logo.svg",
+    "apps/web/public/model-icons/claude.png",
+    "apps/web/.next/static/media/assistant.woff2",
+    "apps/web/.next/static/chunks/app.js",
+    "server.js",
+  ];
+  await Promise.all(files.map(async (relative) => {
+    await mkdir(path.dirname(path.join(source, relative)), { recursive: true });
+    await writeFile(path.join(source, relative), relative);
+  }));
+
+  const result = await copyStagingInputs({
+    stagingRoot: staging,
+    policy,
+    inputs: [{ label: "standalone", source, destination: "web/standalone" }],
+  });
+
+  assert.deepEqual(result.copied.map((entry) => entry.path).sort(), [
+    "web/standalone/apps/web/.next/static/chunks/app.js",
+    "web/standalone/server.js",
+  ]);
+  assert.deepEqual(result.excluded.toSorted((left, right) => left.path.localeCompare(right.path)), [
+    { input: "standalone", path: "web/standalone/apps/web/.next/static/media/assistant.woff2", reason: "host-only-ui" },
+    { input: "standalone", path: "web/standalone/apps/web/public/logo.svg", reason: "host-only-ui" },
+    { input: "standalone", path: "web/standalone/apps/web/public/model-icons/claude.png", reason: "host-only-ui" },
+  ]);
+});
+
+test("removes the complete sharp image-optimizer closure from Host-only standalone output", async (t) => {
+  const { source, staging } = await roots(t);
+  const files = [
+    "node_modules/.pnpm/sharp@0.34.5/node_modules/sharp/package.json",
+    "node_modules/.pnpm/@img+sharp-darwin-arm64@0.34.5/node_modules/@img/sharp-darwin-arm64/lib/sharp.node",
+    "node_modules/.pnpm/@img+sharp-libvips-darwin-arm64@1.2.4/node_modules/@img/sharp-libvips-darwin-arm64/lib/libvips.dylib",
+    "node_modules/.pnpm/@img+colour@1.1.0/node_modules/@img/colour/package.json",
+    "node_modules/@img/sharp-darwin-arm64/lib/sharp.node",
+    "node_modules/@img/sharp-libvips-darwin-arm64/lib/libvips.dylib",
+    "node_modules/@img/colour/package.json",
+    "node_modules/sharp/package.json",
+    "server.js",
+  ];
+  await Promise.all(files.map(async (relative) => {
+    await mkdir(path.dirname(path.join(source, relative)), { recursive: true });
+    await writeFile(path.join(source, relative), relative);
+  }));
+
+  const result = await copyStagingInputs({
+    stagingRoot: staging,
+    policy,
+    inputs: [{ label: "standalone", source, destination: "web/standalone" }],
+  });
+
+  assert.deepEqual(result.copied.map((entry) => entry.path), ["web/standalone/server.js"]);
+  assert.equal(result.excluded.length, 8);
+  assert.ok(result.excluded.every((entry) => entry.reason === "host-only-image-optimizer"));
+  assert.deepEqual(result.excluded.map((entry) => entry.path).toSorted(), [
+    "web/standalone/node_modules/.pnpm/@img+colour@1.1.0",
+    "web/standalone/node_modules/.pnpm/@img+sharp-darwin-arm64@0.34.5",
+    "web/standalone/node_modules/.pnpm/@img+sharp-libvips-darwin-arm64@1.2.4",
+    "web/standalone/node_modules/.pnpm/sharp@0.34.5",
+    "web/standalone/node_modules/@img/colour",
+    "web/standalone/node_modules/@img/sharp-darwin-arm64",
+    "web/standalone/node_modules/@img/sharp-libvips-darwin-arm64",
+    "web/standalone/node_modules/sharp",
+  ]);
+});
+
+test("packages the audited third-party evidence whenever the upstream license is staged", async (t) => {
+  const { source, staging } = await roots(t);
+  const license = path.join(source, "LICENSE");
+  await writeFile(license, "upstream license\n");
+
+  const result = await copyStagingInputs({
+    stagingRoot: staging,
+    policy,
+    inputs: [{ label: "license", source: license, destination: "legal/LICENSE" }],
+  });
+
+  assert.deepEqual(result.copied.map((entry) => entry.path), [
+    "legal/LICENSE",
+    "legal/THIRD_PARTY_NOTICES.md",
+    "legal/licenses/better-sqlite3-12.10.0.LICENSE",
+    "legal/licenses/blake3-wasm-2.1.5.LICENSE",
+    "legal/licenses/node-pty-1.1.0.LICENSE",
+  ]);
+  assert.equal(
+    await readFile(path.join(staging, "legal/THIRD_PARTY_NOTICES.md"), "utf8"),
+    await readFile(new URL("../legal/THIRD_PARTY_NOTICES.md", import.meta.url), "utf8"),
+  );
+});
+
 test("rejects symlink and hard-link staging sources", async (t) => {
   const symlinkFixture = await roots(t);
   await writeFile(path.join(symlinkFixture.source, "server.js"), "server\n");

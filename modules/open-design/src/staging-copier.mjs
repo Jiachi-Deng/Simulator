@@ -1,8 +1,21 @@
 import { constants as fsConstants } from "node:fs";
 import { chmod, lstat, mkdir, open, opendir, realpath, rm } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { stagingAssert, stagingFail } from "./staging-error.mjs";
+
+const HOST_ONLY_WEB_PREFIXES = [
+  "web/standalone/apps/web/public/",
+  "web/standalone/apps/web/.next/static/",
+];
+const BUNDLED_LEGAL_EVIDENCE = [
+  "THIRD_PARTY_NOTICES.md",
+  "licenses/better-sqlite3-12.10.0.LICENSE",
+  "licenses/blake3-wasm-2.1.5.LICENSE",
+  "licenses/node-pty-1.1.0.LICENSE",
+];
+const MODULE_LEGAL_ROOT = fileURLToPath(new URL("../legal/", import.meta.url));
 
 export async function ensureEmptyStagingRoot(stagingRoot) {
   stagingAssert(path.isAbsolute(stagingRoot ?? ""), "STAGING_ROOT_INVALID", "staging root must be an absolute path");
@@ -40,6 +53,12 @@ export async function copyStagingInputs({ stagingRoot, inputs, policy, target } 
     }
   }
 
+  if (inputs.some((input) => input.destination === "legal/LICENSE")) {
+    for (const relative of BUNDLED_LEGAL_EVIDENCE) {
+      await copyRegularFile(path.join(MODULE_LEGAL_ROOT, ...relative.split("/")), `legal/${relative}`, "simulator-rights-evidence");
+    }
+  }
+
   return { root, copied, excluded, totalBytes };
 
   async function copyDirectory(sourceDirectory, sourceRoot, destinationRoot, label) {
@@ -53,8 +72,9 @@ export async function copyStagingInputs({ stagingRoot, inputs, policy, target } 
       const stat = await lstat(sourcePath).catch((error) => stagingFail("STAGING_SOURCE_INVALID", `${label}: ${error.message}`));
       stagingAssert(!stat.isSymbolicLink(), "STAGING_SYMLINK_FORBIDDEN", `${label} contains a symlink: ${relativeSourcePath}`);
       if (stat.isDirectory()) {
-        if (isExcludedPath(destinationPath, policy, target)) {
-          excluded.push({ input: label, path: destinationPath, reason: "policy" });
+        const reason = exclusionReason(destinationPath, policy, target);
+        if (reason != null) {
+          excluded.push({ input: label, path: destinationPath, reason });
           continue;
         }
         await copyDirectory(sourcePath, sourceRoot, destinationRoot, label);
@@ -69,8 +89,9 @@ export async function copyStagingInputs({ stagingRoot, inputs, policy, target } 
   }
 
   async function copyRegularFile(sourcePath, destinationPath, label) {
-    if (isExcludedPath(destinationPath, policy, target)) {
-      excluded.push({ input: label, path: destinationPath, reason: "policy" });
+    const reason = exclusionReason(destinationPath, policy, target);
+    if (reason != null) {
+      excluded.push({ input: label, path: destinationPath, reason });
       return;
     }
     assertAllowedDestination(destinationPath, policy, target);
@@ -148,13 +169,19 @@ function assertAllowedDestination(value, policy, target) {
 }
 
 function isExcludedPath(value, policy, target) {
+  return exclusionReason(value, policy, target) != null;
+}
+
+function exclusionReason(value, policy, target) {
+  if (isHostOnlyWebResource(value, policy)) return "host-only-ui";
+  if (isHostOnlyImageOptimizerDependency(value)) return "host-only-image-optimizer";
   const lower = value.toLowerCase();
-  if (lower.endsWith(".map")) return true;
+  if (lower.endsWith(".map")) return "policy";
   const segments = lower.split("/");
-  if (lower.includes("/node-pty/third_party/")) return true;
+  if (lower.includes("/node-pty/third_party/")) return "policy";
   if (target?.platform && target?.arch) {
     const expected = `${target.platform}-${target.arch}`;
-    if (segments.some((segment) => /^(darwin|linux|win32)-(arm64|x64)$/u.test(segment) && segment !== expected)) return true;
+    if (segments.some((segment) => /^(darwin|linux|win32)-(arm64|x64)$/u.test(segment) && segment !== expected)) return "policy";
   }
   const segmentMatches = (pattern) => {
     const normalized = pattern.toLowerCase();
@@ -162,7 +189,27 @@ function isExcludedPath(value, policy, target) {
     return segments.some((segment) => matchesSimpleGlob(segment, normalized));
   };
   return (policy.forbiddenSegmentPatterns ?? []).some(segmentMatches)
-    || (policy.forbiddenBasenamePatterns ?? []).some((pattern) => matchesSimpleGlob(path.posix.basename(lower), pattern.toLowerCase()));
+    || (policy.forbiddenBasenamePatterns ?? []).some((pattern) => matchesSimpleGlob(path.posix.basename(lower), pattern.toLowerCase()))
+    ? "policy"
+    : null;
+}
+
+function isHostOnlyWebResource(value, policy) {
+  if (!HOST_ONLY_WEB_PREFIXES.some((prefix) => value.startsWith(prefix))) return false;
+  const extension = path.posix.extname(value).toLowerCase();
+  return [...(policy.resourceExtensions?.fonts ?? []), ...(policy.resourceExtensions?.images ?? [])].includes(extension);
+}
+
+function isHostOnlyImageOptimizerDependency(value) {
+  if (!value.startsWith("web/standalone/")) return false;
+  const segments = value.split("/");
+  for (let index = 0; index < segments.length; index += 1) {
+    if (segments[index] === ".pnpm" && /^(?:sharp@|@img\+(?:colour@|sharp-))/u.test(segments[index + 1] ?? "")) return true;
+    if (segments[index] !== "node_modules") continue;
+    if (segments[index + 1] === "sharp") return true;
+    if (segments[index + 1] === "@img" && (segments[index + 2] === "colour" || segments[index + 2]?.startsWith("sharp-"))) return true;
+  }
+  return false;
 }
 
 function matchesSimpleGlob(value, pattern) {

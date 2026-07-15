@@ -28,7 +28,7 @@ test("requires node-pty to be explicitly allowed to build", () => {
   assert.doesNotThrow(() => assertNativeBuildsAllowed({ pnpm: { onlyBuiltDependencies: ["better-sqlite3", "node-pty", "sharp"] } }));
 });
 
-test("pins every real target-native path while keeping redistribution decisions pending", () => {
+test("pins every target-native path and excludes the complete sharp optimizer closure", () => {
   assert.equal(Object.keys(pendingMetadata).length, 13);
   const decisionById = new Map(resourceDecisions.decisions.map((decision) => [decision.id, decision]));
   for (const [artifactPath, metadata] of Object.entries(pendingMetadata)) {
@@ -37,8 +37,16 @@ test("pins every real target-native path while keeping redistribution decisions 
     assert.deepEqual({ platform: metadata.nativeTarget.platform, arch: metadata.nativeTarget.arch, nodeAbi: metadata.nativeTarget.nodeAbi, libc: metadata.nativeTarget.libc }, target);
     const decision = decisionById.get(metadata.decisionId);
     assert.equal(decision.sourcePath, metadata.sourcePath);
-    assert.equal(decision.status, "review");
-    assert.equal(decision.rightsStatus, "pending");
+    if (metadata.sourcePath.startsWith("@img/sharp-")) {
+      assert.equal(decision.status, "exclude");
+      assert.equal(decision.rightsStatus, "not-applicable");
+      assert.match(decision.reason, /staging gate removes/u);
+    } else {
+      assert.equal(decision.status, "include");
+      assert.equal(decision.rightsStatus, "cleared");
+      assert.ok(decision.license);
+      assert.ok(decision.rightsEvidence);
+    }
   }
 });
 

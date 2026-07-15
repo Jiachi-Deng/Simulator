@@ -21,14 +21,17 @@ test("produces canonical metadata for every real staged resource path", async (t
   const packageRoot = path.join(root, "runtime/daemon/node_modules/node-pty");
   const nativePath = "runtime/daemon/node_modules/node-pty/prebuilds/darwin-arm64/pty.node";
   const imagePath = "web/standalone/apps/web/public/logo.svg";
+  const evidencePath = "legal/licenses/node-pty-1.1.0.LICENSE";
   await Promise.all([
     mkdir(path.join(packageRoot, "prebuilds/darwin-arm64"), { recursive: true }),
     mkdir(path.dirname(path.join(root, imagePath)), { recursive: true }),
+    mkdir(path.dirname(path.join(root, evidencePath)), { recursive: true }),
   ]);
   await Promise.all([
     writeFile(path.join(packageRoot, "package.json"), JSON.stringify({ name: "node-pty", version: "1.1.0", license: "MIT" })),
     writeFile(path.join(root, nativePath), "native"),
     writeFile(path.join(root, imagePath), "svg"),
+    writeFile(path.join(root, evidencePath), await readFile(new URL("../legal/licenses/node-pty-1.1.0.LICENSE", import.meta.url))),
   ]);
 
   const result = await produceResourceMetadata({ artifactRoot: root, provenance, policy, decisions, target });
@@ -44,4 +47,10 @@ test("produces canonical metadata for every real staged resource path", async (t
   assert.equal(result.sha256, createHash("sha256").update(canonicalJsonBytes(result.document)).digest("hex"));
   assert.equal(result.bytes.includes(Buffer.from(root)), false);
   assert.deepEqual(result.evidence, { resourceCount: 2, categories: { images: 1, "native-binaries": 1 } });
+
+  await writeFile(path.join(root, evidencePath), "tampered\n");
+  await assert.rejects(
+    produceResourceMetadata({ artifactRoot: root, provenance, policy, decisions, target }),
+    { code: "RIGHTS_EVIDENCE_INVALID" },
+  );
 });
