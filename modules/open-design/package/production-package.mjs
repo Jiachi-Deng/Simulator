@@ -100,6 +100,11 @@ const PRODUCTION_FILE_NAMES = Object.freeze([
   OPEN_DESIGN_OFFICIAL_CHANNEL_FILENAME,
   OPEN_DESIGN_PRODUCTION_METADATA_FILENAME,
 ]);
+export const OPEN_DESIGN_REFRESH_FILE_NAMES = Object.freeze([
+  OPEN_DESIGN_PRODUCTION_CATALOG_FILENAME,
+  OPEN_DESIGN_PRODUCTION_ENVELOPE_FILENAME,
+  OPEN_DESIGN_PRODUCTION_METADATA_FILENAME,
+]);
 const REFERENCE_MAPPING = Object.freeze([
   "Proma package-open-design-host-app: dry-run, deterministic archive, catalog-bound size/hash",
   "Proma sign-host-app-catalog: separate Ed25519 sign/verify and tamper rejection",
@@ -128,6 +133,122 @@ export async function buildOpenDesignProductionPackageForTest(options, fixtureDi
     nodePolicy: createNodeRuntimePolicy({ version: "24.18.0", licenseSha256: fixtureDigests?.nodeLicenseSha256 }),
     validatePublicStaging: async () => undefined,
   });
+}
+
+export async function dryRunOpenDesignCatalogRefresh(options = {}) {
+  const normalized = normalizeRefreshOptions(options, { requireSigningKey: false });
+  const source = await inspectRefreshSource(normalized);
+  return Object.freeze({
+    mode: "refresh-dry-run",
+    writes: Object.freeze([]),
+    moduleId: OPEN_DESIGN_MODULE_ID,
+    version: OPEN_DESIGN_PRODUCTION_VERSION,
+    platform: OPEN_DESIGN_MODULE_PLATFORM,
+    releaseTag: normalized.releaseTag,
+    previousCatalog: Object.freeze({
+      sequence: source.catalog.sequence,
+      issuedAt: source.catalog.issuedAt,
+      expiresAt: source.catalog.expiresAt,
+    }),
+    nextCatalog: Object.freeze({
+      sequence: normalized.catalogSequence,
+      issuedAt: normalized.catalogIssuedAt,
+      expiresAt: normalized.catalogExpiresAt,
+    }),
+    plannedFiles: OPEN_DESIGN_REFRESH_FILE_NAMES,
+    immutableArchiveVerified: true,
+    verifiedWithModuleInstaller: true,
+    signingRequired: true,
+  });
+}
+
+export async function refreshOpenDesignProductionCatalog(options = {}) {
+  const normalized = normalizeRefreshOptions(options, { requireSigningKey: true });
+  const source = await inspectRefreshSource(normalized);
+  const signing = await loadSigningKey(normalized);
+  stagingAssert(Buffer.from(signing.publicKey).equals(Buffer.from(source.trustedKey.publicKey)), "PACKAGE_REFRESH_KEY_MISMATCH", "external signing key does not match the official channel trust root");
+
+  const catalog = {
+    schemaVersion: 2,
+    sequence: normalized.catalogSequence,
+    issuedAt: normalized.catalogIssuedAt,
+    expiresAt: normalized.catalogExpiresAt,
+    releases: source.catalog.releases,
+  };
+  const oldReleaseBytes = encodeCanonicalCatalog(source.catalog.releases);
+  const newReleaseBytes = encodeCanonicalCatalog(catalog.releases);
+  stagingAssert(Buffer.from(oldReleaseBytes).equals(Buffer.from(newReleaseBytes)), "PACKAGE_REFRESH_RELEASE_CHANGED", "refresh must preserve the signed release records byte-for-byte");
+  const catalogBytes = encodeCanonicalCatalog(catalog);
+  const signature = Uint8Array.from(sign(null, catalogBytes, signing.privateKey));
+  const envelopeBytes = encodeCanonicalCatalog({
+    schemaVersion: 1,
+    keyId: normalized.keyId,
+    catalogBytes: Buffer.from(catalogBytes).toString("base64"),
+    signature: Buffer.from(signature).toString("base64"),
+  });
+  const verified = verifyCatalogEnvelope(envelopeBytes, source.trustedKey, normalized.priorTrustState, normalized.verificationTimeMs);
+  stagingAssert(verified.catalog.schemaVersion === 2
+    && Buffer.from(encodeCanonicalCatalog(verified.catalog.releases)).equals(Buffer.from(oldReleaseBytes)),
+  "PACKAGE_REFRESH_RELEASE_CHANGED", "verified refresh catalog changed the signed release records");
+
+  const releaseMetadata = {
+    ...source.metadata,
+    catalog: {
+      ...source.metadata.catalog,
+      path: OPEN_DESIGN_PRODUCTION_ENVELOPE_FILENAME,
+      canonicalCatalogPath: OPEN_DESIGN_PRODUCTION_CATALOG_FILENAME,
+      url: `${normalized.releaseBaseUrl}${OPEN_DESIGN_PRODUCTION_ENVELOPE_FILENAME}`,
+      schemaVersion: 2,
+      sequence: normalized.catalogSequence,
+      issuedAt: normalized.catalogIssuedAt,
+      expiresAt: normalized.catalogExpiresAt,
+      sha256: sha256Bytes(catalogBytes),
+      size: catalogBytes.byteLength,
+    },
+  };
+  const releaseMetadataBytes = encodeCanonicalCatalog(releaseMetadata);
+  const outputTarget = await prepareOutputTarget(normalized.output);
+  let published = false;
+  try {
+    const bundleRoot = path.join(outputTarget.transactionRoot, "bundle");
+    await mkdir(bundleRoot, { mode: 0o700 });
+    await writeExclusiveBytes(path.join(bundleRoot, OPEN_DESIGN_PRODUCTION_CATALOG_FILENAME), catalogBytes);
+    await writeExclusiveBytes(path.join(bundleRoot, OPEN_DESIGN_PRODUCTION_ENVELOPE_FILENAME), envelopeBytes);
+    await writeExclusiveBytes(path.join(bundleRoot, OPEN_DESIGN_PRODUCTION_METADATA_FILENAME), releaseMetadataBytes);
+    const expectedFiles = new Map([
+      [OPEN_DESIGN_PRODUCTION_CATALOG_FILENAME, { size: catalogBytes.byteLength, sha256: sha256Bytes(catalogBytes) }],
+      [OPEN_DESIGN_PRODUCTION_ENVELOPE_FILENAME, { size: envelopeBytes.byteLength, sha256: sha256Bytes(envelopeBytes) }],
+      [OPEN_DESIGN_PRODUCTION_METADATA_FILENAME, { size: releaseMetadataBytes.byteLength, sha256: sha256Bytes(releaseMetadataBytes) }],
+    ]);
+    await verifyBundleFiles(bundleRoot, expectedFiles);
+    await fsyncDirectory(bundleRoot);
+    await assertDirectoryContainsOnly(outputTarget.transactionRoot, ["bundle"]);
+    await assertAbsent(outputTarget.finalRoot, "PACKAGE_OUTPUT_EXISTS");
+    await rename(bundleRoot, outputTarget.finalRoot).catch((error) => stagingFail("PACKAGE_PUBLISH_FAILED", error.message));
+    published = true;
+    await chmod(outputTarget.finalRoot, 0o700);
+    await rmdir(outputTarget.transactionRoot).catch((error) => stagingFail("PACKAGE_CLEANUP_FAILED", error.message));
+    await fsyncDirectory(outputTarget.parent);
+    await verifyBundleFiles(outputTarget.finalRoot, expectedFiles);
+    return Object.freeze({
+      output: outputTarget.finalRoot,
+      catalogPath: path.join(outputTarget.finalRoot, OPEN_DESIGN_PRODUCTION_CATALOG_FILENAME),
+      envelopePath: path.join(outputTarget.finalRoot, OPEN_DESIGN_PRODUCTION_ENVELOPE_FILENAME),
+      metadataPath: path.join(outputTarget.finalRoot, OPEN_DESIGN_PRODUCTION_METADATA_FILENAME),
+      catalogSha256: sha256Bytes(catalogBytes),
+      sequence: normalized.catalogSequence,
+      issuedAt: normalized.catalogIssuedAt,
+      expiresAt: normalized.catalogExpiresAt,
+      immutableArchiveSha256: source.artifact.sha256,
+      immutableExtractedManifestSha256: source.installMetadata.extractedManifestSha256,
+      verifiedWithModuleInstaller: true,
+    });
+  } catch (error) {
+    if (published) await rm(outputTarget.finalRoot, { recursive: true, force: true }).catch(() => undefined);
+    await rm(outputTarget.transactionRoot, { recursive: true, force: true }).catch(() => undefined);
+    await fsyncDirectory(outputTarget.parent).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function preflightProductionPackage(options, policy) {
@@ -412,6 +533,7 @@ export async function verifyOpenDesignProductionBundle({
   stagingAssert(await hashRegularFile(archivePath, DEFAULT_INSTALL_LIMITS.maxArchiveBytes, "production archive") === artifact.sha256, "PACKAGE_ARCHIVE_INVALID", "archive SHA-256 differs from the signed catalog");
 
   const official = parseStrictJson(officialBytes, "official channel");
+  stagingAssert(Buffer.from(encodeCanonicalCatalog(official)).equals(officialBytes), "PACKAGE_OFFICIAL_CHANNEL_INVALID", "official channel must use canonical JSON bytes");
   const expectedOfficial = {
     schemaVersion: 1,
     moduleId: OPEN_DESIGN_MODULE_ID,
@@ -429,6 +551,7 @@ export async function verifyOpenDesignProductionBundle({
   stagingAssert(Buffer.from(encodeCanonicalCatalog(official)).equals(Buffer.from(encodeCanonicalCatalog(expectedOfficial))), "PACKAGE_OFFICIAL_CHANNEL_INVALID", "official channel metadata does not match the externally trusted release identity");
 
   const metadata = parseStrictJson(metadataBytes, "release metadata");
+  stagingAssert(Buffer.from(encodeCanonicalCatalog(metadata)).equals(metadataBytes), "PACKAGE_METADATA_INVALID", "refresh source release metadata must use canonical JSON bytes");
   stagingAssert(metadata?.distribution?.class === "public" && metadata?.distribution?.nonPromotable === false, "PACKAGE_METADATA_INVALID", "release metadata is not public/promotable");
   stagingAssert(metadata?.archive?.sha256 === artifact.sha256 && metadata?.archive?.extractedManifestSha256 === installMetadata.extractedManifestSha256, "PACKAGE_METADATA_INVALID", "release metadata differs from the signed catalog");
   stagingAssert(metadata?.hostIntegration?.sourceCopyTarget === "apps/electron/resources/open-design-official-channel.json"
@@ -461,6 +584,192 @@ export async function verifyOpenDesignProductionBundle({
     extractedManifestSha256: installMetadata.extractedManifestSha256,
     catalogState: verified.state,
   });
+}
+
+async function inspectRefreshSource(normalized) {
+  const info = await lstat(normalized.bundleRoot).catch((error) => stagingFail("PACKAGE_REFRESH_SOURCE_INVALID", error.message));
+  stagingAssert(info.isDirectory() && !info.isSymbolicLink(), "PACKAGE_REFRESH_SOURCE_INVALID", "refresh source must be a real production bundle directory");
+  const actualNames = await import("node:fs/promises").then(({ readdir }) => readdir(normalized.bundleRoot));
+  const expectedNames = new Set(PRODUCTION_FILE_NAMES);
+  stagingAssert(actualNames.length === expectedNames.size && actualNames.every((name) => expectedNames.has(name)), "PACKAGE_REFRESH_SOURCE_INVALID", "refresh source must contain the exact production bundle file set");
+
+  const [envelopeBytes, catalogBytes, officialBytes, metadataBytes] = await Promise.all([
+    readOwnerControlledFile(path.join(normalized.bundleRoot, OPEN_DESIGN_PRODUCTION_ENVELOPE_FILENAME), 8 * 1024 * 1024, "catalog envelope", false),
+    readOwnerControlledFile(path.join(normalized.bundleRoot, OPEN_DESIGN_PRODUCTION_CATALOG_FILENAME), 8 * 1024 * 1024, "canonical catalog", false),
+    readOwnerControlledFile(path.join(normalized.bundleRoot, OPEN_DESIGN_OFFICIAL_CHANNEL_FILENAME), 64 * 1024, "official channel", false),
+    readOwnerControlledFile(path.join(normalized.bundleRoot, OPEN_DESIGN_PRODUCTION_METADATA_FILENAME), 256 * 1024, "release metadata", false),
+  ]);
+  const envelope = decodeCatalogEnvelope(envelopeBytes);
+  stagingAssert(Buffer.from(envelope.catalogBytes).equals(catalogBytes), "PACKAGE_CATALOG_INVALID", "refresh source envelope differs from the raw catalog asset");
+  const untrustedCatalog = parseStrictJson(catalogBytes, "canonical catalog");
+  stagingAssert(untrustedCatalog && typeof untrustedCatalog === "object" && typeof untrustedCatalog.issuedAt === "string", "PACKAGE_CATALOG_INVALID", "refresh source catalog has no signed issuance time");
+
+  const official = parseStrictJson(officialBytes, "official channel");
+  const suppliedKey = normalizeTrustedKey({
+    keyId: normalized.keyId,
+    publicKey: decodePublicKeyFromOfficialChannel(official),
+    activeFrom: normalized.keyActiveFrom,
+    ...(normalized.keyActiveUntil === undefined ? {} : { activeUntil: normalized.keyActiveUntil }),
+  });
+  const expectedOfficial = {
+    schemaVersion: 1,
+    moduleId: OPEN_DESIGN_MODULE_ID,
+    version: OPEN_DESIGN_PRODUCTION_VERSION,
+    platform: OPEN_DESIGN_MODULE_PLATFORM,
+    catalogUrl: `${normalized.releaseBaseUrl}${OPEN_DESIGN_PRODUCTION_ENVELOPE_FILENAME}`,
+    githubRelease: { owner: OPEN_DESIGN_RELEASE_OWNER, repository: OPEN_DESIGN_RELEASE_REPOSITORY, tag: normalized.releaseTag },
+    trustedKeys: [{
+      keyId: suppliedKey.keyId,
+      publicKey: Buffer.from(suppliedKey.publicKey).toString("base64"),
+      activeFrom: suppliedKey.activeFrom,
+      ...(suppliedKey.activeUntil === undefined ? {} : { activeUntil: suppliedKey.activeUntil }),
+    }],
+  };
+  stagingAssert(Buffer.from(encodeCanonicalCatalog(official)).equals(Buffer.from(encodeCanonicalCatalog(expectedOfficial))), "PACKAGE_OFFICIAL_CHANNEL_INVALID", "official channel does not match the expected exact-tag trust identity");
+
+  // Historical refresh verification deliberately anchors `now` to the signed
+  // issuedAt. This permits a just-expired catalog to be refreshed, while the
+  // shared verifier still enforces canonical bytes, Ed25519, key activation and
+  // expiry boundaries, catalog TTL, schema, and positive sequence.
+  const historicalVerificationTimeMs = Date.parse(untrustedCatalog.issuedAt);
+  stagingAssert(Number.isSafeInteger(historicalVerificationTimeMs) && historicalVerificationTimeMs >= 0, "PACKAGE_CATALOG_INVALID", "refresh source issuedAt is invalid");
+  const historical = verifyModuleReleaseCatalog(envelope, {
+    trustedKeys: [suppliedKey],
+    state: { highestSequence: 0 },
+    now: historicalVerificationTimeMs,
+  });
+  if (!historical.ok) stagingFail("PACKAGE_CATALOG_INVALID", historical.diagnostics.map((entry) => `${entry.code}: ${entry.message}`).join("; "));
+  stagingAssert(historical.catalog.schemaVersion === 2, "PACKAGE_CATALOG_INVALID", "refresh source must be Catalog v2");
+  stagingAssert(historical.catalog.sequence === normalized.priorTrustState.highestSequence
+    && historical.catalog.issuedAt === normalized.priorTrustState.latestIssuedAt,
+  "PACKAGE_TRUST_STATE_INVALID", "explicit previous trust state does not identify the signed refresh source catalog");
+  const release = historical.catalog.releases[0];
+  stagingAssert(historical.catalog.releases.length === 1
+    && release?.manifest?.id === OPEN_DESIGN_MODULE_ID
+    && release.manifest.version === OPEN_DESIGN_PRODUCTION_VERSION,
+  "PACKAGE_CATALOG_INVALID", "refresh source catalog does not contain exactly one expected OpenDesign release");
+  const artifact = release.manifest.artifacts.find((entry) => entry.platform === OPEN_DESIGN_MODULE_PLATFORM);
+  const installMetadata = release.artifactInstallMetadata.find((entry) => entry.platform === OPEN_DESIGN_MODULE_PLATFORM);
+  const sizeMetadata = release.artifactSizes.find((entry) => entry.platform === OPEN_DESIGN_MODULE_PLATFORM);
+  stagingAssert(artifact && installMetadata && sizeMetadata, "PACKAGE_CATALOG_INVALID", "refresh source lacks complete darwin-arm64 release metadata");
+  stagingAssert(artifact.url === `${normalized.releaseBaseUrl}${OPEN_DESIGN_PRODUCTION_ARCHIVE_FILENAME}`, "PACKAGE_CATALOG_INVALID", "refresh source archive URL is not the exact-tag immutable asset");
+
+  const archivePath = path.join(normalized.bundleRoot, OPEN_DESIGN_PRODUCTION_ARCHIVE_FILENAME);
+  const archiveInfo = await lstat(archivePath).catch((error) => stagingFail("PACKAGE_ARCHIVE_INVALID", error.message));
+  stagingAssert(archiveInfo.isFile() && !archiveInfo.isSymbolicLink() && archiveInfo.size === sizeMetadata.size, "PACKAGE_ARCHIVE_INVALID", "immutable archive size differs from the signed catalog");
+  const actualArchiveSha256 = await hashRegularFile(archivePath, DEFAULT_INSTALL_LIMITS.maxArchiveBytes, "immutable production archive");
+  stagingAssert(actualArchiveSha256 === artifact.sha256, "PACKAGE_ARCHIVE_INVALID", "immutable archive SHA-256 differs from the signed catalog");
+
+  const metadata = parseStrictJson(metadataBytes, "release metadata");
+  stagingAssert(metadata?.distribution?.class === "public" && metadata?.distribution?.nonPromotable === false, "PACKAGE_METADATA_INVALID", "refresh source metadata is not public/promotable");
+  stagingAssert(metadata?.module?.id === OPEN_DESIGN_MODULE_ID
+    && metadata?.module?.version === OPEN_DESIGN_PRODUCTION_VERSION
+    && metadata?.module?.platform === OPEN_DESIGN_MODULE_PLATFORM,
+  "PACKAGE_METADATA_INVALID", "refresh source metadata identifies another module release");
+  stagingAssert(metadata?.githubRelease?.owner === OPEN_DESIGN_RELEASE_OWNER
+    && metadata?.githubRelease?.repository === OPEN_DESIGN_RELEASE_REPOSITORY
+    && metadata?.githubRelease?.tag === normalized.releaseTag,
+  "PACKAGE_METADATA_INVALID", "refresh source metadata identifies another GitHub Release");
+  stagingAssert(metadata?.catalog?.path === OPEN_DESIGN_PRODUCTION_ENVELOPE_FILENAME
+    && metadata?.catalog?.canonicalCatalogPath === OPEN_DESIGN_PRODUCTION_CATALOG_FILENAME
+    && metadata?.catalog?.url === `${normalized.releaseBaseUrl}${OPEN_DESIGN_PRODUCTION_ENVELOPE_FILENAME}`
+    && metadata?.catalog?.schemaVersion === 2
+    && metadata?.catalog?.sequence === historical.catalog.sequence
+    && metadata?.catalog?.issuedAt === historical.catalog.issuedAt
+    && metadata?.catalog?.expiresAt === historical.catalog.expiresAt
+    && metadata?.catalog?.sha256 === sha256Bytes(catalogBytes)
+    && metadata?.catalog?.size === catalogBytes.byteLength,
+  "PACKAGE_METADATA_INVALID", "refresh source metadata differs from the signed raw catalog");
+  stagingAssert(metadata?.archive?.path === OPEN_DESIGN_PRODUCTION_ARCHIVE_FILENAME
+    && metadata?.archive?.url === artifact.url
+    && metadata?.archive?.sha256 === artifact.sha256
+    && metadata?.archive?.size === archiveInfo.size
+    && metadata?.archive?.extractedManifestSha256 === installMetadata.extractedManifestSha256,
+  "PACKAGE_METADATA_INVALID", "refresh source metadata differs from the immutable archive or tree hash");
+  stagingAssert(metadata?.hostVersionRange === release.hostVersionRange, "PACKAGE_METADATA_INVALID", "refresh source host version range differs from the signed catalog");
+  stagingAssert(metadata?.trustedKey?.keyId === suppliedKey.keyId
+    && metadata?.trustedKey?.publicKey === Buffer.from(suppliedKey.publicKey).toString("base64")
+    && metadata?.trustedKey?.activeFrom === suppliedKey.activeFrom
+    && metadata?.trustedKey?.activeUntil === suppliedKey.activeUntil,
+  "PACKAGE_METADATA_INVALID", "refresh source metadata differs from the official channel trust root");
+
+  const installerRoot = await mkdtemp(path.join(os.tmpdir(), "open-design-refresh-verify-"));
+  await chmod(installerRoot, 0o700);
+  try {
+    const installed = await installAndVerify({
+      archivePath,
+      installerRoot,
+      manifest: release.manifest,
+      extractedManifestSha256: installMetadata.extractedManifestSha256,
+    });
+    stagingAssert(installed.archiveSha256 === artifact.sha256
+      && installed.extractedManifestSha256 === installMetadata.extractedManifestSha256,
+    "PACKAGE_INSTALLER_ROUND_TRIP_FAILED", "refresh source failed immutable archive/tree verification");
+  } finally {
+    await rm(installerRoot, { recursive: true, force: true });
+  }
+  return { catalog: historical.catalog, metadata, trustedKey: suppliedKey, artifact, installMetadata };
+}
+
+function normalizeRefreshOptions(options, { requireSigningKey }) {
+  stagingAssert(path.isAbsolute(options.bundleRoot ?? ""), "PACKAGE_REFRESH_SOURCE_INVALID", "production bundle root must be absolute");
+  const releaseTag = normalizeReleaseTag(options.releaseTag);
+  const catalogSequence = Number(options.catalogSequence);
+  stagingAssert(Number.isSafeInteger(catalogSequence) && catalogSequence > 0, "PACKAGE_CATALOG_INVALID", "new catalog sequence must be a positive safe integer");
+  const catalogIssuedAt = canonicalTimestamp(options.catalogIssuedAt, "new catalog issuedAt");
+  const catalogExpiresAt = canonicalTimestamp(options.catalogExpiresAt, "new catalog expiresAt");
+  stagingAssert(typeof options.keyId === "string" && KEY_ID_PATTERN.test(options.keyId), "PACKAGE_KEY_INVALID", "key ID is invalid");
+  const keyActiveFrom = canonicalTimestamp(options.keyActiveFrom, "key activeFrom");
+  const keyActiveUntil = options.keyActiveUntil === undefined ? undefined : canonicalTimestamp(options.keyActiveUntil, "key activeUntil");
+  stagingAssert(options.priorTrustState !== undefined, "PACKAGE_TRUST_STATE_INVALID", "refresh requires explicit previous trust state");
+  const priorTrustState = normalizePriorTrustState(options.priorTrustState, catalogSequence);
+  stagingAssert(priorTrustState.highestSequence > 0 && priorTrustState.latestIssuedAt !== undefined, "PACKAGE_TRUST_STATE_INVALID", "refresh previous trust state must identify a prior signed catalog");
+  const verificationTimeMs = options.verificationTimeMs ?? Date.parse(catalogIssuedAt) + 1_000;
+  stagingAssert(Number.isSafeInteger(verificationTimeMs) && verificationTimeMs >= 0, "PACKAGE_CATALOG_INVALID", "new catalog verification time is invalid");
+  if (requireSigningKey) {
+    stagingAssert(path.isAbsolute(options.output ?? ""), "PACKAGE_OUTPUT_INVALID", "refresh output directory must be absolute");
+    assertDisjointPaths(options.bundleRoot, options.output);
+    stagingAssert(Boolean(options.privateKeyFile) !== Boolean(options.privateKeyEnvName), "PACKAGE_KEY_INVALID", "select exactly one private key source: file or environment variable");
+  } else {
+    stagingAssert(options.output === undefined, "PACKAGE_OUTPUT_INVALID", "refresh dry-run does not accept an output path");
+    stagingAssert(options.privateKeyFile === undefined && options.privateKeyEnvName === undefined, "PACKAGE_KEY_INVALID", "refresh dry-run does not accept private-key inputs");
+  }
+  return {
+    bundleRoot: options.bundleRoot,
+    ...(options.output === undefined ? {} : { output: options.output }),
+    releaseTag,
+    releaseBaseUrl: createReleaseBaseUrl(releaseTag),
+    catalogSequence,
+    catalogIssuedAt,
+    catalogExpiresAt,
+    keyId: options.keyId,
+    keyActiveFrom,
+    keyActiveUntil,
+    priorTrustState,
+    verificationTimeMs,
+    privateKeyFile: options.privateKeyFile,
+    privateKeyEnvName: options.privateKeyEnvName,
+    env: options.env ?? process.env,
+  };
+}
+
+function decodePublicKeyFromOfficialChannel(official) {
+  stagingAssert(official && typeof official === "object" && Array.isArray(official.trustedKeys) && official.trustedKeys.length === 1, "PACKAGE_OFFICIAL_CHANNEL_INVALID", "official channel must contain exactly one trusted key");
+  const encoded = official.trustedKeys[0]?.publicKey;
+  stagingAssert(typeof encoded === "string" && encoded.length === 44, "PACKAGE_OFFICIAL_CHANNEL_INVALID", "official channel public key is invalid");
+  const bytes = Buffer.from(encoded, "base64");
+  stagingAssert(bytes.byteLength === 32 && bytes.toString("base64") === encoded, "PACKAGE_OFFICIAL_CHANNEL_INVALID", "official channel public key is not canonical Ed25519 base64");
+  return Uint8Array.from(bytes);
+}
+
+function assertDisjointPaths(left, right) {
+  const normalizedLeft = path.resolve(left);
+  const normalizedRight = path.resolve(right);
+  const contains = (parent, child) => {
+    const relative = path.relative(parent, child);
+    return relative === "" || (relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
+  };
+  stagingAssert(!contains(normalizedLeft, normalizedRight) && !contains(normalizedRight, normalizedLeft), "PACKAGE_OUTPUT_INVALID", "refresh output and source bundle paths must be disjoint");
 }
 
 async function inspectProductionInputs(normalized, policy) {

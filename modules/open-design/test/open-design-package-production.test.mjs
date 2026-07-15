@@ -8,6 +8,7 @@ import {
   mkdtemp,
   opendir,
   readFile,
+  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -20,6 +21,7 @@ import { encodeCanonicalCatalog, verifyModuleReleaseCatalog } from "../../../pac
 import { canonicalJsonBytes, digestInventory } from "../src/validate-artifact.mjs";
 import {
   buildOpenDesignProductionPackageForTest,
+  dryRunOpenDesignCatalogRefresh,
   dryRunOpenDesignProductionPackageForTest,
   OPEN_DESIGN_OFFICIAL_CHANNEL_FILENAME,
   OPEN_DESIGN_PRODUCTION_ARCHIVE_FILENAME,
@@ -27,6 +29,8 @@ import {
   OPEN_DESIGN_PRODUCTION_ENVELOPE_FILENAME,
   OPEN_DESIGN_PRODUCTION_METADATA_FILENAME,
   OPEN_DESIGN_PRODUCTION_VERSION,
+  OPEN_DESIGN_REFRESH_FILE_NAMES,
+  refreshOpenDesignProductionCatalog,
   verifyOpenDesignProductionBundle,
 } from "../package/production-package.mjs";
 
@@ -39,6 +43,10 @@ const VERIFY_AT = Date.parse(ISSUED_AT) + 1_000;
 const KEY_ACTIVE_FROM = "2026-07-01T00:00:00.000Z";
 const KEY_ACTIVE_UNTIL = "2026-08-01T00:00:00.000Z";
 const KEY_ID = "open-design-release-test-2026";
+const REFRESH_ISSUED_AT = "2026-07-15T06:00:00.000Z";
+const REFRESH_EXPIRES_AT = "2026-07-15T18:00:00.000Z";
+const EXPIRED_REFRESH_ISSUED_AT = "2026-07-16T00:00:00.000Z";
+const EXPIRED_REFRESH_EXPIRES_AT = "2026-07-16T12:00:00.000Z";
 const OUTPUT_NAMES = [
   OPEN_DESIGN_PRODUCTION_ARCHIVE_FILENAME,
   OPEN_DESIGN_PRODUCTION_CATALOG_FILENAME,
@@ -195,6 +203,193 @@ test("production verification rejects catalog, signature, archive, and trust-roo
     verificationTimeMs: VERIFY_AT,
   }), (error) => error.code === "PACKAGE_CATALOG_INVALID");
 });
+
+test("catalog refresh CLI preserves signed release bytes and emits only three replacement assets", { skip: !supported, timeout: 180_000 }, async (t) => {
+  const fixture = await createFixture(t);
+  const source = await packageFixture(fixture, path.join(fixture.root, "refresh-source"), { privateKeyFile: fixture.privateKeyFile });
+  const output = path.join(fixture.root, "refresh-cli-output");
+  const cli = path.resolve("modules/open-design/package/production-cli.mjs");
+  const command = await execFileAsync(process.execPath, [
+    cli,
+    "--bundle-root", source.output,
+    "--output", output,
+    "--release-tag", RELEASE_TAG,
+    "--catalog-sequence", "2",
+    "--catalog-issued-at", REFRESH_ISSUED_AT,
+    "--catalog-expires-at", REFRESH_EXPIRES_AT,
+    "--key-id", KEY_ID,
+    "--key-active-from", KEY_ACTIVE_FROM,
+    "--key-active-until", KEY_ACTIVE_UNTIL,
+    "--previous-sequence", "1",
+    "--previous-issued-at", ISSUED_AT,
+    "--verification-time", String(Date.parse(REFRESH_ISSUED_AT) + 1_000),
+    "--private-key-file", fixture.privateKeyFile,
+    "--refresh",
+  ]);
+  const result = JSON.parse(command.stdout);
+  assert.equal(result.output, await realpath(output));
+  assert.equal(command.stdout.includes(fixture.privateKeyFile), false);
+  assert.equal(command.stdout.includes("PRIVATE KEY"), false);
+  const outputNames = await import("node:fs/promises").then(({ readdir }) => readdir(output));
+  assert.deepEqual(outputNames.sort(), [...OPEN_DESIGN_REFRESH_FILE_NAMES].sort());
+  assert.equal((await lstat(output)).mode & 0o777, 0o700);
+  for (const name of OPEN_DESIGN_REFRESH_FILE_NAMES) assert.equal((await lstat(path.join(output, name))).mode & 0o777, 0o600);
+  await assert.rejects(lstat(path.join(output, OPEN_DESIGN_PRODUCTION_ARCHIVE_FILENAME)), { code: "ENOENT" });
+  await assert.rejects(lstat(path.join(output, OPEN_DESIGN_OFFICIAL_CHANNEL_FILENAME)), { code: "ENOENT" });
+
+  const oldCatalog = JSON.parse(await readFile(source.catalogPath, "utf8"));
+  const newCatalogBytes = await readFile(path.join(output, OPEN_DESIGN_PRODUCTION_CATALOG_FILENAME));
+  const newCatalog = JSON.parse(newCatalogBytes.toString("utf8"));
+  assert.deepEqual(newCatalog.releases, oldCatalog.releases);
+  assert.deepEqual(Buffer.from(encodeCanonicalCatalog(newCatalog.releases)), Buffer.from(encodeCanonicalCatalog(oldCatalog.releases)));
+  assert.equal(newCatalog.sequence, 2);
+  assert.equal(newCatalog.issuedAt, REFRESH_ISSUED_AT);
+  assert.equal(newCatalog.expiresAt, REFRESH_EXPIRES_AT);
+  assert.equal(await verifyRefreshedCatalog(output, fixture, REFRESH_ISSUED_AT), true);
+
+  const sourceMetadata = JSON.parse(await readFile(source.metadataPath, "utf8"));
+  const refreshedMetadata = JSON.parse(await readFile(path.join(output, OPEN_DESIGN_PRODUCTION_METADATA_FILENAME), "utf8"));
+  assert.deepEqual(refreshedMetadata, { ...sourceMetadata, catalog: refreshedMetadata.catalog });
+  assert.deepEqual(refreshedMetadata.archive, sourceMetadata.archive);
+  assert.equal(refreshedMetadata.catalog.sequence, 2);
+  assert.equal(refreshedMetadata.catalog.sha256, sha256(newCatalogBytes));
+});
+
+test("catalog refresh accepts a cryptographically valid expired source without skipping archive installation", { skip: !supported, timeout: 180_000 }, async (t) => {
+  const fixture = await createFixture(t);
+  const source = await packageFixture(fixture, path.join(fixture.root, "expired-refresh-source"), { privateKeyFile: fixture.privateKeyFile });
+  const output = path.join(fixture.root, "expired-refresh-output");
+  const result = await refreshOpenDesignProductionCatalog(refreshOptions(fixture, source.output, output, {
+    catalogIssuedAt: EXPIRED_REFRESH_ISSUED_AT,
+    catalogExpiresAt: EXPIRED_REFRESH_EXPIRES_AT,
+  }));
+  assert.equal(result.verifiedWithModuleInstaller, true);
+  assert.equal(result.immutableArchiveSha256, source.archiveSha256);
+  assert.equal(result.immutableExtractedManifestSha256, source.extractedManifestSha256);
+  assert.equal(await verifyRefreshedCatalog(output, fixture, EXPIRED_REFRESH_ISSUED_AT), true);
+});
+
+test("catalog refresh rejects wrong key, archive tamper, and official-channel mismatch without output", { skip: !supported, timeout: 240_000 }, async (t) => {
+  const fixture = await createFixture(t);
+  const source = await packageFixture(fixture, path.join(fixture.root, "refresh-rejection-source"), { privateKeyFile: fixture.privateKeyFile });
+
+  const attackerPair = generateKeyPairSync("ed25519");
+  const attackerKey = path.join(fixture.root, "attacker.pem");
+  await writeFile(attackerKey, attackerPair.privateKey.export({ format: "pem", type: "pkcs8" }), { mode: 0o600 });
+  const wrongKeyOutput = path.join(fixture.root, "wrong-key-refresh");
+  await assert.rejects(refreshOpenDesignProductionCatalog({
+    ...refreshOptions(fixture, source.output, wrongKeyOutput),
+    privateKeyFile: attackerKey,
+  }), (error) => error.code === "PACKAGE_REFRESH_KEY_MISMATCH");
+  await assert.rejects(lstat(wrongKeyOutput), { code: "ENOENT" });
+
+  const archiveBytes = await readFile(source.archivePath);
+  const tamperedArchive = Buffer.from(archiveBytes);
+  tamperedArchive[tamperedArchive.length - 1] ^= 0x01;
+  await writeFile(source.archivePath, tamperedArchive, { mode: 0o600 });
+  const archiveOutput = path.join(fixture.root, "archive-tamper-refresh");
+  await assert.rejects(refreshOpenDesignProductionCatalog(refreshOptions(fixture, source.output, archiveOutput)), (error) => error.code === "PACKAGE_ARCHIVE_INVALID");
+  await assert.rejects(lstat(archiveOutput), { code: "ENOENT" });
+  await writeFile(source.archivePath, archiveBytes, { mode: 0o600 });
+
+  const officialBytes = await readFile(source.officialChannelPath);
+  const official = JSON.parse(officialBytes.toString("utf8"));
+  official.githubRelease.tag = "other-tag";
+  await writeFile(source.officialChannelPath, encodeCanonicalCatalog(official), { mode: 0o600 });
+  const officialOutput = path.join(fixture.root, "official-mismatch-refresh");
+  await assert.rejects(refreshOpenDesignProductionCatalog(refreshOptions(fixture, source.output, officialOutput)), (error) => error.code === "PACKAGE_OFFICIAL_CHANNEL_INVALID");
+  await assert.rejects(lstat(officialOutput), { code: "ENOENT" });
+  await writeFile(source.officialChannelPath, officialBytes, { mode: 0o600 });
+});
+
+test("catalog refresh rejects rollback/nonmonotonic state and dry-run leaves no partial output", { skip: !supported, timeout: 240_000 }, async (t) => {
+  const fixture = await createFixture(t);
+  const source = await packageFixture(fixture, path.join(fixture.root, "refresh-state-source"), { privateKeyFile: fixture.privateKeyFile });
+
+  const rollbackOutput = path.join(fixture.root, "rollback-refresh");
+  await assert.rejects(refreshOpenDesignProductionCatalog({
+    ...refreshOptions(fixture, source.output, rollbackOutput),
+    catalogSequence: 1,
+  }), (error) => error.code === "PACKAGE_TRUST_STATE_INVALID");
+  await assert.rejects(lstat(rollbackOutput), { code: "ENOENT" });
+
+  const nonmonotonicOutput = path.join(fixture.root, "nonmonotonic-refresh");
+  await assert.rejects(refreshOpenDesignProductionCatalog({
+    ...refreshOptions(fixture, source.output, nonmonotonicOutput),
+    catalogIssuedAt: ISSUED_AT,
+    catalogExpiresAt: EXPIRES_AT,
+    verificationTimeMs: VERIFY_AT,
+  }), (error) => error.code === "PACKAGE_CATALOG_INVALID");
+  await assert.rejects(lstat(nonmonotonicOutput), { code: "ENOENT" });
+
+  const wrongStateOutput = path.join(fixture.root, "wrong-state-refresh");
+  await assert.rejects(refreshOpenDesignProductionCatalog({
+    ...refreshOptions(fixture, source.output, wrongStateOutput),
+    priorTrustState: { highestSequence: 1, latestIssuedAt: "2026-07-14T23:59:59.000Z" },
+  }), (error) => error.code === "PACKAGE_TRUST_STATE_INVALID");
+  await assert.rejects(lstat(wrongStateOutput), { code: "ENOENT" });
+
+  const plan = await dryRunOpenDesignCatalogRefresh(refreshOptions(fixture, source.output, undefined, { dryRun: true }));
+  assert.equal(plan.mode, "refresh-dry-run");
+  assert.deepEqual(plan.writes, []);
+  assert.deepEqual(plan.plannedFiles, OPEN_DESIGN_REFRESH_FILE_NAMES);
+  assert.equal(plan.immutableArchiveVerified, true);
+  assert.equal(plan.verifiedWithModuleInstaller, true);
+
+  const dryCli = path.resolve("modules/open-design/package/production-cli.mjs");
+  const dryResult = await execFileAsync(process.execPath, [
+    dryCli,
+    "--bundle-root", source.output,
+    "--release-tag", RELEASE_TAG,
+    "--catalog-sequence", "2",
+    "--catalog-issued-at", REFRESH_ISSUED_AT,
+    "--catalog-expires-at", REFRESH_EXPIRES_AT,
+    "--key-id", KEY_ID,
+    "--key-active-from", KEY_ACTIVE_FROM,
+    "--key-active-until", KEY_ACTIVE_UNTIL,
+    "--previous-sequence", "1",
+    "--previous-issued-at", ISSUED_AT,
+    "--refresh",
+    "--dry-run",
+  ]);
+  assert.equal(JSON.parse(dryResult.stdout).mode, "refresh-dry-run");
+});
+
+function refreshOptions(fixture, bundleRoot, output, overrides = {}) {
+  const { dryRun = false, ...values } = overrides;
+  return {
+    bundleRoot,
+    ...(output === undefined ? {} : { output }),
+    releaseTag: RELEASE_TAG,
+    catalogSequence: 2,
+    catalogIssuedAt: REFRESH_ISSUED_AT,
+    catalogExpiresAt: REFRESH_EXPIRES_AT,
+    keyId: KEY_ID,
+    keyActiveFrom: KEY_ACTIVE_FROM,
+    keyActiveUntil: KEY_ACTIVE_UNTIL,
+    priorTrustState: { highestSequence: 1, latestIssuedAt: ISSUED_AT },
+    verificationTimeMs: Date.parse(values.catalogIssuedAt ?? REFRESH_ISSUED_AT) + 1_000,
+    ...(dryRun ? {} : { privateKeyFile: fixture.privateKeyFile }),
+    ...values,
+  };
+}
+
+async function verifyRefreshedCatalog(output, fixture, issuedAt) {
+  const catalogBytes = await readFile(path.join(output, OPEN_DESIGN_PRODUCTION_CATALOG_FILENAME));
+  const wire = JSON.parse(await readFile(path.join(output, OPEN_DESIGN_PRODUCTION_ENVELOPE_FILENAME), "utf8"));
+  assert.deepEqual(Buffer.from(wire.catalogBytes, "base64"), catalogBytes);
+  const result = verifyModuleReleaseCatalog({
+    schemaVersion: wire.schemaVersion,
+    keyId: wire.keyId,
+    catalogBytes: Uint8Array.from(catalogBytes),
+    signature: Uint8Array.from(Buffer.from(wire.signature, "base64")),
+  }, {
+    trustedKeys: [trustedKey(fixture)],
+    state: { highestSequence: 1, latestIssuedAt: ISSUED_AT },
+    now: Date.parse(issuedAt) + 1_000,
+  });
+  return result.ok;
+}
 
 async function createFixture(t, { distribution = { class: "public", nonPromotable: false } } = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), "open-design-production-test-"));

@@ -8,7 +8,9 @@ import { fileURLToPath } from "node:url";
 import { stagingAssert, stagingFail } from "../src/staging-error.mjs";
 import {
   buildOpenDesignProductionPackage,
+  dryRunOpenDesignCatalogRefresh,
   dryRunOpenDesignProductionPackage,
+  refreshOpenDesignProductionCatalog,
   verifyOpenDesignProductionBundle,
 } from "./production-package.mjs";
 
@@ -42,6 +44,22 @@ const VERIFY_VALUE_OPTIONS = new Set([
   "previous-issued-at",
   "verification-time",
 ]);
+const REFRESH_VALUE_OPTIONS = new Set([
+  "bundle-root",
+  "output",
+  "release-tag",
+  "catalog-sequence",
+  "catalog-issued-at",
+  "catalog-expires-at",
+  "key-id",
+  "key-active-from",
+  "key-active-until",
+  "private-key-file",
+  "private-key-env",
+  "previous-sequence",
+  "previous-issued-at",
+  "verification-time",
+]);
 
 export async function main(argv = process.argv.slice(2), env = process.env) {
   const parsed = parseArguments(argv);
@@ -63,6 +81,35 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     return result;
   }
 
+  if (parsed.mode === "refresh") {
+    const common = {
+      bundleRoot: required(parsed.values, "bundle-root"),
+      releaseTag: required(parsed.values, "release-tag"),
+      catalogSequence: integer(required(parsed.values, "catalog-sequence"), "catalog-sequence", 1),
+      catalogIssuedAt: required(parsed.values, "catalog-issued-at"),
+      catalogExpiresAt: required(parsed.values, "catalog-expires-at"),
+      keyId: required(parsed.values, "key-id"),
+      keyActiveFrom: required(parsed.values, "key-active-from"),
+      ...(parsed.values["key-active-until"] === undefined ? {} : { keyActiveUntil: parsed.values["key-active-until"] }),
+      priorTrustState: requiredPreviousTrustState(parsed.values),
+      ...(parsed.values["verification-time"] === undefined ? {} : { verificationTimeMs: integer(parsed.values["verification-time"], "verification-time", 0) }),
+    };
+    if (parsed.dryRun) {
+      const result = await dryRunOpenDesignCatalogRefresh(common);
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+      return result;
+    }
+    const result = await refreshOpenDesignProductionCatalog({
+      ...common,
+      output: required(parsed.values, "output"),
+      ...(parsed.values["private-key-file"] === undefined ? {} : { privateKeyFile: parsed.values["private-key-file"] }),
+      ...(parsed.values["private-key-env"] === undefined ? {} : { privateKeyEnvName: parsed.values["private-key-env"] }),
+      env,
+    });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+    return result;
+  }
+
   const common = {
     stagingRoot: required(parsed.values, "staging-root"),
     nodeBin: required(parsed.values, "node-bin"),
@@ -78,7 +125,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     priorTrustState: previousTrustState(parsed.values),
     ...(parsed.values["verification-time"] === undefined ? {} : { verificationTimeMs: integer(parsed.values["verification-time"], "verification-time", 0) }),
   };
-  if (parsed.mode === "dry-run") {
+  if (parsed.dryRun) {
     const result = await dryRunOpenDesignProductionPackage(common);
     process.stdout.write(`${JSON.stringify(result)}\n`);
     return result;
@@ -97,16 +144,20 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
 
 function parseArguments(argv) {
   stagingAssert(Array.isArray(argv), "PACKAGE_ARGUMENT_INVALID", "arguments must be an array");
-  const modeFlags = argv.filter((token) => token === "--dry-run" || token === "--verify");
-  stagingAssert(modeFlags.length <= 1, "PACKAGE_ARGUMENT_INVALID", "select only one operation mode");
-  const mode = modeFlags[0]?.slice(2) ?? "build";
-  const allowed = mode === "verify" ? VERIFY_VALUE_OPTIONS : BUILD_VALUE_OPTIONS;
+  const operationFlags = argv.filter((token) => token === "--verify" || token === "--refresh");
+  stagingAssert(operationFlags.length <= 1, "PACKAGE_ARGUMENT_INVALID", "select only one operation mode");
+  const mode = operationFlags[0]?.slice(2) ?? "build";
+  const dryRunFlags = argv.filter((token) => token === "--dry-run");
+  stagingAssert(dryRunFlags.length <= 1, "PACKAGE_ARGUMENT_INVALID", "dry-run may be selected only once");
+  const dryRun = dryRunFlags.length === 1;
+  stagingAssert(!(mode === "verify" && dryRun), "PACKAGE_ARGUMENT_INVALID", "verify mode cannot be combined with dry-run");
+  const allowed = mode === "verify" ? VERIFY_VALUE_OPTIONS : mode === "refresh" ? REFRESH_VALUE_OPTIONS : BUILD_VALUE_OPTIONS;
   const values = {};
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index];
     stagingAssert(typeof token === "string" && token.startsWith("--"), "PACKAGE_ARGUMENT_INVALID", "all arguments must use --name syntax");
     const name = token.slice(2);
-    if (name === "dry-run" || name === "verify") {
+    if (name === "dry-run" || name === "verify" || name === "refresh") {
       continue;
     }
     stagingAssert(allowed.has(name), "PACKAGE_ARGUMENT_INVALID", `unknown argument: --${name}`);
@@ -116,10 +167,10 @@ function parseArguments(argv) {
     values[name] = value;
     index += 1;
   }
-  if (mode === "dry-run") {
+  if (dryRun) {
     stagingAssert(values.output === undefined && values["private-key-file"] === undefined && values["private-key-env"] === undefined, "PACKAGE_ARGUMENT_INVALID", "dry-run forbids output and private-key inputs");
   }
-  return { mode, values };
+  return { mode, dryRun, values };
 }
 
 function previousTrustState(values) {
@@ -128,6 +179,12 @@ function previousTrustState(values) {
     highestSequence: integer(required(values, "previous-sequence"), "previous-sequence", 0),
     ...(values["previous-issued-at"] === undefined ? {} : { latestIssuedAt: values["previous-issued-at"] }),
   };
+}
+
+function requiredPreviousTrustState(values) {
+  const state = previousTrustState(values);
+  stagingAssert(state !== undefined && state.latestIssuedAt !== undefined, "PACKAGE_ARGUMENT_INVALID", "refresh requires --previous-sequence and --previous-issued-at");
+  return state;
 }
 
 function required(values, name) {

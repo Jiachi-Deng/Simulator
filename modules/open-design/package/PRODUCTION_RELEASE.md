@@ -42,13 +42,47 @@ catalog at least every 12 hours, using:
 - the externally supplied Ed25519 key, or an intentionally rotated key already
   embedded in a newly shipped official-channel configuration.
 
-Re-run the deterministic publisher into a new owner-only output directory and
-confirm the archive is byte-identical. Replace only the Catalog, envelope, and
-release-metadata assets on the same tag. During GitHub asset replacement,
-clients must fail closed and retry; never extend the TTL or reset the sequence
-to hide a missed refresh. `open-design-official-channel.json` and the archive
-remain unchanged unless a new signed application build intentionally changes
-the trust root or module version.
+Use refresh mode so the 12-hour CI job does not rebuild OpenDesign on macOS:
+
+```text
+pnpm --filter @simulator/open-design-artifact-policy package:production -- \
+  --refresh \
+  --bundle-root /absolute/path/to/verified-production-bundle \
+  --output /absolute/path/to/new-refresh-assets \
+  --release-tag open-design-v0.14.1 \
+  --catalog-sequence <next-sequence> \
+  --catalog-issued-at <canonical-ISO-time> \
+  --catalog-expires-at <canonical-ISO-time-within-24h> \
+  --previous-sequence <current-sequence> \
+  --previous-issued-at <current-issuedAt> \
+  --key-id <official-key-id> \
+  --key-active-from <canonical-ISO-time> \
+  --key-active-until <canonical-ISO-time> \
+  --private-key-env OPEN_DESIGN_RELEASE_PRIVATE_KEY
+```
+
+Add `--dry-run` and omit `--output`/`--private-key-env` for the CI preflight.
+Refresh accepts a just-expired source only after verifying its canonical signed
+bytes at the signed `issuedAt`, key window, explicit previous trust state,
+official-channel trust root/tag, actual immutable archive hash/size, metadata,
+and a real `ModuleInstaller` tree-hash round trip. It then preserves the complete
+signed release record byte-for-byte and changes only sequence and timestamps.
+
+The refresh output is a new owner-only directory containing exactly the raw
+Catalog, envelope, and release metadata. It never copies or modifies the archive
+or `open-design-official-channel.json`. Replace those three assets on the same
+tag. During GitHub asset replacement, clients must fail closed and retry; never
+extend the TTL or reset the sequence to hide a missed refresh.
+
+The expected GitHub Actions job runs at least every 12 hours, downloads the five
+assets from the fixed tag into a private workspace, obtains the last accepted
+`sequence` and `issuedAt` from trusted CI state, runs refresh dry-run and refresh,
+runs `--verify` against a reconstructed five-file bundle, and only then replaces
+the three refresh assets. The job must compare the archive SHA-256 before and
+after and must never expose the private key in arguments, logs, artifacts, or
+step outputs. `open-design-official-channel.json` and the archive remain
+unchanged unless a new signed application build intentionally changes the trust
+root or module version.
 
 ## Independent verification
 
