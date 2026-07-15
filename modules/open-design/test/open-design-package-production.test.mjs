@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 
@@ -35,6 +36,7 @@ import {
 } from "../package/production-package.mjs";
 
 const execFileAsync = promisify(execFile);
+const productionCli = fileURLToPath(new URL("../package/production-cli.mjs", import.meta.url));
 const supported = process.platform === "darwin" && process.arch === "arm64";
 const RELEASE_TAG = "open-design-v0.14.1";
 const ISSUED_AT = "2026-07-15T00:00:00.000Z";
@@ -110,7 +112,7 @@ test("production package emits deterministic Catalog v2, exact-tag metadata, and
     catalogState: { highestSequence: 1, latestIssuedAt: ISSUED_AT },
   });
 
-  const cli = path.resolve("modules/open-design/package/production-cli.mjs");
+  const cli = productionCli;
   const cliVerification = await execFileAsync(process.execPath, [
     cli,
     "--bundle-root", first.output,
@@ -208,7 +210,7 @@ test("catalog refresh CLI preserves signed release bytes and emits only three re
   const fixture = await createFixture(t);
   const source = await packageFixture(fixture, path.join(fixture.root, "refresh-source"), { privateKeyFile: fixture.privateKeyFile });
   const output = path.join(fixture.root, "refresh-cli-output");
-  const cli = path.resolve("modules/open-design/package/production-cli.mjs");
+  const cli = productionCli;
   const command = await execFileAsync(process.execPath, [
     cli,
     "--bundle-root", source.output,
@@ -336,7 +338,7 @@ test("catalog refresh rejects rollback/nonmonotonic state and dry-run leaves no 
   assert.equal(plan.immutableArchiveVerified, true);
   assert.equal(plan.verifiedWithModuleInstaller, true);
 
-  const dryCli = path.resolve("modules/open-design/package/production-cli.mjs");
+  const dryCli = productionCli;
   const dryResult = await execFileAsync(process.execPath, [
     dryCli,
     "--bundle-root", source.output,
