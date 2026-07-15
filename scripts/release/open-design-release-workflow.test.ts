@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { readFileSync } from "node:fs"
 import { join } from "node:path"
-import { load } from "js-yaml"
 
 const root = join(import.meta.dir, "../..")
 const producerPath = join(root, ".github/workflows/open-design-production-input.yml")
@@ -12,8 +11,8 @@ const producerSource = readFileSync(producerPath, "utf8")
 const source = readFileSync(workflowPath, "utf8")
 const documentation = readFileSync(documentationPath, "utf8")
 const staticValidation = readFileSync(staticValidationPath, "utf8")
-const producer = load(producerSource) as Record<string, any>
-const workflow = load(source) as Record<string, any>
+const producer = Bun.YAML.parse(producerSource) as Record<string, any>
+const workflow = Bun.YAML.parse(source) as Record<string, any>
 
 describe("OpenDesign official release workflow", () => {
   test("has fixed authority, protected writes, and serialized initial/refresh entrypoints", () => {
