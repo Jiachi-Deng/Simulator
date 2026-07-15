@@ -11,12 +11,12 @@
     {"name": "pnpm-workspace.yaml", "sha256": "7036cab2720e4e2db1e613bf0b7eb83075be2e60e1dd0ae683f2bca2483cc2ac"},
     {"name": "apps/web/next-env.d.ts", "sha256": "7ad303e40d4fddf44f156129e397511953a71481c5cfd86b1862649aaaf240cc"},
     {"name": "patches/open-design-v0.14.1-simulator-host-runtime.patch", "sha256": "18ab49077e76831057637f42ca5ee6e7ee3fd4b472aaf38125e6838f43b0f568"},
-    {"name": "legal/SBOM.spdx.json", "sha256": "8c752b5df367ef91c9ba3d92f6dec61c232af064bceabf1180a58dbc855f6185"},
+    {"name": "legal/SBOM.spdx.json", "sha256": "ef1662062c1411ceac160d243a7a00685c4584951602f9ab0cf747083bf524a2"},
     {"name": "resource-metadata.json", "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
     {"name": "target.json", "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"},
     {"name": "provenance.json", "sha256": "fd3eed7dc1d2ecf6f34a320a22b2fb5a06a3cbb123793eaadc25e06717ad8f07"}
   ],
-  "sbom": {"documentSha256": "8c752b5df367ef91c9ba3d92f6dec61c232af064bceabf1180a58dbc855f6185", "lockfileSha256": "5b0f471b76ffdcca7f427e5b3cc9eb88cb82f1a30c7ab8a41fb57d46306da80f", "packages": [
+  "sbom": {"documentSha256": "ef1662062c1411ceac160d243a7a00685c4584951602f9ab0cf747083bf524a2", "lockfileSha256": "5b0f471b76ffdcca7f427e5b3cc9eb88cb82f1a30c7ab8a41fb57d46306da80f", "packages": [
     {"name": "better-sqlite3", "version": "12.10.0", "contentSha512": "0b2cda65140ac87901d992277d34e5da7bd3df711b0e98e42c46c4f3f65c9372e5e8ed2aaafb8676b278e4782d1fe1f291183cf084d8dc076b78118def468149", "licenseDeclared": "MIT", "noticeStatus": "NONE"},
     {"name": "bindings", "version": "1.5.0", "contentSha512": "a76abfb7f9a1bee3a3fd478b955eb9eba183fe0ba8c25af4847c42948d16f66ecc59890bd45d212e8fb401ec6cf4748f0ad4754974344c3dcc30aad765a8db89", "licenseDeclared": "MIT", "noticeStatus": "NONE"},
     {"name": "blake3-wasm", "version": "2.1.5", "contentSha512": "175f8af046df399138f5db683ed9b1510ae95da048977202bdab0b87e9c9b5ad31933fbd905ffbb9eb7d7cb9f02aa843ae68fa83ee8add3c3dc903d483691ae6", "licenseDeclared": "MIT", "noticeStatus": "NONE"},

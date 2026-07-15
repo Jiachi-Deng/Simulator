@@ -248,7 +248,11 @@ test("writes the producer-owned artifact manifest with O_EXCL semantics", async 
 
 test("requires exact SBOM package, lock, checksum, license and notice coverage", () => {
   const valid = validateSbom({ sbom, sha256: "a".repeat(64), provenance, policy });
-  assert.equal(valid.packages.length, 8);
+  assert.equal(valid.packages.length, 5);
+  assert.deepEqual(
+    valid.packages.map((entry) => entry.name).sort(),
+    ["better-sqlite3", "bindings", "blake3-wasm", "file-uri-to-path", "node-pty"],
+  );
   assert.equal(valid.documentSha256, "a".repeat(64));
   for (const mutate of [
     (value) => { value.packages = []; },

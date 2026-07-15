@@ -1,1 +1,150 @@
-{"SPDXID":"SPDXRef-DOCUMENT","annotations":[{"annotationDate":"2026-07-13T00:00:00Z","annotationType":"OTHER","annotator":"Tool: Simulator OpenDesign policy","comment":"pnpm-lock.yaml sha256:5b0f471b76ffdcca7f427e5b3cc9eb88cb82f1a30c7ab8a41fb57d46306da80f"}],"creationInfo":{"created":"2026-07-13T00:00:00Z","creators":["Tool: Simulator OpenDesign policy"]},"dataLicense":"CC0-1.0","documentDescribes":["SPDXRef-Package-img-sharp-darwin-arm64","SPDXRef-Package-img-sharp-libvips-darwin-arm64","SPDXRef-Package-better-sqlite3","SPDXRef-Package-bindings","SPDXRef-Package-blake3-wasm","SPDXRef-Package-file-uri-to-path","SPDXRef-Package-node-pty","SPDXRef-Package-sharp"],"documentNamespace":"https://example.invalid/spdx/open-design-staging-fixture","name":"open-design-staging-fixture","packages":[{"SPDXID":"SPDXRef-Package-img-sharp-darwin-arm64","checksums":[{"algorithm":"SHA512","checksumValue":"8a6b50dd63095db318e1fc5bfcd769e87053355b5609423459da1bca17867f9f9a77ac57f152033bcbb6c44e2a73f7ebd3c08a1bfedd0ec785b67e8cea0febdf"}],"comment":"notice=NONE","copyrightText":"NOASSERTION","downloadLocation":"NOASSERTION","externalRefs":[{"referenceCategory":"PACKAGE-MANAGER","referenceLocator":"pkg:npm/%40img/sharp-darwin-arm64@0.34.5","referenceType":"purl"}],"filesAnalyzed":false,"licenseConcluded":"Apache-2.0","licenseDeclared":"Apache-2.0","name":"@img/sharp-darwin-arm64","versionInfo":"0.34.5"},{"SPDXID":"SPDXRef-Package-img-sharp-libvips-darwin-arm64","checksums":[{"algorithm":"SHA512","checksumValue":"cea8e3a3b45ab457c5a0fd0c910e758dfb856419d5136a5189ac9d289d46feb1d9be7b2b1c039c4002c88bdb00e5ca39c5e9d0753ba00afb5bd5cb9fefc55fe2"}],"comment":"notice=NONE","copyrightText":"NOASSERTION","downloadLocation":"NOASSERTION","externalRefs":[{"referenceCategory":"PACKAGE-MANAGER","referenceLocator":"pkg:npm/%40img/sharp-libvips-darwin-arm64@1.2.4","referenceType":"purl"}],"filesAnalyzed":false,"licenseConcluded":"LGPL-3.0-or-later","licenseDeclared":"LGPL-3.0-or-later","name":"@img/sharp-libvips-darwin-arm64","versionInfo":"1.2.4"},{"SPDXID":"SPDXRef-Package-better-sqlite3","checksums":[{"algorithm":"SHA512","checksumValue":"0b2cda65140ac87901d992277d34e5da7bd3df711b0e98e42c46c4f3f65c9372e5e8ed2aaafb8676b278e4782d1fe1f291183cf084d8dc076b78118def468149"}],"comment":"notice=NONE","copyrightText":"NOASSERTION","downloadLocation":"NOASSERTION","externalRefs":[{"referenceCategory":"PACKAGE-MANAGER","referenceLocator":"pkg:npm/better-sqlite3@12.10.0","referenceType":"purl"}],"filesAnalyzed":false,"licenseConcluded":"MIT","licenseDeclared":"MIT","name":"better-sqlite3","versionInfo":"12.10.0"},{"SPDXID":"SPDXRef-Package-bindings","checksums":[{"algorithm":"SHA512","checksumValue":"a76abfb7f9a1bee3a3fd478b955eb9eba183fe0ba8c25af4847c42948d16f66ecc59890bd45d212e8fb401ec6cf4748f0ad4754974344c3dcc30aad765a8db89"}],"comment":"notice=NONE","copyrightText":"NOASSERTION","downloadLocation":"NOASSERTION","externalRefs":[{"referenceCategory":"PACKAGE-MANAGER","referenceLocator":"pkg:npm/bindings@1.5.0","referenceType":"purl"}],"filesAnalyzed":false,"licenseConcluded":"MIT","licenseDeclared":"MIT","name":"bindings","versionInfo":"1.5.0"},{"SPDXID":"SPDXRef-Package-blake3-wasm","checksums":[{"algorithm":"SHA512","checksumValue":"175f8af046df399138f5db683ed9b1510ae95da048977202bdab0b87e9c9b5ad31933fbd905ffbb9eb7d7cb9f02aa843ae68fa83ee8add3c3dc903d483691ae6"}],"comment":"notice=NONE","copyrightText":"NOASSERTION","downloadLocation":"NOASSERTION","externalRefs":[{"referenceCategory":"PACKAGE-MANAGER","referenceLocator":"pkg:npm/blake3-wasm@2.1.5","referenceType":"purl"}],"filesAnalyzed":false,"licenseConcluded":"MIT","licenseDeclared":"MIT","name":"blake3-wasm","versionInfo":"2.1.5"},{"SPDXID":"SPDXRef-Package-file-uri-to-path","checksums":[{"algorithm":"SHA512","checksumValue":"d19b7eb372fb55fd5b8b0599dbd6804625582f1ee23069c4525f71df77db07f8f78d1f35bbf3b62dba8af819b508348d0ca56d27f623c18ed351de5291e2d02f"}],"comment":"notice=NONE","copyrightText":"NOASSERTION","downloadLocation":"NOASSERTION","externalRefs":[{"referenceCategory":"PACKAGE-MANAGER","referenceLocator":"pkg:npm/file-uri-to-path@1.0.0","referenceType":"purl"}],"filesAnalyzed":false,"licenseConcluded":"MIT","licenseDeclared":"MIT","name":"file-uri-to-path","versionInfo":"1.0.0"},{"SPDXID":"SPDXRef-Package-node-pty","checksums":[{"algorithm":"SHA512","checksumValue":"db426ab6eb58e893d74d49cbd228f5b9a77b41ed5b693e3a972a25876b1210d0dde2c4f3299e279801647800110cac2694b8cfc7a5ca465c11531c233b2fa552"}],"comment":"notice=NONE","copyrightText":"NOASSERTION","downloadLocation":"NOASSERTION","externalRefs":[{"referenceCategory":"PACKAGE-MANAGER","referenceLocator":"pkg:npm/node-pty@1.1.0","referenceType":"purl"}],"filesAnalyzed":false,"licenseConcluded":"MIT","licenseDeclared":"MIT","name":"node-pty","versionInfo":"1.1.0"},{"SPDXID":"SPDXRef-Package-sharp","checksums":[{"algorithm":"SHA512","checksumValue":"3aef48e45b7d58d7026d7ad4f5c3203c17022bc2e2c0ba9c6f2c16dede280d5dfb9f5a73a6e34bb1888057c78e0e78dbb509520f067671411e433e04e781e5b6"}],"comment":"notice=NONE","copyrightText":"NOASSERTION","downloadLocation":"NOASSERTION","externalRefs":[{"referenceCategory":"PACKAGE-MANAGER","referenceLocator":"pkg:npm/sharp@0.34.5","referenceType":"purl"}],"filesAnalyzed":false,"licenseConcluded":"Apache-2.0","licenseDeclared":"Apache-2.0","name":"sharp","versionInfo":"0.34.5"}],"spdxVersion":"SPDX-2.3"}
+{
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "annotations": [
+    {
+      "annotationDate": "2026-07-13T00:00:00Z",
+      "annotationType": "OTHER",
+      "annotator": "Tool: Simulator OpenDesign policy",
+      "comment": "pnpm-lock.yaml sha256:5b0f471b76ffdcca7f427e5b3cc9eb88cb82f1a30c7ab8a41fb57d46306da80f"
+    }
+  ],
+  "creationInfo": {
+    "created": "2026-07-13T00:00:00Z",
+    "creators": [
+      "Tool: Simulator OpenDesign policy"
+    ]
+  },
+  "dataLicense": "CC0-1.0",
+  "documentDescribes": [
+    "SPDXRef-Package-better-sqlite3",
+    "SPDXRef-Package-bindings",
+    "SPDXRef-Package-blake3-wasm",
+    "SPDXRef-Package-file-uri-to-path",
+    "SPDXRef-Package-node-pty"
+  ],
+  "documentNamespace": "https://example.invalid/spdx/open-design-staging-fixture",
+  "name": "open-design-staging-fixture",
+  "packages": [
+    {
+      "SPDXID": "SPDXRef-Package-better-sqlite3",
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "0b2cda65140ac87901d992277d34e5da7bd3df711b0e98e42c46c4f3f65c9372e5e8ed2aaafb8676b278e4782d1fe1f291183cf084d8dc076b78118def468149"
+        }
+      ],
+      "comment": "notice=NONE",
+      "copyrightText": "NOASSERTION",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceLocator": "pkg:npm/better-sqlite3@12.10.0",
+          "referenceType": "purl"
+        }
+      ],
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "name": "better-sqlite3",
+      "versionInfo": "12.10.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-bindings",
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "a76abfb7f9a1bee3a3fd478b955eb9eba183fe0ba8c25af4847c42948d16f66ecc59890bd45d212e8fb401ec6cf4748f0ad4754974344c3dcc30aad765a8db89"
+        }
+      ],
+      "comment": "notice=NONE",
+      "copyrightText": "NOASSERTION",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceLocator": "pkg:npm/bindings@1.5.0",
+          "referenceType": "purl"
+        }
+      ],
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "name": "bindings",
+      "versionInfo": "1.5.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-blake3-wasm",
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "175f8af046df399138f5db683ed9b1510ae95da048977202bdab0b87e9c9b5ad31933fbd905ffbb9eb7d7cb9f02aa843ae68fa83ee8add3c3dc903d483691ae6"
+        }
+      ],
+      "comment": "notice=NONE",
+      "copyrightText": "NOASSERTION",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceLocator": "pkg:npm/blake3-wasm@2.1.5",
+          "referenceType": "purl"
+        }
+      ],
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "name": "blake3-wasm",
+      "versionInfo": "2.1.5"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-file-uri-to-path",
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "d19b7eb372fb55fd5b8b0599dbd6804625582f1ee23069c4525f71df77db07f8f78d1f35bbf3b62dba8af819b508348d0ca56d27f623c18ed351de5291e2d02f"
+        }
+      ],
+      "comment": "notice=NONE",
+      "copyrightText": "NOASSERTION",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceLocator": "pkg:npm/file-uri-to-path@1.0.0",
+          "referenceType": "purl"
+        }
+      ],
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "name": "file-uri-to-path",
+      "versionInfo": "1.0.0"
+    },
+    {
+      "SPDXID": "SPDXRef-Package-node-pty",
+      "checksums": [
+        {
+          "algorithm": "SHA512",
+          "checksumValue": "db426ab6eb58e893d74d49cbd228f5b9a77b41ed5b693e3a972a25876b1210d0dde2c4f3299e279801647800110cac2694b8cfc7a5ca465c11531c233b2fa552"
+        }
+      ],
+      "comment": "notice=NONE",
+      "copyrightText": "NOASSERTION",
+      "downloadLocation": "NOASSERTION",
+      "externalRefs": [
+        {
+          "referenceCategory": "PACKAGE-MANAGER",
+          "referenceLocator": "pkg:npm/node-pty@1.1.0",
+          "referenceType": "purl"
+        }
+      ],
+      "filesAnalyzed": false,
+      "licenseConcluded": "MIT",
+      "licenseDeclared": "MIT",
+      "name": "node-pty",
+      "versionInfo": "1.1.0"
+    }
+  ],
+  "spdxVersion": "SPDX-2.3"
+}
