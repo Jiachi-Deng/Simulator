@@ -220,6 +220,13 @@ jobs:
         if: ${{ always() }}
         shell: bash
         run: |
+          for sealed_tree in \
+            "${PRODUCTION_STAGING:-}" \
+            "$RUNNER_TEMP/open-design-production-input/package/open-design-production-input/staging"; do
+            if [[ -n "$sealed_tree" && -d "$sealed_tree" ]]; then
+              chmod -R u+rwX "$sealed_tree"
+            fi
+          done
           rm -rf "$RUNNER_TEMP/open-design-production-input"
           if [[ -n "${BUILD_WORK_PARENT:-}" ]]; then
             rm -rf "$BUILD_WORK_PARENT"

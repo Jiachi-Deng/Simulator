@@ -61,6 +61,8 @@ describe("OpenDesign official release workflow", () => {
     expect(producerSource.match(/--work-parent \"\$BUILD_WORK_PARENT\"/g)).toHaveLength(2)
     expect(producerSource).not.toContain('--work-parent "$PRODUCTION_WORK/')
     expect(producerSource).toContain('test "$(stat -f \'%Lp\' "$build_work_parent")" = "700"')
+    expect(producerSource).toContain('"$RUNNER_TEMP/open-design-production-input/package/open-design-production-input/staging"')
+    expect(producerSource).toContain('chmod -R u+rwX "$sealed_tree"')
     expect(producerSource).toContain('rm -rf "$BUILD_WORK_PARENT"')
     expect(producerSource).not.toContain("--development-local-only")
     expect(producerSource).toContain("open-design-production-input.tar.gz")
