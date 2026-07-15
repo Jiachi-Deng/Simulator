@@ -126,6 +126,13 @@ import {
   loadOpenDesignDevelopmentBootstrap,
   type OpenDesignDevelopmentBootstrap,
 } from './open-design-development-bootstrap'
+import {
+  loadOpenDesignOfficialChannel,
+  resolveOpenDesignHostInstallRequest,
+  selectOpenDesignHostChannel,
+  type OpenDesignHostChannelBootstrap,
+  type OpenDesignOfficialChannelBootstrap,
+} from './open-design-official-channel'
 import { resolveHostModuleStorageRoot } from './host-module-storage-root'
 import {
   createHostModuleAgentRuntime,
@@ -248,6 +255,11 @@ let moduleViewManager: ModuleViewManager | null = null
 let hostModuleCoordinator: HostModuleCoordinatorRuntime | null = null
 let hostModuleAgentRuntime: HostModuleAgentRuntime | null = null
 let openDesignDevelopmentBootstrap: OpenDesignDevelopmentBootstrap = Object.freeze({ status: 'disabled' })
+let openDesignHostChannel: OpenDesignHostChannelBootstrap = Object.freeze({
+  status: 'not-ready',
+  errorCode: 'OFFICIAL_CHANNEL_NOT_INITIALIZED',
+  errorMessage: 'The OpenDesign official channel is not ready.',
+})
 let openDesignModuleController: OpenDesignModuleController | null = null
 let openDesignModuleIpc: OpenDesignModuleIpcRegistration | null = null
 let stopServer: (() => Promise<void>) | null = null
@@ -1064,8 +1076,29 @@ app.whenReady().then(async () => {
           errorCode: openDesignDevelopmentBootstrap.errorCode,
         })
       }
-      const developmentBundle = openDesignDevelopmentBootstrap.status === 'ready'
-        ? openDesignDevelopmentBootstrap.bundle
+      const openDesignOfficialBootstrap: OpenDesignOfficialChannelBootstrap = openDesignDevelopmentBootstrap.status === 'disabled'
+        ? await loadOpenDesignOfficialChannel({
+            isPackaged: app.isPackaged,
+            resourcesPath: process.resourcesPath,
+            platform: currentModulePlatform(),
+          })
+        : Object.freeze({
+            status: 'not-ready',
+            errorCode: 'OFFICIAL_CHANNEL_BYPASSED_FOR_DEVELOPMENT',
+            errorMessage: 'The OpenDesign official channel is not ready.',
+          })
+      openDesignHostChannel = selectOpenDesignHostChannel(
+        openDesignDevelopmentBootstrap,
+        openDesignOfficialBootstrap,
+      )
+      if (openDesignDevelopmentBootstrap.status === 'disabled' && openDesignHostChannel.status === 'not-ready') {
+        mainLog.info('OpenDesign official channel is not ready', { errorCode: openDesignHostChannel.errorCode })
+      }
+      const developmentBundle = openDesignHostChannel.status === 'ready' && openDesignHostChannel.source === 'development'
+        ? openDesignHostChannel.bundle
+        : undefined
+      const officialChannel = openDesignHostChannel.status === 'ready' && openDesignHostChannel.source === 'official'
+        ? openDesignHostChannel.channel
         : undefined
       try {
         const moduleStorageRoot = resolveHostModuleStorageRoot({
@@ -1098,9 +1131,10 @@ app.whenReady().then(async () => {
           root: moduleStorageRoot,
           hostVersion: app.getVersion(),
           platform: currentModulePlatform(),
-          // Public builds remain fail-closed. The fixed development key and local
-          // HTTPS adapter exist only after the explicit double opt-in is verified.
-          trustedKeys: developmentBundle?.trustedKeys ?? [],
+          // Development trust stays behind the explicit double opt-in. Production
+          // trust roots come only from the fixed code-signed packaged resource.
+          trustedKeys: developmentBundle?.trustedKeys ?? officialChannel?.trustedKeys ?? [],
+          githubReleaseRedirectPolicy: officialChannel?.githubReleaseRedirectPolicy,
           moduleViewManager,
           hostWindow: () => windowManager?.getLastActiveWindow() ?? undefined,
           fetch: developmentBundle?.fetchAdapter,
@@ -1171,12 +1205,11 @@ app.whenReady().then(async () => {
       )
       openDesignModuleController = new OpenDesignModuleController({
         getRuntime: () => {
-          if (openDesignDevelopmentBootstrap.status === 'disabled') return { status: 'disabled' }
-          if (openDesignDevelopmentBootstrap.status === 'not-ready') {
+          if (openDesignHostChannel.status === 'not-ready') {
             return {
               status: 'not-ready',
-              errorCode: openDesignDevelopmentBootstrap.errorCode,
-              errorMessage: openDesignDevelopmentBootstrap.errorMessage,
+              errorCode: openDesignHostChannel.errorCode,
+              errorMessage: openDesignHostChannel.errorMessage,
             }
           }
           const runtime = hostModuleCoordinator
@@ -1189,9 +1222,10 @@ app.whenReady().then(async () => {
           }
           return { status: 'ready', runtime }
         },
-        getInstallRequest: () => openDesignDevelopmentBootstrap.status === 'ready'
-          ? openDesignDevelopmentBootstrap.bundle.installRequest
-          : undefined,
+        getInstallRequest: () => resolveOpenDesignHostInstallRequest(
+          openDesignHostChannel,
+          hostModuleCoordinator?.coordinator,
+        ),
         host: hostAdapter,
       })
       try {
@@ -1350,6 +1384,11 @@ async function cleanupBeforeQuit(): Promise<void> {
   openDesignModuleController?.dispose()
   openDesignModuleController = null
   openDesignDevelopmentBootstrap = Object.freeze({ status: 'disabled' })
+  openDesignHostChannel = Object.freeze({
+    status: 'not-ready',
+    errorCode: 'OFFICIAL_CHANNEL_NOT_INITIALIZED',
+    errorMessage: 'The OpenDesign official channel is not ready.',
+  })
 
   if (windowManager) {
     const windows = windowManager.getWindowStates()

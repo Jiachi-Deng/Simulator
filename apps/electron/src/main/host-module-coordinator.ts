@@ -33,6 +33,7 @@ export interface HostModuleCoordinatorOptions {
   readonly hostVersion: string
   readonly platform: ModulePlatform
   readonly trustedKeys: ModuleDownloaderOptions['trustedKeys']
+  readonly githubReleaseRedirectPolicy?: ModuleDownloaderOptions['githubReleaseRedirectPolicy']
   readonly moduleViewManager: ModuleViewManager
   readonly hostWindow: () => BrowserWindow | undefined
   readonly onHostClose?: (moduleId: ModuleId) => void | Promise<void>
@@ -91,6 +92,7 @@ export function createHostModuleCoordinator(options: HostModuleCoordinatorOption
     cache: new NodeFilesystemModuleDownloaderCache(cacheRoot),
     clock,
     trustedKeys: options.trustedKeys,
+    githubReleaseRedirectPolicy: options.githubReleaseRedirectPolicy,
   })
   const installer = new ModuleInstaller(installedRoot, { usageGuard: usage })
   const registry = new ModuleRegistry(
