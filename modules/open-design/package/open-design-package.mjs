@@ -33,14 +33,6 @@ import { create as createTar, list as listTar } from "tar";
 import { verifySealedCandidate } from "../src/atomic-publisher.mjs";
 import { inspectNativeBinary } from "../src/native-inventory.mjs";
 import { stagingAssert, stagingFail } from "../src/staging-error.mjs";
-import {
-  DEVELOPMENT_ONLY_KEY_ACTIVE_FROM,
-  DEVELOPMENT_ONLY_KEY_ACTIVE_UNTIL,
-  DEVELOPMENT_ONLY_KEY_ID,
-  DEVELOPMENT_ONLY_PRIVATE_KEY_PEM,
-  DEVELOPMENT_ONLY_TEST_CATALOG_ISSUED_AT,
-  developmentOnlyPublicKeyBytes,
-} from "./development-key.mjs";
 
 const execFileAsync = promisify(execFile);
 const packageRoot = path.dirname(fileURLToPath(import.meta.url));
@@ -81,21 +73,16 @@ const OFFICIAL_NODE_RUNTIME_POLICY = createNodeRuntimePolicy({
 });
 
 export function buildOpenDesignDevelopmentPackage(options = {}) {
-  return buildOpenDesignDevelopmentPackageWithPolicy(options, OFFICIAL_NODE_RUNTIME_POLICY);
+  return buildOpenDesignDevelopmentPackageWithPolicy(options, OFFICIAL_NODE_RUNTIME_POLICY, false);
 }
 
 // Test-only digest seam for small self-contained Node fixtures. The production
 // entrypoint and CLI always use OFFICIAL_NODE_RUNTIME_POLICY above.
 export function buildOpenDesignDevelopmentPackageForTest(options, fixtureDigests) {
-  const catalogIssuedAt = options.catalogIssuedAt ?? DEVELOPMENT_ONLY_TEST_CATALOG_ISSUED_AT;
-  return buildOpenDesignDevelopmentPackageWithPolicy({
-    ...options,
-    catalogIssuedAt,
-    catalogVerificationTimeMs: options.catalogVerificationTimeMs ?? Date.parse(catalogIssuedAt) + 1_000,
-  }, createNodeRuntimePolicy({
+  return buildOpenDesignDevelopmentPackageWithPolicy(options, createNodeRuntimePolicy({
     version: NODE_RUNTIME_VERSION,
     licenseSha256: fixtureDigests?.nodeLicenseSha256,
-  }));
+  }), true);
 }
 
 async function buildOpenDesignDevelopmentPackageWithPolicy({
@@ -103,13 +90,20 @@ async function buildOpenDesignDevelopmentPackageWithPolicy({
   nodeBin,
   nodeLicense,
   catalogIssuedAt,
-  catalogVerificationTimeMs = Date.now(),
+  catalogVerificationTimeMs,
   output,
   developmentLocalOnly = false,
   allowUnreviewedLocalArtifact = false,
-} = {}, nodeRuntimePolicy) {
+} = {}, nodeRuntimePolicy, useTestCatalogDefaults) {
+  // Loaded only after entering the explicitly development-only builder. Merely
+  // importing shared archive primitives from this module never loads a
+  // development private key into a production publisher process.
+  const developmentIdentity = await loadDevelopmentIdentity();
+  const effectiveIssuedAt = catalogIssuedAt ?? (useTestCatalogDefaults ? developmentIdentity.testCatalogIssuedAt : undefined);
+  const effectiveVerificationTimeMs = catalogVerificationTimeMs
+    ?? (useTestCatalogDefaults ? Date.parse(effectiveIssuedAt) + 1_000 : Date.now());
   assertDevelopmentAuthorization({ developmentLocalOnly, allowUnreviewedLocalArtifact });
-  const catalogWindow = createDevelopmentCatalogWindow(catalogIssuedAt, catalogVerificationTimeMs);
+  const catalogWindow = createDevelopmentCatalogWindow(effectiveIssuedAt, effectiveVerificationTimeMs, developmentIdentity);
   stagingAssert(path.isAbsolute(stagingRoot ?? ""), "PACKAGE_STAGING_INVALID", "sealed staging root must be absolute");
   stagingAssert(path.isAbsolute(nodeBin ?? ""), "PACKAGE_NODE_INVALID", "Node binary path must be absolute");
   stagingAssert(path.isAbsolute(nodeLicense ?? ""), "PACKAGE_NODE_LICENSE_INVALID", "Node LICENSE path must be absolute");
@@ -183,12 +177,12 @@ async function buildOpenDesignDevelopmentPackageWithPolicy({
       releases: [{ manifest, artifactSizes: [{ platform: OPEN_DESIGN_MODULE_PLATFORM, size: archiveInfo.size }] }],
     };
     const catalogBytes = encodeCanonicalCatalog(catalog);
-    const signature = Uint8Array.from(sign(null, catalogBytes, DEVELOPMENT_ONLY_PRIVATE_KEY_PEM));
-    verifyDevelopmentCatalog(catalogBytes, signature, catalogWindow.verificationTimeMs);
+    const signature = Uint8Array.from(sign(null, catalogBytes, developmentIdentity.privateKeyPem));
+    verifyDevelopmentCatalog(catalogBytes, signature, catalogWindow.verificationTimeMs, developmentIdentity);
 
     const envelope = {
       schemaVersion: 1,
-      keyId: DEVELOPMENT_ONLY_KEY_ID,
+      keyId: developmentIdentity.keyId,
       catalogBytes: Buffer.from(catalogBytes).toString("base64"),
       signature: Buffer.from(signature).toString("base64"),
     };
@@ -230,7 +224,7 @@ async function buildOpenDesignDevelopmentPackageWithPolicy({
       archiveSize: archiveInfo.size,
       envelopeBytes,
       extractedManifestSha256: tree.sha256,
-    });
+    }, developmentIdentity);
     const descriptorBytes = encodeCanonicalCatalog(descriptor);
     const expectedBundleFiles = new Map([
       [ARCHIVE_FILENAME, { size: archiveInfo.size, sha256: archiveSha256 }],
@@ -300,7 +294,7 @@ function assertDevelopmentAuthorization({ developmentLocalOnly, allowUnreviewedL
   stagingAssert(allowUnreviewedLocalArtifact === true, "PACKAGE_DEVELOPMENT_NOT_ALLOWED", "packaging requires SIMULATOR_ALLOW_UNREVIEWED_LOCAL_ARTIFACT=1");
 }
 
-function createDevelopmentCatalogWindow(issuedAt, verificationTimeMs) {
+function createDevelopmentCatalogWindow(issuedAt, verificationTimeMs, developmentIdentity) {
   const issuedAtMs = Date.parse(issuedAt ?? "");
   stagingAssert(
     typeof issuedAt === "string"
@@ -316,7 +310,7 @@ function createDevelopmentCatalogWindow(issuedAt, verificationTimeMs) {
   );
   const expiresAtMs = issuedAtMs + MAX_MODULE_RELEASE_CATALOG_TTL_MS;
   stagingAssert(
-    Number.isSafeInteger(expiresAtMs) && expiresAtMs <= Date.parse(DEVELOPMENT_ONLY_KEY_ACTIVE_UNTIL),
+    Number.isSafeInteger(expiresAtMs) && expiresAtMs <= Date.parse(developmentIdentity.activeUntil),
     "PACKAGE_CATALOG_WINDOW_INVALID",
     "catalog validity exceeds the development signing-key window",
   );
@@ -731,18 +725,18 @@ function createValidatedManifest(archiveSha256, artifactUrl) {
   return parsed.value;
 }
 
-function verifyDevelopmentCatalog(catalogBytes, signature, verificationTimeMs) {
+function verifyDevelopmentCatalog(catalogBytes, signature, verificationTimeMs, developmentIdentity) {
   const result = verifyModuleReleaseCatalog({
     schemaVersion: 1,
-    keyId: DEVELOPMENT_ONLY_KEY_ID,
+    keyId: developmentIdentity.keyId,
     catalogBytes,
     signature,
   }, {
     trustedKeys: [{
-      keyId: DEVELOPMENT_ONLY_KEY_ID,
-      publicKey: developmentOnlyPublicKeyBytes(),
-      activeFrom: DEVELOPMENT_ONLY_KEY_ACTIVE_FROM,
-      activeUntil: DEVELOPMENT_ONLY_KEY_ACTIVE_UNTIL,
+      keyId: developmentIdentity.keyId,
+      publicKey: developmentIdentity.publicKey,
+      activeFrom: developmentIdentity.activeFrom,
+      activeUntil: developmentIdentity.activeUntil,
     }],
     state: { highestSequence: 0 },
     now: verificationTimeMs,
@@ -750,7 +744,7 @@ function verifyDevelopmentCatalog(catalogBytes, signature, verificationTimeMs) {
   if (!result.ok) stagingFail("PACKAGE_CATALOG_INVALID", result.diagnostics.map((entry) => `${entry.code}: ${entry.message}`).join("; "));
 }
 
-function createBundleDescriptor({ archiveSha256, archiveSize, envelopeBytes, extractedManifestSha256 }) {
+function createBundleDescriptor({ archiveSha256, archiveSize, envelopeBytes, extractedManifestSha256 }, developmentIdentity) {
   return {
     schemaVersion: 2,
     developmentOnly: true,
@@ -760,10 +754,10 @@ function createBundleDescriptor({ archiveSha256, archiveSize, envelopeBytes, ext
     install: { extractedManifestSha256, hostVersionRange: "*" },
     trustedKey: {
       developmentOnly: true,
-      keyId: DEVELOPMENT_ONLY_KEY_ID,
-      publicKey: Buffer.from(developmentOnlyPublicKeyBytes()).toString("base64"),
-      activeFrom: DEVELOPMENT_ONLY_KEY_ACTIVE_FROM,
-      activeUntil: DEVELOPMENT_ONLY_KEY_ACTIVE_UNTIL,
+      keyId: developmentIdentity.keyId,
+      publicKey: Buffer.from(developmentIdentity.publicKey).toString("base64"),
+      activeFrom: developmentIdentity.activeFrom,
+      activeUntil: developmentIdentity.activeUntil,
     },
     resources: {
       catalog: {
@@ -782,6 +776,18 @@ function createBundleDescriptor({ archiveSha256, archiveSize, envelopeBytes, ext
       },
     },
   };
+}
+
+async function loadDevelopmentIdentity() {
+  const module = await import("./development-key.mjs");
+  return Object.freeze({
+    keyId: module.DEVELOPMENT_ONLY_KEY_ID,
+    privateKeyPem: module.DEVELOPMENT_ONLY_PRIVATE_KEY_PEM,
+    publicKey: module.developmentOnlyPublicKeyBytes(),
+    activeFrom: module.DEVELOPMENT_ONLY_KEY_ACTIVE_FROM,
+    activeUntil: module.DEVELOPMENT_ONLY_KEY_ACTIVE_UNTIL,
+    testCatalogIssuedAt: module.DEVELOPMENT_ONLY_TEST_CATALOG_ISSUED_AT,
+  });
 }
 
 async function writeExclusiveBytes(filename, bytes) {
@@ -917,3 +923,27 @@ function currentUid() {
   stagingAssert(typeof process.getuid === "function", "PACKAGE_PLATFORM_UNSUPPORTED", "filesystem ownership checks require POSIX");
   return process.getuid();
 }
+
+// The production publisher reuses only these hardened filesystem/archive
+// primitives. Development identity, URLs, markers, catalog shape and signing
+// material remain private to the development entrypoint above.
+export const OPEN_DESIGN_PACKAGE_PRIMITIVES = Object.freeze({
+  createNodeRuntimePolicy,
+  prepareOutputTarget,
+  preflightSealedStaging,
+  readJsonFromSnapshot,
+  verifySealedStaging,
+  inspectNodeInput,
+  copySnapshotTree,
+  copyRegularInput,
+  normalizeAndVerifyAssembly,
+  collectArchiveEntries,
+  createDeterministicArchive,
+  writeExclusiveBytes,
+  verifyBundleFiles,
+  hashRegularFile,
+  sha256Bytes,
+  fsyncDirectory,
+  assertAbsent,
+  assertDirectoryContainsOnly,
+});
