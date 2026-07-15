@@ -56,7 +56,10 @@ export function sha256(value: Uint8Array | string): ModuleSha256 {
   return createHash('sha256').update(value).digest('hex') as ModuleSha256
 }
 
-export function expectedTreeHash(entries: readonly TarFixtureEntry[]): ModuleSha256 {
+export function expectedTreeHash(
+  entries: readonly TarFixtureEntry[],
+  executablePaths: ReadonlySet<string> = new Set(['bin/module']),
+): ModuleSha256 {
   const directories = new Set<string>()
   const files: Array<{ path: string; content: Buffer; executable: boolean }> = []
   for (const entry of entries) {
@@ -68,7 +71,7 @@ export function expectedTreeHash(entries: readonly TarFixtureEntry[]): ModuleSha
     for (let index = 1; index < parts.length; index += 1) directories.add(parts.slice(0, index).join('/'))
     if (type === '5') directories.add(path)
     if (type === '0') {
-      files.push({ path, content: Buffer.from(entry.content ?? ''), executable: ((entry.mode ?? 0o644) & 0o111) !== 0 })
+      files.push({ path, content: Buffer.from(entry.content ?? ''), executable: executablePaths.has(path) })
     }
   }
   const records = [
@@ -91,6 +94,7 @@ export function descriptor(
   archive: Uint8Array,
   entries: readonly TarFixtureEntry[],
   version = '1.0.0',
+  auxiliaryExecutables: readonly string[] = [],
 ): VerifiedArtifactDescriptor {
   const input = {
     schemaVersion: 1,
@@ -99,6 +103,7 @@ export function descriptor(
     artifacts: [{
       platform: 'darwin-arm64',
       entrypoint: 'bin/module',
+      ...(auxiliaryExecutables.length === 0 ? {} : { auxiliaryExecutables }),
       url: `https://modules.example.test/org.simulator.fixture/${version}/darwin-arm64.tar.gz`,
       sha256: sha256(archive),
     }],
@@ -110,7 +115,7 @@ export function descriptor(
     verified: true,
     manifest: parsed.value,
     artifact: parsed.value.artifacts[0]!,
-    extractedManifestSha256: expectedTreeHash(entries),
+    extractedManifestSha256: expectedTreeHash(entries, new Set(['bin/module', ...auxiliaryExecutables])),
     format: 'tar.gz',
   }
 }

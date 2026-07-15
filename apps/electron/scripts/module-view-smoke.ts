@@ -73,6 +73,7 @@ const frontendUrl = `http://127.0.0.1:${server.port}/index.html?deniedWsPort=${d
 const processHandle = Bun.spawn([
   executable,
   ...applicationArguments,
+  `--user-data-dir=${join(temporaryDirectory, 'electron-user-data')}`,
   `--module-view-smoke-url=${frontendUrl}`,
   `--module-view-smoke-result=${resultPath}`,
 ], {

@@ -6,11 +6,12 @@ import { lstat, open, opendir, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { caseFold } from "unicode-case-folding";
-import { canonicalJson, digestInventory, inferResourcePathCategory, loadRuntimeSchemas, validateArtifact } from "./validate-artifact.mjs";
+import { canonicalJsonBytes, digestInventory, inferResourcePathCategory, loadRuntimeSchemas, validateArtifact, validateDevelopmentArtifact } from "./validate-artifact.mjs";
 
 const moduleRoot = new URL("../", import.meta.url);
 const encoder = new TextEncoder();
 const RESOURCE_FIELDS = new Set(["resourceCategory", "sourcePath", "decisionId", "nativeTarget"]);
+const DEFERRED_RIGHTS_CODES = new Set(["UNEXPECTED_RESOURCE", "RESOURCE_EXCLUDED", "RIGHTS_DECISION_MISSING", "RIGHTS_EVIDENCE_MISSING"]);
 
 export class InventoryProductionError extends Error {
   constructor(code, message) {
@@ -22,7 +23,7 @@ export class InventoryProductionError extends Error {
 
 const fail = (code, message) => { throw new InventoryProductionError(code, message); };
 
-export async function produceInventory({ stagingRoot, metadata = {}, provenance, policy, decisions, target, schemas, hook }) {
+export async function produceInventory({ stagingRoot, metadata = {}, provenance, policy, decisions, attestation, target, distribution = { class: "public", nonPromotable: false }, schemas, hook, deferRights = false }) {
   if (!path.isAbsolute(stagingRoot)) fail("STAGING_ROOT_INVALID", "staging root must be absolute");
   if (!isPlainObject(metadata)) fail("METADATA_INVALID", "metadata map must be an object keyed by exact artifact path");
 
@@ -50,7 +51,7 @@ export async function produceInventory({ stagingRoot, metadata = {}, provenance,
   for (const artifactPath of leafPaths) {
     const rule = findRule(artifactPath, policy);
     if (!rule) fail("PATH_NOT_ALLOWED", `path is outside the feature profile: ${artifactPath}`);
-    const special = validateMetadata(artifactPath, metadata[artifactPath], policy);
+    const special = validateMetadata(artifactPath, metadata[artifactPath], policy, { deferRights });
     const collected = await collectFile({ stagingRoot, artifactPath, rootReal, policy, hook, expected: initial.entries.get(artifactPath) });
     const identityKey = `${collected.stat.dev}:${collected.stat.ino}`;
     if (identities.has(identityKey)) fail("HARD_LINK_ALIAS", `hard-linked artifact paths are forbidden: ${identities.get(identityKey)} and ${artifactPath}`);
@@ -59,16 +60,17 @@ export async function produceInventory({ stagingRoot, metadata = {}, provenance,
     if (!Number.isSafeInteger(totalBytes) || totalBytes > policy.limits.maxTotalBytes) fail("TOTAL_SIZE_EXCEEDED", "staged files exceed maxTotalBytes");
 
     const required = policy.requiredFiles.find((candidate) => candidate.path === artifactPath);
-    const native = policy.nativeBinaryExtensions.includes(path.posix.extname(artifactPath).toLowerCase());
+    const runtimeClass = runtimeBinaryClass(artifactPath, policy);
     files.push({
       schemaVersion: 1,
       path: artifactPath,
       type: "file",
-      artifactKind: native ? "native-binary" : rule.artifactKind,
+      artifactKind: runtimeClass ?? rule.artifactKind,
       component: rule.component ?? rule.components[0],
       dependencyScope: rule.artifactKind === "runtime-package" || rule.artifactKind === "daemon-runtime" ? "production" : "artifact",
       bytes: collected.bytes,
       sha256: collected.sha256,
+      ...(runtimeClass && { fileMode: modeString(collected.stat.mode) }),
       ...(required && { mediaType: required.mediaType, schemaId: required.schemaId }),
       ...(required?.schemaVersion !== undefined && { contentSchemaVersion: required.schemaVersion, sourceCommit: provenance.source.commit }),
       ...special
@@ -92,16 +94,19 @@ export async function produceInventory({ stagingRoot, metadata = {}, provenance,
     contentSchemaVersion: manifestRequired.schemaVersion, sourceCommit: provenance.source.commit
   });
   files.sort((left, right) => compareUtf8(left.path, right.path));
-  const inventory = { schemaVersion: 1, source: { ref: provenance.source.ref, commit: provenance.source.commit }, target: structuredClone(target), files };
+  const inventory = { schemaVersion: 1, distribution: structuredClone(distribution), source: { ref: provenance.source.ref, commit: provenance.source.commit }, target: structuredClone(target), files };
   const manifest = files.find((file) => file.path === "artifact-manifest.json");
   for (let previousBytes = -1; manifest.bytes !== previousBytes;) {
     previousBytes = manifest.bytes;
-    manifest.bytes = encoder.encode(`${canonicalJson(inventory)}\n`).length;
+    manifest.bytes = canonicalJsonBytes(inventory).length;
   }
   manifest.sha256 = digestInventory(inventory);
-  const result = validateArtifact({ provenance, policy, decisions, inventory, schemas: schemas ?? await loadRuntimeSchemas() });
-  if (!result.ok) fail("ARTIFACT_INVALID", result.errors.map((error) => `${error.code}: ${error.message}`).join("; "));
-  return { inventory, json: `${canonicalJson(inventory)}\n` };
+  const validator = distribution.class === "development-local-only" ? validateDevelopmentArtifact : validateArtifact;
+  const result = validator({ provenance, policy, decisions, attestation, inventory, schemas: schemas ?? await loadRuntimeSchemas() });
+  const deferredErrors = result.errors.filter((error) => DEFERRED_RIGHTS_CODES.has(error.code));
+  const blockingErrors = deferRights ? result.errors.filter((error) => !DEFERRED_RIGHTS_CODES.has(error.code)) : result.errors;
+  if (blockingErrors.length > 0) fail("ARTIFACT_INVALID", blockingErrors.map((error) => `${error.code}: ${error.message}`).join("; "));
+  return { inventory, json: canonicalJsonBytes(inventory).toString("utf8"), deferredRightsErrors: deferredErrors };
 }
 
 async function snapshotDirectory(stagingRoot, rootReal, policy, { hashFiles = false } = {}) {
@@ -222,21 +227,31 @@ function validateArtifactPath(value, policy) {
   if (encoder.encode(value).length > policy.limits.maxPathBytes) fail("PATH_LIMIT_EXCEEDED", `path exceeds maxPathBytes: ${value}`);
 }
 
-function validateMetadata(artifactPath, value, policy) {
+function validateMetadata(artifactPath, value, policy, { deferRights = false } = {}) {
   const extension = path.posix.extname(artifactPath).toLowerCase();
   const pathCategory = inferResourcePathCategory(artifactPath, policy);
-  const inferredCategory = policy.nativeBinaryExtensions.includes(extension) ? "native-binaries" : Object.entries(policy.resourceExtensions).find(([, extensions]) => extensions.includes(extension))?.[0];
+  const inferredCategory = runtimeBinaryClass(artifactPath, policy) ? "native-binaries" : pathCategory ?? Object.entries(policy.resourceExtensions).find(([, extensions]) => extensions.includes(extension))?.[0];
   if (value === undefined) {
-    if (inferredCategory || pathCategory !== undefined) fail("METADATA_MISSING", `resource/native metadata is required for exact path: ${artifactPath}`);
+    if (!deferRights && (inferredCategory || pathCategory !== undefined)) fail("METADATA_MISSING", `resource/native metadata is required for exact path: ${artifactPath}`);
     return {};
   }
   if (!isPlainObject(value) || Object.keys(value).some((key) => !RESOURCE_FIELDS.has(key))) fail("METADATA_INVALID", `metadata has unknown fields: ${artifactPath}`);
   for (const key of ["resourceCategory", "sourcePath", "decisionId"]) if (typeof value[key] !== "string" || !value[key]) fail("METADATA_INVALID", `metadata.${key} is required: ${artifactPath}`);
   if (inferredCategory && value.resourceCategory !== inferredCategory) fail("METADATA_INVALID", `metadata category does not match file type: ${artifactPath}`);
-  if (pathCategory && value.resourceCategory !== pathCategory) fail("METADATA_INVALID", `metadata category does not match resource path: ${artifactPath}`);
   if (value.resourceCategory === "native-binaries" && !isPlainObject(value.nativeTarget)) fail("METADATA_MISSING", `nativeTarget is required: ${artifactPath}`);
   if (value.resourceCategory !== "native-binaries" && value.nativeTarget !== undefined) fail("METADATA_INVALID", `nativeTarget is only valid for native binaries: ${artifactPath}`);
   return structuredClone(value);
+}
+
+function runtimeBinaryClass(artifactPath, policy) {
+  const extension = path.posix.extname(artifactPath).toLowerCase();
+  if (extension === ".wasm") return "wasm-resource";
+  if (artifactPath.endsWith("/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper")) return "executable-native";
+  return policy.nativeBinaryExtensions.includes(extension) ? "native-binary" : null;
+}
+
+function modeString(mode) {
+  return Number(mode & 0o777n).toString(8).padStart(4, "0");
 }
 
 function findRule(artifactPath, policy) {
@@ -269,10 +284,10 @@ async function main(argv) {
   const stagingRoot = options["staging-root"];
   const metadataPath = options.metadata;
   const targetPath = options.target;
-  const [metadata, target, provenance, policy, decisions] = await Promise.all([
-    readJson(metadataPath), readJson(targetPath), readJson(new URL("provenance.json", moduleRoot)), readJson(new URL("artifact-policy.json", moduleRoot)), readJson(new URL("resource-decisions.json", moduleRoot))
+  const [metadata, target, provenance, policy, decisions, attestation] = await Promise.all([
+    readJson(metadataPath), readJson(targetPath), readJson(new URL("provenance.json", moduleRoot)), readJson(new URL("artifact-policy.json", moduleRoot)), readJson(new URL("resource-decisions.json", moduleRoot)), readJson(path.join(stagingRoot, "build-attestation.json"))
   ]);
-  const { json } = await produceInventory({ stagingRoot, metadata, target, provenance, policy, decisions });
+  const { json } = await produceInventory({ stagingRoot, metadata, target, provenance, policy, decisions, attestation });
   process.stdout.write(json);
 }
 

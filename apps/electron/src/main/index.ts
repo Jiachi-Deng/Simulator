@@ -84,6 +84,7 @@ Sentry.setUser({ id: machineId })
 import { join, delimiter } from 'path'
 import { existsSync, readFileSync } from 'fs'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
+import type { ModuleId } from '@simulator/module-contract'
 import { SessionManager, setSessionPlatform, setSessionRuntimeHooks } from '@craft-agent/server-core/sessions'
 import { registerAllRpcHandlers } from './handlers/index'
 import { registerCoreRpcHandlers, cleanupSessionFileWatchForClient } from '@craft-agent/server-core/handlers/rpc'
@@ -95,7 +96,7 @@ import { createMessagingBootstrap, type MessagingBootstrapHandle } from '@craft-
 import { getCredentialManager } from '@craft-agent/shared/credentials'
 import { initModelRefreshService, getModelRefreshService, setFetcherPlatform } from '@craft-agent/server-core/model-fetchers'
 import { setSearchPlatform, setImageProcessor } from '@craft-agent/server-core/services'
-import { createApplicationMenu } from './menu'
+import { createApplicationMenu, setOpenDesignModuleEscapeHandler } from './menu'
 import { WindowManager } from './window-manager'
 import { loadWindowState, saveWindowState } from './window-state'
 import { getWorkspaces, getWorkspaceByNameOrId, loadStoredConfig, addWorkspace, saveConfig } from '@craft-agent/shared/config'
@@ -110,7 +111,44 @@ import { setPowerShellValidatorRoot } from '@craft-agent/shared/agent'
 import { handleDeepLink } from './deep-link'
 import { BrowserPaneManager } from './browser-pane-manager'
 import { ModuleViewManager } from './module-view-manager'
+import {
+  createHostModuleCoordinator,
+  currentModulePlatform,
+  type HostModuleCoordinatorRuntime,
+} from './host-module-coordinator'
+import {
+  createOpenDesignModuleBrowserWindowAdapter,
+  OpenDesignModuleController,
+  registerOpenDesignModuleIpc,
+  type OpenDesignModuleIpcRegistration,
+} from './open-design-module-controller'
+import {
+  loadOpenDesignDevelopmentBootstrap,
+  type OpenDesignDevelopmentBootstrap,
+} from './open-design-development-bootstrap'
+import {
+  loadOpenDesignOfficialChannel,
+  resolveOpenDesignHostInstallRequest,
+  selectOpenDesignHostChannel,
+  type OpenDesignHostChannelBootstrap,
+  type OpenDesignOfficialChannelBootstrap,
+} from './open-design-official-channel'
+import { resolveHostModuleStorageRoot } from './host-module-storage-root'
+import {
+  createHostModuleAgentRuntime,
+  type HostModuleAgentRuntime,
+} from './module-agent-runtime'
+import { OPEN_DESIGN_MODULE_ID } from '../shared/open-design-module-ipc'
 import { isModuleViewSmokeRequested, runModuleViewSmokeIfRequested } from './module-view-smoke'
+import {
+  isHostModuleCoordinatorSmokeRequested,
+  completeHostModuleCoordinatorSmokeCleanup,
+  getHostModuleCoordinatorSmokeNodeRuntime,
+  getHostModuleCoordinatorSmokeRoot,
+  recordHostModuleCoordinatorBeforeQuitEvent,
+  runHostModuleCoordinatorSmokeIfRequested,
+  writeHostModuleCoordinatorSmokeBootMarker,
+} from './host-module-coordinator-smoke'
 import { OAuthFlowStore } from '@craft-agent/shared/auth'
 import { registerThumbnailScheme, registerThumbnailHandler } from './thumbnail-protocol'
 import log, { isDebugMode, mainLog, getLogFilePath, getMessagingGatewayLogFilePath, messagingGatewayLog, autoUpdateLog } from './logger'
@@ -121,6 +159,7 @@ import { initNotificationService, initBadgeIcon, initInstanceBadge, updateBadgeC
 import { checkForUpdatesOnLaunch, setAutoUpdateEventSink, isUpdating, setBeforeUpdateQuitHook } from './auto-update'
 import type { EventSink } from '@craft-agent/server-core/transport'
 import { validateGitBashPath, checkVCRedistInstalled } from '@craft-agent/server-core/services'
+import { BeforeQuitCleanupController } from './before-quit-cleanup'
 
 // Initialize electron-log for renderer process support
 log.initialize()
@@ -213,6 +252,18 @@ let windowManager: WindowManager | null = null
 let sessionManager: SessionManager | null = null
 let browserPaneManager: BrowserPaneManager | null = null
 let moduleViewManager: ModuleViewManager | null = null
+let hostModuleCoordinator: HostModuleCoordinatorRuntime | null = null
+let hostModuleAgentRuntime: HostModuleAgentRuntime | null = null
+let openDesignDevelopmentBootstrap: OpenDesignDevelopmentBootstrap = Object.freeze({ status: 'disabled' })
+let openDesignHostChannel: OpenDesignHostChannelBootstrap = Object.freeze({
+  status: 'not-ready',
+  errorCode: 'OFFICIAL_CHANNEL_NOT_INITIALIZED',
+  errorMessage: 'The OpenDesign official channel is not ready.',
+})
+let openDesignModuleController: OpenDesignModuleController | null = null
+let openDesignModuleIpc: OpenDesignModuleIpcRegistration | null = null
+let stopServer: (() => Promise<void>) | null = null
+let embeddedServer: { host: string; port: number } | null = null
 let oauthFlowStore: OAuthFlowStore | null = null
 let moduleSink: EventSink | null = null
 let moduleClientResolver: ((webContentsId: number) => string | undefined) | null = null
@@ -267,7 +318,8 @@ app.on('open-url', (event, url) => {
 })
 
 // Handle deeplink on Windows/Linux (single instance check)
-const gotTheLock = isModuleViewSmokeRequested() || app.requestSingleInstanceLock()
+writeHostModuleCoordinatorSmokeBootMarker()
+const gotTheLock = isModuleViewSmokeRequested() || isHostModuleCoordinatorSmokeRequested() || app.requestSingleInstanceLock()
 if (!gotTheLock) {
   app.quit()
 } else {
@@ -348,6 +400,8 @@ async function createInitialWindows(): Promise<void> {
 app.whenReady().then(async () => {
   // Export packaged state as env var so logger.ts (and headless Bun) don't need 'electron'
   process.env.CRAFT_IS_PACKAGED = app.isPackaged ? 'true' : 'false'
+  const smokeNodeRuntime = getHostModuleCoordinatorSmokeNodeRuntime()
+  if (smokeNodeRuntime) process.env.PATH = `${join(smokeNodeRuntime, '..')}${delimiter}${process.env.PATH ?? ''}`
 
   // The smoke path is intentionally isolated from normal workspace/server startup.
   if (await runModuleViewSmokeIfRequested()) return
@@ -362,6 +416,7 @@ app.whenReady().then(async () => {
       appRootPath: app.isPackaged ? app.getAppPath() : process.cwd(),
       resourcesPath: process.resourcesPath,
       isPackaged: app.isPackaged,
+      nodeRuntimePath: getHostModuleCoordinatorSmokeNodeRuntime(),
     },
   })
 
@@ -447,8 +502,8 @@ app.whenReady().then(async () => {
     browserPaneManager.registerToolbarIpc()
     browserPaneManager.registerCapabilityIpc()
 
-    // Register the isolated optional-module transport. Real Module lifecycle and
-    // frontend attachment are intentionally owned by later integration slices.
+    // Register the isolated optional-module transport before constructing the
+    // coordinator runtime after the first host window exists.
     moduleViewManager = new ModuleViewManager()
 
     // Build real PlatformServices from Electron APIs
@@ -702,6 +757,8 @@ app.whenReady().then(async () => {
 
       // Capture module-level references for before-quit cleanup and deep-link handlers
       sessionManager = instance.sessionManager
+      stopServer = instance.stop
+      embeddedServer = { host: instance.host, port: instance.port }
       oauthFlowStore = instance.oauthFlowStore
       moduleSink = instance.wsServer.push.bind(instance.wsServer)
       moduleClientResolver = resolveClientId
@@ -1010,6 +1067,181 @@ app.whenReady().then(async () => {
     // In headless mode the server runs without any UI — skip window creation.
     if (!isHeadless) {
       await createInitialWindows()
+      openDesignDevelopmentBootstrap = await loadOpenDesignDevelopmentBootstrap({
+        argv: process.argv,
+        platform: currentModulePlatform(),
+      })
+      if (openDesignDevelopmentBootstrap.status === 'not-ready') {
+        mainLog.error('OpenDesign development bundle bootstrap failed', {
+          errorCode: openDesignDevelopmentBootstrap.errorCode,
+        })
+      }
+      const openDesignOfficialBootstrap: OpenDesignOfficialChannelBootstrap = openDesignDevelopmentBootstrap.status === 'disabled'
+        ? await loadOpenDesignOfficialChannel({
+            isPackaged: app.isPackaged,
+            resourcesPath: process.resourcesPath,
+            platform: currentModulePlatform(),
+          })
+        : Object.freeze({
+            status: 'not-ready',
+            errorCode: 'OFFICIAL_CHANNEL_BYPASSED_FOR_DEVELOPMENT',
+            errorMessage: 'The OpenDesign official channel is not ready.',
+          })
+      openDesignHostChannel = selectOpenDesignHostChannel(
+        openDesignDevelopmentBootstrap,
+        openDesignOfficialBootstrap,
+      )
+      if (openDesignDevelopmentBootstrap.status === 'disabled' && openDesignHostChannel.status === 'not-ready') {
+        mainLog.info('OpenDesign official channel is not ready', { errorCode: openDesignHostChannel.errorCode })
+      }
+      const developmentBundle = openDesignHostChannel.status === 'ready' && openDesignHostChannel.source === 'development'
+        ? openDesignHostChannel.bundle
+        : undefined
+      const officialChannel = openDesignHostChannel.status === 'ready' && openDesignHostChannel.source === 'official'
+        ? openDesignHostChannel.channel
+        : undefined
+      try {
+        const moduleStorageRoot = resolveHostModuleStorageRoot({
+          userDataRoot: app.getPath('userData'),
+          smokeRoot: getHostModuleCoordinatorSmokeRoot(),
+          developmentBootstrapStatus: openDesignDevelopmentBootstrap.status,
+        })
+        if (!sessionManager) throw new Error('Session manager is unavailable for the Module Agent runtime')
+        hostModuleAgentRuntime = await createHostModuleAgentRuntime({
+          storageRoot: moduleStorageRoot,
+          sessions: sessionManager,
+          resolveWorkspaceId: () => {
+            const hostWindow = windowManager?.getLastActiveWindow()
+            const activeWorkspaceId = hostWindow
+              ? windowManager?.getWorkspaceForWindow(hostWindow.webContents.id) ?? undefined
+              : undefined
+            return activeWorkspaceId ?? sessionManager?.getWorkspaces()[0]?.id
+          },
+        })
+        const stopOpenDesignDirectly = async (moduleId: ModuleId, reason: 'host-close' | 'view-failure') => {
+          const runtime = hostModuleCoordinator
+          if (!runtime) throw new Error('OpenDesign coordinator is unavailable')
+          const result = await runtime.coordinator.stop({
+            moduleId,
+            operationId: `open-design-${reason}-${Date.now().toString(36)}-${randomUUID()}`,
+          })
+          if (!result.ok) throw new Error('OpenDesign coordinator stop failed')
+        }
+        hostModuleCoordinator = createHostModuleCoordinator({
+          root: moduleStorageRoot,
+          hostVersion: app.getVersion(),
+          platform: currentModulePlatform(),
+          // Development trust stays behind the explicit double opt-in. Production
+          // trust roots come only from the fixed code-signed packaged resource.
+          trustedKeys: developmentBundle?.trustedKeys ?? officialChannel?.trustedKeys ?? [],
+          githubReleaseRedirectPolicy: officialChannel?.githubReleaseRedirectPolicy,
+          moduleViewManager,
+          hostWindow: () => windowManager?.getLastActiveWindow() ?? undefined,
+          fetch: developmentBundle?.fetchAdapter,
+          prepareModuleAgentLaunch: (context) => {
+            const runtime = hostModuleAgentRuntime
+            if (!runtime) throw new Error('Module Agent runtime is unavailable')
+            return runtime.prepareLaunch(context)
+          },
+          onHostClose: async (moduleId) => {
+            if (moduleId !== OPEN_DESIGN_MODULE_ID) return
+            const controller = openDesignModuleController
+            if (controller) await controller.stopForHostView()
+            else await stopOpenDesignDirectly(moduleId, 'host-close')
+          },
+          onHostCloseError: (_error, moduleId) => {
+            mainLog.error('Module host close failed', { moduleId })
+          },
+          onViewFailure: async (_failure, moduleId) => {
+            if (moduleId !== OPEN_DESIGN_MODULE_ID) return
+            const controller = openDesignModuleController
+            if (controller) await controller.stopForViewFailure()
+            else await stopOpenDesignDirectly(moduleId, 'view-failure')
+          },
+          onViewFailureError: (_error, moduleId) => {
+            mainLog.error('Module view failure cleanup failed', { moduleId })
+          },
+        })
+        await hostModuleCoordinator.coordinator.recover()
+      } catch (error) {
+        if (isHostModuleCoordinatorSmokeRequested()) throw error
+        mainLog.error('Optional Module coordinator is unavailable', {
+          errorType: error instanceof Error ? error.name : typeof error,
+        })
+        try {
+          await hostModuleCoordinator?.dispose()
+        } catch {
+          // Optional Module teardown must not block the built-in Agent runtime.
+        }
+        hostModuleCoordinator = null
+        try {
+          await hostModuleAgentRuntime?.dispose()
+        } catch {
+          // Optional Module Agent teardown must not block the built-in Agent runtime.
+        }
+        hostModuleAgentRuntime = null
+      }
+      if (isHostModuleCoordinatorSmokeRequested()) {
+        const hostWindow = windowManager?.getLastActiveWindow()
+        const smokeRuntime = hostModuleCoordinator
+        const smokeAgentRuntime = hostModuleAgentRuntime
+        if (!sessionManager || !embeddedServer || !hostWindow || !smokeRuntime || !smokeAgentRuntime) {
+          throw new Error('Built-in runtime was incomplete before module smoke')
+        }
+        await runHostModuleCoordinatorSmokeIfRequested({
+          runtime: smokeRuntime,
+          manager: moduleViewManager,
+          sessionManager,
+          hostWindow,
+          serverHost: embeddedServer.host,
+          serverPort: embeddedServer.port,
+          moduleAgentRuntime: smokeAgentRuntime,
+        })
+        return
+      }
+
+      const hostAdapter = createOpenDesignModuleBrowserWindowAdapter(
+        () => windowManager?.getLastActiveWindow() ?? undefined,
+      )
+      openDesignModuleController = new OpenDesignModuleController({
+        getRuntime: () => {
+          if (openDesignHostChannel.status === 'not-ready') {
+            return {
+              status: 'not-ready',
+              errorCode: openDesignHostChannel.errorCode,
+              errorMessage: openDesignHostChannel.errorMessage,
+            }
+          }
+          const runtime = hostModuleCoordinator
+          if (!runtime) {
+            return {
+              status: 'not-ready',
+              errorCode: 'MODULE_COORDINATOR_UNAVAILABLE',
+              errorMessage: 'The optional Module runtime is unavailable.',
+            }
+          }
+          return { status: 'ready', runtime }
+        },
+        getInstallRequest: () => resolveOpenDesignHostInstallRequest(
+          openDesignHostChannel,
+          hostModuleCoordinator?.coordinator,
+        ),
+        host: hostAdapter,
+      })
+      try {
+        openDesignModuleIpc = registerOpenDesignModuleIpc(ipcMain, openDesignModuleController)
+        setOpenDesignModuleEscapeHandler(async () => {
+          await openDesignModuleController?.stopForHostView()
+        })
+      } catch (error) {
+        mainLog.error('OpenDesign Module control surface is unavailable', {
+          errorType: error instanceof Error ? error.name : typeof error,
+        })
+        openDesignModuleIpc?.dispose()
+        openDesignModuleIpc = null
+        openDesignModuleController.dispose()
+        openDesignModuleController = null
+      }
     }
 
     // Run credential health check at startup to detect issues early
@@ -1115,9 +1347,6 @@ app.on('window-all-closed', () => {
   }
 })
 
-// Track if we're in the process of quitting (to avoid re-entry)
-let isQuitting = false
-
 /**
  * Capture the current multi-window state and persist it to disk.
  * Called from two sites:
@@ -1140,16 +1369,26 @@ function captureAndSaveWindowState(reason: 'before-quit' | 'pre-update'): number
   return windows.length
 }
 
-// Save window state and clean up resources before quitting
-app.on('before-quit', async (event) => {
-  // Avoid re-entry when we call app.exit()
-  if (isQuitting) return
-  isQuitting = true
-
+async function cleanupBeforeQuit(): Promise<void> {
+  let coordinatorDrained = false
+  let sessionFlushed = false
+  let serverStopped = false
+  let viewsDisposed = false
+  let moduleAgentStopped = false
   // Ensure Cmd+Q/app quit bypasses layered window close interception (Cmd+W behavior).
   windowManager?.setAppQuitting(true)
-  moduleViewManager?.dispose()
-  moduleViewManager = null
+
+  setOpenDesignModuleEscapeHandler(null)
+  openDesignModuleIpc?.dispose()
+  openDesignModuleIpc = null
+  openDesignModuleController?.dispose()
+  openDesignModuleController = null
+  openDesignDevelopmentBootstrap = Object.freeze({ status: 'disabled' })
+  openDesignHostChannel = Object.freeze({
+    status: 'not-ready',
+    errorCode: 'OFFICIAL_CHANNEL_NOT_INITIALIZED',
+    errorMessage: 'The OpenDesign official channel is not ready.',
+  })
 
   if (windowManager) {
     const windows = windowManager.getWindowStates()
@@ -1179,60 +1418,131 @@ app.on('before-quit', async (event) => {
     }
   }
 
-  // Flush all pending session writes before quitting
+  try {
+    await hostModuleCoordinator?.dispose()
+    coordinatorDrained = true
+  } catch (error) {
+    mainLog.error('Failed to drain host module coordinator:', error)
+  } finally {
+    hostModuleCoordinator = null
+  }
+  try {
+    await hostModuleAgentRuntime?.dispose()
+    moduleAgentStopped = true
+  } catch (error) {
+    mainLog.error('Failed to stop Module Agent runtime:', error)
+  } finally {
+    hostModuleAgentRuntime = null
+  }
+  try {
+    moduleViewManager?.dispose()
+    viewsDisposed = true
+  } catch (error) {
+    mainLog.error('Failed to dispose module views:', error)
+  } finally {
+    moduleViewManager = null
+  }
+
+  // Flush all pending session writes before quitting.
   if (sessionManager) {
-    // Prevent quit until sessions are flushed
-    event.preventDefault()
     try {
       await sessionManager.flushAllSessions()
+      sessionFlushed = true
       mainLog.info('Flushed all pending session writes')
     } catch (error) {
       mainLog.error('Failed to flush sessions:', error)
     }
-    // Clean up SessionManager resources (file watchers, timers, etc.)
-    sessionManager.cleanup()
+    try {
+      sessionManager.cleanup()
+    } catch (error) {
+      mainLog.error('Failed to clean up session manager:', error)
+    }
+    sessionManager = null
+  }
 
-    // Clean up browser pane instances
-    if (browserPaneManager) {
+  if (browserPaneManager) {
+    try {
       browserPaneManager.destroyAll()
+    } catch (error) {
+      mainLog.error('Failed to destroy browser panes:', error)
     }
+    browserPaneManager = null
+  }
 
-    // Clean up OAuth flow store (stop periodic cleanup timer)
-    if (oauthFlowStore) {
+  if (oauthFlowStore && !stopServer) {
+    try {
       oauthFlowStore.dispose()
+    } catch (error) {
+      mainLog.error('Failed to dispose OAuth flow store:', error)
     }
+    oauthFlowStore = null
+  }
 
-    // Stop all model refresh timers
+  try {
     getModelRefreshService().stopAll()
+  } catch (error) {
+    mainLog.error('Failed to stop model refresh timers:', error)
+  }
 
-    // Stop messaging gateways so the WhatsApp worker subprocess exits cleanly.
-    if (messagingHandle) {
-      try {
-        await messagingHandle.dispose()
-      } catch (err) {
-        mainLog.error('[messaging] dispose failed:', err)
-      }
+  if (messagingHandle) {
+    try {
+      await messagingHandle.dispose()
+    } catch (err) {
+      mainLog.error('[messaging] dispose failed:', err)
     }
+    messagingHandle = null
+  }
 
-    // Clean up power manager (release power blocker)
+  try {
     const { cleanup: cleanupPowerManager } = await import('./power-manager')
     cleanupPowerManager()
+  } catch (error) {
+    mainLog.error('Failed to clean up power manager:', error)
+  }
 
-    // Release the server lock file so the next launch doesn't see a stale PID.
-    // This must happen regardless of the exit path (normal quit or update quit).
+  if (stopServer) {
+    const stop = stopServer
+    stopServer = null
+    try {
+      await stop()
+      serverStopped = true
+    } catch (error) {
+      mainLog.error('Failed to stop embedded server:', error)
+      releaseServerLock()
+    } finally {
+      oauthFlowStore = null
+    }
+  } else {
     releaseServerLock()
+    serverStopped = true
+  }
+  embeddedServer = null
+  completeHostModuleCoordinatorSmokeCleanup({
+    coordinatorDrained,
+    sessionFlushed,
+    serverStopped,
+    viewsDisposed,
+    moduleAgentStopped,
+  })
+}
 
-    // If update is in progress, let electron-updater handle the quit flow
-    // Force exit breaks the NSIS installer on Windows
+const beforeQuitCleanup = new BeforeQuitCleanupController({
+  cleanup: cleanupBeforeQuit,
+  onCleanupError: (error) => mainLog.error('Failed to clean up before quit:', error),
+  continueQuit: () => {
     if (isUpdating()) {
       mainLog.info('Update in progress, letting electron-updater handle quit')
       app.quit()
       return
     }
-
-    // Now actually quit
     app.exit(0)
-  }
+  },
+})
+
+// Save state and synchronously cancel Electron's first quit event before async cleanup starts.
+app.on('before-quit', (event) => {
+  recordHostModuleCoordinatorBeforeQuitEvent()
+  beforeQuitCleanup.handleBeforeQuit(event)
 })
 
 // Handle uncaught exceptions — forward to Sentry explicitly since registering

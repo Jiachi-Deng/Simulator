@@ -1,4 +1,5 @@
 import { existsSync, readdirSync, statSync } from "node:fs"
+import { validatePackagedServerResources } from "../../../scripts/packaged-server-resources"
 
 const requiredAssetDirectories = [
   { path: "dist/resources/themes", description: "preset themes" },
@@ -34,4 +35,11 @@ if (failures.length > 0) {
   process.exit(1)
 }
 
-console.log("All required bundled asset directories are present and non-empty.")
+try {
+  validatePackagedServerResources("dist/resources")
+} catch (error) {
+  console.error(error instanceof Error ? error.message : String(error))
+  process.exit(1)
+}
+
+console.log("All required bundled assets and packaged server dependencies are present.")

@@ -1,0 +1,218 @@
+name: OpenDesign Production Input
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/open-design-production-input.yml
+      - modules/open-design/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: open-design-production-input-${{ github.sha }}
+  cancel-in-progress: true
+
+env:
+  SIMULATOR_REPOSITORY: Jiachi-Deng/Simulator
+  UPSTREAM_REPOSITORY: https://github.com/nexu-io/open-design
+  UPSTREAM_TAG: open-design-v0.14.1
+  UPSTREAM_COMMIT: 2225647726d5387bb24e9539fdb577958b6d88c6
+  UPSTREAM_LOCK_SHA256: 5b0f471b76ffdcca7f427e5b3cc9eb88cb82f1a30c7ab8a41fb57d46306da80f
+  NODE_VERSION: 24.18.0
+  NODE_DISTRIBUTION_URL: https://nodejs.org/dist/v24.18.0/node-v24.18.0-darwin-arm64.tar.gz
+  NODE_DISTRIBUTION_SHA256: e1a97e14c99c803e96c7339403282ea05a499c32f8d83defe9ef5ec66f979ed1
+  NODE_EXECUTABLE_SHA256: ee6fb0e015284d83a91e8ec5213f43a157f8a392b58555301682892ba928c04a
+  PNPM_VERSION: 10.33.2
+  PNPM_PACKAGE_URL: https://registry.npmjs.org/pnpm/-/pnpm-10.33.2.tgz
+  PNPM_PACKAGE_INTEGRITY: sha512-a90faf6feeab71ad6c6e57f94e0fe1a12f5dcc22cd754db40ae9593eb6a3e0b6b12e3540218bb37ae083404b1f2ce6db2a4121e979829b4aff94b99f49da1cf8
+  PNPM_EXECUTABLE_SHA256: b276da51dc8ca5b0d3ee3371695b50fc8b3244b281b091c63a3f082a88dadeb9
+
+jobs:
+  produce:
+    name: Produce sealed OpenDesign input
+    if: >-
+      github.repository == 'Jiachi-Deng/Simulator' &&
+      github.ref == 'refs/heads/main'
+    runs-on: macos-15
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout exact Simulator source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate fixed Simulator and provenance authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "$SIMULATOR_REPOSITORY"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain=v1)"
+          test "$(uname -m)" = "arm64"
+
+          provenance=modules/open-design/provenance.json
+          test "$(jq -r .repository "$provenance")" = "$UPSTREAM_REPOSITORY"
+          test "$(jq -r .source.ref "$provenance")" = "$UPSTREAM_TAG"
+          test "$(jq -r .source.commit "$provenance")" = "$UPSTREAM_COMMIT"
+          test "$(jq -r .lockfile.sha256 "$provenance")" = "$UPSTREAM_LOCK_SHA256"
+          test "$(jq -r .buildToolchainExpectations.node "$provenance")" = "$NODE_VERSION"
+          test "$(jq -r .buildToolchainExpectations.nodeAbi "$provenance")" = "137"
+          test "$(jq -r .buildToolchainExpectations.platform "$provenance")" = "darwin"
+          test "$(jq -r .buildToolchainExpectations.arch "$provenance")" = "arm64"
+          test "$(jq -r .buildToolchainExpectations.nodeDistributionUrl "$provenance")" = "$NODE_DISTRIBUTION_URL"
+          test "$(jq -r .buildToolchainExpectations.nodeDistributionSha256 "$provenance")" = "$NODE_DISTRIBUTION_SHA256"
+          test "$(jq -r .buildToolchainExpectations.nodeExecutableSha256 "$provenance")" = "$NODE_EXECUTABLE_SHA256"
+          test "$(jq -r .buildToolchainExpectations.pnpm "$provenance")" = "$PNPM_VERSION"
+          test "$(jq -r .buildToolchainExpectations.pnpmPackageIntegrity "$provenance")" = "$PNPM_PACKAGE_INTEGRITY"
+          test "$(jq -r .buildToolchainExpectations.pnpmExecutableSha256 "$provenance")" = "$PNPM_EXECUTABLE_SHA256"
+
+      - name: Fetch and verify pinned upstream and exact toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          work="$RUNNER_TEMP/open-design-production-input"
+          source="$work/upstream"
+          downloads="$work/downloads"
+          node_root="$work/toolchain/node"
+          pnpm_root="$work/toolchain/pnpm"
+          mkdir -m 700 -p "$source" "$downloads" "$node_root" "$pnpm_root"
+
+          git -C "$source" init
+          git -C "$source" remote add origin "$UPSTREAM_REPOSITORY"
+          git -C "$source" fetch --depth=1 origin "+refs/tags/$UPSTREAM_TAG:refs/tags/$UPSTREAM_TAG"
+          git -C "$source" checkout --detach "$UPSTREAM_COMMIT"
+          test "$(git -C "$source" remote get-url origin)" = "$UPSTREAM_REPOSITORY"
+          test "$(git -C "$source" rev-parse HEAD)" = "$UPSTREAM_COMMIT"
+          test "$(git -C "$source" rev-parse "refs/tags/$UPSTREAM_TAG^{}")" = "$UPSTREAM_COMMIT"
+          test "$(git -C "$source" show "HEAD:pnpm-lock.yaml" | shasum -a 256 | awk '{print $1}')" = "$UPSTREAM_LOCK_SHA256"
+          test -z "$(git -C "$source" status --porcelain=v1)"
+
+          node_archive="$downloads/node-v$NODE_VERSION-darwin-arm64.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 \
+            "$NODE_DISTRIBUTION_URL" --output "$node_archive"
+          test "$(shasum -a 256 "$node_archive" | awk '{print $1}')" = "$NODE_DISTRIBUTION_SHA256"
+          tar -xzf "$node_archive" -C "$node_root" --strip-components=1
+          node_bin="$node_root/bin/node"
+          test -x "$node_bin"
+          test -f "$node_root/LICENSE"
+          test "$(shasum -a 256 "$node_bin" | awk '{print $1}')" = "$NODE_EXECUTABLE_SHA256"
+          test "$("$node_bin" -p 'process.version')" = "v$NODE_VERSION"
+          test "$("$node_bin" -p 'process.versions.modules')" = "137"
+          test "$("$node_bin" -p 'process.platform')" = "darwin"
+          test "$("$node_bin" -p 'process.arch')" = "arm64"
+
+          pnpm_archive="$downloads/pnpm-$PNPM_VERSION.tgz"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 \
+            "$PNPM_PACKAGE_URL" --output "$pnpm_archive"
+          test "sha512-$(shasum -a 512 "$pnpm_archive" | awk '{print $1}')" = "$PNPM_PACKAGE_INTEGRITY"
+          tar -xzf "$pnpm_archive" -C "$pnpm_root"
+          pnpm_bin="$pnpm_root/package/bin/pnpm.cjs"
+          test -f "$pnpm_bin"
+          test "$(shasum -a 256 "$pnpm_bin" | awk '{print $1}')" = "$PNPM_EXECUTABLE_SHA256"
+          test "$("$node_bin" "$pnpm_bin" --version)" = "$PNPM_VERSION"
+
+          printf 'PRODUCTION_WORK=%s\nUPSTREAM_SOURCE=%s\nTOOLCHAIN_NODE_ROOT=%s\nTOOLCHAIN_NODE_BIN=%s\nTOOLCHAIN_PNPM_BIN=%s\n' \
+            "$work" "$source" "$node_root" "$node_bin" "$pnpm_bin" >> "$GITHUB_ENV"
+
+      - name: Install exact staging policy dependencies
+        shell: bash
+        env:
+          npm_config_cache: ${{ runner.temp }}/open-design-production-input/npm-cache
+        run: |
+          set -euo pipefail
+          "$TOOLCHAIN_NODE_BIN" "$TOOLCHAIN_NODE_ROOT/lib/node_modules/npm/bin/npm-cli.js" \
+            ci --ignore-scripts --no-audit --no-fund --prefix modules/open-design
+
+      - name: Dry-run pinned production staging
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -m 700 -p "$PRODUCTION_WORK/plan-build" "$PRODUCTION_WORK/plan-publish"
+          "$TOOLCHAIN_NODE_BIN" modules/open-design/src/stage-open-design.mjs \
+            --dry-run \
+            --source "$UPSTREAM_SOURCE" \
+            --staging-root "$PRODUCTION_WORK/plan-publish/staging" \
+            --work-parent "$PRODUCTION_WORK/plan-build" \
+            --target "$GITHUB_WORKSPACE/modules/open-design/fixtures/staging-target.darwin-arm64.json" \
+            --node-bin "$TOOLCHAIN_NODE_BIN" \
+            --pnpm-bin "$TOOLCHAIN_PNPM_BIN" > "$PRODUCTION_WORK/stage-plan.json"
+          jq -e --arg commit "$UPSTREAM_COMMIT" \
+            '.dryRun == true and .verification.commit == $commit' "$PRODUCTION_WORK/stage-plan.json" >/dev/null
+
+      - name: Build and pass public rights and runtime smoke gates
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -m 700 -p "$PRODUCTION_WORK/build" "$PRODUCTION_WORK/publish"
+          staging="$PRODUCTION_WORK/publish/staging"
+          "$TOOLCHAIN_NODE_BIN" modules/open-design/src/stage-open-design.mjs \
+            --source "$UPSTREAM_SOURCE" \
+            --staging-root "$staging" \
+            --work-parent "$PRODUCTION_WORK/build" \
+            --target "$GITHUB_WORKSPACE/modules/open-design/fixtures/staging-target.darwin-arm64.json" \
+            --node-bin "$TOOLCHAIN_NODE_BIN" \
+            --pnpm-bin "$TOOLCHAIN_PNPM_BIN" > "$PRODUCTION_WORK/stage-result.json"
+          jq -e \
+            '.dryRun == false and .distribution.class == "public" and .distribution.nonPromotable == false and .rightsErrors == 0 and .smoke == true' \
+            "$PRODUCTION_WORK/stage-result.json" >/dev/null
+          jq -e \
+            '.distribution.class == "public" and .distribution.nonPromotable == false and .source.commit == "2225647726d5387bb24e9539fdb577958b6d88c6"' \
+            "$staging/artifact-manifest.json" >/dev/null
+          printf 'PRODUCTION_STAGING=%s\n' "$staging" >> "$GITHUB_ENV"
+
+      - name: Seal exact initial-input archive and checksum
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          package_parent="$PRODUCTION_WORK/package"
+          input="$package_parent/open-design-production-input"
+          output="$PRODUCTION_WORK/output"
+          mkdir -m 700 -p "$input/node/bin" "$output"
+          cp -pR "$PRODUCTION_STAGING" "$input/staging"
+          cp -p "$TOOLCHAIN_NODE_BIN" "$input/node/bin/node"
+          cp -p "$TOOLCHAIN_NODE_ROOT/LICENSE" "$input/node/LICENSE"
+
+          test -x "$input/node/bin/node"
+          test "$(shasum -a 256 "$input/node/bin/node" | awk '{print $1}')" = "$NODE_EXECUTABLE_SHA256"
+          cmp "$TOOLCHAIN_NODE_ROOT/LICENSE" "$input/node/LICENSE"
+          diff -qr "$PRODUCTION_STAGING" "$input/staging"
+          test -z "$(find "$input" -type l -print -quit)"
+          test "$(find "$input/node" -type f | wc -l | tr -d ' ')" = "2"
+
+          tar -czf "$output/open-design-production-input.tar.gz" \
+            -C "$package_parent" open-design-production-input
+          tar -tzf "$output/open-design-production-input.tar.gz" > "$PRODUCTION_WORK/archive-paths.txt"
+          test "$(head -n 1 "$PRODUCTION_WORK/archive-paths.txt")" = "open-design-production-input/"
+          if tar -tvzf "$output/open-design-production-input.tar.gz" | awk '$1 ~ /^[lh]/ { found=1 } END { exit found ? 0 : 1 }'; then
+            echo "Initial-input archive must not contain links"
+            exit 1
+          fi
+          (cd "$output" && shasum -a 256 open-design-production-input.tar.gz > SHA256SUMS)
+          test "$(find "$output" -maxdepth 1 -type f | wc -l | tr -d ' ')" = "2"
+          grep -Eq '^[0-9a-f]{64}  open-design-production-input\.tar\.gz$' "$output/SHA256SUMS"
+          (cd "$output" && shasum -a 256 -c SHA256SUMS)
+
+      - name: Upload sealed initial input
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: open-design-production-input
+          path: ${{ runner.temp }}/open-design-production-input/output/
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          overwrite: false
+
+      - name: Remove transient production material
+        if: ${{ always() }}
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/open-design-production-input"

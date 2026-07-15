@@ -1,0 +1,2184 @@
+diff --git a/apps/daemon/src/routes/runs.ts b/apps/daemon/src/routes/runs.ts
+index fee4df05bd02d23b5cfa0b7c64be9da3dd7a3807..a7840ead9cf6f9f662e38bc184ef1933604dceb8 100644
+--- a/apps/daemon/src/routes/runs.ts
++++ b/apps/daemon/src/routes/runs.ts
+@@ -83,6 +83,10 @@ import {
+   validateRunToolBundleForAgent,
+ } from '../run-tool-bundle.js';
+ import type { DetectedAgent, RuntimeAgentDef } from '../runtimes/types.js';
++import {
++  isSimulatorHostAgentMode,
++  SIMULATOR_HOST_AGENT_ID,
++} from '../simulator-host-agent.js';
+ import {
+   countDesignSystemPreviewModules,
+   countNewArtifacts,
+@@ -543,6 +547,8 @@ export function registerRunRoutes(app: Express, ctx: RegisterRunRoutesDeps) {
+       mediaExecution: mediaExecution.policy,
+       toolBundle: toolBundle.bundle,
+     };
++    const simulatorHostMode = isSimulatorHostAgentMode();
++    if (simulatorHostMode) meta.agentId = SIMULATOR_HOST_AGENT_ID;
+     if (resolvedSnapshot?.ok) {
+       meta.appliedPluginSnapshotId = resolvedSnapshot.snapshotId;
+       if (!meta.pluginId) meta.pluginId = resolvedSnapshot.snapshot.pluginId;
+@@ -566,7 +572,7 @@ export function registerRunRoutes(app: Express, ctx: RegisterRunRoutesDeps) {
+         throw err;
+       }
+     }
+-    if (typeof meta.agentId !== 'string' || !meta.agentId) {
++    if (!simulatorHostMode && (typeof meta.agentId !== 'string' || !meta.agentId)) {
+       try {
+         const appCfg = await readAppConfig(RUNTIME_DATA_DIR);
+         const cfgAgent = typeof appCfg.agentId === 'string' && appCfg.agentId
+@@ -1409,6 +1415,7 @@ export function registerRunRoutes(app: Express, ctx: RegisterRunRoutesDeps) {
+       return sendApiError(res, 503, 'UPSTREAM_UNAVAILABLE', 'daemon is shutting down');
+     }
+     const requestBody = toJsonRecord(req.body);
++    if (isSimulatorHostAgentMode()) requestBody.agentId = SIMULATOR_HOST_AGENT_ID;
+     const mediaExecution = parseMediaExecutionPolicyInput(requestBody.mediaExecution);
+     if (!mediaExecution.ok) {
+       return sendApiError(res, 400, 'BAD_REQUEST', mediaExecution.message);
+diff --git a/apps/daemon/src/routes/static-resource.ts b/apps/daemon/src/routes/static-resource.ts
+index 0459682890700a2bf5f2afc9938e91bbd4a18128..2bf8646a63a61c02e4721e997b105186ae606214 100644
+--- a/apps/daemon/src/routes/static-resource.ts
++++ b/apps/daemon/src/routes/static-resource.ts
+@@ -28,6 +28,10 @@ import { listPromptTemplates, readPromptTemplate } from '../media/prompt-templat
+ import { readAppConfig } from '../app-config.js';
+ import { installFromTarget, uninstallById } from '../library-install.js';
+ import type { RouteDeps } from '../server-context.js';
++import {
++  isSimulatorHostAgentMode,
++  simulatorHostAgentInfo,
++} from '../simulator-host-agent.js';
+ 
+ export interface RegisterAtomRoutesDeps {
+   db: Database.Database;
+@@ -111,6 +115,23 @@ export function registerStaticResourceRoutes(app: Express, ctx: RegisterStaticRe
+   app.get('/api/agents', async (req, res) => {
+     const wantsStream =
+       req.query.stream === '1' || req.query.stream === 'true';
++    if (isSimulatorHostAgentMode()) {
++      const agent = simulatorHostAgentInfo();
++      if (!wantsStream) {
++        res.json({ agents: [agent] });
++        return;
++      }
++      res.writeHead(200, {
++        'Content-Type': 'text/event-stream',
++        'Cache-Control': 'no-cache, no-transform',
++        Connection: 'keep-alive',
++        'X-Accel-Buffering': 'no',
++      });
++      res.write(`event: agent\ndata: ${JSON.stringify(agent)}\n\n`);
++      res.write('event: done\ndata: {}\n\n');
++      res.end();
++      return;
++    }
+     let config;
+     try {
+       config = await readAppConfig(RUNTIME_DATA_DIR);
+diff --git a/apps/daemon/src/routes/vela.ts b/apps/daemon/src/routes/vela.ts
+index 07b8f1cc9d229138be744ae8ea833c0bda8ae76d..c7b0afeda8103feac8b020f55333ffd2a4eea629 100644
+--- a/apps/daemon/src/routes/vela.ts
++++ b/apps/daemon/src/routes/vela.ts
+@@ -41,6 +41,7 @@ import {
+   fetchVelaPresetModels,
+   fetchVelaRemoteModelsWithRetry,
+ } from '../runtimes/defs/amr.js';
++import { isSimulatorHostAgentMode } from '../simulator-host-agent.js';
+ 
+ const AMR_API_PROXY_PREFIX = '/api/integrations/vela/api-proxy';
+ const AMR_API_UPSTREAM_ORIGIN = 'https://amr-api.open-design.ai';
+@@ -143,6 +144,7 @@ function proxyAmrApiRequest(req: Request, res: Response): void {
+ 
+ export function registerVelaRoutes(app: Express, deps: RegisterVelaRoutesDeps): void {
+   const env = deps.env ?? process.env;
++  if (isSimulatorHostAgentMode()) return;
+   const { RUNTIME_DATA_DIR } = deps.paths;
+   const { readAppConfig } = deps.appConfig;
+   const getPublicBaseUrl = deps.http.getPublicBaseUrl ?? ((req: Request) => {
+diff --git a/apps/daemon/src/runtimes/defs/simulator-host.ts b/apps/daemon/src/runtimes/defs/simulator-host.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..a90bb278f1558b87116b815a5c50ec69863850d6
+--- /dev/null
++++ b/apps/daemon/src/runtimes/defs/simulator-host.ts
+@@ -0,0 +1,12 @@
++import type { RuntimeAgentDef } from '../types.js';
++
++export const simulatorHostAgentDef: RuntimeAgentDef = {
++  id: 'simulator-host-runtime',
++  name: 'Simulator Host Runtime',
++  bin: process.execPath,
++  versionArgs: ['--version'],
++  fallbackModels: [{ id: 'host-selected', label: 'Simulator current Workspace connection', default: true }],
++  supportsCustomModel: false,
++  buildArgs: () => [],
++  streamFormat: 'simulator-host-runtime',
++};
+diff --git a/apps/daemon/src/runtimes/registry.ts b/apps/daemon/src/runtimes/registry.ts
+index 8469e6246d7f9bb9f463ad50da8b4a0bfed4fb60..dcb5d1d87b72237028e0a75f5a608458a07c40d5 100644
+--- a/apps/daemon/src/runtimes/registry.ts
++++ b/apps/daemon/src/runtimes/registry.ts
+@@ -23,36 +23,42 @@ import { antigravityAgentDef } from './defs/antigravity.js';
+ import { codebuddyAgentDef } from './defs/codebuddy.js';
+ import { reasonixAgentDef } from './defs/reasonix.js';
+ import { mimoAgentDef } from './defs/mimo.js';
++import { simulatorHostAgentDef } from './defs/simulator-host.js';
++import { isSimulatorHostAgentMode } from '../simulator-host-agent.js';
+ import { readLocalAgentProfileDefs as readLocalAgentProfileDefsFromFile } from './local-profiles.js';
+ import type { RuntimeAgentDef } from './types.js';
+ 
+-const BASE_AGENT_DEFS: RuntimeAgentDef[] = [
+-  amrAgentDef,
+-  claudeAgentDef,
+-  codexAgentDef,
+-  devinAgentDef,
+-  opencodeAgentDef,
+-  byokOpenCodeAgentDef,
+-  hermesAgentDef,
+-  traeCliAgentDef,
+-  grokBuildAgentDef,
+-  kimiAgentDef,
+-  cursorAgentDef,
+-  qwenAgentDef,
+-  qoderAgentDef,
+-  copilotAgentDef,
+-  ampAgentDef,
+-  piAgentDef,
+-  kiroAgentDef,
+-  kiloAgentDef,
+-  vibeAgentDef,
+-  deepseekAgentDef,
+-  aiderAgentDef,
+-  antigravityAgentDef,
+-  reasonixAgentDef,
+-  codebuddyAgentDef,
+-  mimoAgentDef,
+-];
++const SIMULATOR_HOST_MODE = isSimulatorHostAgentMode();
++
++const BASE_AGENT_DEFS: RuntimeAgentDef[] = SIMULATOR_HOST_MODE
++  ? [simulatorHostAgentDef]
++  : [
++      amrAgentDef,
++      claudeAgentDef,
++      codexAgentDef,
++      devinAgentDef,
++      opencodeAgentDef,
++      byokOpenCodeAgentDef,
++      hermesAgentDef,
++      traeCliAgentDef,
++      grokBuildAgentDef,
++      kimiAgentDef,
++      cursorAgentDef,
++      qwenAgentDef,
++      qoderAgentDef,
++      copilotAgentDef,
++      ampAgentDef,
++      piAgentDef,
++      kiroAgentDef,
++      kiloAgentDef,
++      vibeAgentDef,
++      deepseekAgentDef,
++      aiderAgentDef,
++      antigravityAgentDef,
++      reasonixAgentDef,
++      codebuddyAgentDef,
++      mimoAgentDef,
++    ];
+ 
+ export function readLocalAgentProfileDefs(
+   baseDefs: RuntimeAgentDef[] = BASE_AGENT_DEFS,
+@@ -62,7 +68,7 @@ export function readLocalAgentProfileDefs(
+ 
+ export const AGENT_DEFS: RuntimeAgentDef[] = [
+   ...BASE_AGENT_DEFS,
+-  ...readLocalAgentProfileDefs(BASE_AGENT_DEFS),
++  ...(SIMULATOR_HOST_MODE ? [] : readLocalAgentProfileDefs(BASE_AGENT_DEFS)),
+ ];
+ 
+ const ids = new Set();
+diff --git a/apps/daemon/src/runtimes/runs.ts b/apps/daemon/src/runtimes/runs.ts
+index ce6b33acb0461d0448b8ad01735f95a0d01d4fec..fb2d24d1d802b2cccfe517720b1a40106127da8b 100644
+--- a/apps/daemon/src/runtimes/runs.ts
++++ b/apps/daemon/src/runtimes/runs.ts
+@@ -392,6 +392,16 @@ export function createChatRunService({
+     run.updatedAt = Date.now();
+     clearPendingRetryRestart(run);
+     closeRunStdin(run);
++    if (typeof run.externalCancel === 'function') {
++      try {
++        await run.externalCancel();
++      } catch {
++        // The Host transport is fail-closed. Local cancellation still owns the
++        // terminal state; the adapter's finally block attempts session close.
++      }
++      finish(run, 'canceled', null, 'SIGTERM');
++      return statusBody(run);
++    }
+     if (!run.child) {
+       finish(run, 'canceled', null, 'SIGTERM');
+       return statusBody(run);
+@@ -435,6 +445,11 @@ export function createChatRunService({
+       run.updatedAt = Date.now();
+       clearPendingRetryRestart(run);
+       closeRunStdin(run);
++      if (typeof run.externalCancel === 'function') {
++        try { await run.externalCancel(); } catch { /* best-effort shutdown */ }
++        finish(run, 'canceled', null, 'SIGTERM');
++        return;
++      }
+       if (run.acpSession?.abort) {
+         try {
+           run.acpSession.abort();
+diff --git a/apps/daemon/src/server.ts b/apps/daemon/src/server.ts
+index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f67d12c9d 100644
+--- a/apps/daemon/src/server.ts
++++ b/apps/daemon/src/server.ts
+@@ -355,6 +355,12 @@ import { importFigmaFromBytes } from './figma/figma-import.js';
+ import { renderDesignSystemPreview } from './design-systems/preview.js';
+ import { renderDesignSystemShowcase } from './design-systems/showcase.js';
+ import { createChatRunService } from './runtimes/runs.js';
++import {
++  disposeSimulatorHostAgentSessions,
++  isSimulatorHostAgentMode,
++  runSimulatorHostAgentTurn,
++  SIMULATOR_HOST_AGENT_ID,
++} from './simulator-host-agent.js';
+ import {
+   createRunLifecycleTracer,
+   runLifecycleMarkersForStreamEvent,
+@@ -2870,7 +2876,7 @@ export async function startServer({
+     agents: agentDeps,
+     validation: validationDeps,
+   });
+-  registerTerminalRoutes(app, {
++  if (!isSimulatorHostAgentMode()) registerTerminalRoutes(app, {
+     db,
+     http: httpDeps,
+     paths: pathDeps,
+@@ -4020,6 +4026,15 @@ export async function startServer({
+     lifecycle.mark('chat_run_started');
+     /** @type {Partial<ChatRequest> & { imagePaths?: string[] }} */
+     chatBody = chatBody || {};
++    if (isSimulatorHostAgentMode()) {
++      chatBody = {
++        ...chatBody,
++        agentId: SIMULATOR_HOST_AGENT_ID,
++        model: null,
++        reasoning: null,
++        byokProvider: null,
++      };
++    }
+     const {
+       agentId,
+       message,
+@@ -4265,7 +4280,8 @@ export async function startServer({
+         };
+       }
+     }
+-    const toolTokenGrant = cwd && typeof projectId === 'string' && projectId
++    const toolTokenGrant = def.id !== SIMULATOR_HOST_AGENT_ID
++      && cwd && typeof projectId === 'string' && projectId
+       ? toolTokenRegistry.mint({
+           runId,
+           projectId,
+@@ -4295,7 +4311,9 @@ export async function startServer({
+         activeChatRunHandles.delete(sinkRunId);
+       };
+     }
+-    const runtimeToolPrompt = createAgentRuntimeToolPrompt(daemonUrl, toolTokenGrant);
++    const runtimeToolPrompt = def.id === SIMULATOR_HOST_AGENT_ID
++      ? ''
++      : createAgentRuntimeToolPrompt(daemonUrl, toolTokenGrant);
+     const commentHint = renderCommentAttachmentHint(safeCommentAttachments);
+ 
+     // Resolve external MCP config + stored OAuth tokens up-front so the
+@@ -5177,6 +5195,19 @@ export async function startServer({
+       design.runs.finish(run, status, code, signal);
+       return false;
+     };
++    if (def.id === SIMULATOR_HOST_AGENT_ID) {
++      return runSimulatorHostAgentTurn({
++        prompt: composed,
++        continuationPrompt: [
++          `# User request\n\n${composeChatUserRequestForAgent(message, currentPrompt, { skipTranscript: true })}${attachmentHint}${commentHint}`,
++          promptImagePaths.length ? `\n\n${promptImagePaths.map((p) => `@${p}`).join(' ')}` : '',
++        ].join(''),
++        workingDirectory: effectiveCwd,
++        run,
++        send,
++        finish: design.runs.finish,
++      });
++    }
+     const mcpServers = buildLiveArtifactsMcpServersForAgent(def, {
+       enabled: Boolean(toolTokenGrant?.token),
+       command: process.execPath,
+@@ -7583,9 +7614,11 @@ export async function startServer({
+     // on the agent's final status (live artifact discovery, lastRun summary
+     // metadata) lives inside the `completion` promise.
+     const appConfig = await readAppConfig(RUNTIME_DATA_DIR);
+-    let agentId = typeof appConfig.agentId === 'string' && appConfig.agentId
+-      ? appConfig.agentId
+-      : null;
++    let agentId = isSimulatorHostAgentMode()
++      ? SIMULATOR_HOST_AGENT_ID
++      : typeof appConfig.agentId === 'string' && appConfig.agentId
++        ? appConfig.agentId
++        : null;
+     if (!agentId) {
+       const agents = await detectAgents(appConfig.agentCliEnv ?? {}).catch(() => []);
+       agentId = agents.find((agent) => agent.available)?.id ?? null;
+@@ -7754,8 +7787,10 @@ export async function startServer({
+   // and dispatches into the same chat runner used by manual runs.
+   routineService.setRunHandler(async ({ routine, trigger, startedAt, runId }) => {
+     const appConfig = await readAppConfig(RUNTIME_DATA_DIR);
+-    let agentId = routine.agentId
+-      || (typeof appConfig.agentId === 'string' && appConfig.agentId ? appConfig.agentId : null);
++    let agentId = isSimulatorHostAgentMode()
++      ? SIMULATOR_HOST_AGENT_ID
++      : routine.agentId
++        || (typeof appConfig.agentId === 'string' && appConfig.agentId ? appConfig.agentId : null);
+     if (!agentId) {
+       const agents = await detectAgents(appConfig.agentCliEnv ?? {}).catch(() => []);
+       agentId = agents.find((agent) => agent.available)?.id ?? null;
+@@ -8205,6 +8240,7 @@ export async function startServer({
+       daemonShutdownStarted = true;
+       daemonShuttingDown = true;
+       await design.runs.shutdownActive({ graceMs: resolveChatRunShutdownGraceMs() });
++      await disposeSimulatorHostAgentSessions().catch((error) => console.warn('[od] Host session cleanup failed', error));
+       await terminalService.shutdownActive();
+       await design.analytics.shutdown();
+     };
+diff --git a/apps/daemon/src/simulator-host-agent.ts b/apps/daemon/src/simulator-host-agent.ts
+new file mode 100644
+index 0000000000000000000000000000000000000000..13ff76eb0abe133ba273bbd5cdc9a28fe3365759
+--- /dev/null
++++ b/apps/daemon/src/simulator-host-agent.ts
+@@ -0,0 +1,730 @@
++// @ts-nocheck
++
++import { constants as fsConstants } from 'node:fs';
++import { lstat, open } from 'node:fs/promises';
++import path from 'node:path';
++
++export const SIMULATOR_HOST_AGENT_ID = 'simulator-host-runtime';
++export const SIMULATOR_HOST_AGENT_EVENT = 'module-agent.event';
++const CONTRACT_VERSION = 1;
++const TOKEN_BYTES = 64;
++const MAX_JSON_BYTES = 256 * 1024;
++const MAX_SSE_BUFFER_BYTES = 2 * 1024 * 1024;
++const MAX_PROMPT_BYTES = 2 * 1024 * 1024;
++const REQUEST_TIMEOUT_MS = 30_000;
++const STREAM_TIMEOUT_MS = 10 * 60_000;
++const hostLaunchEnvironment = Object.freeze({
++  SIMULATOR_HOST_AGENT_URL: process.env.SIMULATOR_HOST_AGENT_URL,
++  SIMULATOR_HOST_AGENT_TOKEN_FILE: process.env.SIMULATOR_HOST_AGENT_TOKEN_FILE,
++});
++delete process.env.SIMULATOR_HOST_AGENT_URL;
++delete process.env.SIMULATOR_HOST_AGENT_TOKEN_FILE;
++const cachedSessions = new Map();
++const MAX_CACHED_SESSIONS = 4;
++let cacheClock = 0;
++let cacheAdmissionTail = Promise.resolve();
++let cacheDisposal = null;
++
++const EVENT_TYPES = new Set([
++  'session.ready',
++  'turn.started',
++  'message.delta',
++  'message.completed',
++  'activity',
++  'turn.completed',
++  'turn.failed',
++  'turn.cancelled',
++  'session.closed',
++]);
++
++export class SimulatorHostAgentError extends Error {
++  constructor(code, message) {
++    super(message);
++    this.name = 'SimulatorHostAgentError';
++    this.code = code;
++  }
++}
++
++function fail(code, message) {
++  throw new SimulatorHostAgentError(code, message);
++}
++
++export function isSimulatorHostAgentMode(env = hostLaunchEnvironment) {
++  return Boolean(env.SIMULATOR_HOST_AGENT_URL || env.SIMULATOR_HOST_AGENT_TOKEN_FILE);
++}
++
++export function simulatorHostAgentInfo(env = hostLaunchEnvironment) {
++  const configured = Boolean(
++    env.SIMULATOR_HOST_AGENT_URL?.trim()
++    && env.SIMULATOR_HOST_AGENT_TOKEN_FILE?.trim(),
++  );
++  return {
++    id: SIMULATOR_HOST_AGENT_ID,
++    name: 'Simulator Host Runtime',
++    bin: process.execPath,
++    versionArgs: ['--version'],
++    models: [{ id: 'host-selected', label: 'Simulator current Workspace connection', default: true }],
++    modelsSource: 'live',
++    available: configured,
++    path: configured ? process.execPath : null,
++    version: configured ? 'contract-v1' : null,
++    streamFormat: 'simulator-host-runtime',
++    supportsCustomModel: false,
++  };
++}
++
++function plainRecord(value) {
++  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
++  const prototype = Object.getPrototypeOf(value);
++  return prototype === Object.prototype || prototype === null ? value : null;
++}
++
++function hasExactKeys(value, required, optional = []) {
++  const record = plainRecord(value);
++  if (!record) return false;
++  const allowed = new Set([...required, ...optional]);
++  const keys = Object.keys(record);
++  return required.every((key) => Object.hasOwn(record, key))
++    && keys.every((key) => allowed.has(key));
++}
++
++function boundedString(value, maximum) {
++  return typeof value === 'string' && value.length > 0 && value.length <= maximum;
++}
++
++function validHandle(value) {
++  return boundedString(value, 256) && /^[A-Za-z0-9._~-]+$/u.test(value);
++}
++
++function parseBaseUrl(raw) {
++  let url;
++  try {
++    url = new URL(raw);
++  } catch {
++    fail('CONFIGURATION_INVALID', 'Simulator Host Runtime configuration is invalid.');
++  }
++  if (
++    url.protocol !== 'http:'
++    || !['127.0.0.1', '[::1]'].includes(url.hostname)
++    || url.username
++    || url.password
++    || url.search
++    || url.hash
++    || url.pathname !== '/'
++  ) fail('CONFIGURATION_INVALID', 'Simulator Host Runtime configuration is invalid.');
++  return new URL(url.origin);
++}
++
++async function readTokenFile(filename) {
++  if (typeof filename !== 'string' || !path.isAbsolute(filename) || path.resolve(filename) !== filename) {
++    fail('CONFIGURATION_INVALID', 'Simulator Host Runtime configuration is invalid.');
++  }
++  let handle;
++  try {
++    const before = await lstat(filename);
++    if (
++      !before.isFile()
++      || before.isSymbolicLink()
++      || before.nlink !== 1
++      || (before.size !== TOKEN_BYTES && before.size !== TOKEN_BYTES + 1)
++      || (typeof process.getuid === 'function' && before.uid !== process.getuid())
++      || (process.platform !== 'win32' && (before.mode & 0o777) !== 0o600)
++    ) fail('AUTHENTICATION_INVALID', 'Simulator Host Runtime authentication is unavailable.');
++    handle = await open(filename, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
++    const opened = await handle.stat();
++    if (opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size) {
++      fail('AUTHENTICATION_INVALID', 'Simulator Host Runtime authentication is unavailable.');
++    }
++    const bytes = Buffer.alloc(TOKEN_BYTES + 1);
++    const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
++    let tokenBytes = bytes.subarray(0, bytesRead);
++    if (tokenBytes.length === TOKEN_BYTES + 1 && tokenBytes.at(-1) === 0x0a) {
++      tokenBytes = tokenBytes.subarray(0, TOKEN_BYTES);
++    }
++    if (tokenBytes.length !== TOKEN_BYTES || !/^[0-9a-f]{64}$/u.test(tokenBytes.toString('ascii'))) {
++      bytes.fill(0);
++      fail('AUTHENTICATION_INVALID', 'Simulator Host Runtime authentication is unavailable.');
++    }
++    const token = tokenBytes.toString('ascii');
++    bytes.fill(0);
++    return token;
++  } catch (error) {
++    if (error instanceof SimulatorHostAgentError) throw error;
++    fail('AUTHENTICATION_INVALID', 'Simulator Host Runtime authentication is unavailable.');
++  } finally {
++    await handle?.close().catch(() => undefined);
++  }
++}
++
++function requestSignal(timeoutMs, externalSignal) {
++  const controller = new AbortController();
++  let timedOut = false;
++  const onAbort = () => controller.abort();
++  if (externalSignal?.aborted) controller.abort();
++  else externalSignal?.addEventListener('abort', onAbort, { once: true });
++  const timer = setTimeout(() => {
++    timedOut = true;
++    controller.abort();
++  }, timeoutMs);
++  timer.unref?.();
++  return {
++    signal: controller.signal,
++    timedOut: () => timedOut,
++    cleanup: () => {
++      clearTimeout(timer);
++      externalSignal?.removeEventListener('abort', onAbort);
++    },
++  };
++}
++
++async function readBoundedText(response, maximum) {
++  if (!response.body) fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid response.');
++  const reader = response.body.getReader();
++  const chunks = [];
++  let total = 0;
++  try {
++    while (true) {
++      const next = await reader.read();
++      if (next.done) break;
++      total += next.value.byteLength;
++      if (total > maximum) fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid response.');
++      chunks.push(Buffer.from(next.value));
++    }
++  } finally {
++    reader.releaseLock();
++  }
++  try {
++    return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, total));
++  } catch {
++    fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid response.');
++  }
++}
++
++function parseJson(text) {
++  try {
++    return JSON.parse(text);
++  } catch {
++    fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid response.');
++  }
++}
++
++function validateCapabilities(value) {
++  if (!hasExactKeys(value, ['contractVersion', 'capability', 'features', 'limits'])) return false;
++  if (value.contractVersion !== CONTRACT_VERSION || value.capability !== 'host-agent.use') return false;
++  if (!hasExactKeys(value.features, ['streaming', 'cancellation', 'multiTurn'])) return false;
++  if (value.features.streaming !== true || value.features.cancellation !== true || value.features.multiTurn !== true) return false;
++  if (!hasExactKeys(value.limits, ['maxPromptBytes', 'maxReplayEvents'])) return false;
++  return Number.isSafeInteger(value.limits.maxPromptBytes)
++    && value.limits.maxPromptBytes > 0
++    && value.limits.maxPromptBytes <= MAX_PROMPT_BYTES
++    && Number.isSafeInteger(value.limits.maxReplayEvents)
++    && value.limits.maxReplayEvents > 0
++    && value.limits.maxReplayEvents <= 10_000;
++}
++
++function validateSession(value) {
++  return hasExactKeys(value, ['contractVersion', 'sessionHandle', 'state'])
++    && value.contractVersion === CONTRACT_VERSION
++    && validHandle(value.sessionHandle)
++    && value.state === 'idle';
++}
++
++function validateTurn(value, sessionHandle) {
++  return hasExactKeys(value, ['contractVersion', 'turnId', 'state'])
++    && value.contractVersion === CONTRACT_VERSION
++    && validHandle(value.turnId)
++    && value.state === 'running'
++    && validHandle(sessionHandle);
++}
++
++function validateCancel(value) {
++  return hasExactKeys(value, ['contractVersion', 'state'])
++    && value.contractVersion === CONTRACT_VERSION
++    && (value.state === 'cancelling' || value.state === 'idle');
++}
++
++function validateEventData(type, data) {
++  if (!plainRecord(data)) return false;
++  if (['session.ready', 'turn.started', 'turn.cancelled', 'session.closed'].includes(type)) {
++    return Object.keys(data).length === 0;
++  }
++  if (type === 'message.delta') return hasExactKeys(data, ['delta']) && boundedString(data.delta, 1024 * 1024);
++  if (type === 'message.completed') return hasExactKeys(data, ['text']) && typeof data.text === 'string' && data.text.length <= MAX_PROMPT_BYTES;
++  if (type === 'activity') {
++    if (!hasExactKeys(data, [], ['phase', 'kind', 'label']) || Object.keys(data).length === 0) return false;
++    return Object.values(data).every((value) => boundedString(value, 256));
++  }
++  if (type === 'turn.completed') {
++    return hasExactKeys(data, [], ['text'])
++      && (data.text === undefined || (typeof data.text === 'string' && data.text.length <= MAX_PROMPT_BYTES));
++  }
++  if (type === 'turn.failed') return hasExactKeys(data, ['code']) && boundedString(data.code, 128) && /^[A-Z0-9_]+$/u.test(data.code);
++  return false;
++}
++
++function validateEvent(value, expectedSession, expectedTurn, lastSequence) {
++  if (!hasExactKeys(value, ['contractVersion', 'sequence', 'sessionHandle', 'type', 'occurredAt', 'data'], ['turnId'])) return false;
++  if (
++    value.contractVersion !== CONTRACT_VERSION
++    || !Number.isSafeInteger(value.sequence)
++    || value.sequence <= lastSequence
++    || value.sessionHandle !== expectedSession
++    || !EVENT_TYPES.has(value.type)
++    || !Number.isSafeInteger(value.occurredAt)
++    || value.occurredAt < 0
++  ) return false;
++  const sessionEvent = value.type === 'session.ready' || value.type === 'session.closed';
++  if (sessionEvent ? value.turnId !== undefined : value.turnId !== expectedTurn) return false;
++  return validateEventData(value.type, value.data);
++}
++
++export class SimulatorHostAgentClient {
++  constructor(baseUrl, token, fetchImpl = globalThis.fetch) {
++    this.baseUrl = baseUrl;
++    this.token = token;
++    this.fetchImpl = fetchImpl;
++  }
++
++  static async fromEnvironment(env = hostLaunchEnvironment, fetchImpl = globalThis.fetch) {
++    if (typeof fetchImpl !== 'function') fail('CONFIGURATION_INVALID', 'Simulator Host Runtime configuration is invalid.');
++    const baseUrl = parseBaseUrl(env.SIMULATOR_HOST_AGENT_URL);
++    const token = await readTokenFile(env.SIMULATOR_HOST_AGENT_TOKEN_FILE);
++    return new SimulatorHostAgentClient(baseUrl, token, fetchImpl);
++  }
++
++  async request(method, pathname, body, { signal, expectNoContent = false } = {}) {
++    const context = requestSignal(REQUEST_TIMEOUT_MS, signal);
++    try {
++      const response = await this.fetchImpl(new URL(pathname, this.baseUrl), {
++        method,
++        signal: context.signal,
++        headers: {
++          authorization: `Bearer ${this.token}`,
++          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
++        },
++        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
++      });
++      if (expectNoContent) {
++        if (response.status !== 204) fail('HTTP_ERROR', 'Simulator Host Runtime rejected the request.');
++        return undefined;
++      }
++      if (!response.ok || response.headers.get('content-type')?.split(';', 1)[0] !== 'application/json') {
++        fail('HTTP_ERROR', 'Simulator Host Runtime rejected the request.');
++      }
++      return parseJson(await readBoundedText(response, MAX_JSON_BYTES));
++    } catch (error) {
++      if (error instanceof SimulatorHostAgentError) throw error;
++      if (signal?.aborted) fail('REQUEST_ABORTED', 'Simulator Host Runtime request was cancelled.');
++      fail(context.timedOut() ? 'REQUEST_TIMEOUT' : 'REQUEST_FAILED', 'Simulator Host Runtime is unavailable.');
++    } finally {
++      context.cleanup();
++    }
++  }
++
++  async capabilities(options) {
++    const value = await this.request('GET', '/v1/capabilities', undefined, options);
++    if (!validateCapabilities(value)) fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid response.');
++    return value;
++  }
++
++  async createSession(workingDirectory, options) {
++    const body = {
++      contractVersion: CONTRACT_VERSION,
++      ...(workingDirectory ? { workingDirectory } : {}),
++    };
++    const value = await this.request('POST', '/v1/module-sessions', body, options);
++    if (!validateSession(value)) fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid response.');
++    return value;
++  }
++
++  async createTurn(sessionHandle, prompt, options) {
++    const value = await this.request(
++      'POST',
++      `/v1/module-sessions/${encodeURIComponent(sessionHandle)}/turns`,
++      { contractVersion: CONTRACT_VERSION, prompt },
++      options,
++    );
++    if (!validateTurn(value, sessionHandle)) fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid response.');
++    return value;
++  }
++
++  async cancel(sessionHandle, options) {
++    const value = await this.request(
++      'POST',
++      `/v1/module-sessions/${encodeURIComponent(sessionHandle)}/cancel`,
++      { contractVersion: CONTRACT_VERSION },
++      options,
++    );
++    if (!validateCancel(value)) fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid response.');
++    return value;
++  }
++
++  async close(sessionHandle, options) {
++    await this.request(
++      'DELETE',
++      `/v1/module-sessions/${encodeURIComponent(sessionHandle)}`,
++      undefined,
++      { ...options, expectNoContent: true },
++    );
++  }
++
++  async stream(sessionHandle, turnId, afterSequence, signal, onEvent) {
++    const context = requestSignal(STREAM_TIMEOUT_MS, signal);
++    let response;
++    try {
++      const url = new URL(`/v1/module-sessions/${encodeURIComponent(sessionHandle)}/events`, this.baseUrl);
++      url.searchParams.set('afterSequence', String(afterSequence));
++      response = await this.fetchImpl(url, {
++        method: 'GET',
++        signal: context.signal,
++        headers: {
++          accept: 'text/event-stream',
++          authorization: `Bearer ${this.token}`,
++        },
++      });
++      if (!response.ok || response.headers.get('content-type')?.split(';', 1)[0] !== 'text/event-stream' || !response.body) {
++        fail('HTTP_ERROR', 'Simulator Host Runtime rejected the event stream.');
++      }
++      const reader = response.body.getReader();
++      const decoder = new TextDecoder('utf-8', { fatal: true });
++      let buffer = '';
++      let lastSequence = afterSequence;
++      let eventCount = 0;
++      let stopped = false;
++      try {
++        while (!stopped) {
++          const next = await reader.read();
++          if (next.done) break;
++          buffer += decoder.decode(next.value, { stream: true });
++          if (Buffer.byteLength(buffer, 'utf8') > MAX_SSE_BUFFER_BYTES) {
++            fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid event stream.');
++          }
++          while (buffer.includes('\n\n')) {
++            const boundary = buffer.indexOf('\n\n');
++            const frame = buffer.slice(0, boundary).replaceAll('\r\n', '\n');
++            buffer = buffer.slice(boundary + 2);
++            if (frame === ': keepalive') continue;
++            const lines = frame.split('\n');
++            if (lines.length !== 3 || lines[0] !== `event: ${SIMULATOR_HOST_AGENT_EVENT}` || !lines[1].startsWith('id: ') || !lines[2].startsWith('data: ')) {
++              fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid event stream.');
++            }
++            const id = lines[1].slice(4);
++            if (!/^(?:0|[1-9]\d*)$/u.test(id)) fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid event stream.');
++            const event = parseJson(lines[2].slice(6));
++            if (!validateEvent(event, sessionHandle, turnId, lastSequence) || String(event.sequence) !== id) {
++              fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid event stream.');
++            }
++            lastSequence = event.sequence;
++            eventCount += 1;
++            if (eventCount > 10_000) fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned too many events.');
++            if (onEvent(event) === false) stopped = true;
++          }
++        }
++        if (!stopped && (buffer.length > 0 || decoder.decode().length > 0)) {
++          fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an incomplete event stream.');
++        }
++      } finally {
++        if (stopped) await reader.cancel().catch(() => undefined);
++        reader.releaseLock();
++      }
++      return { lastSequence, terminal: stopped };
++    } catch (error) {
++      if (error instanceof SimulatorHostAgentError) throw error;
++      if (signal?.aborted) fail('REQUEST_ABORTED', 'Simulator Host Runtime request was cancelled.');
++      fail(context.timedOut() ? 'REQUEST_TIMEOUT' : 'REQUEST_FAILED', 'Simulator Host Runtime is unavailable.');
++    } finally {
++      context.cleanup();
++    }
++  }
++}
++
++function appendCompletedText(completedText, streamedText, send) {
++  if (completedText === streamedText) return streamedText;
++  if (!completedText.startsWith(streamedText)) {
++    fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an inconsistent transcript.');
++  }
++  const suffix = completedText.slice(streamedText.length);
++  if (suffix) send('agent', { type: 'text_delta', delta: suffix });
++  return completedText;
++}
++
++function withCacheAdmission(operation) {
++  const admitted = cacheAdmissionTail.then(operation, operation);
++  cacheAdmissionTail = admitted.then(() => undefined, () => undefined);
++  return admitted;
++}
++
++function cacheIdentityForRun(run) {
++  const conversationId = typeof run?.conversationId === 'string' ? run.conversationId.trim() : '';
++  const runId = typeof run?.id === 'string' ? run.id.trim() : '';
++  if (conversationId) return `conversation:${conversationId}`;
++  if (runId) return `run:${runId}`;
++  fail('INPUT_INVALID', 'Simulator Host Runtime run identity is invalid.');
++}
++
++function releaseCachedSession(record) {
++  if (!record || record.closing || record.closeFailed) return;
++  record.busy = false;
++  record.lastUsed = ++cacheClock;
++}
++
++async function closeCachedSession(record) {
++  if (!record) return;
++  if (record.closing) return record.closing;
++  record.busy = true;
++  const operation = (async () => {
++    if (record.creating) {
++      try {
++        await record.creating;
++      } catch {
++        if (cachedSessions.get(record.cacheKey) === record) cachedSessions.delete(record.cacheKey);
++        record.session = null;
++        record.closeFailed = false;
++        return;
++      }
++    }
++    if (!record.session) {
++      if (cachedSessions.get(record.cacheKey) === record) cachedSessions.delete(record.cacheKey);
++      record.closeFailed = false;
++      return;
++    }
++    try {
++      await record.client.close(record.session.sessionHandle);
++    } catch (error) {
++      // Keep the opaque handle reachable and non-reusable. A later dispose or
++      // LRU admission can retry the same DELETE instead of orphaning it.
++      record.closeFailed = true;
++      record.busy = false;
++      throw error;
++    }
++    if (cachedSessions.get(record.cacheKey) === record) cachedSessions.delete(record.cacheKey);
++    record.session = null;
++    record.closeFailed = false;
++    record.busy = false;
++  })();
++  record.closing = operation;
++  try {
++    await operation;
++  } finally {
++    if (record.closing === operation) record.closing = null;
++  }
++}
++
++async function acquireCachedSession(client, workingDirectory, run) {
++  const identity = cacheIdentityForRun(run);
++  const cacheKey = JSON.stringify([workingDirectory, identity]);
++  return withCacheAdmission(async () => {
++    if (cacheDisposal) fail('SESSION_UNAVAILABLE', 'Simulator Host Runtime session cache is shutting down.');
++    let record = cachedSessions.get(cacheKey);
++    if (record) {
++      if (record.creating) await record.creating;
++      if (!record.session || record.closing || record.closeFailed) {
++        fail('SESSION_UNAVAILABLE', 'Simulator Host Runtime session is unavailable.');
++      }
++      if (record.busy) fail('SESSION_BUSY', 'Simulator Host Runtime session is already processing a turn.');
++      record.busy = true;
++      record.lastUsed = ++cacheClock;
++      return record;
++    }
++
++    while (cachedSessions.size >= MAX_CACHED_SESSIONS) {
++      const candidate = [...cachedSessions.values()]
++        .filter((entry) => !entry.busy && !entry.creating && !entry.closing)
++        .sort((left, right) => left.lastUsed - right.lastUsed)[0];
++      if (!candidate) fail('SESSION_LIMIT', 'Simulator Host Runtime session cache is full.');
++      await closeCachedSession(candidate);
++    }
++    if (cacheDisposal) fail('SESSION_UNAVAILABLE', 'Simulator Host Runtime session cache is shutting down.');
++
++    record = {
++      cacheKey,
++      identity,
++      workingDirectory,
++      client,
++      session: null,
++      creating: null,
++      closing: null,
++      closeFailed: false,
++      busy: true,
++      completedTurns: 0,
++      lastSequence: 0,
++      lastUsed: ++cacheClock,
++    };
++    record.creating = client.createSession(workingDirectory)
++      .then((session) => {
++        record.session = session;
++        return session;
++      })
++      .catch((error) => {
++        if (cachedSessions.get(cacheKey) === record) cachedSessions.delete(cacheKey);
++        throw error;
++      })
++      .finally(() => { record.creating = null; });
++    cachedSessions.set(cacheKey, record);
++    await record.creating;
++    if (!record.session || record.closing || record.closeFailed || cacheDisposal) {
++      fail('SESSION_UNAVAILABLE', 'Simulator Host Runtime session is unavailable.');
++    }
++    return record;
++  });
++}
++
++export async function disposeSimulatorHostAgentSessions() {
++  if (cacheDisposal) return cacheDisposal;
++  const operation = (async () => {
++    let firstError;
++    for (const record of [...cachedSessions.values()]) {
++      try {
++        await closeCachedSession(record);
++      } catch (error) {
++        firstError ??= error;
++      }
++    }
++    if (firstError) throw firstError;
++  })();
++  cacheDisposal = operation;
++  try {
++    await operation;
++  } finally {
++    if (cacheDisposal === operation) cacheDisposal = null;
++  }
++}
++
++export async function runSimulatorHostAgentTurn({ prompt, continuationPrompt, workingDirectory, run, send, finish, env = hostLaunchEnvironment, fetchImpl = globalThis.fetch }) {
++  if (
++    typeof prompt !== 'string'
++    || typeof continuationPrompt !== 'string'
++    || Buffer.byteLength(prompt, 'utf8') > MAX_PROMPT_BYTES
++    || Buffer.byteLength(continuationPrompt, 'utf8') > MAX_PROMPT_BYTES
++  ) {
++    fail('INPUT_INVALID', 'Simulator Host Runtime prompt is invalid.');
++  }
++  const client = await SimulatorHostAgentClient.fromEnvironment(env, fetchImpl);
++  const lifecycleAbort = new AbortController();
++  let sessionRecord;
++  let sessionAcquisition;
++  let session;
++  let turn;
++  let terminal = null;
++  let cancelPromise = null;
++  let streamedText = '';
++  let lastSequence = 0;
++
++  const throwIfCancelled = () => {
++    if (!run.cancelRequested && !lifecycleAbort.signal.aborted) return;
++    lifecycleAbort.abort();
++    fail('REQUEST_ABORTED', 'Simulator Host Runtime request was cancelled.');
++  };
++  const cancelHostSession = async () => {
++    lifecycleAbort.abort();
++    if (!sessionRecord && sessionAcquisition) {
++      try { sessionRecord = await sessionAcquisition; } catch { return; }
++    }
++    session = sessionRecord?.session ?? session;
++    if (!session || terminal) return;
++    let cancelError;
++    if (turn && !cancelPromise) cancelPromise = client.cancel(session.sessionHandle);
++    if (cancelPromise) {
++      try { await cancelPromise; } catch (error) { cancelError = error; }
++    }
++    await closeCachedSession(sessionRecord);
++    if (cancelError) throw cancelError;
++  };
++
++  // Install cancellation before the first Host request. This closes the race
++  // where Open Design could mark a queued run canceled while capabilities,
++  // session creation, or turn creation continued in the Host Runtime.
++  run.externalCancel = cancelHostSession;
++
++  try {
++    throwIfCancelled();
++    const capabilities = await client.capabilities({ signal: lifecycleAbort.signal });
++    throwIfCancelled();
++    // Session creation intentionally keeps its own bounded request timeout.
++    // Aborting after the Host accepts the request could otherwise strand an
++    // opaque hidden session before this process receives its handle.
++    sessionAcquisition = acquireCachedSession(client, workingDirectory, run);
++    sessionRecord = await sessionAcquisition;
++    session = sessionRecord.session;
++    lastSequence = sessionRecord.lastSequence;
++    throwIfCancelled();
++    const turnPrompt = sessionRecord.completedTurns > 0 ? continuationPrompt : prompt;
++    if (Buffer.byteLength(turnPrompt, 'utf8') > capabilities.limits.maxPromptBytes) {
++      fail('INPUT_INVALID', 'Simulator Host Runtime prompt exceeds the Host limit.');
++    }
++    turn = await client.createTurn(session.sessionHandle, turnPrompt, { signal: lifecycleAbort.signal });
++    throwIfCancelled();
++    run.status = 'running';
++    run.updatedAt = Date.now();
++    send('start', {
++      runId: run.id,
++      agentId: SIMULATOR_HOST_AGENT_ID,
++      bin: 'Simulator Host Runtime',
++      streamFormat: 'simulator-host-runtime',
++      projectId: run.projectId ?? null,
++      cwd: workingDirectory,
++      model: 'host-selected',
++      reasoning: null,
++      toolTokenExpiresAt: null,
++    });
++
++    for (let reconnect = 0; reconnect < 2 && !terminal; reconnect += 1) {
++      const result = await client.stream(
++        session.sessionHandle,
++        turn.turnId,
++        lastSequence,
++        lifecycleAbort.signal,
++        (event) => {
++          lastSequence = event.sequence;
++          if (event.type === 'message.delta') {
++            streamedText += event.data.delta;
++            if (streamedText.length > MAX_PROMPT_BYTES) fail('PROTOCOL_INVALID', 'Simulator Host Runtime transcript exceeded the limit.');
++            send('agent', { type: 'text_delta', delta: event.data.delta });
++          } else if (event.type === 'message.completed') {
++            streamedText = appendCompletedText(event.data.text, streamedText, send);
++          } else if (event.type === 'activity') {
++            send('agent', { type: 'status', label: event.data.label ?? event.data.phase ?? event.data.kind });
++          } else if (event.type === 'turn.completed') {
++            if (typeof event.data.text === 'string') streamedText = appendCompletedText(event.data.text, streamedText, send);
++            terminal = 'succeeded';
++            return false;
++          } else if (event.type === 'turn.failed') {
++            send('error', { error: { code: 'HOST_AGENT_TURN_FAILED', message: 'Simulator Host Runtime turn failed.', retryable: false, details: { hostCode: event.data.code } } });
++            terminal = 'failed';
++            return false;
++          } else if (event.type === 'turn.cancelled') {
++            terminal = 'canceled';
++            return false;
++          } else if (event.type === 'session.closed') {
++            fail('PROTOCOL_INVALID', 'Simulator Host Runtime closed the session before the turn completed.');
++          }
++          return true;
++        },
++      );
++      lastSequence = result.lastSequence;
++      sessionRecord.lastSequence = lastSequence;
++    }
++    if (!terminal) fail('STREAM_ENDED', 'Simulator Host Runtime event stream ended unexpectedly.');
++    if (run.cancelRequested || lifecycleAbort.signal.aborted) terminal = 'canceled';
++    if (cancelPromise) await cancelPromise.catch(() => undefined);
++    if (terminal === 'succeeded') {
++      sessionRecord.completedTurns += 1;
++    }
++    else await closeCachedSession(sessionRecord).catch(() => undefined);
++    if (terminal === 'succeeded') finish(run, 'succeeded', 0, null);
++    else if (terminal === 'failed') finish(run, 'failed', 1, null);
++    else finish(run, 'canceled', null, 'SIGTERM');
++  } catch (error) {
++    if (run.cancelRequested || lifecycleAbort.signal.aborted) return;
++    throw error;
++  } finally {
++    run.externalCancel = null;
++    lifecycleAbort.abort();
++    if (run.cancelRequested && session && turn && !terminal && !cancelPromise) {
++      cancelPromise = client.cancel(session.sessionHandle);
++    }
++    if (cancelPromise) await cancelPromise.catch(() => undefined);
++    if (terminal !== 'succeeded' && sessionRecord) await closeCachedSession(sessionRecord).catch(() => undefined);
++    else if (sessionRecord) releaseCachedSession(sessionRecord);
++  }
++}
+diff --git a/apps/web/next.config.ts b/apps/web/next.config.ts
+index 062b86a662dbf7c5491909972ead83fa3b5a17ee..9c9ecad2ba0ebee5e15099b0918c9678ff619359 100644
+--- a/apps/web/next.config.ts
++++ b/apps/web/next.config.ts
+@@ -157,6 +157,10 @@ function configuredAllowedDevHosts(): string[] {
+ 
+ const nextConfig: NextConfig = {
+   allowedDevOrigins: configuredAllowedDevHosts(),
++  // Simulator Host mode does not use Next's image optimizer. Keeping every
++  // image URL unoptimized lets the sealed standalone runtime omit sharp and
++  // its platform-specific libvips payload without changing preview files.
++  images: { unoptimized: true },
+   outputFileTracingRoot: WORKSPACE_ROOT,
+   reactStrictMode: true,
+   // Emit browser sourcemaps so packaged-runtime exceptions can be symbolicated
+@@ -180,7 +184,6 @@ const nextConfig: NextConfig = {
+         // the daemon's static fallback simple (every directory has its own
+         // index.html on disk).
+         trailingSlash: true,
+-        images: { unoptimized: true },
+       }
+     : webOutputMode === 'standalone'
+       ? {
+diff --git a/apps/web/src/App.tsx b/apps/web/src/App.tsx
+index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..6af814f96a34b1f362f3445c11dc30d6a4afe36c 100644
+--- a/apps/web/src/App.tsx
++++ b/apps/web/src/App.tsx
+@@ -65,9 +65,14 @@ import {
+   RUNS_CHANGED_EVENT,
+   fetchAmrModels,
+   fetchVelaLoginStatus,
++  isSimulatorHostRuntimeMode,
+   listProjectRuns,
+   type VelaLoginStatus,
+ } from './providers/daemon';
++import {
++  SIMULATOR_HOST_AGENT_ID,
++  normalizeSimulatorHostConfig,
++} from './providers/simulator-host-mode';
+ import { AMR_LOGIN_STATUS_EVENT } from './components/amrLoginPolling';
+ import { goBack, navigate, useRoute } from './router';
+ import {
+@@ -411,6 +416,7 @@ function AppInner() {
+   const [settingsHighlight, setSettingsHighlight] = useState<SettingsHighlight>(null);
+   const [integrationInitialTab, setIntegrationInitialTab] = useState<IntegrationTab>('mcp');
+   const [daemonLive, setDaemonLive] = useState(false);
++  const [simulatorHostRuntimeMode, setSimulatorHostRuntimeMode] = useState(false);
+   const [agents, setAgents] = useState<AgentInfo[]>([]);
+   const amrModelsRef = useRef<AmrModelsResponse | null>(null);
+   const amrPollGenerationRef = useRef(0);
+@@ -724,8 +730,20 @@ function AppInner() {
+   // it.
+   const showPrivacyConsent =
+     daemonConfigLoaded &&
++    !simulatorHostRuntimeMode &&
+     config.privacyDecisionAt == null &&
+     config.onboardingCompleted === true;
++  useEffect(() => {
++    if (typeof document === 'undefined') return;
++    if (simulatorHostRuntimeMode) {
++      document.documentElement.setAttribute('data-simulator-host-runtime', 'true');
++    } else {
++      document.documentElement.removeAttribute('data-simulator-host-runtime');
++    }
++    return () => {
++      document.documentElement.removeAttribute('data-simulator-host-runtime');
++    };
++  }, [simulatorHostRuntimeMode]);
+   useEffect(() => {
+     const body = activeProjectId
+       ? { projectId: activeProjectId, fileName: activeFileName }
+@@ -956,12 +974,21 @@ function AppInner() {
+         fetchDaemonConfig(),
+         fetchComposioConfigFromDaemon(),
+         fetchMediaProvidersFromDaemon(),
++        isSimulatorHostRuntimeMode(),
+       ]).then(([
+         daemonConfig,
+         daemonComposioConfig,
+         daemonMediaProvidersResult,
++        nextSimulatorHostRuntimeMode,
+       ]) => {
+         if (cancelled) return;
++        const normalizedSimulatorHostRuntimeMode = nextSimulatorHostRuntimeMode !== false;
++        setSimulatorHostRuntimeMode(normalizedSimulatorHostRuntimeMode);
++        if (normalizedSimulatorHostRuntimeMode) {
++          document.documentElement.setAttribute('data-simulator-host-runtime', 'true');
++        } else {
++          document.documentElement.removeAttribute('data-simulator-host-runtime');
++        }
+         const daemonMediaProvidersLoaded =
+           daemonMediaProvidersResult.status === 'ok'
+             ? daemonMediaProvidersResult.providers
+@@ -985,7 +1012,7 @@ function AppInner() {
+           baseConfig.mediaProviders,
+           daemonMediaProvidersLoaded,
+         );
+-        const next = mergeDaemonMediaProviders(
++        let next = mergeDaemonMediaProviders(
+           clearStaleAmrModelChoiceOnProfileChange(
+             baseConfig,
+             mergeDaemonConfig(baseConfig, daemonConfig),
+@@ -996,6 +1023,9 @@ function AppInner() {
+         if (!hasLocalComposioKey && daemonComposioConfig) {
+           next.composio = daemonComposioConfig;
+         }
++        if (nextSimulatorHostRuntimeMode) {
++          next = normalizeSimulatorHostConfig(next);
++        }
+         saveConfig(next);
+         if (
+           daemonMediaProvidersResult.status === 'ok' &&
+@@ -1020,7 +1050,11 @@ function AppInner() {
+         // banner keys off `privacyDecisionAt`. They may coexist on the
+         // first launch; the banner sits above the modal layer so it
+         // stays actionable regardless of the active view.
+-        if (!next.onboardingCompleted) {
++        if (nextSimulatorHostRuntimeMode) {
++          if (window.location.pathname === '/onboarding') {
++            navigate({ kind: 'home', view: 'home' }, { replace: true });
++          }
++        } else if (!next.onboardingCompleted) {
+           navigate({ kind: 'home', view: 'onboarding' }, { replace: true });
+         }
+         setDaemonConfigLoaded(true);
+@@ -1193,7 +1227,10 @@ function AppInner() {
+     // a half-typed key can't survive in localStorage. If the dialog is
+     // closing, preserve any onboarding completion that the close gesture
+     // already committed so an unmount autosave cannot re-open the welcome flow.
+-    const persisted = buildPersistedConfig(next, configRef.current);
++    const lockedNext = simulatorHostRuntimeMode
++      ? normalizeSimulatorHostConfig(next)
++      : next;
++    const persisted = buildPersistedConfig(lockedNext, configRef.current);
+     latestPersistedConfigRef.current = persisted;
+     saveConfig(persisted);
+     setConfig(persisted);
+@@ -1212,7 +1249,7 @@ function AppInner() {
+         : Promise.resolve(),
+       syncConfigToDaemon(persisted, { throwOnError: true }),
+     ]);
+-  }, [daemonMediaProviders, daemonMediaProvidersFetchState]);
++  }, [daemonMediaProviders, daemonMediaProvidersFetchState, simulatorHostRuntimeMode]);
+ 
+   /**
+    * Explicit Composio API-key save. Called from the section-local
+@@ -1235,12 +1272,13 @@ function AppInner() {
+ 
+   const handleModeChange = useCallback(
+     (mode: AppConfig['mode']) => {
++      if (simulatorHostRuntimeMode) return;
+       const next = { ...latestPersistedConfigRef.current, mode };
+       latestPersistedConfigRef.current = next;
+       saveConfig(next);
+       setConfig(next);
+     },
+-    [],
++    [simulatorHostRuntimeMode],
+   );
+ 
+   // Quick theme switch from the settings dropdown in the entry view.
+@@ -1269,17 +1307,19 @@ function AppInner() {
+ 
+   const handleAgentChange = useCallback(
+     (agentId: string) => {
++      if (simulatorHostRuntimeMode || agentId === SIMULATOR_HOST_AGENT_ID) return;
+       const next = { ...latestPersistedConfigRef.current, agentId };
+       latestPersistedConfigRef.current = next;
+       saveConfig(next);
+       void syncConfigToDaemon(next);
+       setConfig(next);
+     },
+-    [],
++    [simulatorHostRuntimeMode],
+   );
+ 
+   const handleAgentModelChange = useCallback(
+     (agentId: string, choice: { model?: string; reasoning?: string }) => {
++      if (simulatorHostRuntimeMode || agentId === SIMULATOR_HOST_AGENT_ID) return;
+       const current = latestPersistedConfigRef.current;
+       const prev = current.agentModels?.[agentId] ?? {};
+       const merged = { ...prev, ...choice };
+@@ -1293,7 +1333,7 @@ function AppInner() {
+       void syncConfigToDaemon(next);
+       setConfig(next);
+     },
+-    [],
++    [simulatorHostRuntimeMode],
+   );
+ 
+   // BYOK protocol switch — also flips `mode` to 'api' so the user does
+@@ -1302,12 +1342,13 @@ function AppInner() {
+   // user had previously configured for the target protocol.
+   const handleApiProtocolChange = useCallback(
+     (protocol: ApiProtocol) => {
++      if (simulatorHostRuntimeMode) return;
+       const next = switchApiProtocolConfig(config, protocol);
+       saveConfig(next);
+       void syncConfigToDaemon(next);
+       setConfig(next);
+     },
+-    [config],
++    [config, simulatorHostRuntimeMode],
+   );
+ 
+   // BYOK model picker — patches `model` (and the per-protocol shadow
+@@ -1315,12 +1356,13 @@ function AppInner() {
+   // mid-session without retyping their key.
+   const handleApiModelChange = useCallback(
+     (model: string) => {
++      if (simulatorHostRuntimeMode) return;
+       const next = updateCurrentApiProtocolConfig(config, { model });
+       saveConfig(next);
+       void syncConfigToDaemon(next);
+       setConfig(next);
+     },
+-    [config],
++    [config, simulatorHostRuntimeMode],
+   );
+ 
+   const handleChangeDefaultDesignSystem = useCallback(
+@@ -2287,12 +2329,11 @@ function AppInner() {
+   // EntryView / ProjectView split so the discovery surface stays
+   // independent of any active project.
+   let appMain: ReactNode;
+-  const pendingFirstRunOnboardingRoute =
+-    route.kind === 'home' &&
+-    route.view === 'home' &&
+-    config.onboardingCompleted !== true &&
+-    !daemonConfigLoaded;
+-  if (pendingFirstRunOnboardingRoute) {
++  // Do not render a stale standalone/Cloud surface while daemon config and the
++  // Host-only capability are still resolving. In Simulator this makes the
++  // transition atomic: loader -> native Home, never loader -> onboarding -> Home.
++  const pendingRuntimeBootstrap = !daemonConfigLoaded;
++  if (pendingRuntimeBootstrap) {
+     appMain = (
+       <div className="entry-shell entry-shell--no-header">
+         <CenteredLoader label={t('entry.loadingWorkspace')} />
+diff --git a/apps/web/src/components/AvatarMenu.tsx b/apps/web/src/components/AvatarMenu.tsx
+index ab73af33a8487af489abd8df7a8815ca1f0aa444..86cbcd6b8abda745826de8827c1a5394e294ad92 100644
+--- a/apps/web/src/components/AvatarMenu.tsx
++++ b/apps/web/src/components/AvatarMenu.tsx
+@@ -32,6 +32,10 @@ import {
+ } from '../runtime/amr-guidance';
+ import { isMacPlatform } from '../utils/platform';
+ import { isVisibleLocalCliAgent } from '../utils/visibleAgents';
++import {
++  SIMULATOR_HOST_RUNTIME_DESCRIPTION,
++  isSimulatorHostAgentConfig,
++} from '../providers/simulator-host-mode';
+ 
+ interface Props {
+   config: AppConfig;
+@@ -320,6 +324,35 @@ export function AvatarMenu({
+       : SUGGESTED_MODELS_BY_PROTOCOL[apiProtocol] ?? [],
+   );
+ 
++  if (isSimulatorHostAgentConfig(config)) {
++    const hostReady = daemonLive && agents.some(
++      (agent) => agent.id === config.agentId && agent.available,
++    );
++    const statusLabel = hostReady
++      ? SIMULATOR_HOST_RUNTIME_DESCRIPTION
++      : '正在连接 Simulator';
++    return (
++      <div
++        className={`avatar-menu avatar-menu--${placement}`}
++        data-testid="simulator-host-runtime-composer-indicator"
++      >
++        <span
++          className="avatar-agent-trigger simulator-host-runtime-avatar od-tooltip"
++          role="status"
++          aria-label={statusLabel}
++          data-tooltip={statusLabel}
++          data-tooltip-placement={placement === 'up' ? 'top' : 'bottom'}
++        >
++          <AgentIcon id="simulator-host-runtime" size={20} />
++          <span
++            className={`simulator-host-runtime-dot${hostReady ? ' is-ready' : ''}`}
++            aria-hidden="true"
++          />
++        </span>
++      </div>
++    );
++  }
++
+   return (
+     <div className={`avatar-menu avatar-menu--${placement}`} ref={wrapRef}>
+       <button
+diff --git a/apps/web/src/components/EntrySettingsMenu.tsx b/apps/web/src/components/EntrySettingsMenu.tsx
+index 47019924446d2a15d0c2c323357193a260a6ff89..ced196d11688a65297cc282e3ce057c1f7d6ba76 100644
+--- a/apps/web/src/components/EntrySettingsMenu.tsx
++++ b/apps/web/src/components/EntrySettingsMenu.tsx
+@@ -28,6 +28,7 @@ import { formatDiscordPresenceCount, useDiscordPresence } from './useDiscordPres
+ import { Icon } from './Icon';
+ import { SocialShareGrid } from './SocialShareGrid';
+ import { enterpriseUrl } from './enterpriseUrl';
++import { isSimulatorHostAgentConfig } from '../providers/simulator-host-mode';
+ 
+ const DISCORD_URL = 'https://discord.gg/mHAjSMV6gz';
+ const X_URL = 'https://x.com/OpenDesignHQ';
+@@ -97,6 +98,7 @@ export function EntrySettingsMenu({
+   const triggerRef = useRef<HTMLButtonElement | null>(null);
+   const langListRef = useRef<HTMLDivElement | null>(null);
+   const activeTheme = config.theme ?? 'system';
++  const simulatorHostRuntimeMode = isSimulatorHostAgentConfig(config);
+   const discordOnlineLabel = discordPresence
+     ? t('entry.discordOnlineLabel', {
+         count: formatDiscordPresenceCount(discordPresence.onlineCount),
+@@ -135,7 +137,7 @@ export function EntrySettingsMenu({
+   }, [langOpen, open]);
+ 
+   useEffect(() => {
+-    if (!open) return;
++    if (!open || simulatorHostRuntimeMode) return;
+     const onClick = (event: MouseEvent) => {
+       if (!wrapRef.current) return;
+       if (!wrapRef.current.contains(event.target as Node)) setOpen(false);
+@@ -178,7 +180,7 @@ export function EntrySettingsMenu({
+     return () => {
+       cancelled = true;
+     };
+-  }, [open, openDesignShareRequest]);
++  }, [open, openDesignShareRequest, simulatorHostRuntimeMode]);
+ 
+   return (
+     <div className="entry-settings-menu" ref={wrapRef}>
+@@ -321,6 +323,8 @@ export function EntrySettingsMenu({
+             </div>
+           </section>
+ 
++          {!simulatorHostRuntimeMode ? (
++            <>
+           <section className="entry-settings-menu__section">
+             <div className="entry-settings-menu__section-title">
+               <Icon name="external-link" size={13} />
+@@ -535,6 +539,9 @@ export function EntrySettingsMenu({
+             <Icon name="external-link" size={12} className="entry-settings-menu__item-end" />
+           </a>
+ 
++            </>
++          ) : null}
++
+           <div className="entry-settings-menu__divider" aria-hidden />
+ 
+           <button
+diff --git a/apps/web/src/components/EntryShell.tsx b/apps/web/src/components/EntryShell.tsx
+index 19fe95db34ce35a4959c07a72f700c4199702878..5a1c898f4b6ac30a409a1a97b9e5bcc0be8cc1dc 100644
+--- a/apps/web/src/components/EntryShell.tsx
++++ b/apps/web/src/components/EntryShell.tsx
+@@ -177,6 +177,7 @@ import {
+   providerModelsCacheKey,
+   type ProviderModelsCache,
+ } from './providerModelsCache';
++import { isSimulatorHostAgentConfig } from '../providers/simulator-host-mode';
+ 
+ // Persist the entry nav-rail open/collapsed state so it survives both a
+ // home -> project -> home navigation (EntryShell unmounts on the project
+@@ -535,6 +536,11 @@ export function EntryShell({
+   // view from the route rather than keeping it in component state.
+   const route = useRoute();
+   const view: EntryViewKind = route.kind === 'home' ? route.view : 'home';
++  const simulatorHostRuntimeMode = isSimulatorHostAgentConfig(config);
++  useEffect(() => {
++    if (!simulatorHostRuntimeMode || view !== 'onboarding') return;
++    navigate({ kind: 'home', view: 'home' }, { replace: true });
++  }, [simulatorHostRuntimeMode, view]);
+   const [newProjectOpen, setNewProjectOpen] = useState(false);
+   // Hard block from the pre-run balance gate on a home submit (empty wallet
+   // or signed out); non-null renders the AmrBalanceDialog on the home page —
+@@ -893,6 +899,14 @@ export function EntryShell({
+   );
+ 
+ 
++  if (view === 'onboarding' && simulatorHostRuntimeMode) {
++    return (
++      <div className="entry-shell entry-shell--no-header">
++        <CenteredLoader label={t('entry.loadingWorkspace')} />
++      </div>
++    );
++  }
++
+   if (view === 'onboarding') {
+     return (
+       <div className="entry-shell entry-shell--no-header entry-shell--onboarding">
+@@ -986,7 +1000,9 @@ export function EntryShell({
+               <Icon name="panel-left" size={20} />
+             </button>
+             <div className="entry-main__topbar-chips entry-main__topbar-chips--icon-only">
+-              <GithubStarBadge />
++              {!simulatorHostRuntimeMode ? (
++                <>
++                  <GithubStarBadge />
+               <a
+                 className="entry-workspace-chip od-tooltip"
+                 href={enterpriseUrl(uiLocale)}
+@@ -1034,7 +1050,6 @@ export function EntryShell({
+                   </>
+                 ) : null}
+               </a>
+-              {view === 'home' ? null : executionSwitcher}
+               <button
+                 type="button"
+                 className="use-everywhere-chip od-tooltip"
+@@ -1058,14 +1073,21 @@ export function EntryShell({
+                   {t('entry.useEverywhereTitle')}
+                 </span>
+               </button>
++                </>
++              ) : null}
++              {view === 'home' ? null : executionSwitcher}
+             </div>
+-            <UpdaterPopup
+-              allowSilentUpdates={config.allowSilentUpdates}
+-              onAllowSilentUpdatesChange={(allowSilentUpdates) =>
+-                onConfigPersist({ ...config, allowSilentUpdates })
+-              }
+-            />
+-            <WhatsNewPopup active={view === 'home'} />
++            {!simulatorHostRuntimeMode ? (
++              <>
++                <UpdaterPopup
++                  allowSilentUpdates={config.allowSilentUpdates}
++                  onAllowSilentUpdatesChange={(allowSilentUpdates) =>
++                    onConfigPersist({ ...config, allowSilentUpdates })
++                  }
++                />
++                <WhatsNewPopup active={view === 'home'} />
++              </>
++            ) : null}
+             {avatarMenu}
+             {amrBalanceGateBlock ? (
+               <AmrBalanceDialog
+diff --git a/apps/web/src/components/FileWorkspace.tsx b/apps/web/src/components/FileWorkspace.tsx
+index dc418554bd91136114645a7c4aa10a471b3a3353..1c4bec5d5a922d25722c07d6bc4ea397ff946f5d 100644
+--- a/apps/web/src/components/FileWorkspace.tsx
++++ b/apps/web/src/components/FileWorkspace.tsx
+@@ -117,6 +117,7 @@ import { QuestionsPanel } from './QuestionsPanel';
+ import { QuickSwitcher } from './QuickSwitcher';
+ import { SketchEditor } from './SketchEditor';
+ import { SketchEnginePrewarm } from './SketchEnginePrewarm';
++import { isSimulatorHostAgentConfig } from '../providers/simulator-host-mode';
+ import {
+   emptySketchScene,
+   isSketchJsonFileName,
+@@ -612,6 +613,7 @@ export function FileWorkspace({
+   focusQuestionsRequest = null,
+ }: Props) {
+   const t = useT();
++  const simulatorHostRuntimeMode = isSimulatorHostAgentConfig(chatConfig);
+   // The chat column only shows a compact Questions banner; the form itself
+   // lives here, including after submission when a banner click can reopen the
+   // answered preview.
+@@ -642,7 +644,9 @@ export function FileWorkspace({
+     lastTabsStatePropRef.current = tabsState;
+   }
+   const [activeTab, setActiveTab] = useState<string>(
+-    tabsState.active ?? defaultRootTab,
++    simulatorHostRuntimeMode && isBrowserTabId(tabsState.active ?? '')
++      ? defaultRootTab
++      : tabsState.active ?? defaultRootTab,
+   );
+ 
+   const [showLibraryPicker, setShowLibraryPicker] = useState(false);
+@@ -679,7 +683,7 @@ export function FileWorkspace({
+     setProjectFolders(EMPTY_PROJECT_FOLDERS);
+   }
+   const [browserTabs, setBrowserTabs] = useState<BrowserWorkspaceTab[]>(
+-    () => browserTabsFromState(tabsState.browserTabs),
++    () => simulatorHostRuntimeMode ? [] : browserTabsFromState(tabsState.browserTabs),
+   );
+   const [browserNavigateRequests, setBrowserNavigateRequests] = useState<
+     Record<string, { url: string; nonce: number }>
+@@ -840,8 +844,12 @@ export function FileWorkspace({
+   // (or on project switch). Fall back to the Design Files browser so a
+   // fresh project lands in a useful place.
+   useEffect(() => {
+-    setActiveTab(tabsState.active ?? defaultRootTab);
+-  }, [tabsState.active, defaultRootTab]);
++    setActiveTab(
++      simulatorHostRuntimeMode && isBrowserTabId(tabsState.active ?? '')
++        ? defaultRootTab
++        : tabsState.active ?? defaultRootTab,
++    );
++  }, [tabsState.active, defaultRootTab, simulatorHostRuntimeMode]);
+ 
+   useEffect(() => {
+     setBrowserTabs([]);
+@@ -882,10 +890,12 @@ export function FileWorkspace({
+   }, [loadSketchFile, sketchFiles]);
+ 
+   useEffect(() => {
+-    const nextBrowserTabs = browserTabsFromState(tabsState.browserTabs);
++    const nextBrowserTabs = simulatorHostRuntimeMode
++      ? []
++      : browserTabsFromState(tabsState.browserTabs);
+     setBrowserTabs(nextBrowserTabs);
+     browserTabSequenceRef.current = maxBrowserTabSequence(nextBrowserTabs);
+-  }, [tabsState.browserTabs]);
++  }, [tabsState.browserTabs, simulatorHostRuntimeMode]);
+ 
+   function workspaceTabsState(
+     tabs: string[],
+@@ -1133,10 +1143,10 @@ export function FileWorkspace({
+   }, [openRequest]);
+ 
+   useEffect(() => {
+-    if (!browserOpenRequest) return;
++    if (simulatorHostRuntimeMode || !browserOpenRequest) return;
+     openRequestedBrowserTab(browserOpenRequest);
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+-  }, [browserOpenRequest]);
++  }, [browserOpenRequest, simulatorHostRuntimeMode]);
+ 
+   // Share request: ensure the target file is open + active so the FileViewer
+   // below receives the matching `shareRequest` and opens its Share menu.
+@@ -2406,7 +2416,7 @@ export function FileWorkspace({
+     openTab: openFile,
+     // Browser is owned by this branch's DesignBrowserPanel: spin up a browser
+     // tab synchronously (no daemon round-trip) and let the launcher close.
+-    createBrowser: () => openBrowserTab(),
++    createBrowser: simulatorHostRuntimeMode ? undefined : () => openBrowserTab(),
+     createSketch: () => void startNewSketch(),
+     createDocument: () => void createMarkdownDocument(),
+     uploadDesignFiles: () => fileInputRef.current?.click(),
+diff --git a/apps/web/src/components/InlineModelSwitcher.tsx b/apps/web/src/components/InlineModelSwitcher.tsx
+index 000924396bb9314823363eba57f19341fd9a39ac..0671b7c129286068f794cf62f0cfc54daf51ec4c 100644
+--- a/apps/web/src/components/InlineModelSwitcher.tsx
++++ b/apps/web/src/components/InlineModelSwitcher.tsx
+@@ -79,6 +79,10 @@ import {
+   providerModelsCacheKey,
+   type ProviderModelsCache,
+ } from './providerModelsCache';
++import {
++  SIMULATOR_HOST_RUNTIME_DESCRIPTION,
++  isSimulatorHostAgentConfig,
++} from '../providers/simulator-host-mode';
+ 
+ interface Props {
+   config: AppConfig;
+@@ -645,6 +649,38 @@ export function InlineModelSwitcher({
+     }
+   }, [config.agentId, config.mode, open]);
+ 
++  if (isSimulatorHostAgentConfig(config)) {
++    const hostReady = daemonLive && agents.some(
++      (agent) => agent.id === config.agentId && agent.available,
++    );
++    const statusLabel = hostReady ? 'Simulator' : '正在连接 Simulator';
++    const accessibleLabel = `${statusLabel} · ${SIMULATOR_HOST_RUNTIME_DESCRIPTION}`;
++    return (
++      <div
++        className={`inline-switcher${compact ? ' inline-switcher--compact' : ''}`}
++        data-testid="simulator-host-runtime-indicator"
++      >
++        <div
++          className="inline-switcher__chip simulator-host-runtime-chip od-tooltip"
++          role="status"
++          aria-label={accessibleLabel}
++          data-tooltip={accessibleLabel}
++          data-tooltip-placement="bottom"
++        >
++          <span
++            className={`simulator-host-runtime-dot${hostReady ? ' is-ready' : ''}`}
++            aria-hidden="true"
++          />
++          <span className="inline-switcher__chip-text">
++            <span className="inline-switcher__chip-primary">{statusLabel}</span>
++            <span className="inline-switcher__chip-sep" aria-hidden="true">·</span>
++            <span className="inline-switcher__chip-model">当前 Workspace 连接</span>
++          </span>
++        </div>
++      </div>
++    );
++  }
++
+   return (
+     <div
+       className={`inline-switcher${compact ? ' inline-switcher--compact' : ''}`}
+diff --git a/apps/web/src/components/ProjectView.tsx b/apps/web/src/components/ProjectView.tsx
+index 6f6b5afd109c32068a0f331955975bfc025c185d..ffd14fa5ca2927777d8ee8bd478b86a797403b1a 100644
+--- a/apps/web/src/components/ProjectView.tsx
++++ b/apps/web/src/components/ProjectView.tsx
+@@ -261,6 +261,7 @@ import { effectiveAgentModelChoice } from './agentModelSelection';
+ import { mediaExecutionPolicyForProjectMetadata } from '../media/execution-policy';
+ import { mediaModelProviderId } from '../media/models';
+ import { byokProviderRequiresApiKey } from '../utils/byokProvider';
++import { isSimulatorHostAgentConfig } from '../providers/simulator-host-mode';
+ import {
+   useByokImageModelOptions,
+   useByokVideoModelOptions,
+@@ -1348,6 +1349,7 @@ export function ProjectView({
+ }: Props) {
+   const { locale, t } = useI18n();
+   const analytics = useAnalytics();
++  const simulatorHostRuntimeMode = isSimulatorHostAgentConfig(config);
+   // Onboarding first-generation funnel (spec §11.1). Consume the pending entry
+   // (set by the Home recommendation) exactly once on mount; the refs guard the
+   // two lifecycle events so each fires only for the genuine first send / first
+@@ -8070,6 +8072,7 @@ export function ProjectView({
+   }, [finalize]);
+ 
+   const handleContinueInCli = useCallback(async () => {
++    if (simulatorHostRuntimeMode) return;
+     const projectDir = projectDetail.resolvedDir;
+     if (!projectDir) {
+       setProjectActionsToast({
+@@ -8112,6 +8115,7 @@ export function ProjectView({
+     designMdState.transcriptMessageCount,
+     designMdState.designSystemId,
+     designMdState.currentArtifact,
++    simulatorHostRuntimeMode,
+     terminalLauncher,
+   ]);
+ 
+@@ -8210,6 +8214,7 @@ export function ProjectView({
+   // Quick Switcher shortcut. ⌘+Shift+K is free (⌘+P is the only
+   // existing primary-modifier shortcut on this surface).
+   useEffect(() => {
++    if (simulatorHostRuntimeMode) return;
+     const onKeyDown = (e: KeyboardEvent) => {
+       const primary = isMacPlatform() ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+       if (primary && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
+@@ -8221,7 +8226,7 @@ export function ProjectView({
+     };
+     window.addEventListener('keydown', onKeyDown, { capture: true });
+     return () => window.removeEventListener('keydown', onKeyDown, { capture: true });
+-  }, [designMdState.exists, handleContinueInCli]);
++  }, [designMdState.exists, handleContinueInCli, simulatorHostRuntimeMode]);
+ 
+   // PluginLoopHome auto-send: when the user submits on Home, app.tsx
+   // sets `sessionStorage['od:auto-send-first:<projectId>']` and routes
+@@ -8432,7 +8437,9 @@ export function ProjectView({
+               onRequestPluginFolderAgentAction={handlePluginFolderAgentAction}
+               activePluginActionPaths={activePluginActionPaths}
+               hiddenPluginActionPaths={hiddenAssistantPluginActionPaths}
+-              onShareToOpenDesign={handleShareToOpenDesign}
++              onShareToOpenDesign={
++                simulatorHostRuntimeMode ? undefined : handleShareToOpenDesign
++              }
+               shareToOpenDesignBusyMessageId={shareToOpenDesignBusyMessageId}
+               forceStreamingMessageIds={forceStreamingPluginMessageIds}
+               initialDraft={chatInitialDraft}
+@@ -8440,8 +8447,12 @@ export function ProjectView({
+               onOpenQuestions={openQuestionsTab}
+               onContinueRemainingTasks={handleContinueRemainingTasks}
+               onAssistantFeedback={handleAssistantFeedback}
+-              onArtifactShare={handleArtifactShare}
+-              onArtifactDownload={handleArtifactDownload}
++              onArtifactShare={
++                simulatorHostRuntimeMode ? undefined : handleArtifactShare
++              }
++              onArtifactDownload={
++                simulatorHostRuntimeMode ? undefined : handleArtifactDownload
++              }
+               onForkFromMessage={handleForkFromMessage}
+               forkingMessageId={forkingMessageId}
+               onNewConversation={handleNewConversation}
+@@ -8608,10 +8619,14 @@ export function ProjectView({
+           commentQueueOnSend={commentQueueOnSend}
+           commentSendDisabled={currentConversationQueueDisabled}
+           openRequest={openRequest}
+-          browserOpenRequest={browserOpenRequest}
+-          pinnedBrowserTabId={projectIsProgrammaticBrandExtraction ? BRAND_BROWSER_TAB_ID : null}
+-          shareRequest={shareRequest}
+-          downloadRequest={downloadRequest}
++          browserOpenRequest={simulatorHostRuntimeMode ? null : browserOpenRequest}
++          pinnedBrowserTabId={
++            !simulatorHostRuntimeMode && projectIsProgrammaticBrandExtraction
++              ? BRAND_BROWSER_TAB_ID
++              : null
++          }
++          shareRequest={simulatorHostRuntimeMode ? null : shareRequest}
++          downloadRequest={simulatorHostRuntimeMode ? null : downloadRequest}
+           slideNavRequest={slideNavRequest}
+           liveArtifactEvents={liveArtifactEvents}
+           designSystemActivityEvents={designSystemActivityEvents}
+@@ -8622,7 +8637,9 @@ export function ProjectView({
+           onRemovePreviewComment={removePreviewComment}
+           onSendBoardCommentAttachments={handleSendBoardCommentAttachments}
+           onBrandExtractionStopRequest={projectIsProgrammaticBrandExtraction ? handleStop : undefined}
+-          onRequestBrowserUsePrompt={handleBrowserUsePrompt}
++          onRequestBrowserUsePrompt={
++            simulatorHostRuntimeMode ? undefined : handleBrowserUsePrompt
++          }
+           onPluginFolderAgentAction={handlePluginFolderAgentAction}
+           activePluginActionPaths={activePluginActionPaths}
+           preferredPreviewFile={currentProject.metadata?.entryFile ?? null}
+@@ -8673,6 +8690,7 @@ export function ProjectView({
+           conversationId={activeConversationId}
+           headerActions={(
+             <>
++              {!simulatorHostRuntimeMode ? (
+               <HandoffButton
+                 projectId={project.id}
+                 projectName={project.name}
+@@ -8683,6 +8701,7 @@ export function ProjectView({
+                 metricsConsent={config.telemetry?.metrics === true}
+                 installationId={config.installationId}
+               />
++              ) : null}
+               <EntrySettingsMenu
+                 config={config}
+                 onThemeChange={handleThemeChange}
+diff --git a/apps/web/src/components/SettingsDialog.tsx b/apps/web/src/components/SettingsDialog.tsx
+index 2dc9d96c9e82e805e29fa4e675c4558291e94876..d2ae431a3f5246de047189b5aa66cde32995f7a7 100644
+--- a/apps/web/src/components/SettingsDialog.tsx
++++ b/apps/web/src/components/SettingsDialog.tsx
+@@ -189,6 +189,11 @@ import {
+   requestNotificationPermission,
+   showCompletionNotification,
+ } from '../utils/notifications';
++import {
++  SIMULATOR_HOST_RUNTIME_DESCRIPTION,
++  SIMULATOR_HOST_RUNTIME_LABEL,
++  isSimulatorHostAgentConfig,
++} from '../providers/simulator-host-mode';
+ 
+ export type SettingsSection =
+   | 'execution'
+@@ -216,6 +221,12 @@ export type SettingsSection =
+   | 'library'
+   | 'about';
+ 
++function simulatorHostVisibleSettingsSection(section: SettingsSection): SettingsSection {
++  return section === 'media' || section === 'privacy' || section === 'about'
++    ? 'execution'
++    : section;
++}
++
+ interface ByokProviderPreset {
+   id: string;
+   title: string;
+@@ -1344,6 +1355,7 @@ export function SettingsDialog({
+     ...initial,
+     baseUrl: resolveFixedOriginBaseUrl(initial.apiProtocol ?? 'anthropic', initial.baseUrl),
+   }));
++  const simulatorHostRuntimeMode = isSimulatorHostAgentConfig(cfg);
+   const [maxTokensInput, setMaxTokensInput] = useState(
+     initial.maxTokens == null ? '' : String(initial.maxTokens),
+   );
+@@ -1416,7 +1428,11 @@ export function SettingsDialog({
+       ? { [initial.apiProtocol ?? 'anthropic']: byokProviderKeyForConfig(initial) }
+       : {},
+   );
+-  const [activeSection, setActiveSection] = useState<SettingsSection>(initialSection);
++  const [activeSection, setActiveSection] = useState<SettingsSection>(() =>
++    isSimulatorHostAgentConfig(initial)
++      ? simulatorHostVisibleSettingsSection(initialSection)
++      : initialSection,
++  );
+   const [settingsSidebarCollapsed, setSettingsSidebarCollapsed] = useState(false);
+   const [settingsFullscreen, setSettingsFullscreen] = useState(false);
+   // Scroll the right-hand content pane back to the top whenever the user
+@@ -1738,8 +1754,12 @@ export function SettingsDialog({
+   // routes through this when the MCP tab is active so the user can press the
+   // single Save button at the bottom instead of hunting for the inner one.
+   useEffect(() => {
+-    setActiveSection(initialSection);
+-  }, [initialSection]);
++    setActiveSection(
++      simulatorHostRuntimeMode
++        ? simulatorHostVisibleSettingsSection(initialSection)
++        : initialSection,
++    );
++  }, [initialSection, simulatorHostRuntimeMode]);
+ 
+   // settings_view — fires whenever the active section changes (and once on
+   // mount). Keying the fire on a section+section-string lets us dedupe
+@@ -3506,7 +3526,12 @@ export function SettingsDialog({
+   // BYOK content so "Local CLI" only renders once (in the seg-control tab),
+   // not twice (heading + tab).
+   const sectionHeader: Record<SettingsSection, { title: string; subtitle: string }> = {
+-    execution: { title: t('settings.title'), subtitle: t('settings.subtitle') },
++    execution: simulatorHostRuntimeMode
++      ? {
++          title: SIMULATOR_HOST_RUNTIME_LABEL,
++          subtitle: SIMULATOR_HOST_RUNTIME_DESCRIPTION,
++        }
++      : { title: t('settings.title'), subtitle: t('settings.subtitle') },
+     instructions: {
+       title: t('settings.instructionsTitle'),
+       subtitle: t('settings.instructionsSubtitle'),
+@@ -3544,6 +3569,9 @@ export function SettingsDialog({
+     about: { title: t('settings.about'), subtitle: t('settings.aboutHint') },
+   };
+   const activeHeader = sectionHeader[activeSection];
++  const simulatorHostReady = daemonLive && agents.some(
++    (agent) => agent.id === cfg.agentId && agent.available,
++  );
+   const visibleAgents = agents.filter(isVisibleLocalCliAgent);
+   const installedAgents = orderAgentsWithOpenDesignFirst(
+     visibleAgents.filter((a) => a.available),
+@@ -3933,8 +3961,16 @@ export function SettingsDialog({
+             >
+               <Icon name="sliders" size={18} />
+               <span>
+-                <strong>{t('settings.envConfigure')}</strong>
+-                <small>{`${t('settings.localCli')} / ${t('settings.modeApiMeta')}`}</small>
++                <strong>
++                  {simulatorHostRuntimeMode
++                    ? SIMULATOR_HOST_RUNTIME_LABEL
++                    : t('settings.envConfigure')}
++                </strong>
++                <small>
++                  {simulatorHostRuntimeMode
++                    ? '当前 Workspace 连接'
++                    : `${t('settings.localCli')} / ${t('settings.modeApiMeta')}`}
++                </small>
+               </span>
+             </button>
+             <button
+@@ -3959,6 +3995,7 @@ export function SettingsDialog({
+                 <small>{t('settings.memoryHint')}</small>
+               </span>
+             </button>
++            {!simulatorHostRuntimeMode ? (
+             <button
+               type="button"
+               className={`settings-nav-item${activeSection === 'media' ? ' active' : ''}`}
+@@ -3970,6 +4007,7 @@ export function SettingsDialog({
+                 <small>Image / video / audio</small>
+               </span>
+             </button>
++            ) : null}
+             <button
+               type="button"
+               className={`settings-nav-item${activeSection === 'mcpClient' ? ' active' : ''}`}
+@@ -4080,6 +4118,7 @@ export function SettingsDialog({
+                 <small>{t('settings.projectLocationsHint')}</small>
+               </span>
+             </button>
++            {!simulatorHostRuntimeMode ? (
+             <button
+               type="button"
+               className={`settings-nav-item${activeSection === 'privacy' ? ' active' : ''}`}
+@@ -4091,6 +4130,8 @@ export function SettingsDialog({
+                 <small>{t('settings.privacyHint')}</small>
+               </span>
+             </button>
++            ) : null}
++            {!simulatorHostRuntimeMode ? (
+             <button
+               type="button"
+               className={`settings-nav-item${activeSection === 'about' ? ' active' : ''}`}
+@@ -4102,9 +4143,33 @@ export function SettingsDialog({
+                 <small>{t('settings.aboutHint')}</small>
+               </span>
+             </button>
++            ) : null}
+           </aside>
+           <div className="settings-content" ref={settingsContentRef}>
+-          {activeSection === 'execution' ? (
++          {activeSection === 'execution' && simulatorHostRuntimeMode ? (
++            <section
++              className="settings-section"
++              data-testid="settings-simulator-host-runtime"
++              aria-label={SIMULATOR_HOST_RUNTIME_LABEL}
++            >
++              <div className="empty-card" role="status">
++                <div className="simulator-host-settings-status">
++                  <span
++                    className={`simulator-host-runtime-dot${simulatorHostReady ? ' is-ready' : ''}`}
++                    aria-hidden="true"
++                  />
++                  <strong>{SIMULATOR_HOST_RUNTIME_LABEL}</strong>
++                </div>
++                <p>{SIMULATOR_HOST_RUNTIME_DESCRIPTION}</p>
++                <p className="hint">
++                  {simulatorHostReady
++                    ? 'AI Runtime 由 Simulator 管理，无需在 OpenDesign 中登录或选择模型。'
++                    : '正在连接 Simulator；连接恢复后可继续当前设计任务。'}
++                </p>
++              </div>
++            </section>
++          ) : null}
++          {activeSection === 'execution' && !simulatorHostRuntimeMode ? (
+             <>
+               <div
+                 className="seg-control"
+diff --git a/apps/web/src/index.css b/apps/web/src/index.css
+index 685f2defee0519c26003ad21670e465527639307..321df6601ff4780a42a33d6e4d8f82e11058080c 100644
+--- a/apps/web/src/index.css
++++ b/apps/web/src/index.css
+@@ -30,3 +30,4 @@
+ @import './styles/viewer/routines.css';
+ @import './styles/modal-window-drag.css';
+ @import './styles/entrance.css';
++@import './styles/simulator-host.css';
+diff --git a/apps/web/src/providers/daemon.ts b/apps/web/src/providers/daemon.ts
+index 5f5b9ed8fe4122db928827003dcef25c9c67867a..1ffd99983a5b18aa3b4acb7f9177de5e23a0bdec 100644
+--- a/apps/web/src/providers/daemon.ts
++++ b/apps/web/src/providers/daemon.ts
+@@ -54,6 +54,7 @@ import {
+   type PersistedArtifactFileRef,
+ } from '../artifacts/strip';
+ import { trackRunProgress, trackRunStart, trackRunTerminal } from '../observability/stuck-run';
++import { createSimulatorHostNetworkPolicy } from './simulator-host-mode';
+ 
+ const MAX_TRANSCRIPT_MESSAGE_CHARS = 12_000;
+ const LARGE_TOOL_RESULT_CHARS = 8_000;
+@@ -838,6 +839,9 @@ export interface VelaLoginStatus {
+   browserOpenFailed?: boolean;
+ }
+ 
++const simulatorHostNetworkPolicy = createSimulatorHostNetworkPolicy();
++export const isSimulatorHostRuntimeMode = simulatorHostNetworkPolicy.isSimulatorHostRuntimeMode;
++
+ // AMR (vela) login surfaces three thin endpoints on the daemon:
+ //   GET  /api/integrations/vela/status   — read ~/.amr/config.json projection
+ //   POST /api/integrations/vela/login    — spawn `vela login` (vela opens browser itself)
+@@ -847,7 +851,8 @@ export interface VelaLoginStatus {
+ export async function fetchVelaLoginStatus(options: { refresh?: boolean } = {}): Promise<VelaLoginStatus | null> {
+   try {
+     const query = options.refresh ? '?refresh=1' : '';
+-    const resp = await fetch(`/api/integrations/vela/status${query}`, { cache: 'no-store' });
++    const resp = await simulatorHostNetworkPolicy.fetchIfAllowed(`/api/integrations/vela/status${query}`, { cache: 'no-store' });
++    if (!resp) return null;
+     if (!resp.ok) return null;
+     return (await resp.json()) as VelaLoginStatus;
+   } catch {
+@@ -858,7 +863,8 @@ export async function fetchVelaLoginStatus(options: { refresh?: boolean } = {}):
+ export async function fetchAmrWalletSnapshot(options: { refresh?: boolean } = {}): Promise<AmrWalletSnapshot | null> {
+   try {
+     const query = options.refresh ? '?refresh=1' : '';
+-    const resp = await fetch(`/api/integrations/vela/wallet${query}`, { cache: 'no-store' });
++    const resp = await simulatorHostNetworkPolicy.fetchIfAllowed(`/api/integrations/vela/wallet${query}`, { cache: 'no-store' });
++    if (!resp) return null;
+     if (!resp.ok) return null;
+     return (await resp.json()) as AmrWalletSnapshot;
+   } catch {
+@@ -868,7 +874,8 @@ export async function fetchAmrWalletSnapshot(options: { refresh?: boolean } = {}
+ 
+ export async function fetchAmrModels(): Promise<AmrModelsResponse | null> {
+   try {
+-    const resp = await fetch('/api/amr/models', { cache: 'no-store' });
++    const resp = await simulatorHostNetworkPolicy.fetchIfAllowed('/api/amr/models', { cache: 'no-store' });
++    if (!resp) return null;
+     if (!resp.ok) return null;
+     return (await resp.json()) as AmrModelsResponse;
+   } catch {
+@@ -891,11 +898,14 @@ export async function startVelaLogin(
+   try {
+     const loginAttribution =
+       attribution && odDeviceId ? { ...attribution, odDeviceId } : attribution;
+-    const resp = await fetch('/api/integrations/vela/login', {
++    const resp = await simulatorHostNetworkPolicy.fetchIfAllowed('/api/integrations/vela/login', {
+       method: 'POST',
+       headers: loginAttribution ? { 'Content-Type': 'application/json' } : undefined,
+       body: loginAttribution ? JSON.stringify({ attribution: loginAttribution }) : undefined,
+     });
++    if (!resp) {
++      return { ok: false, status: 404, error: 'Open Design Cloud is disabled in Simulator Host Runtime mode.' };
++    }
+     if (resp.ok) {
+       const body = (await resp.json()) as { pid?: number };
+       return { ok: true, status: resp.status, pid: body.pid };
+@@ -914,7 +924,8 @@ export async function startVelaLogin(
+ 
+ export async function cancelVelaLogin(): Promise<{ ok: boolean; canceled?: boolean }> {
+   try {
+-    const resp = await fetch('/api/integrations/vela/login/cancel', { method: 'POST' });
++    const resp = await simulatorHostNetworkPolicy.fetchIfAllowed('/api/integrations/vela/login/cancel', { method: 'POST' });
++    if (!resp) return { ok: false };
+     if (!resp.ok) return { ok: false };
+     const body = (await resp.json().catch(() => null)) as { canceled?: boolean } | null;
+     return { ok: true, canceled: body?.canceled };
+@@ -925,7 +936,8 @@ export async function cancelVelaLogin(): Promise<{ ok: boolean; canceled?: boole
+ 
+ export async function velaLogout(): Promise<{ ok: boolean }> {
+   try {
+-    const resp = await fetch('/api/integrations/vela/logout', { method: 'POST' });
++    const resp = await simulatorHostNetworkPolicy.fetchIfAllowed('/api/integrations/vela/logout', { method: 'POST' });
++    if (!resp) return { ok: false };
+     return { ok: resp.ok };
+   } catch {
+     return { ok: false };
+diff --git a/apps/web/src/providers/simulator-host-mode.js b/apps/web/src/providers/simulator-host-mode.js
+new file mode 100644
+index 0000000000000000000000000000000000000000..81a92591d000b8bdd71471b2e41df7525a8c5550
+--- /dev/null
++++ b/apps/web/src/providers/simulator-host-mode.js
+@@ -0,0 +1,54 @@
++export const SIMULATOR_HOST_AGENT_ID = 'simulator-host-runtime';
++export const SIMULATOR_HOST_RUNTIME_LABEL = 'Simulator Host Runtime';
++export const SIMULATOR_HOST_RUNTIME_DESCRIPTION = '使用 Simulator 当前 Workspace 连接';
++
++export function isSimulatorHostAgentConfig(config) {
++  return config?.mode === 'daemon' && config?.agentId === SIMULATOR_HOST_AGENT_ID;
++}
++
++export function normalizeSimulatorHostConfig(config) {
++  return {
++    ...config,
++    mode: 'daemon',
++    apiKey: '',
++    apiProtocolConfigs: {},
++    byokProviderConfigDrafts: {},
++    mediaProviders: {},
++    agentId: SIMULATOR_HOST_AGENT_ID,
++    agentModels: {},
++    agentCliEnv: {},
++    agentCliEnvIntent: {},
++    onboardingCompleted: true,
++    telemetry: { metrics: false, content: false },
++  };
++}
++
++export function createSimulatorHostNetworkPolicy(fetchImpl) {
++  /** @type {Promise<boolean> | null} */
++  let modePromise = null;
++
++  const isSimulatorHostRuntimeMode = async () => {
++    if (!modePromise) {
++      // Resolve the global fetch lazily. The browser installs it before app
++      // bootstrap, while tests replace it after importing this module.
++      const activeFetch = fetchImpl ?? globalThis.fetch;
++      modePromise = activeFetch('/api/agents', { cache: 'no-store' })
++        .then(async (response) => {
++          if (!response.ok) return true;
++          const body = await response.json();
++          return Array.isArray(body?.agents)
++            && body.agents.some((agent) => agent?.id === SIMULATOR_HOST_AGENT_ID);
++        })
++        .catch(() => true);
++    }
++    return modePromise;
++  };
++
++  return {
++    isSimulatorHostRuntimeMode,
++    async fetchIfAllowed(input, init) {
++      if (await isSimulatorHostRuntimeMode()) return null;
++      return (fetchImpl ?? globalThis.fetch)(input, init);
++    },
++  };
++}
+diff --git a/apps/web/src/styles/simulator-host.css b/apps/web/src/styles/simulator-host.css
+new file mode 100644
+index 0000000000000000000000000000000000000000..61e60d62f4c4f1e4a31af8c2511cf0a13ca94329
+--- /dev/null
++++ b/apps/web/src/styles/simulator-host.css
+@@ -0,0 +1,39 @@
++.simulator-host-runtime-chip {
++  cursor: default;
++}
++
++.simulator-host-runtime-dot {
++  width: 7px;
++  height: 7px;
++  flex: 0 0 7px;
++  border-radius: 999px;
++  background: var(--text-tertiary);
++  box-shadow: 0 0 0 2px color-mix(in srgb, var(--text-tertiary) 16%, transparent);
++}
++
++.simulator-host-runtime-dot.is-ready {
++  background: #36a269;
++  box-shadow: 0 0 0 2px color-mix(in srgb, #36a269 18%, transparent);
++}
++
++.simulator-host-runtime-avatar {
++  cursor: default;
++}
++
++.simulator-host-settings-status {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  margin-bottom: 8px;
++}
++
++/* Simulator's embedded WebContentsView deliberately denies downloads. Keep
++   preview/edit/version-history intact while removing controls that cannot
++   complete in this security boundary. */
++html[data-simulator-host-runtime='true'] .chrome-file-action-menus,
++html[data-simulator-host-runtime='true'] .markdown-workbench .chrome-share-menu,
++html[data-simulator-host-runtime='true'] .df-preview-download,
++html[data-simulator-host-runtime='true'] .df-batch-actions > button:first-child,
++html[data-simulator-host-runtime='true'] a[download] {
++  display: none !important;
++}
+diff --git a/package.json b/package.json
+index 7fddb1fc2a5e1d08df126728ae67dc870e6536fe..109f063cc82467ca1c89f87da40b10d05975c101 100644
+--- a/package.json
++++ b/package.json
+@@ -61,6 +61,7 @@
+       "electron",
+       "electron-winstaller",
+       "esbuild",
++      "node-pty",
+       "protobufjs",
+       "sharp"
+     ]

@@ -17,6 +17,8 @@ export {
   type ModuleUsageGuard,
   type ModuleUsageGuardLease,
   type RollbackResult,
+  type RestoreModuleStateRequest,
+  type RestoreModuleStateResult,
   type UninstallRequest,
   type VerifiedArtifactDescriptor,
 } from './types.ts'

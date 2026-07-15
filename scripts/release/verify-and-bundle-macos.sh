@@ -88,6 +88,7 @@ verify_app() {
   executable="$app/Contents/MacOS/$executable_name"
   assert_lstat_type "$executable" "regular file" "app executable"
   [[ -x "$executable" ]] || { echo "Missing executable in $app" >&2; exit 1; }
+  bun "$SCRIPT_DIR/../packaged-server-resources.ts" --app "$app"
   bun "$SCRIPT_DIR/verify-macos-signatures.ts" "$app"
   python3 - "$executable" <<'PY'
 import subprocess, sys

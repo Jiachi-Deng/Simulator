@@ -8,9 +8,15 @@ import type {
 } from '@simulator/module-contract'
 
 export const DEFAULT_INSTALL_LIMITS = Object.freeze({
-  maxArchiveBytes: 128 * 1024 * 1024,
-  maxEntries: 4_096,
+  // The sealed OpenDesign development bundle is ~138 MiB compressed after its
+  // fixed Node and AMR runtimes are included. Keep a bounded 192 MiB envelope;
+  // extracted bytes, individual files, entry count, and decompression ratio
+  // remain independently constrained below.
+  maxArchiveBytes: 192 * 1024 * 1024,
+  // OpenDesign staging contains 4,777 files; retain a bounded headroom without relaxing byte-based limits.
+  maxEntries: 8_192,
   maxFileBytes: 64 * 1024 * 1024,
+  maxExecutableFileBytes: 128 * 1024 * 1024,
   maxTotalBytes: 512 * 1024 * 1024,
   maxPathBytes: 512,
   maxDepth: 32,
@@ -24,6 +30,7 @@ export interface InstallLimits {
   readonly maxArchiveBytes: number
   readonly maxEntries: number
   readonly maxFileBytes: number
+  readonly maxExecutableFileBytes: number
   readonly maxTotalBytes: number
   readonly maxPathBytes: number
   readonly maxDepth: number
@@ -71,6 +78,12 @@ export interface InstallResult extends InstalledModuleState {
 
 export interface RollbackResult extends InstalledModuleState {
   readonly activePath: string
+}
+
+export interface RestoreModuleStateRequest extends InstalledModuleState {}
+
+export interface RestoreModuleStateResult extends InstalledModuleState {
+  readonly activePath: string | null
 }
 
 export interface InstallRequest {

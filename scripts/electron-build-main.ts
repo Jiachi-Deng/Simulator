@@ -4,7 +4,7 @@
  */
 
 import { spawn } from "bun";
-import { existsSync, readFileSync, statSync, mkdirSync } from "fs";
+import { existsSync, readFileSync, statSync, mkdirSync, rmSync } from "fs";
 import { join } from "path";
 import {
   EMBEDDED_BUILD_VARIABLES,
@@ -13,6 +13,17 @@ import {
   isPublicBuild,
 } from "./build-environment";
 import { resolveBuildPolicy, writeBuildPolicy } from "./build-policy";
+import {
+  copyPiAgentServer,
+  copySessionServer,
+  verifyMcpServersExist,
+  type BuildConfig,
+} from "./build/common";
+import {
+  currentPackagedArch,
+  currentPackagedPlatform,
+  validatePackagedServerResources,
+} from "./packaged-server-resources";
 
 const ROOT_DIR = join(import.meta.dir, "..");
 const DIST_DIR = join(ROOT_DIR, "apps/electron/dist");
@@ -179,11 +190,9 @@ async function buildInterceptor(): Promise<void> {
 async function buildSessionServer(): Promise<void> {
   console.log("📋 Building Session MCP Server...");
 
-  // Ensure dist directory exists
   const distDir = join(SESSION_SERVER_DIR, "dist");
-  if (!existsSync(distDir)) {
-    mkdirSync(distDir, { recursive: true });
-  }
+  rmSync(distDir, { recursive: true, force: true });
+  mkdirSync(distDir, { recursive: true });
 
   const proc = spawn({
     cmd: [
@@ -215,24 +224,19 @@ async function buildSessionServer(): Promise<void> {
 }
 
 // Build the Pi Agent Server (subprocess for Pi SDK sessions)
-// Optional: skips if package directory is missing (e.g., not synced to OSS).
 async function buildPiAgentServer(): Promise<void> {
   if (!existsSync(join(PI_AGENT_SERVER_DIR, "src"))) {
-    console.log("⏭️  Pi agent server skipped (package not found)");
-    return;
+    throw new Error(`Pi agent server source not found at ${join(PI_AGENT_SERVER_DIR, "src")}`);
   }
 
   console.log("🥧 Building Pi Agent Server...");
 
-  // Ensure dist directory exists
   const distDir = join(PI_AGENT_SERVER_DIR, "dist");
-  if (!existsSync(distDir)) {
-    mkdirSync(distDir, { recursive: true });
-  }
+  rmSync(distDir, { recursive: true, force: true });
+  mkdirSync(distDir, { recursive: true });
 
-  // Use --target=bun --format=esm because the Pi SDK (@earendil-works/pi-coding-agent)
-  // is ESM-only. --target=node --format=cjs leaves ESM deps as external require()
-  // calls that fail at runtime since there are no node_modules relative to dist/.
+  // Use --target=bun --format=esm because the Pi SDK is ESM-only. All non-runtime
+  // dependencies must stay bundled so packaged validation can enforce closure.
   const proc = spawn({
     cmd: [
       "bun", "build",
@@ -240,7 +244,6 @@ async function buildPiAgentServer(): Promise<void> {
       "--outfile", PI_AGENT_SERVER_OUTPUT,
       "--target", "bun",
       "--format", "esm",
-      "--external", "koffi",
     ],
     cwd: ROOT_DIR,
     stdout: "inherit",
@@ -333,6 +336,20 @@ async function main(): Promise<void> {
 
   // Build Pi agent server (subprocess for Pi SDK sessions)
   await buildPiAgentServer();
+
+  const stagingConfig: BuildConfig = {
+    platform: currentPackagedPlatform(),
+    arch: currentPackagedArch(),
+    upload: false,
+    uploadLatest: false,
+    uploadScript: false,
+    rootDir: ROOT_DIR,
+    electronDir: join(ROOT_DIR, "apps/electron"),
+  };
+  copySessionServer(stagingConfig);
+  copyPiAgentServer(stagingConfig);
+  verifyMcpServersExist(stagingConfig);
+  validatePackagedServerResources(join(stagingConfig.electronDir, "resources"));
 
   // Build unified network interceptor (CJS bundle for Node.js --require)
   await buildInterceptor();

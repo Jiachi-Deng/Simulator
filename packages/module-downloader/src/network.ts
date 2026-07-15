@@ -25,10 +25,12 @@ export async function fetchWithRedirects(
 ): Promise<DownloaderResponse> {
   const initial = canonicalHttpsUrl(input)
   let current = initial
+  let requestHeaders = { ...headers }
+  let usedGitHubReleaseHop = false
   for (let redirects = 0; ; redirects += 1) {
     let response: DownloaderResponse
     try {
-      response = await context.options.fetch.fetch({ url: current.href, headers, signal, redirect: 'manual' })
+      response = await context.options.fetch.fetch({ url: current.href, headers: requestHeaders, signal, redirect: 'manual' })
     } catch (cause) {
       if (signal.aborted) throw abortError(signal)
       throw new ModuleDownloaderError('NETWORK_ERROR', 'Network request failed', { retryable: true, cause })
@@ -55,14 +57,59 @@ export async function fetchWithRedirects(
         throw new ModuleDownloaderError('INVALID_REDIRECT', 'Redirect Location is invalid', { cause })
       }
       canonicalHttpsUrl(next.href)
-      if (next.origin !== initial.origin) {
-        throw new ModuleDownloaderError('INVALID_REDIRECT', 'Cross-origin redirects are not allowed')
+      if (next.origin !== current.origin) {
+        if (!allowGitHubReleaseAssetHop(context, initial, current, next, redirects, usedGitHubReleaseHop)) {
+          throw new ModuleDownloaderError('INVALID_REDIRECT', 'Cross-origin redirects are not allowed')
+        }
+        requestHeaders = stripCredentialHeaders(requestHeaders)
+        usedGitHubReleaseHop = true
+      } else if (usedGitHubReleaseHop) {
+        throw new ModuleDownloaderError('INVALID_REDIRECT', 'Redirects after the GitHub release asset hop are not allowed')
       }
       current = next
     } finally {
       if (!transferred) await disposeResponse(response)
     }
   }
+}
+
+function allowGitHubReleaseAssetHop(
+  context: NetworkContext,
+  initial: URL,
+  current: URL,
+  next: URL,
+  redirects: number,
+  alreadyUsed: boolean,
+): boolean {
+  const policy = context.options.githubReleaseRedirectPolicy
+  if (!policy || alreadyUsed || redirects !== 0 || current.href !== initial.href) return false
+  if (initial.origin !== 'https://github.com' || initial.search !== '') return false
+  const segments = initial.pathname.split('/')
+  if (segments.length !== 7
+    || segments[0] !== ''
+    || segments[1] !== policy.owner
+    || segments[2] !== policy.repository
+    || segments[3] !== 'releases'
+    || segments[4] !== 'download'
+    || !exactReleasePathSegment(segments[5]!)
+    || !exactReleasePathSegment(segments[6]!)
+    || segments[5] === 'latest') return false
+  return next.origin === 'https://release-assets.githubusercontent.com'
+    && next.pathname.startsWith('/github-production-release-asset/')
+}
+
+function exactReleasePathSegment(value: string): boolean {
+  return /^[A-Za-z0-9](?:[A-Za-z0-9._+-]{0,254})$/.test(value) && value !== '.' && value !== '..'
+}
+
+function stripCredentialHeaders(headers: Readonly<Record<string, string>>): Record<string, string> {
+  const safe: Record<string, string> = {}
+  for (const [name, value] of Object.entries(headers)) {
+    const normalized = name.toLowerCase()
+    if (normalized === 'authorization' || normalized === 'cookie' || normalized === 'proxy-authorization') continue
+    safe[name] = value
+  }
+  return safe
 }
 
 export async function disposeResponse(response: DownloaderResponse): Promise<void> {

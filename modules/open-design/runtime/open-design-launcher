@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+# This file is the module contract entrypoint. Keep its location stable: the
+# archive producer copies runtime/ verbatim and Module Daemon spawns it without
+# a shell.
+runtime_dir=$(CDPATH= cd -P "$(dirname "$0")" && pwd -P)
+module_root=$(CDPATH= cd -P "$runtime_dir/.." && pwd -P)
+node_bin="$module_root/runtime/node/bin/node"
+launcher="$module_root/runtime/open-design-launcher.mjs"
+
+[ -x "$node_bin" ] && [ -f "$launcher" ] || exit 126
+exec "$node_bin" "$launcher"

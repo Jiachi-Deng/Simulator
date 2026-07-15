@@ -8,6 +8,7 @@ describe("release static validation workflow", () => {
   test("runs on pull requests that can affect RC, updater, or build-policy behavior", () => {
     expect(workflow).toContain("pull_request:")
     expect(workflow).toContain(".github/workflows/engineering-rc.yml")
+    expect(workflow).toContain(".github/workflows/open-design-production-input.yml")
     expect(workflow).toContain("scripts/release/**")
     expect(workflow).toContain("scripts/build-policy.ts")
     expect(workflow).toContain("apps/electron/scripts/build-dmg.sh")

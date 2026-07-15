@@ -19,4 +19,9 @@ describe("DMG packaging", () => {
     expect(script).toContain('APP_ROOT="$ELECTRON_DIR/release/mac-arm64/Simulator.app"')
     expect(script).toContain('APP_ROOT="$ELECTRON_DIR/release/mac/Simulator.app"')
   })
+
+  test("verifies packaged Pi and session server resources before accepting the app", () => {
+    expect(script).toContain('bun "$ROOT_DIR/scripts/packaged-server-resources.ts" --app "$APP_ROOT"')
+    expect(script.indexOf('packaged-server-resources.ts')).toBeLessThan(script.indexOf('verify-public-build-privacy.ts'))
+  })
 })

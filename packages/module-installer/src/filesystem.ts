@@ -13,6 +13,7 @@ import {
 } from 'node:fs/promises'
 import { dirname, join, relative, sep } from 'node:path'
 import type { ModuleSha256 } from '@simulator/module-contract'
+import { isPortableArchivePayloadSegment } from './archive.ts'
 import {
   ModuleInstallerError,
   SimulatedInstallerCrash,
@@ -38,6 +39,11 @@ type ProgressReporter = (progress: InstallProgress) => void
 function filesystemError(message: string, cause: unknown): ModuleInstallerError {
   if (cause instanceof ModuleInstallerError) return cause
   return new ModuleInstallerError('FILESYSTEM_ERROR', `${message}: ${cause instanceof Error ? cause.message : String(cause)}`, cause)
+}
+
+function isUnsupportedFsync(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException).code
+  return code === 'EINVAL' || code === 'ENOTSUP' || code === 'EISDIR' || code === 'EPERM'
 }
 
 export async function pathExists(path: string): Promise<boolean> {
@@ -70,7 +76,7 @@ export async function copyAndHashArchive(
     source = await open(sourcePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0))
     const openedInfo = await source.stat()
     if (!openedInfo.isFile()) throw new ModuleInstallerError('ARCHIVE_INVALID', 'Opened archive source is not a regular file')
-    destination = await open(destinationPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
+    destination = await open(destinationPath, exclusiveWriteFlags(), 0o600)
 
     const hash = createHash('sha256')
     const buffer = Buffer.allocUnsafe(256 * 1024)
@@ -123,10 +129,8 @@ function portableRelative(root: string, path: string): string {
   return relative(root, path).split(sep).join('/')
 }
 
-const SAFE_PATH_SEGMENT = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
-
 function assertSafeExtractedPath(path: string): void {
-  if (!path.split('/').every((segment) => SAFE_PATH_SEGMENT.test(segment))) {
+  if (!path.split('/').every(isPortableArchivePayloadSegment)) {
     throw new ModuleInstallerError('ARCHIVE_INVALID', `Extracted path is outside the safe ASCII contract: ${JSON.stringify(path)}`)
   }
 }
@@ -136,6 +140,7 @@ export async function hashExtractedTree(
   limits: InstallLimits,
   signal: AbortSignal | undefined,
   report: ProgressReporter,
+  executablePaths: ReadonlySet<string>,
 ): Promise<TreeManifestResult> {
   const records: TreeRecord[] = []
   const files = new Map<string, { size: number; executable: boolean; sha256: string }>()
@@ -172,11 +177,18 @@ export async function hashExtractedTree(
       }
 
       totalBytes += info.size
-      if (info.size > limits.maxFileBytes || totalBytes > limits.maxTotalBytes) {
+      const maxFileBytes = executablePaths.has(path) ? limits.maxExecutableFileBytes : limits.maxFileBytes
+      if (info.size > maxFileBytes || totalBytes > limits.maxTotalBytes) {
         throw new ModuleInstallerError('ARCHIVE_LIMIT_EXCEEDED', 'Extracted tree exceeds byte limits')
       }
       const sha256 = await hashFile(absolute)
-      const executable = (info.mode & 0o111) !== 0
+      const executable = executablePaths.has(path)
+      if (executable && process.platform !== 'win32' && (info.mode & 0o100) === 0) {
+        throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Declared executable lost its owner execute bit: ${JSON.stringify(path)}`)
+      }
+      if (!executable && (info.mode & 0o111) !== 0) {
+        throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Undeclared executable is present after normalization: ${JSON.stringify(path)}`)
+      }
       files.set(path, { size: info.size, executable, sha256 })
       records.push({ path, value: `F\t${JSON.stringify(path)}\t${info.size}\t${executable ? 1 : 0}\t${sha256}` })
       report({
@@ -201,7 +213,7 @@ export async function hashExtractedTree(
   }
 }
 
-export async function normalizeAndVerifyModes(root: string, entrypoint: string): Promise<void> {
+export async function normalizeAndVerifyModes(root: string, executablePaths: ReadonlySet<string>): Promise<void> {
   async function visit(directory: string): Promise<void> {
     await chmod(directory, 0o700)
     for (const child of await readdir(directory, { withFileTypes: true })) {
@@ -210,7 +222,7 @@ export async function normalizeAndVerifyModes(root: string, entrypoint: string):
       if (child.isDirectory()) {
         await visit(absolute)
       } else if (child.isFile()) {
-        await chmod(absolute, relativePath === entrypoint ? 0o700 : 0o600)
+        await chmod(absolute, executablePaths.has(relativePath) ? 0o700 : 0o600)
       } else {
         throw new ModuleInstallerError('ARCHIVE_INVALID', `Cannot normalize mode for non-regular entry: ${JSON.stringify(relativePath)}`)
       }
@@ -219,12 +231,14 @@ export async function normalizeAndVerifyModes(root: string, entrypoint: string):
 
   try {
     await visit(root)
-    const entrypointPath = join(root, ...entrypoint.split('/'))
-    const info = await lstat(entrypointPath)
-    if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o100) === 0) {
-      throw new ModuleInstallerError('ENTRYPOINT_INVALID', 'Extracted entrypoint is not an owner-executable regular file')
+    for (const executablePath of executablePaths) {
+      const absolute = join(root, ...executablePath.split('/'))
+      const info = await lstat(absolute)
+      if (!info.isFile() || info.isSymbolicLink() || (process.platform !== 'win32' && (info.mode & 0o100) === 0)) {
+        throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Declared executable is not an owner-executable regular file: ${JSON.stringify(executablePath)}`)
+      }
+      await access(absolute, constants.X_OK)
     }
-    await access(entrypointPath, constants.X_OK)
   } catch (error) {
     throw filesystemError('Could not normalize or verify extracted file modes', error)
   }
@@ -241,7 +255,7 @@ export async function fsyncTree(root: string): Promise<void> {
       else {
         const handle = await open(path, 'r')
         try {
-          await handle.sync()
+          try { await handle.sync() } catch (error) { if (!isUnsupportedFsync(error)) throw error }
         } finally {
           await handle.close()
         }
@@ -264,7 +278,7 @@ export async function fsyncDirectory(directory: string): Promise<void> {
     await handle.sync()
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code
-    if (code !== 'EINVAL' && code !== 'ENOTSUP' && code !== 'EISDIR' && code !== 'EPERM') throw error
+    if (!isUnsupportedFsync(error)) throw error
   } finally {
     await handle?.close().catch(() => undefined)
   }
@@ -274,7 +288,7 @@ export async function atomicWriteJson(path: string, value: unknown): Promise<voi
   const directory = dirname(path)
   await mkdir(directory, { recursive: true, mode: 0o700 })
   const temporary = join(directory, `.${randomUUID()}.tmp`)
-  const handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
+  const handle = await open(temporary, exclusiveWriteFlags(), 0o600)
   try {
     await handle.writeFile(`${JSON.stringify(value)}\n`, 'utf8')
     await handle.sync()
@@ -307,7 +321,7 @@ export async function createJsonExclusive(
   let published = false
   try {
     await fault?.('before-journal-temp-write')
-    handle = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL, 0o600)
+    handle = await open(temporary, exclusiveWriteFlags(), 0o600)
     const serialized = Buffer.from(`${JSON.stringify(value)}\n`, 'utf8')
     const midpoint = Math.max(1, Math.floor(serialized.length / 2))
     await handle.writeFile(serialized.subarray(0, midpoint))
@@ -341,4 +355,10 @@ export async function createJsonExclusive(
     await fsyncDirectory(directory).catch(() => undefined)
     throw error
   }
+}
+
+function exclusiveWriteFlags(): 'wx' | number {
+  return process.platform === 'win32'
+    ? 'wx'
+    : constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0)
 }

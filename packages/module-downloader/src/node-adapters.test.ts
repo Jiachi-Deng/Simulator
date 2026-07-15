@@ -27,6 +27,21 @@ describe('production filesystem cache', () => {
     await expect(cache.readPartial('../bad')).rejects.toThrow()
   })
 
+  it('defers initialization until an operation can observe its result', async () => {
+    const directory = join(await root(), 'lazy-cache')
+    const cache = new NodeFilesystemModuleDownloaderCache(directory)
+    await expect(lstat(directory)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect(await cache.readCatalog()).toBeUndefined()
+    expect((await lstat(directory)).isDirectory()).toBe(true)
+  })
+
+  it('contains nested cache directories by filesystem identity across path aliases', async () => {
+    const directory = await root()
+    const cache = new NodeFilesystemModuleDownloaderCache(directory)
+    expect(await cache.readArtifact('0'.repeat(64))).toBeUndefined()
+    expect((await lstat(join(directory, 'artifacts', 'owners'))).isDirectory()).toBe(true)
+  })
+
   it('serializes leases across OS processes', async () => {
     const directory = await root()
     const fixture = join(import.meta.dir, 'testing', 'lease-child.ts')
@@ -59,6 +74,31 @@ describe('production filesystem cache', () => {
     const replacement = new NodeFilesystemModuleDownloaderCache(directory, { leasePollMs: 5 })
     const next = await replacement.acquireLease('deferred cleanup', AbortSignal.timeout(5_000))
     await next.release()
+    expect((await readdir(join(directory, 'leases', 'claims'))).some((name) => name.includes('.released-'))).toBe(false)
+  })
+
+  it.skipIf(process.platform !== 'win32')('defers released-marker scans when Windows lstat is transiently blocked', async () => {
+    const directory = await root(); let scanFaults = 1
+    const setup = new NodeFilesystemModuleDownloaderCache(directory)
+    await setup.readCatalog()
+    const key = 'blocked released-marker scan'
+    const base = createHash('sha256').update(key).digest('hex')
+    const token = '00000000-0000-4000-8000-000000000000'
+    const marker = join(directory, 'leases', 'claims', `${base}.released-${token}`)
+    await writeFile(marker, token)
+
+    const cache = new NodeFilesystemModuleDownloaderCache(directory, {
+      leasePollMs: 1,
+      faultInjector(point, path) {
+        if (point === 'cleanup' && path === marker && scanFaults > 0) {
+          scanFaults -= 1
+          throw Object.assign(new Error('transient Windows marker lstat contention'), { code: 'EPERM' })
+        }
+      },
+    })
+    const lease = await cache.acquireLease(key, AbortSignal.timeout(5_000))
+    await lease.release()
+    expect(scanFaults).toBe(0)
     expect((await readdir(join(directory, 'leases', 'claims'))).some((name) => name.includes('.released-'))).toBe(false)
   })
 
@@ -138,7 +178,7 @@ describe('production filesystem cache', () => {
     })
   }
 
-  for (const code of ['EFAULT', 'EBUSY', 'EPERM'] as const) {
+  for (const code of ['EFAULT', 'EBADF', 'EBUSY', 'EPERM'] as const) {
     it.skipIf(process.platform !== 'win32')(`fails finitely without granting a new owner when marker cleanup stays ${code}`, async () => {
       const directory = await root()
       const cache = new NodeFilesystemModuleDownloaderCache(directory, {
@@ -358,14 +398,19 @@ describe('production filesystem cache', () => {
   it('does not reclaim an active artifact owner paused beyond stale age', async () => {
     const directory = await root(); let reached!: () => void; let resume!: () => void
     const atClaim = new Promise<void>((resolve) => { reached = resolve }); const gate = new Promise<void>((resolve) => { resume = resolve })
-    const first = new NodeFilesystemModuleDownloaderCache(directory, { staleLeaseMs: 1, leasePollMs: 1, checkpoint: async (point) => { if (point === 'artifact-claim-published') { reached(); await gate } } })
+    const processIdentity = async () => 'active-owner-process-start'
+    const first = new NodeFilesystemModuleDownloaderCache(directory, { staleLeaseMs: 1, leasePollMs: 1, processIdentity, checkpoint: async (point) => { if (point === 'artifact-claim-published') { reached(); await gate } } })
     const bytes = Buffer.from('active owner'); const sha256 = createHash('sha256').update(bytes).digest('hex')
     const firstPartial = await first.createPartial({ sha256, sourceUrl: 'https://example.test/a', expectedSize: bytes.length, updatedAt: 1 }); await first.appendPartial(firstPartial.id, bytes, 2)
     const publishing = first.publishPartial(firstPartial.id, { sha256, size: bytes.length, committedAt: 3 }); await atClaim
-    const competitor = new NodeFilesystemModuleDownloaderCache(directory, { staleLeaseMs: 1, leasePollMs: 1, maxStaleRecoveries: 1, now: () => Date.now() + 1_000_000 })
-    const secondPartial = await competitor.createPartial({ sha256, sourceUrl: 'https://example.test/a', expectedSize: bytes.length, updatedAt: 4 }); await competitor.appendPartial(secondPartial.id, bytes, 5)
-    await expect(competitor.publishPartial(secondPartial.id, { sha256, size: bytes.length, committedAt: 6 })).rejects.toThrow('live or unverifiable owner')
-    resume(); expect(await publishing).toBe('published')
+    try {
+      const competitor = new NodeFilesystemModuleDownloaderCache(directory, { staleLeaseMs: 1, leasePollMs: 1, maxStaleRecoveries: 1, now: () => Date.now() + 1_000_000, processIdentity })
+      const secondPartial = await competitor.createPartial({ sha256, sourceUrl: 'https://example.test/a', expectedSize: bytes.length, updatedAt: 4 }); await competitor.appendPartial(secondPartial.id, bytes, 5)
+      await expect(competitor.publishPartial(secondPartial.id, { sha256, size: bytes.length, committedAt: 6 })).rejects.toThrow('live or unverifiable owner')
+    } finally {
+      resume(); await publishing
+    }
+    expect(await publishing).toBe('published')
   })
 
   it('fails closed for partial data and record leaf symlinks without touching targets', async () => {

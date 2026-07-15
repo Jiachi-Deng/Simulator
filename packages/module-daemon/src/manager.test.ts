@@ -4,7 +4,12 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { parseModuleManifest, type ModuleArtifact, type ModuleManifest, type ModulePlatform } from '@simulator/module-contract'
 import { ModuleDaemonManager } from './manager.ts'
-import { ModuleDaemonError, type ActivationAdapter, type ModuleDaemonSnapshot } from './types.ts'
+import {
+  ModuleDaemonError,
+  type ActivationAdapter,
+  type ModuleDaemonLaunchCleanupReason,
+  type ModuleDaemonSnapshot,
+} from './types.ts'
 import { FakeClock, FakeHealthAdapter, FakeProcessAdapter } from './testing/fakes.ts'
 import { createMinimalEnvironment } from './safety.ts'
 
@@ -90,6 +95,24 @@ describe('ModuleDaemonManager', () => {
       .toThrow('duplicate entry')
     expect(() => createMinimalEnvironment({ SIMULATOR_MODULE_ID: 'shadow' }, values, 'linux'))
       .toThrow('cannot override host-owned')
+    expect(() => createMinimalEnvironment({ SIMULATOR_MODULE_DATA_ROOT: '/tmp/shadow' }, values, 'linux'))
+      .toThrow('cannot override host-owned')
+  })
+
+  test('injects a host-derived persistent data root without exposing it to base env overrides', async () => {
+    const root = await activatedRoot()
+    const moduleDataRoot = join(tmpdir(), 'simulator-module-data')
+    const { manager, processAdapter } = harness({ moduleDataRoot })
+
+    const started = await manager.start({ manifest: manifest(), activatedRoot: root, platform: currentPlatform() })
+    expect(processAdapter.requests[0]!.env.SIMULATOR_MODULE_DATA_ROOT)
+      .toBe(join(moduleDataRoot, 'org.simulator.daemon'))
+    await manager.stop(started.id)
+  })
+
+  test('rejects a relative or non-normalized module data root', () => {
+    expect(() => harness({ moduleDataRoot: 'relative' })).toThrow('normalized absolute path')
+    expect(() => harness({ moduleDataRoot: '/tmp/../tmp/modules' })).toThrow('normalized absolute path')
   })
 
   test('starts healthy with a contained entrypoint, minimal env, and shell disabled', async () => {
@@ -114,6 +137,247 @@ describe('ModuleDaemonManager', () => {
     })
     expect(processAdapter.requests[0]!.env.HOME).toBeUndefined()
     expect(await manager.stop(started.id)).toMatchObject({ state: 'stopped' })
+  })
+
+  test('prepares a launch-scoped environment and revokes it on stop without mutating base env', async () => {
+    const root = await activatedRoot()
+    const baseEnvironment = { PATH: '/usr/bin:/bin' }
+    const cleanupReasons: ModuleDaemonLaunchCleanupReason[] = []
+    const contexts: Array<{ restartCount: number; aborted: boolean }> = []
+    const { manager, processAdapter } = harness({
+      baseEnvironment,
+      prepareLaunch: async (context) => {
+        contexts.push({ restartCount: context.restartCount, aborted: context.signal.aborted })
+        return {
+          environment: {
+            SIMULATOR_HOST_AGENT_URL: 'http://127.0.0.1:43100',
+            SIMULATOR_HOST_AGENT_TOKEN_FILE: '/tmp/simulator-launch-token-1',
+          },
+          cleanup: async (reason) => { cleanupReasons.push(reason) },
+        }
+      },
+    })
+
+    const started = await manager.start({ manifest: manifest(), activatedRoot: root, platform: currentPlatform() })
+    expect(processAdapter.requests[0]!.env).toMatchObject({
+      PATH: '/usr/bin:/bin',
+      SIMULATOR_HOST_AGENT_URL: 'http://127.0.0.1:43100',
+      SIMULATOR_HOST_AGENT_TOKEN_FILE: '/tmp/simulator-launch-token-1',
+    })
+    expect(baseEnvironment).toEqual({ PATH: '/usr/bin:/bin' })
+    expect(contexts).toEqual([{ restartCount: 0, aborted: false }])
+
+    await manager.stop(started.id)
+    expect(cleanupReasons).toEqual(['stop'])
+  })
+
+  test('revokes the old lease before preparing a fresh lease on restart', async () => {
+    const root = await activatedRoot()
+    const events: string[] = []
+    let launch = 0
+    const { manager, processAdapter, clock } = harness({
+      restartLimit: 1,
+      restartBackoffMs: [10],
+      prepareLaunch: async () => {
+        const current = ++launch
+        events.push(`prepare:${current}`)
+        return {
+          environment: { SIMULATOR_HOST_AGENT_TOKEN_FILE: `/tmp/launch-${current}` },
+          cleanup: async (reason) => { events.push(`cleanup:${current}:${reason}`) },
+        }
+      },
+    })
+    const started = await manager.start({ manifest: manifest(), activatedRoot: root, platform: currentPlatform() })
+    processAdapter.processes[0]!.crash(7)
+    await waitFor(() => events.includes('cleanup:1:restart'))
+    await clock.advance(10)
+    await waitFor(() => processAdapter.processes.length === 2)
+
+    expect(events.slice(0, 3)).toEqual(['prepare:1', 'cleanup:1:restart', 'prepare:2'])
+    expect(processAdapter.requests.map((request) => request.env.SIMULATOR_HOST_AGENT_TOKEN_FILE))
+      .toEqual(['/tmp/launch-1', '/tmp/launch-2'])
+
+    await manager.stop(started.id)
+    expect(events).toEqual(['prepare:1', 'cleanup:1:restart', 'prepare:2', 'cleanup:2:stop'])
+  })
+
+  test('rejects restart health waiters when launch cleanup terminates the supervisor', async () => {
+    const root = await activatedRoot()
+    let launch = 0
+    let failSecondCleanup = true
+    let signalSecondPrepare!: () => void
+    let releaseSecondPrepare!: () => void
+    const secondPrepareStarted = new Promise<void>((resolve) => { signalSecondPrepare = resolve })
+    const secondPrepareGate = new Promise<void>((resolve) => { releaseSecondPrepare = resolve })
+    const cleanupReasons: Array<{ launch: number; reason: ModuleDaemonLaunchCleanupReason }> = []
+    const { manager, processAdapter, clock } = harness({
+      restartLimit: 1,
+      restartBackoffMs: [10],
+      prepareLaunch: async () => {
+        const current = ++launch
+        if (current === 2) {
+          signalSecondPrepare()
+          await secondPrepareGate
+        }
+        return {
+          cleanup: async (reason) => {
+            cleanupReasons.push({ launch: current, reason })
+            if (current === 2 && failSecondCleanup) {
+              failSecondCleanup = false
+              throw new Error('injected restart grant cleanup failure')
+            }
+          },
+        }
+      },
+    })
+    const request = { manifest: manifest(), activatedRoot: root, platform: currentPlatform() }
+    const started = await manager.start(request)
+    processAdapter.processes[0]!.crash(7)
+    await waitFor(() => manager.get(started.id)?.state === 'crashed')
+    processAdapter.failNext(new Error('injected restart spawn failure'))
+
+    const advancing = clock.advance(10)
+    await secondPrepareStarted
+    expect(manager.get(started.id)?.state).toBe('starting')
+    const waitingForRestart = manager.start(request)
+    releaseSecondPrepare()
+    await advancing
+
+    const waiterResult = await Promise.race([
+      waitingForRestart.then(
+        () => ({ status: 'resolved' as const }),
+        (error: unknown) => ({ status: 'rejected' as const, error }),
+      ),
+      Bun.sleep(100).then(() => ({ status: 'timeout' as const })),
+    ])
+    expect(waiterResult).toMatchObject({
+      status: 'rejected',
+      error: { code: 'LAUNCH_CLEANUP_FAILED' },
+    })
+    expect(manager.get(started.id)).toMatchObject({
+      state: 'crashed',
+      diagnostic: { code: 'LAUNCH_CLEANUP_FAILED' },
+    })
+    expect(cleanupReasons).toEqual([
+      { launch: 1, reason: 'restart' },
+      { launch: 2, reason: 'spawn-failed' },
+    ])
+
+    await expect(manager.stop(started.id)).resolves.toMatchObject({ state: 'stopped' })
+    expect(cleanupReasons).toEqual([
+      { launch: 1, reason: 'restart' },
+      { launch: 2, reason: 'spawn-failed' },
+      { launch: 2, reason: 'stop' },
+    ])
+  })
+
+  test('revokes a prepared lease when spawn fails before process ownership exists', async () => {
+    const root = await activatedRoot()
+    const cleanupReasons: ModuleDaemonLaunchCleanupReason[] = []
+    const { manager, processAdapter, health } = harness({
+      restartLimit: 0,
+      prepareLaunch: async () => ({
+        environment: { SIMULATOR_HOST_AGENT_TOKEN_FILE: '/tmp/spawn-failure-token' },
+        cleanup: async (reason) => { cleanupReasons.push(reason) },
+      }),
+    })
+    processAdapter.failNext(new Error('injected spawn failure'))
+
+    await expect(manager.start({ manifest: manifest(), activatedRoot: root, platform: currentPlatform() }))
+      .rejects.toMatchObject({ code: 'RESTART_BUDGET_EXHAUSTED' })
+    expect(processAdapter.processes).toHaveLength(0)
+    expect(cleanupReasons).toEqual(['spawn-failed'])
+    expect(health.released).toHaveLength(1)
+  })
+
+  test('revokes the final lease as process-exit after an unrecoverable crash', async () => {
+    const root = await activatedRoot()
+    const cleanupReasons: ModuleDaemonLaunchCleanupReason[] = []
+    const { manager, processAdapter } = harness({
+      restartLimit: 0,
+      prepareLaunch: async () => ({
+        cleanup: async (reason) => { cleanupReasons.push(reason) },
+      }),
+    })
+    const started = await manager.start({ manifest: manifest(), activatedRoot: root, platform: currentPlatform() })
+
+    processAdapter.processes[0]!.crash(9)
+    await waitFor(() => manager.get(started.id)?.diagnostic?.code === 'RESTART_BUDGET_EXHAUSTED')
+    expect(cleanupReasons).toEqual(['process-exit'])
+  })
+
+  test('retries failed launch cleanup without repeating successful cleanup or retaining the process', async () => {
+    const root = await activatedRoot()
+    const cleanupReasons: ModuleDaemonLaunchCleanupReason[] = []
+    let failCleanup = true
+    const { manager, processAdapter, health } = harness({
+      prepareLaunch: async () => ({
+        cleanup: async (reason) => {
+          cleanupReasons.push(reason)
+          if (failCleanup) {
+            failCleanup = false
+            throw new Error('injected grant revocation failure')
+          }
+        },
+      }),
+    })
+    const started = await manager.start({ manifest: manifest(), activatedRoot: root, platform: currentPlatform() })
+
+    await expect(Promise.all([manager.stop(started.id), manager.stop(started.id)]))
+      .rejects.toMatchObject({ code: 'LAUNCH_CLEANUP_FAILED' })
+    expect(processAdapter.processes[0]!.stopCalls).toBe(1)
+    expect(manager.get(started.id)?.pid).toBeUndefined()
+    expect(health.released).toHaveLength(1)
+    expect(cleanupReasons).toEqual(['stop'])
+
+    await expect(Promise.all([manager.stop(started.id), manager.stop(started.id)]))
+      .resolves.toEqual([
+        expect.objectContaining({ state: 'stopped' }),
+        expect.objectContaining({ state: 'stopped' }),
+      ])
+    expect(cleanupReasons).toEqual(['stop', 'stop'])
+    expect(processAdapter.processes[0]!.stopCalls).toBe(1)
+
+    await manager.stop(started.id)
+    expect(cleanupReasons).toEqual(['stop', 'stop'])
+  })
+
+  test('uses the drain cleanup reason for every active launch', async () => {
+    const rootA = await activatedRoot()
+    const rootB = await activatedRoot()
+    const cleanupReasons: Array<{ id: string; reason: ModuleDaemonLaunchCleanupReason }> = []
+    const { manager } = harness({
+      prepareLaunch: async (context) => ({
+        cleanup: async (reason) => { cleanupReasons.push({ id: context.id, reason }) },
+      }),
+    })
+    await Promise.all([
+      manager.start({ manifest: manifest('org.simulator.drain-a'), activatedRoot: rootA, platform: currentPlatform() }),
+      manager.start({ manifest: manifest('org.simulator.drain-b'), activatedRoot: rootB, platform: currentPlatform() }),
+    ])
+
+    await manager.drain()
+    expect(cleanupReasons.sort((left, right) => left.id.localeCompare(right.id))).toEqual([
+      { id: 'org.simulator.drain-a', reason: 'drain' },
+      { id: 'org.simulator.drain-b', reason: 'drain' },
+    ])
+  })
+
+  test('rejects launch environment overrides and cleans the lease before spawn', async () => {
+    const root = await activatedRoot()
+    const cleanupReasons: ModuleDaemonLaunchCleanupReason[] = []
+    const { manager, processAdapter } = harness({
+      restartLimit: 0,
+      prepareLaunch: async () => ({
+        environment: { PATH: '/untrusted/bin' },
+        cleanup: async (reason) => { cleanupReasons.push(reason) },
+      }),
+    })
+
+    await expect(manager.start({ manifest: manifest(), activatedRoot: root, platform: currentPlatform() }))
+      .rejects.toMatchObject({ code: 'RESTART_BUDGET_EXHAUSTED' })
+    expect(processAdapter.requests).toHaveLength(0)
+    expect(cleanupReasons).toEqual(['spawn-failed'])
   })
 
   test('rejects an entrypoint link that escapes the activated root', async () => {

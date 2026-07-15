@@ -31,4 +31,8 @@ describe("macOS RC bundle verification", () => {
     expect(script).toContain('assert_lstat_type "$executable" "regular file" "app executable"')
     expect(script).toContain('[[ "$executable_name" != */*')
   })
+
+  test("fails closed when packaged Pi or session server resources are incomplete", () => {
+    expect(script).toContain('bun "$SCRIPT_DIR/../packaged-server-resources.ts" --app "$app"')
+  })
 })

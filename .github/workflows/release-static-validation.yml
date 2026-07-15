@@ -4,6 +4,9 @@ on:
   pull_request:
     paths:
       - .github/workflows/engineering-rc.yml
+      - .github/workflows/open-design-production-input.yml
+      - .github/workflows/open-design-release.yml
+      - .github/workflows/open-design-release.md
       - .github/workflows/release-static-validation.yml
       - scripts/release/**
       - scripts/build-policy.ts
@@ -48,7 +51,7 @@ jobs:
 
       - name: Parse release workflow YAML
         run: >-
-          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }' .github/workflows/engineering-rc.yml .github/workflows/release-static-validation.yml
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }' .github/workflows/engineering-rc.yml .github/workflows/open-design-production-input.yml .github/workflows/open-design-release.yml .github/workflows/release-static-validation.yml
 
       - name: Parse release shell scripts
         run: find scripts/release -type f -name '*.sh' -print0 | xargs -0 -r -n1 bash -n

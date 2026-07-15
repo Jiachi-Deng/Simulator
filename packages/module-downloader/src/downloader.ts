@@ -19,6 +19,7 @@ import {
   type ArtifactProgress,
   type CachedCatalogRecord,
   type CatalogResult,
+  type GitHubReleaseRedirectPolicy,
   type ModuleDownloaderOptions,
   type RetryPolicy,
 } from './types.ts'
@@ -69,6 +70,7 @@ export class ModuleDownloader {
       catalogTimeoutMs: positiveInteger(options.catalogTimeoutMs, DEFAULT_CATALOG_TIMEOUT_MS, 'catalogTimeoutMs'),
       artifactTimeoutMs: positiveInteger(options.artifactTimeoutMs, DEFAULT_ARTIFACT_TIMEOUT_MS, 'artifactTimeoutMs'),
       maxRedirects: nonNegativeInteger(options.maxRedirects, DEFAULT_MAX_REDIRECTS, 'maxRedirects'),
+      githubReleaseRedirectPolicy: normalizeGitHubReleaseRedirectPolicy(options.githubReleaseRedirectPolicy),
       partialMaxAgeMs: nonNegativeInteger(options.partialMaxAgeMs, DEFAULT_PARTIAL_MAX_AGE_MS, 'partialMaxAgeMs'),
       maxPartialsPerArtifact: positiveInteger(
         options.maxPartialsPerArtifact,
@@ -569,6 +571,18 @@ function normalizeRetry(input: ModuleDownloaderOptions['retry']): RetryPolicy {
   }
   if (retry.maxDelayMs < retry.baseDelayMs) throw new TypeError('retry.maxDelayMs must be >= retry.baseDelayMs')
   return retry
+}
+
+function normalizeGitHubReleaseRedirectPolicy(
+  input: ModuleDownloaderOptions['githubReleaseRedirectPolicy'],
+): GitHubReleaseRedirectPolicy | undefined {
+  if (input === undefined) return undefined
+  if (!input || typeof input !== 'object' || Array.isArray(input)
+    || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?$/.test(input.owner)
+    || !/^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?$/.test(input.repository)) {
+    throw new TypeError('githubReleaseRedirectPolicy must name one canonical GitHub owner and repository')
+  }
+  return Object.freeze({ owner: input.owner, repository: input.repository })
 }
 
 function deterministicJitter(delay: number, attempt: number): number {

@@ -9,6 +9,7 @@
  * so they inherit this pipeline transparently.
  *
  * Pipeline steps:
+ * 0. Module Agent session boundary (when registered by the trusted Host)
  * 1. Permission mode check: Block tools disallowed by current mode
  * 2. Source blocking: Block tools from inactive MCP sources
  * 3. Prerequisite check: Block source tools until guide.md is read
@@ -48,6 +49,7 @@ import {
 import { permissionsConfigCache, type PermissionsContext } from '../permissions-config.ts';
 import type { PrerequisiteCheckResult } from './prerequisite-manager.ts';
 import { rewriteBashWithRtk } from './rtk-rewrite.ts';
+import { checkModuleAgentToolBoundary } from '../module-agent-tool-boundary.ts';
 
 // ============================================================
 // TYPES
@@ -675,6 +677,7 @@ const FILE_WRITE_TOOLS = new Set(['Write', 'Edit', 'MultiEdit', 'NotebookEdit'])
  * user prompting) is handled by the calling agent based on the result type.
  *
  * Pipeline:
+ * 0. Module Agent session boundary (when registered by the trusted Host)
  * 1. Permission mode check (shouldAllowToolInMode)
  * 2. Source blocking (inactive MCP sources)
  * 3. Prerequisite check (guide.md before source tools)
@@ -716,6 +719,13 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
     backendMetadata,
     onDebug,
   } = ctx;
+
+  const moduleBoundary = checkModuleAgentToolBoundary(sessionId, toolName, input);
+  if (!moduleBoundary.allowed) {
+    const reason = moduleBoundary.reason ?? 'Module Agent tool boundary denied the operation.';
+    onDebug?.(`[ModuleAgentBoundary] blocking ${toolName} — ${reason}`);
+    return { type: 'block', reason };
+  }
 
   // Build permissions context for custom permissions.json rules
   const permissionsContext: PermissionsContext = {

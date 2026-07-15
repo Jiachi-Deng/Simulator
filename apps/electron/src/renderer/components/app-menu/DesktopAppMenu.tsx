@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react"
+import { useEffect, useRef, useState } from "react"
 import { useTranslation } from "react-i18next"
 import * as Icons from "lucide-react"
 import { isMac } from "@/lib/platform"
@@ -29,11 +29,137 @@ import {
   getShortcutDisplay,
 } from "../../../shared/menu-schema"
 import type { MenuItem, MenuSection } from "../../../shared/menu-schema"
+import type {
+  OpenDesignModuleAction,
+  OpenDesignModuleCheckpoint,
+  OpenDesignModuleFacade,
+  OpenDesignModuleState,
+} from "../../../shared/open-design-module-ipc"
 import type { AppMenuProps } from "./types"
 
 type MenuActionHandlers = {
   toggleFocusMode?: () => void
   toggleSidebar?: () => void
+}
+
+type MenuTranslate = (key: string, options?: Record<string, string | number>) => string
+export type OpenDesignMenuCommand = OpenDesignModuleAction
+
+export interface OpenDesignMenuPresentation {
+  readonly statusKey: string
+  readonly statusValues?: Readonly<Record<string, string | number>>
+  readonly checkpointKey?: string
+  readonly action?: OpenDesignMenuCommand
+  readonly actionKey?: string
+  readonly actionDisabled: boolean
+}
+
+function getCheckpointKey(checkpoint: OpenDesignModuleCheckpoint): string {
+  if (checkpoint.startsWith('compensation-') || checkpoint === 'compensation-started' || checkpoint === 'compensated') {
+    return 'menu.openDesignCheckpointRecovering'
+  }
+  switch (checkpoint) {
+    case 'catalog-verified':
+      return 'menu.openDesignCheckpointDownloading'
+    case 'artifact-downloaded':
+      return 'menu.openDesignCheckpointInstalling'
+    case 'installed':
+      return 'menu.openDesignCheckpointRegistering'
+    case 'registered':
+    case 'completed':
+      return 'menu.openDesignCheckpointFinishing'
+    default:
+      return 'menu.openDesignCheckpointPreparing'
+  }
+}
+
+export function getOpenDesignMenuPresentation(
+  state: OpenDesignModuleState | undefined,
+  commandInFlight = false,
+): OpenDesignMenuPresentation {
+  if (!state) {
+    return { statusKey: 'menu.openDesignStatusLoading', actionDisabled: true }
+  }
+  switch (state.status) {
+    case 'not-installed':
+      return {
+        statusKey: 'menu.openDesignStatusNotInstalled',
+        action: 'install',
+        actionKey: 'menu.openDesignActionInstall',
+        actionDisabled: commandInFlight,
+      }
+    case 'available':
+      return {
+        statusKey: 'menu.openDesignStatusAvailable',
+        action: 'start',
+        actionKey: 'menu.openDesignActionOpen',
+        actionDisabled: commandInFlight,
+      }
+    case 'running':
+      return {
+        statusKey: 'menu.openDesignStatusRunning',
+        action: 'stop',
+        actionKey: 'menu.openDesignActionStop',
+        actionDisabled: commandInFlight,
+      }
+    case 'installing': {
+      const progress = state.progress
+      if (progress && progress.total > 0) {
+        const percent = Math.max(0, Math.min(100, Math.round((progress.received / progress.total) * 100)))
+        return {
+          statusKey: 'menu.openDesignStatusInstallingProgress',
+          statusValues: { percent },
+          actionDisabled: true,
+        }
+      }
+      return {
+        statusKey: state.checkpoint
+          ? 'menu.openDesignStatusInstallingCheckpoint'
+          : 'menu.openDesignStatusInstalling',
+        ...(state.checkpoint ? { checkpointKey: getCheckpointKey(state.checkpoint) } : {}),
+        actionDisabled: true,
+      }
+    }
+    case 'disabled':
+      return { statusKey: 'menu.openDesignStatusDisabled', actionDisabled: true }
+    case 'not-ready':
+      return { statusKey: 'menu.openDesignStatusNotReady', actionDisabled: true }
+    case 'error':
+      if (state.errorCode === 'CONTROLLER_UNAVAILABLE') {
+        return { statusKey: 'menu.openDesignStatusUnavailable', actionDisabled: true }
+      }
+      return {
+        statusKey: 'menu.openDesignStatusError',
+        action: state.version ? 'start' : 'install',
+        actionKey: 'menu.openDesignActionRetry',
+        actionDisabled: commandInFlight,
+      }
+  }
+}
+
+function unavailableOpenDesignState(): OpenDesignModuleState {
+  return {
+    status: 'error',
+    errorCode: 'CONTROLLER_UNAVAILABLE',
+    errorMessage: 'OpenDesign controller unavailable',
+  }
+}
+
+const OPEN_DESIGN_STATE_RETRY_DELAY_MS = 250
+
+export async function loadOpenDesignStateWithRetry(
+  module: Pick<OpenDesignModuleFacade, 'getState'>,
+  wait: (milliseconds: number) => Promise<void> = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  shouldContinue: () => boolean = () => true,
+): Promise<OpenDesignModuleState> {
+  while (shouldContinue()) {
+    try {
+      return await module.getState()
+    } catch {
+      if (shouldContinue()) await wait(OPEN_DESIGN_STATE_RETRY_DELAY_MS)
+    }
+  }
+  return unavailableOpenDesignState()
 }
 
 const roleHandlers: Record<string, () => void> = {
@@ -59,7 +185,7 @@ function renderSubmenuItem(
   item: MenuItem,
   index: number,
   actionHandlers: MenuActionHandlers,
-  t: (key: string) => string,
+  t: MenuTranslate,
 ): React.ReactNode {
   if (item.type === 'separator') {
     return <StyledDropdownMenuSeparator key={`sep-${index}`} />
@@ -114,7 +240,7 @@ function renderSubmenuItem(
 function renderMenuSection(
   section: MenuSection,
   actionHandlers: MenuActionHandlers,
-  t: (key: string) => string,
+  t: MenuTranslate,
 ): React.ReactNode {
   const Icon = getIcon(section.icon)
   return (
@@ -148,6 +274,10 @@ export function DesktopAppMenu({
 }: AppMenuProps) {
   const { t } = useTranslation()
   const [isDebugMode, setIsDebugMode] = useState(false)
+  const [openDesignState, setOpenDesignState] = useState<OpenDesignModuleState>()
+  const [openDesignCommand, setOpenDesignCommand] = useState<OpenDesignMenuCommand>()
+  const openDesignCommandInFlight = useRef(false)
+  const openDesignModule = isMac ? window.electronAPI.openDesignModule : undefined
 
   const newChatHotkey = useActionLabel('app.newChat').hotkey
   const newWindowHotkey = useActionLabel('app.newWindow').hotkey
@@ -156,8 +286,46 @@ export function DesktopAppMenu({
   const quitHotkey = useActionLabel('app.quit').hotkey
 
   useEffect(() => {
-    window.electronAPI.isDebugMode().then(setIsDebugMode)
+    window.electronAPI.isDebugMode().then(setIsDebugMode).catch(() => setIsDebugMode(false))
   }, [])
+
+  useEffect(() => {
+    if (!isDebugMode || !openDesignModule) {
+      setOpenDesignState(undefined)
+      return
+    }
+
+    let active = true
+    const updateState = (state: OpenDesignModuleState) => {
+      if (active) setOpenDesignState(state)
+    }
+    let unsubscribe = () => {}
+    try {
+      unsubscribe = openDesignModule.onStateChanged(updateState)
+    } catch {
+      updateState(unavailableOpenDesignState())
+    }
+    void loadOpenDesignStateWithRetry(openDesignModule, undefined, () => active).then(updateState)
+    return () => {
+      active = false
+      unsubscribe()
+    }
+  }, [isDebugMode, openDesignModule])
+
+  const runOpenDesignCommand = async (command: OpenDesignMenuCommand) => {
+    if (!openDesignModule || openDesignCommandInFlight.current) return
+    openDesignCommandInFlight.current = true
+    setOpenDesignCommand(command)
+    try {
+      const state = await openDesignModule[command]()
+      setOpenDesignState(state)
+    } catch {
+      setOpenDesignState(unavailableOpenDesignState())
+    } finally {
+      openDesignCommandInFlight.current = false
+      setOpenDesignCommand(undefined)
+    }
+  }
 
   const actionHandlers: MenuActionHandlers = {
     toggleFocusMode: onToggleFocusMode,
@@ -247,7 +415,11 @@ export function DesktopAppMenu({
           </StyledDropdownMenuSubContent>
         </DropdownMenuSub>
 
-        {isDebugMode && renderDebugSubmenu(t)}
+        {isDebugMode && renderDebugSubmenu(t, openDesignModule ? {
+          state: openDesignState,
+          commandInFlight: openDesignCommand !== undefined,
+          onCommand: runOpenDesignCommand,
+        } : undefined)}
 
         <StyledDropdownMenuSeparator />
 
@@ -266,7 +438,58 @@ export function DesktopAppMenu({
  * that drive it (`checkForUpdates`, `installUpdate`, `toggleDevTools`) all live on
  * `window.electronAPI` directly and never traverse the menu IPC channels.
  */
-function renderDebugSubmenu(t: (key: string) => string): React.ReactNode {
+interface OpenDesignDebugMenuProps {
+  readonly state: OpenDesignModuleState | undefined
+  readonly commandInFlight: boolean
+  readonly onCommand: (command: OpenDesignMenuCommand) => void
+}
+
+function renderOpenDesignMenuItems(
+  t: MenuTranslate,
+  props: OpenDesignDebugMenuProps,
+): React.ReactNode {
+  const presentation = getOpenDesignMenuPresentation(props.state, props.commandInFlight)
+  const statusValues = presentation.checkpointKey
+    ? { checkpoint: t(presentation.checkpointKey) }
+    : presentation.statusValues
+  const ActionIcon = presentation.action === 'install'
+    ? Icons.Download
+    : presentation.action === 'start'
+      ? Icons.Play
+      : Icons.Square
+
+  return (
+    <>
+      <StyledDropdownMenuSeparator />
+      <StyledDropdownMenuItem disabled>
+        {props.state?.status === 'installing'
+          ? <Icons.LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+          : <Icons.Palette className="h-3.5 w-3.5" />}
+        {t(presentation.statusKey, statusValues)}
+      </StyledDropdownMenuItem>
+      {props.state?.errorCode && (
+        <StyledDropdownMenuItem disabled>
+          <Icons.CircleAlert className="h-3.5 w-3.5" />
+          {props.state.errorCode}
+        </StyledDropdownMenuItem>
+      )}
+      {presentation.action && presentation.actionKey && (
+        <StyledDropdownMenuItem
+          disabled={presentation.actionDisabled}
+          onClick={() => props.onCommand(presentation.action!)}
+        >
+          <ActionIcon className="h-3.5 w-3.5" />
+          {t(presentation.actionKey)}
+        </StyledDropdownMenuItem>
+      )}
+    </>
+  )
+}
+
+function renderDebugSubmenu(
+  t: MenuTranslate,
+  openDesign?: OpenDesignDebugMenuProps,
+): React.ReactNode {
   const SectionIcon = getIcon(DEBUG_MENU.icon)
   return (
     <DropdownMenuSub>
@@ -295,6 +518,7 @@ function renderDebugSubmenu(t: (key: string) => string): React.ReactNode {
             </StyledDropdownMenuItem>
           )
         })}
+        {openDesign && renderOpenDesignMenuItems(t, openDesign)}
       </StyledDropdownMenuSubContent>
     </DropdownMenuSub>
   )

@@ -10,13 +10,22 @@ const SHA40 = /^[0-9a-f]{40}$/;
 const textEncoder = new TextEncoder();
 const moduleRoot = new URL("../", import.meta.url);
 
-export function validateArtifact({ provenance, policy, decisions, inventory, schemas }) {
+export function validateArtifact({ provenance, policy, decisions, attestation, inventory, schemas }) {
+  return validateArtifactForDistribution({ provenance, policy, decisions, attestation, inventory, schemas }, "public");
+}
+
+export function validateDevelopmentArtifact({ provenance, policy, decisions, attestation, inventory, schemas }) {
+  return validateArtifactForDistribution({ provenance, policy, decisions, attestation, inventory, schemas }, "development-local-only");
+}
+
+function validateArtifactForDistribution({ provenance, policy, decisions, attestation, inventory, schemas }, expectedDistributionClass) {
   const errors = [];
   const fail = (code, message) => errors.push({ code, message });
   const schemaInputs = [
     ["provenance", provenance, schemas?.provenance],
     ["policy", policy, schemas?.policy],
     ["decisions", decisions, schemas?.decisions],
+    ["attestation", attestation, schemas?.attestation],
     ["inventory", inventory, schemas?.inventory]
   ];
   for (const [name, value, schema] of schemaInputs) {
@@ -27,11 +36,21 @@ export function validateArtifact({ provenance, policy, decisions, inventory, sch
   else for (const [index, file] of (inventory?.files ?? []).entries()) validateSchema(file, schemas.inventoryFile, `inventory.files[${index}]`, fail);
   if (errors.length) return { ok: false, errors };
 
+  if (inventory.distribution.class !== expectedDistributionClass) {
+    fail(expectedDistributionClass === "public" ? "DEVELOPMENT_ARTIFACT_FORBIDDEN" : "DISTRIBUTION_CLASS_INVALID", `validator requires ${expectedDistributionClass} artifacts`);
+  }
+  if (inventory.distribution.class !== attestation.distribution.class || inventory.distribution.nonPromotable !== attestation.distribution.nonPromotable) {
+    fail("DISTRIBUTION_ATTESTATION_MISMATCH", "inventory and attestation distribution markings differ");
+  }
+  if (inventory.distribution.class === "development-local-only" && inventory.distribution.nonPromotable !== true) fail("DISTRIBUTION_CLASS_INVALID", "development artifacts must be non-promotable");
+  if (inventory.distribution.class === "public" && inventory.distribution.nonPromotable !== false) fail("DISTRIBUTION_CLASS_INVALID", "public artifacts cannot carry a development promotion marking");
+
   const pinned = provenance.source;
   if (!SHA40.test(pinned.commit) || /^(HEAD|main|master|develop)$/i.test(pinned.ref)) fail("SOURCE_NOT_PINNED", "source must use a pinned tag/commit and full SHA");
   if (inventory.source.commit !== pinned.commit || inventory.source.ref !== pinned.ref) fail("SOURCE_MISMATCH", "inventory source must match pinned provenance exactly");
+  validateAttestation({ attestation, provenance, inventory }, fail);
 
-  validateLimits({ provenance, policy, decisions, inventory }, policy.limits, fail);
+  validateLimits({ provenance, policy, decisions, attestation, inventory }, policy.limits, fail);
   validateTarget(inventory.target, fail);
 
   const decisionById = new Map();
@@ -62,11 +81,11 @@ export function validateArtifact({ provenance, policy, decisions, inventory, sch
     const rule = policy.exactPathRules.find((candidate) => candidate.path === file.path)
       ?? policy.pathRules.find((candidate) => file.path.startsWith(candidate.prefix));
     const extension = path.posix.extname(file.path).toLowerCase();
-    const native = policy.nativeBinaryExtensions.includes(extension);
+    const runtimeClass = runtimeBinaryClass(file.path, policy);
     if (!rule) fail("PATH_NOT_ALLOWED", `path is outside the feature profile: ${file.path}`);
     else {
       const expectedKind = rule.artifactKind;
-      const kindAllowed = file.artifactKind === expectedKind || (native && expectedKind === "runtime-package" && file.artifactKind === "native-binary");
+      const kindAllowed = file.artifactKind === expectedKind || (runtimeClass && ["web-server", "runtime-package", "daemon-runtime"].includes(expectedKind) && file.artifactKind === runtimeClass);
       const componentAllowed = rule.component ? file.component === rule.component : rule.components.includes(file.component);
       if (!kindAllowed || !componentAllowed) fail("PROFILE_MISMATCH", `artifact kind/component does not match its path rule: ${file.path}`);
     }
@@ -77,27 +96,104 @@ export function validateArtifact({ provenance, policy, decisions, inventory, sch
       if (!file.symlinkTarget || !validateSymlinkTarget(file.path, file.symlinkTarget)) fail("SYMLINK_ESCAPE", `symlink target must stay inside artifact root: ${file.path}`);
     } else if (file.symlinkTarget !== undefined) fail("FILE_METADATA_INVALID", `regular file cannot declare symlinkTarget: ${file.path}`);
 
-    const inferredCategory = native ? "native-binaries" : inferResourceCategory(extension, policy);
     const pathCategory = inferResourcePathCategory(file.path, policy);
+    const inferredCategory = runtimeClass ? "native-binaries" : pathCategory ?? inferResourceCategory(extension, policy);
     if (inferredCategory && file.resourceCategory !== inferredCategory) fail("UNEXPECTED_RESOURCE", `${inferredCategory} resource lacks its category/decision: ${file.path}`);
-    if (pathCategory && file.resourceCategory !== pathCategory) fail("UNEXPECTED_RESOURCE", `${pathCategory} resource lacks its category/decision: ${file.path}`);
     if (pathCategory !== undefined && !file.resourceCategory) fail("UNEXPECTED_RESOURCE", `resource path lacks its category/decision: ${file.path}`);
     if (file.resourceCategory) validateResource(file, decisionById, fail);
     else if (file.sourcePath !== undefined || file.decisionId !== undefined) fail("UNEXPECTED_RESOURCE", `resource metadata is incomplete: ${file.path}`);
 
-    if (native) validateNative(file, extension, inventory.target, fail);
+    if (runtimeClass) validateNative(file, extension, runtimeClass, inventory.target, fail);
     else if (file.nativeTarget !== undefined || file.artifactKind === "native-binary") fail("NATIVE_METADATA_INVALID", `non-native file declares native metadata: ${file.path}`);
   }
   if (inventory.files.length > policy.limits.maxEntries) fail("ENTRY_LIMIT_EXCEEDED", "inventory exceeds maxEntries");
   if (!Number.isSafeInteger(totalBytes) || totalBytes > policy.limits.maxTotalBytes) fail("TOTAL_SIZE_EXCEEDED", "inventory exceeds maxTotalBytes");
 
   const filesByPath = new Map(inventory.files.map((file) => [file.path, file]));
-  for (const required of policy.requiredFiles) validateRequiredFile(filesByPath.get(required.path), required, pinned.commit, { provenance, inventory }, fail);
+  for (const required of policy.requiredFiles) validateRequiredFile(filesByPath.get(required.path), required, pinned.commit, { provenance, attestation, inventory }, fail);
 
   return { ok: errors.length === 0, errors };
 }
 
-function validateSchema(value, schema, location, fail) {
+function validateAttestation({ attestation, provenance, inventory }, fail) {
+  if (attestation.sourceCommit !== provenance.source.commit) fail("ATTESTATION_SOURCE_MISMATCH", "build attestation source commit does not match provenance");
+  if (attestation.patch.sha256 !== provenance.simulatorPatch.sha256 || attestation.patch.postimageSha256 !== provenance.simulatorPatch.postimageSha256) {
+    fail("ATTESTATION_PATCH_MISMATCH", "build attestation patch does not match provenance");
+  }
+  const expected = provenance.buildToolchainExpectations;
+  const actual = attestation.toolchain;
+  for (const [attestationKey, provenanceKey] of [["nodeVersion", "node"], ["nodeAbi", "nodeAbi"], ["platform", "platform"], ["arch", "arch"], ["nodeExecutableSha256", "nodeExecutableSha256"], ["pnpmVersion", "pnpm"], ["pnpmExecutableSha256", "pnpmExecutableSha256"]]) {
+    if (actual[attestationKey] !== expected[provenanceKey]) fail("ATTESTATION_TOOLCHAIN_MISMATCH", `build attestation ${attestationKey} does not match provenance`);
+  }
+  if (inventory.target.platform !== actual.platform || inventory.target.arch !== actual.arch || inventory.target.nodeAbi !== actual.nodeAbi) fail("ATTESTATION_TARGET_MISMATCH", "artifact target does not match attested toolchain");
+  validateSbomEvidence(attestation.sbom, provenance, fail);
+  const metadataInput = attestation.inputs.find((entry) => entry.name === "resource-metadata.json");
+  if (!metadataInput || metadataInput.sha256 !== attestation.resourceMetadata.documentSha256) fail("ATTESTATION_RESOURCE_METADATA_MISMATCH", "resource metadata evidence does not bind the canonical input bytes");
+  const resourceCount = inventory.files.filter((file) => file.resourceCategory !== undefined).length;
+  if (attestation.resourceMetadata.resourceCount !== resourceCount) fail("ATTESTATION_RESOURCE_METADATA_MISMATCH", "resource metadata count does not match the final inventory");
+  const closure = attestation.build.normalization.daemonClosure;
+  const expectedExternals = ["better-sqlite3", "node-pty", "blake3-wasm"];
+  const daemonEntry = inventory.files.find((file) => file.path === "runtime/daemon/dist/sidecar/index.js");
+  if (closure?.method !== "esbuild-node24-esm-create-require-banner-v1" || JSON.stringify(closure.externalAllowlist) !== JSON.stringify(expectedExternals)) {
+    fail("ATTESTATION_DAEMON_CLOSURE_MISMATCH", "daemon closure method or external allowlist is invalid");
+  } else if (!closure.files.some((entry) => entry.path === "runtime/daemon/dist/sidecar/index.js" && entry.sha256 === closure.bundleSha256)) {
+    fail("ATTESTATION_DAEMON_CLOSURE_MISMATCH", "daemon closure bundle evidence is missing or does not match its digest");
+  } else if (daemonEntry?.sha256 !== closure.bundleSha256) {
+    fail("ATTESTATION_DAEMON_CLOSURE_MISMATCH", "daemon closure bundle digest does not match the final inventory entry");
+  }
+  const originByPath = new Map(attestation.build.normalization.nativeOrigins.map((entry) => [entry.path, entry]));
+  const nativeByPath = new Map(attestation.native.map((entry) => [entry.path, entry]));
+  for (const file of inventory.files) {
+    if (!["native-binary", "executable-native", "wasm-resource"].includes(file.artifactKind)) continue;
+    const native = nativeByPath.get(file.path);
+    const origin = originByPath.get(file.path);
+    if (!native || native.sha256 !== file.sha256 || native.resourceClass !== file.artifactKind || native.mode !== file.fileMode || !origin || origin.sha256 !== file.sha256 || origin.mode !== file.fileMode || origin.freshFromBuild !== true || native.freshFromBuild !== true) {
+      fail("ATTESTATION_NATIVE_MISMATCH", `native output is not bound to fresh normalized build evidence: ${file.path}`);
+    } else if (path.posix.extname(file.path).toLowerCase() === ".node" && (native.load?.ok !== true || native.load.nodeAbi !== inventory.target.nodeAbi)) {
+      fail("ATTESTATION_NATIVE_MISMATCH", `Node addon is not bound to a successful exact-runtime load: ${file.path}`);
+    }
+  }
+  const inventoryByPath = new Map(inventory.files.map((file) => [file.path, file]));
+  const expectedEntries = ["runtime/daemon/dist/sidecar/index.js", "runtime/packages/web-sidecar/dist/sidecar/index.js"];
+  if (attestation.runtimeVerification.method !== "sealed-candidate-loopback-v1" || attestation.runtimeVerification.candidateMustBeSealed !== true || JSON.stringify(attestation.runtimeVerification.entries.map((entry) => entry.entryPath)) !== JSON.stringify(expectedEntries)) {
+    fail("ATTESTATION_SMOKE_MISMATCH", "runtime verification policy must bind both sealed candidate entries");
+  }
+  for (const entry of attestation.runtimeVerification.entries) {
+    if (inventoryByPath.get(entry.entryPath)?.sha256 !== entry.entrySha256) fail("ATTESTATION_SMOKE_MISMATCH", `runtime verification digest does not match final inventory: ${entry.entryPath}`);
+  }
+}
+
+function validateSbomEvidence(sbom, provenance, fail) {
+  if (sbom?.lockfileSha256 !== provenance.lockfile.sha256) fail("ATTESTATION_SBOM_MISMATCH", "SBOM evidence does not bind the pinned lockfile");
+  const expected = provenance.sbom.requiredPackages;
+  const actual = sbom?.packages ?? [];
+  if (actual.length !== expected.length) {
+    fail("ATTESTATION_SBOM_MISMATCH", "SBOM evidence does not cover the exact required runtime package set");
+    return;
+  }
+  for (let index = 0; index < expected.length; index += 1) {
+    const left = expected[index];
+    const right = actual[index];
+    for (const key of ["name", "version", "contentSha512", "licenseDeclared", "noticeStatus"]) {
+      if (right?.[key] !== left[key]) fail("ATTESTATION_SBOM_MISMATCH", `SBOM package ${left.name}@${left.version} has mismatched ${key}`);
+    }
+  }
+}
+
+function validateSchema(value, schema, location, fail, rootSchema = schema) {
+  if (schema.$ref !== undefined) {
+    if (typeof schema.$ref !== "string" || !schema.$ref.startsWith("#/$defs/")) {
+      fail("SCHEMA_INVALID", `${location} uses an unsupported schema reference`);
+      return;
+    }
+    const resolved = rootSchema.$defs?.[schema.$ref.slice("#/$defs/".length)];
+    if (!resolved) {
+      fail("SCHEMA_INVALID", `${location} schema reference is missing`);
+      return;
+    }
+    validateSchema(value, resolved, location, fail, rootSchema);
+    return;
+  }
   if (schema.const !== undefined && !Object.is(value, schema.const)) fail("SCHEMA_INVALID", `${location} must equal ${JSON.stringify(schema.const)}`);
   if (schema.enum && !schema.enum.some((candidate) => Object.is(value, candidate))) fail("SCHEMA_INVALID", `${location} has an unknown enum value`);
   if (schema.type && !matchesType(value, schema.type)) {
@@ -113,12 +209,12 @@ function validateSchema(value, schema, location, fail) {
   if (Array.isArray(value)) {
     if (schema.minItems !== undefined && value.length < schema.minItems) fail("SCHEMA_INVALID", `${location} has too few items`);
     if (schema.maxItems !== undefined && value.length > schema.maxItems) fail("SCHEMA_INVALID", `${location} has too many items`);
-    if (schema.items) value.forEach((item, index) => validateSchema(item, schema.items, `${location}[${index}]`, fail));
+    if (schema.items) value.forEach((item, index) => validateSchema(item, schema.items, `${location}[${index}]`, fail, rootSchema));
   } else if (isPlainObject(value)) {
     const properties = schema.properties ?? {};
     for (const required of schema.required ?? []) if (!(required in value)) fail("SCHEMA_INVALID", `${location}.${required} is required`);
     for (const [key, child] of Object.entries(value)) {
-      if (properties[key]) validateSchema(child, properties[key], `${location}.${key}`, fail);
+      if (properties[key]) validateSchema(child, properties[key], `${location}.${key}`, fail, rootSchema);
       else if (schema.additionalProperties === false) fail("SCHEMA_INVALID", `${location}.${key} is an unknown field`);
     }
   }
@@ -194,26 +290,37 @@ export function inferResourcePathCategory(artifactPath, policy) {
 function validateResource(file, decisions, fail) {
   if (!file.sourcePath || !validateNormalizedRelativePath(file.sourcePath)) fail("RESOURCE_SOURCE_INVALID", `resource sourcePath must be exact and normalized: ${file.path}`);
   const decision = decisions.get(file.decisionId);
-  if (!decision || decision.category !== file.resourceCategory || decision.sourcePath !== file.sourcePath) {
+  if (!decision) {
+    fail("RIGHTS_DECISION_MISSING", `no canonical rights decision exists for exact resource source: ${file.path}`);
+  } else if (decision.category !== file.resourceCategory || decision.sourcePath !== file.sourcePath) {
     fail("RESOURCE_DECISION_MISMATCH", `decisionId must match exact sourcePath and category: ${file.path}`);
   } else if (decision.status !== "include" || decision.rightsStatus !== "cleared" || !decision.license?.trim() || !decision.rightsEvidence) {
     fail("RESOURCE_EXCLUDED", `resource lacks an include+cleared decision with license evidence: ${file.path}`);
   }
 }
 
-function validateNative(file, extension, target, fail) {
-  if (file.artifactKind !== "native-binary" || file.resourceCategory !== "native-binaries" || !file.nativeTarget) {
+function validateNative(file, extension, runtimeClass, target, fail) {
+  if (file.artifactKind !== runtimeClass || file.resourceCategory !== "native-binaries" || !file.nativeTarget) {
     fail("NATIVE_METADATA_INVALID", `native binary requires native artifact/resource metadata: ${file.path}`);
     return;
   }
-  const expectedFormat = extension === ".node" ? "node-addon" : extension === ".exe" ? "executable" : "shared-library";
+  const expectedFormat = runtimeClass === "wasm-resource" ? "wasm-module" : runtimeClass === "executable-native" || extension === ".exe" ? "executable" : extension === ".node" ? "node-addon" : "shared-library";
   if (file.nativeTarget.format !== expectedFormat) fail("NATIVE_METADATA_INVALID", `native format does not match extension: ${file.path}`);
   for (const key of ["platform", "arch", "libc"]) if (file.nativeTarget[key] !== target[key]) fail("NATIVE_TARGET_MISMATCH", `${key} does not match artifact target: ${file.path}`);
   if (file.nativeTarget.nodeAbi !== undefined && file.nativeTarget.nodeAbi !== target.nodeAbi) fail("NATIVE_TARGET_MISMATCH", `nodeAbi does not match artifact target: ${file.path}`);
   if (expectedFormat === "node-addon" && !file.nativeTarget.nodeAbi) fail("NATIVE_ABI_MISSING", `Node addon requires nodeAbi: ${file.path}`);
+  const expectedMode = runtimeClass === "executable-native" ? "0755" : "0644";
+  if (file.fileMode !== expectedMode) fail("NATIVE_MODE_MISMATCH", `${runtimeClass} requires mode ${expectedMode}: ${file.path}`);
   if (target.platform === "darwin" && target.libc !== "none") fail("NATIVE_TARGET_INVALID", "darwin target libc must be none");
   if (target.platform === "win32" && target.libc !== "msvcrt") fail("NATIVE_TARGET_INVALID", "win32 target libc must be msvcrt");
   if (target.platform === "linux" && !["glibc", "musl"].includes(target.libc)) fail("NATIVE_TARGET_INVALID", "linux target libc must be glibc or musl");
+}
+
+function runtimeBinaryClass(artifactPath, policy) {
+  const extension = path.posix.extname(artifactPath).toLowerCase();
+  if (extension === ".wasm") return "wasm-resource";
+  if (artifactPath.endsWith("/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper")) return "executable-native";
+  return policy.nativeBinaryExtensions.includes(extension) ? "native-binary" : null;
 }
 
 function validateTarget(target, fail) {
@@ -231,11 +338,20 @@ function validateRequiredFile(file, required, sourceCommit, inputs, fail) {
   if (file.mediaType !== required.mediaType || file.schemaId !== required.schemaId) fail("CONTENT_BINDING_INVALID", `required file has incorrect media/schema binding: ${required.path}`);
   if (required.path !== "legal/LICENSE" && (file.contentSchemaVersion !== required.schemaVersion || file.sourceCommit !== sourceCommit)) fail("CONTENT_BINDING_INVALID", `required JSON document lacks expected schemaVersion/sourceCommit binding: ${required.path}`);
   if (required.path === "provenance.json" && file.sha256 !== digestCanonicalJson(inputs.provenance)) fail("CONTENT_DIGEST_MISMATCH", "provenance digest does not bind the supplied provenance document");
+  if (required.path === "build-attestation.json" && file.sha256 !== digestCanonicalJson(inputs.attestation)) fail("CONTENT_DIGEST_MISMATCH", "attestation digest does not bind the supplied build attestation document");
+  if (required.path === "legal/SBOM.spdx.json") {
+    const sbomInput = inputs.attestation.inputs.find((entry) => entry.name === "legal/SBOM.spdx.json");
+    if (!sbomInput || file.sha256 !== sbomInput.sha256 || file.sha256 !== inputs.attestation.sbom.documentSha256) fail("CONTENT_DIGEST_MISMATCH", "staged SBOM bytes do not bind the hashed SBOM input and attestation evidence");
+  }
+  if (required.path === "resource-metadata.json") {
+    const metadataInput = inputs.attestation.inputs.find((entry) => entry.name === "resource-metadata.json");
+    if (!metadataInput || file.sha256 !== metadataInput.sha256 || file.sha256 !== inputs.attestation.resourceMetadata.documentSha256) fail("CONTENT_DIGEST_MISMATCH", "resource metadata bytes do not bind the attested canonical metadata input");
+  }
   if (required.path === "artifact-manifest.json" && file.sha256 !== digestInventory(inputs.inventory)) fail("CONTENT_DIGEST_MISMATCH", "manifest digest does not bind the supplied inventory document");
 }
 
 export function digestCanonicalJson(value) {
-  return createHash("sha256").update(canonicalJson(value)).digest("hex");
+  return createHash("sha256").update(canonicalJsonBytes(value)).digest("hex");
 }
 
 export function digestInventory(inventory) {
@@ -251,18 +367,22 @@ export function canonicalJson(value) {
   return JSON.stringify(value);
 }
 
+export function canonicalJsonBytes(value) {
+  return Buffer.from(`${canonicalJson(value)}\n`, "utf8");
+}
+
 async function readJson(filename) {
   return JSON.parse(await readFile(filename, "utf8"));
 }
 
 export async function loadRuntimeSchemas() {
-  const names = { provenance: "provenance.schema.json", policy: "policy.schema.json", decisions: "resource-decisions.schema.json", inventory: "inventory.schema.json", inventoryFile: "inventory-file.schema.json" };
+  const names = { provenance: "provenance.schema.json", policy: "policy.schema.json", decisions: "resource-decisions.schema.json", attestation: "build-attestation.schema.json", inventory: "inventory.schema.json", inventoryFile: "inventory-file.schema.json" };
   return Object.fromEntries(await Promise.all(Object.entries(names).map(async ([name, filename]) => [name, await readJson(new URL(filename, moduleRoot))])));
 }
 
 async function main(argv) {
   const options = parseArguments(argv);
-  const names = ["provenance", "policy", "decisions", "inventory"];
+  const names = ["provenance", "policy", "decisions", "attestation", "inventory"];
   const inputs = Object.fromEntries(await Promise.all(names.map(async (name) => [name, await readJson(options[name])])));
   inputs.schemas = await loadRuntimeSchemas();
   const result = validateArtifact(inputs);
@@ -273,7 +393,7 @@ async function main(argv) {
 }
 
 function parseArguments(argv) {
-  const allowed = new Set(["provenance", "policy", "decisions", "inventory"]);
+  const allowed = new Set(["provenance", "policy", "decisions", "attestation", "inventory"]);
   const options = {};
   for (let index = 0; index < argv.length; index += 2) {
     const token = argv[index];

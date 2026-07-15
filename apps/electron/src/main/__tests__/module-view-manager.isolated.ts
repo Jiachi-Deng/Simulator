@@ -20,13 +20,19 @@ function createEmitter() {
         this.removeListener(event, wrapped)
         listener(...args)
       }
+      Object.assign(wrapped, { listener })
       this.on(event, wrapped)
     },
     removeListener(event: string, listener: Listener) {
-      listeners.set(event, (listeners.get(event) ?? []).filter((candidate) => candidate !== listener))
+      listeners.set(event, (listeners.get(event) ?? []).filter((candidate) => (
+        candidate !== listener && (candidate as Listener & { listener?: Listener }).listener !== listener
+      )))
     },
     emit(event: string, ...args: any[]) {
       for (const listener of [...(listeners.get(event) ?? [])]) listener(...args)
+    },
+    listenerCount(event: string) {
+      return listeners.get(event)?.length ?? 0
     },
   }
 }
@@ -65,14 +71,28 @@ function createMockSession() {
 function createHostWindow(width = 1200, height = 800) {
   const emitter = createEmitter()
   let destroyed = false
+  let contentSizeError: Error | undefined
   return {
     ...emitter,
     contentView: {
       addChildView: mock((_view: unknown) => {}),
       removeChildView: mock((_view: unknown) => {}),
     },
-    getContentSize: mock(() => [width, height]),
+    getContentSize: mock(() => {
+      if (contentSizeError) throw contentSizeError
+      return [width, height]
+    }),
     isDestroyed: mock(() => destroyed),
+    _emit: (event: string) => emitter.emit(event),
+    _listenerCount: (event: string) => emitter.listenerCount(event),
+    _setContentSize: (nextWidth: number, nextHeight: number, event = 'resize') => {
+      width = nextWidth
+      height = nextHeight
+      emitter.emit(event)
+    },
+    _setContentSizeError: (error: Error | undefined) => {
+      contentSizeError = error
+    },
     _destroy: () => {
       destroyed = true
       emitter.emit('closed')
@@ -183,6 +203,143 @@ describe('ModuleViewManager', () => {
     expect(dedicatedSession.webRequest.onBeforeRequest).toHaveBeenCalledTimes(1)
     expect(dedicatedSession.webRequest.onBeforeRequest.mock.calls[0][0]).toEqual({ urls: ['<all_urls>'] })
 
+    manager.dispose()
+  })
+
+  it('keeps full-content bounds synchronized across resize, maximize, and restore size changes', async () => {
+    const hostWindow = createHostWindow(1000, 700)
+    const manager = new ModuleViewManager()
+    await manager.attach({ ...attachOptions(hostWindow), rect: 'full-content' })
+    const view = createdViews[0]
+
+    expect(hostWindow._listenerCount('resize')).toBe(1)
+    expect(hostWindow._listenerCount('maximize')).toBe(1)
+    expect(hostWindow._listenerCount('restore')).toBe(1)
+
+    hostWindow._setContentSize(1280, 800)
+    expect(view.setBounds).toHaveBeenLastCalledWith({ x: 0, y: 0, width: 1280, height: 800 })
+    expect(manager.get(identity)?.rect).toEqual({ x: 0, y: 0, width: 1280, height: 800 })
+
+    hostWindow._setContentSize(1728, 1080, 'maximize')
+    expect(view.setBounds).toHaveBeenLastCalledWith({ x: 0, y: 0, width: 1728, height: 1080 })
+
+    hostWindow._setContentSize(1100, 720, 'restore')
+    expect(view.setBounds).toHaveBeenLastCalledWith({ x: 0, y: 0, width: 1100, height: 720 })
+    expect(manager.get(identity)?.rect).toEqual({ x: 0, y: 0, width: 1100, height: 720 })
+    manager.dispose()
+  })
+
+  it('keeps fixed bounds stable and only subscribes while full-content is attached', async () => {
+    const hostWindow = createHostWindow()
+    const replacementHost = createHostWindow(1400, 900)
+    const manager = new ModuleViewManager()
+    const fixedRect = { x: 8, y: 12, width: 640, height: 480 }
+    await manager.attach({ ...attachOptions(hostWindow), rect: fixedRect })
+    const view = createdViews[0]
+
+    expect(hostWindow._listenerCount('resize')).toBe(0)
+    hostWindow._setContentSize(1800, 1000)
+    expect(view.setBounds).toHaveBeenCalledTimes(1)
+    expect(manager.get(identity)?.rect).toEqual(fixedRect)
+
+    manager.resize(identity, 'full-content')
+    expect(hostWindow._listenerCount('resize')).toBe(1)
+    expect(view.setBounds).toHaveBeenLastCalledWith({ x: 0, y: 0, width: 1800, height: 1000 })
+
+    manager.resize(identity, fixedRect)
+    expect(hostWindow._listenerCount('resize')).toBe(0)
+    hostWindow._setContentSize(1920, 1080)
+    expect(view.setBounds).toHaveBeenLastCalledWith(fixedRect)
+
+    manager.detach(identity)
+    expect(manager.reattach(identity, replacementHost as any).rect).toEqual(fixedRect)
+    expect(replacementHost._listenerCount('resize')).toBe(0)
+    replacementHost._setContentSize(1600, 1000)
+    expect(view.setBounds).toHaveBeenLastCalledWith(fixedRect)
+    manager.dispose()
+  })
+
+  it('cleans up full-content listeners across detach, replacement, host close, destroy, and dispose', async () => {
+    const firstHost = createHostWindow(1000, 700)
+    const replacementHost = createHostWindow(1400, 900)
+    const manager = new ModuleViewManager()
+    const onHostClosed = mock(() => {})
+    await manager.attach({ ...attachOptions(firstHost), rect: 'full-content', onHostClosed })
+    const view = createdViews[0]
+
+    manager.detach(identity)
+    expect(firstHost._listenerCount('resize')).toBe(0)
+    firstHost._setContentSize(1100, 750)
+    expect(view.setBounds).toHaveBeenCalledTimes(1)
+
+    expect(manager.reattach(identity, replacementHost as any).rect)
+      .toEqual({ x: 0, y: 0, width: 1400, height: 900 })
+    expect(firstHost._listenerCount('closed')).toBe(0)
+    expect(replacementHost._listenerCount('resize')).toBe(1)
+    firstHost._destroy()
+    expect(manager.get(identity)).toBeDefined()
+
+    replacementHost._destroy()
+    expect(manager.get(identity)).toBeUndefined()
+    expect(onHostClosed).toHaveBeenCalledTimes(1)
+    expect(onHostClosed).toHaveBeenCalledWith(identity)
+    expect(replacementHost._listenerCount('resize')).toBe(0)
+    expect(view.webContents.close).toHaveBeenCalledTimes(1)
+
+    const destroyHost = createHostWindow()
+    await manager.attach({ ...attachOptions(destroyHost), viewInstanceId: 'view-destroy', rect: 'full-content' })
+    manager.destroy({ moduleId: identity.moduleId, viewInstanceId: 'view-destroy' })
+    expect(destroyHost._listenerCount('resize')).toBe(0)
+    expect(destroyHost._listenerCount('closed')).toBe(0)
+
+    const disposeHost = createHostWindow()
+    await manager.attach({ ...attachOptions(disposeHost), viewInstanceId: 'view-dispose', rect: 'full-content' })
+    manager.dispose()
+    expect(disposeHost._listenerCount('resize')).toBe(0)
+    expect(disposeHost._listenerCount('closed')).toBe(0)
+  })
+
+  it('rebinds full-content resize to a recreated live view without touching the destroyed view', async () => {
+    const hostWindow = createHostWindow(1200, 800)
+    const manager = new ModuleViewManager()
+    await manager.attach({ ...attachOptions(hostWindow), rect: 'full-content' })
+    const crashedView = createdViews[0]
+
+    crashedView.webContents.emit('render-process-gone', {}, { reason: 'crashed', exitCode: 139 })
+    expect(hostWindow._listenerCount('resize')).toBe(0)
+    hostWindow._setContentSize(1600, 1000)
+    expect(crashedView.setBounds).toHaveBeenLastCalledWith({ x: 0, y: 0, width: 0, height: 0 })
+
+    await manager.recreate(identity)
+    const replacement = createdViews[1]
+    expect(replacement.setBounds).toHaveBeenCalledWith({ x: 0, y: 0, width: 1600, height: 1000 })
+    expect(hostWindow._listenerCount('resize')).toBe(1)
+
+    crashedView.webContents.isDestroyed.mockImplementation(() => true)
+    hostWindow._setContentSize(1700, 1050)
+    expect(replacement.setBounds).toHaveBeenLastCalledWith({ x: 0, y: 0, width: 1700, height: 1050 })
+    expect(crashedView.setBounds).toHaveBeenCalledTimes(2)
+    manager.dispose()
+  })
+
+  it('contains host resize errors and preserves the last successfully applied bounds', async () => {
+    const hostWindow = createHostWindow(1200, 800)
+    const manager = new ModuleViewManager()
+    await manager.attach({ ...attachOptions(hostWindow), rect: 'full-content' })
+    const view = createdViews[0]
+
+    hostWindow._setContentSizeError(new Error('window is transitioning'))
+    expect(() => hostWindow._emit('resize')).not.toThrow()
+    expect(manager.get(identity)?.rect).toEqual({ x: 0, y: 0, width: 1200, height: 800 })
+    expect(view.setBounds).toHaveBeenCalledTimes(1)
+
+    hostWindow._setContentSizeError(undefined)
+    view.setBounds.mockImplementationOnce(() => { throw new Error('view was destroyed during resize') })
+    expect(() => hostWindow._setContentSize(1400, 900)).not.toThrow()
+    expect(manager.get(identity)?.rect).toEqual({ x: 0, y: 0, width: 1200, height: 800 })
+
+    hostWindow._setContentSize(1500, 950)
+    expect(view.setBounds).toHaveBeenLastCalledWith({ x: 0, y: 0, width: 1500, height: 950 })
     manager.dispose()
   })
 

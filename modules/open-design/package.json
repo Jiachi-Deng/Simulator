@@ -4,14 +4,21 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "unicode-case-folding": "1.1.1"
+    "tar": "7.5.20",
+    "unicode-case-folding": "1.1.1",
+    "yaml": "2.9.0"
   },
   "scripts": {
-    "build": "node ./src/validate-artifact.mjs --provenance ./provenance.json --policy ./artifact-policy.json --decisions ./resource-decisions.json --inventory ./fixtures/minimal-valid.inventory.json",
+    "build": "node ./src/validate-artifact.mjs --provenance ./provenance.json --policy ./artifact-policy.json --decisions ./resource-decisions.json --attestation ./fixtures/minimal-build-attestation.json --inventory ./fixtures/minimal-valid.inventory.json",
     "diff-check": "git diff --check -- .",
     "inventory": "node ./src/produce-inventory.mjs",
-    "test": "node --test",
-    "typecheck": "node --check ./src/validate-artifact.mjs && node --check ./src/produce-inventory.mjs && node --check ./test/validate-artifact.test.mjs && node --check ./test/produce-inventory.test.mjs"
+    "package:development": "node ./package/cli.mjs",
+    "package:production": "node ./package/production-cli.mjs",
+    "stage": "node ./src/stage-open-design.mjs",
+    "stage:plan": "node ./src/stage-open-design.mjs --dry-run",
+    "smoke:loopback": "node ./src/smoke-loopback.mjs",
+    "test": "node --test ./test/*.test.mjs",
+    "typecheck": "node --check ./src/validate-artifact.mjs && node --check ./src/produce-inventory.mjs && node --check ./src/produce-resource-metadata.mjs && node --check ./src/produce-sbom.mjs && node --check ./src/staging-error.mjs && node --check ./src/verify-upstream.mjs && node --check ./src/apply-simulator-patch.mjs && node --check ./src/private-build-workspace.mjs && node --check ./src/materialize-build-output.mjs && node --check ./src/daemon-external-closure.mjs && node --check ./src/native-inventory.mjs && node --check ./src/load-native-addon.mjs && node --check ./src/staging-copier.mjs && node --check ./src/atomic-publisher.mjs && node --check ./src/stage-open-design.mjs && node --check ./src/smoke-loopback.mjs && node --check ./src/staged-runtime-smoke.mjs && node --check ./package/development-key.mjs && node --check ./package/open-design-package.mjs && node --check ./package/production-package.mjs && node --check ./package/cli.mjs && node --check ./package/production-cli.mjs && node --check ./test/validate-artifact.test.mjs && node --check ./test/produce-inventory.test.mjs && node --check ./test/produce-resource-metadata.test.mjs && node --check ./test/produce-sbom.test.mjs && node --check ./test/verify-upstream.test.mjs && node --check ./test/private-build-workspace.test.mjs && node --check ./test/materialize-build-output.test.mjs && node --check ./test/daemon-external-closure.test.mjs && node --check ./test/native-inventory.test.mjs && node --check ./test/staging-infrastructure.test.mjs && node --check ./test/atomic-publisher.test.mjs && node --check ./test/smoke-loopback.test.mjs && node --check ./test/staged-runtime-smoke.test.mjs && node --check ./test/open-design-package.test.mjs && node --check ./test/open-design-package-security.test.mjs && node --check ./test/open-design-package-production.test.mjs && node --check ./test/simulator-host-runtime.test.mjs"
   },
   "engines": {
     "node": ">=20"

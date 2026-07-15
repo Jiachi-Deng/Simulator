@@ -43,7 +43,8 @@
     "dist:win": "powershell -ExecutionPolicy Bypass -File scripts/build-win.ps1",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
-    "smoke:module-view": "bun scripts/module-view-smoke.ts"
+    "smoke:module-view": "bun scripts/module-view-smoke.ts",
+    "smoke:module-coordinator": "bun scripts/host-module-coordinator-smoke.ts"
   },
   "dependencies": {
     "@craft-agent/core": "workspace:*",
@@ -51,6 +52,13 @@
     "@craft-agent/server-core": "workspace:*",
     "@craft-agent/shared": "workspace:*",
     "@craft-agent/ui": "workspace:*",
+    "@simulator/module-contract": "workspace:*",
+    "@simulator/module-agent-gateway": "workspace:*",
+    "@simulator/module-coordinator": "workspace:*",
+    "@simulator/module-daemon": "workspace:*",
+    "@simulator/module-downloader": "workspace:*",
+    "@simulator/module-installer": "workspace:*",
+    "@simulator/module-registry": "workspace:*",
     "@dnd-kit/core": "^6.3.1",
     "@dnd-kit/sortable": "^10.0.0",
     "@dnd-kit/utilities": "^3.2.2",

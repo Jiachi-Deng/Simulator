@@ -10,7 +10,8 @@ import {
   type TrustedReleaseKey,
 } from '@simulator/module-release-trust'
 import { ModuleDownloader } from './downloader.ts'
-import { ModuleDownloaderError, type ModuleDownloaderCacheAdapter } from './types.ts'
+import { fetchWithRedirects } from './network.ts'
+import { ModuleDownloaderError, type ModuleDownloaderCacheAdapter, type ModuleDownloaderOptions } from './types.ts'
 import {
   ManualClock,
   MemoryHeaders,
@@ -23,6 +24,9 @@ import {
 const NOW = Date.parse('2026-07-12T18:00:00.000Z')
 const CATALOG_URL = 'https://modules.example.test/catalog.json'
 const ARTIFACT_URL = 'https://modules.example.test/example.tar.gz'
+const GITHUB_RELEASE_URL = 'https://github.com/Jiachi-Deng/Simulator/releases/download/modules-v1/catalog.json'
+const GITHUB_RELEASE_ARTIFACT_URL = 'https://github.com/Jiachi-Deng/Simulator/releases/download/modules-v1/example.tar.gz'
+const GITHUB_ASSET_URL = 'https://release-assets.githubusercontent.com/github-production-release-asset/123/abcdef?sp=r&sig=opaque'
 
 function fixture() {
   const pair = generateKeyPairSync('ed25519')
@@ -206,6 +210,133 @@ describe('verified catalog download', () => {
       .rejects.toMatchObject({ code: 'INVALID_REDIRECT' })
     expect(fetch.requests).toHaveLength(1)
     expect(disposed).toBe(1)
+  })
+
+  it('allows only an explicitly configured GitHub exact-tag release redirect', async () => {
+    const data = fixture()
+    const fetch = new QueueFetchAdapter([
+      memoryResponse({ status: 302, url: GITHUB_RELEASE_URL, headers: { location: GITHUB_ASSET_URL } }),
+      memoryResponse({
+        url: GITHUB_ASSET_URL,
+        headers: { 'content-length': String(data.wireBytes.byteLength) },
+        chunks: [data.wireBytes],
+      }),
+    ])
+    const client = new ModuleDownloader({
+      fetch,
+      cache: new MemoryModuleDownloaderCache(),
+      clock: new ManualClock(NOW),
+      trustedKeys: [data.trustedKey],
+      githubReleaseRedirectPolicy: { owner: 'Jiachi-Deng', repository: 'Simulator' },
+    })
+
+    expect((await client.fetchCatalog(GITHUB_RELEASE_URL)).source).toBe('network')
+    expect(fetch.requests.map((request) => request.url)).toEqual([GITHUB_RELEASE_URL, GITHUB_ASSET_URL])
+  })
+
+  it('rejects malicious GitHub owners, paths, hosts, and redirect chains before leaking a second request', async () => {
+    const data = fixture()
+    const attempts = [
+      {
+        url: 'https://github.com/attacker/Simulator/releases/download/modules-v1/catalog.json',
+        location: GITHUB_ASSET_URL,
+      },
+      {
+        url: 'https://github.com/Jiachi-Deng/Simulator/releases/latest/download/catalog.json',
+        location: GITHUB_ASSET_URL,
+      },
+      {
+        url: `${GITHUB_RELEASE_URL}?token=must-not-leak`,
+        location: GITHUB_ASSET_URL,
+      },
+      {
+        url: 'https://github.com/Jiachi-Deng/Simulator/releases/download/modules-v1%2F..%2Fevil/catalog.json',
+        location: GITHUB_ASSET_URL,
+      },
+      {
+        url: GITHUB_RELEASE_URL,
+        location: 'https://release-assets.githubusercontent.com.evil.example/github-production-release-asset/123/file',
+      },
+      {
+        url: GITHUB_RELEASE_URL,
+        location: 'https://release-assets.githubusercontent.com/not-a-release-asset/123/file',
+      },
+      {
+        url: GITHUB_RELEASE_URL,
+        location: 'https://release-assets.githubusercontent.com/github-production-release-asset/123/file?redirect=1',
+        secondLocation: 'https://release-assets.githubusercontent.com/github-production-release-asset/123/other',
+      },
+    ]
+
+    for (const attempt of attempts) {
+      const fetch = new QueueFetchAdapter([
+        memoryResponse({ status: 302, url: attempt.url, headers: { location: attempt.location } }),
+        ...(attempt.secondLocation ? [memoryResponse({ status: 302, url: attempt.location, headers: { location: attempt.secondLocation } })] : []),
+      ])
+      const client = new ModuleDownloader({
+        fetch,
+        cache: new MemoryModuleDownloaderCache(),
+        clock: new ManualClock(NOW),
+        trustedKeys: [data.trustedKey],
+        retry: { maxAttempts: 1 },
+        githubReleaseRedirectPolicy: { owner: 'Jiachi-Deng', repository: 'Simulator' },
+      })
+      await expect(client.fetchCatalog(attempt.url)).rejects.toMatchObject({ code: 'INVALID_REDIRECT' })
+      expect(fetch.requests.length).toBeLessThanOrEqual(attempt.secondLocation ? 2 : 1)
+    }
+  })
+
+  it('strips authorization and cookies on the single allowed GitHub cross-origin hop', async () => {
+    const data = fixture()
+    const fetch = new QueueFetchAdapter([
+      memoryResponse({ status: 302, url: GITHUB_RELEASE_URL, headers: { location: GITHUB_ASSET_URL } }),
+      memoryResponse({ url: GITHUB_ASSET_URL }),
+    ])
+    const options: ModuleDownloaderOptions & { maxRedirects: number } = {
+      fetch,
+      cache: new MemoryModuleDownloaderCache(),
+      clock: new ManualClock(NOW),
+      trustedKeys: [data.trustedKey],
+      maxRedirects: 3,
+      githubReleaseRedirectPolicy: { owner: 'Jiachi-Deng', repository: 'Simulator' },
+    }
+    const response = await fetchWithRedirects(
+      { options },
+      GITHUB_RELEASE_URL,
+      { Authorization: 'Bearer secret', Cookie: 'session=secret', 'Proxy-Authorization': 'Basic secret', 'x-request-id': 'safe' },
+      new AbortController().signal,
+    )
+    await response.dispose()
+
+    expect(fetch.requests[0]?.headers).toMatchObject({ Authorization: 'Bearer secret', Cookie: 'session=secret' })
+    expect(fetch.requests[1]?.headers).toEqual({ 'x-request-id': 'safe' })
+  })
+
+  it('retains signed artifact size and SHA-256 verification after the GitHub release hop', async () => {
+    const data = fixture()
+    const poisoned = Uint8Array.from(data.artifactBytes)
+    poisoned[0] = poisoned[0]! ^ 1
+    const fetch = new QueueFetchAdapter([
+      memoryResponse({ status: 302, url: GITHUB_RELEASE_ARTIFACT_URL, headers: { location: GITHUB_ASSET_URL } }),
+      memoryResponse({
+        url: GITHUB_ASSET_URL,
+        headers: { 'content-length': String(poisoned.byteLength) },
+        chunks: [poisoned],
+      }),
+    ])
+    const client = new ModuleDownloader({
+      fetch,
+      cache: new MemoryModuleDownloaderCache(),
+      clock: new ManualClock(NOW),
+      trustedKeys: [data.trustedKey],
+      retry: { maxAttempts: 1 },
+      githubReleaseRedirectPolicy: { owner: 'Jiachi-Deng', repository: 'Simulator' },
+    })
+    const artifact = { ...data.artifact, url: GITHUB_RELEASE_ARTIFACT_URL as ModuleArtifact['url'] }
+
+    await expect(client.downloadArtifact({ artifact, expectedSize: data.artifactBytes.byteLength }))
+      .rejects.toMatchObject({ code: 'HASH_MISMATCH' })
+    expect(fetch.requests.map((request) => request.url)).toEqual([GITHUB_RELEASE_ARTIFACT_URL, GITHUB_ASSET_URL])
   })
 
   it('disposes exactly once for redirect, 304, non-2xx, and declared oversize exits', async () => {
@@ -497,7 +628,7 @@ describe('verified artifact download', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
-  })
+  }, process.platform === 'win32' ? 20_000 : 5_000)
 
   it('retries retryable status with injected exponential backoff', async () => {
     const data = fixture()

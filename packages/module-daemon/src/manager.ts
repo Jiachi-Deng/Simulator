@@ -1,4 +1,5 @@
 import type { ModuleId, ModuleVersion } from '@simulator/module-contract'
+import { isAbsolute, join, normalize } from 'node:path'
 import { assertLoopbackEndpoint, createMinimalEnvironment, resolveActivatedEntrypoint, selectArtifact } from './safety.ts'
 import {
   ModuleDaemonError,
@@ -6,6 +7,8 @@ import {
   type LoopbackEndpoint,
   type ModuleDaemonDiagnostic,
   type ModuleDaemonDiagnosticCode,
+  type ModuleDaemonLaunchCleanupReason,
+  type ModuleDaemonLaunchLease,
   type ModuleDaemonManagerOptions,
   type ModuleDaemonSnapshot,
   type ModuleDaemonState,
@@ -40,6 +43,7 @@ interface DaemonRecord {
   state: ModuleDaemonState
   endpoint?: LoopbackEndpoint
   process?: ModuleProcess
+  launch?: OwnedLaunchLease
   restartCount: number
   lastActiveAt: number
   diagnostic?: ModuleDaemonDiagnostic
@@ -52,6 +56,13 @@ interface DaemonRecord {
   readonly healthyWaiters: Set<Deferred<ModuleDaemonSnapshot>>
   lifecycle?: Promise<void>
   stopPromise?: Promise<ModuleDaemonSnapshot>
+}
+
+interface OwnedLaunchLease {
+  readonly lease: ModuleDaemonLaunchLease
+  readonly controller: AbortController
+  cleanupPromise?: Promise<void>
+  cleaned: boolean
 }
 
 interface PendingStart {
@@ -94,6 +105,39 @@ function positiveInteger(value: number, name: string, allowZero = false): number
   return value
 }
 
+function mergeLaunchEnvironment(
+  base: Readonly<Record<string, string>>,
+  launch: Readonly<Record<string, string>> | undefined,
+  platform: StartModuleDaemonRequest['platform'],
+): Readonly<Record<string, string>> {
+  if (launch === undefined) return base
+  if (launch === null || typeof launch !== 'object' || Array.isArray(launch)) {
+    throw new ModuleDaemonError('LAUNCH_ENVIRONMENT_INVALID', 'Launch environment must be a string record')
+  }
+
+  const environment: Record<string, string> = { ...base }
+  const windows = platform.startsWith('win32-')
+  const names = new Set(Object.keys(environment).map((key) => windows ? key.toUpperCase() : key))
+  for (const [key, value] of Object.entries(launch)) {
+    if (key.length === 0 || key.includes('\0') || typeof value !== 'string' || value.includes('\0')) {
+      throw new ModuleDaemonError(
+        'LAUNCH_ENVIRONMENT_INVALID',
+        'Launch environment keys and values must be non-empty NUL-free strings',
+      )
+    }
+    const name = windows ? key.toUpperCase() : key
+    if (names.has(name)) {
+      throw new ModuleDaemonError(
+        'LAUNCH_ENVIRONMENT_INVALID',
+        `Launch environment cannot override existing entry ${key}`,
+      )
+    }
+    names.add(name)
+    environment[key] = value
+  }
+  return Object.freeze(environment)
+}
+
 export class ModuleDaemonManager {
   private readonly records = new Map<ModuleId, DaemonRecord>()
   private readonly pendingStarts = new Map<ModuleId, PendingStart>()
@@ -111,6 +155,7 @@ export class ModuleDaemonManager {
   private readonly idleTimeoutMs: number
   private readonly stopGraceMs: number
   private readonly baseEnvironment: Readonly<Record<string, string>>
+  private readonly moduleDataRoot?: string
   private draining = false
   private drainPromise?: Promise<void>
 
@@ -128,6 +173,12 @@ export class ModuleDaemonManager {
     }
     this.restartBackoffMs = Object.freeze([...backoff])
     this.baseEnvironment = Object.freeze({ ...(options.baseEnvironment ?? {}) })
+    if (options.moduleDataRoot !== undefined) {
+      if (!isAbsolute(options.moduleDataRoot) || normalize(options.moduleDataRoot) !== options.moduleDataRoot || options.moduleDataRoot.includes('\0')) {
+        throw new TypeError('moduleDataRoot must be a normalized absolute path')
+      }
+      this.moduleDataRoot = options.moduleDataRoot
+    }
   }
 
   start(request: StartModuleDaemonRequest): Promise<ModuleDaemonSnapshot> {
@@ -379,7 +430,7 @@ export class ModuleDaemonManager {
   private async supervise(record: DaemonRecord): Promise<void> {
     try {
       while (!record.stopRequested) {
-        let outcome: MonitorOutcome
+        let outcome: MonitorOutcome | undefined
         try {
           outcome = await this.launchAndMonitor(record)
         } catch (error) {
@@ -389,10 +440,12 @@ export class ModuleDaemonManager {
             : new ModuleDaemonError('SPAWN_FAILED', 'Module daemon launch failed', { cause: error })
           outcome = { kind: 'crashed', code: daemonError.code, message: daemonError.message }
         } finally {
-          await this.cleanupCurrent(record)
+          const cleanupReason = this.cleanupReason(record, outcome)
+          await this.cleanupCurrent(record, cleanupReason)
         }
 
         if (record.stopRequested) break
+        if (!outcome) throw new ModuleDaemonError('SPAWN_FAILED', 'Module daemon launch ended without an outcome')
         if (outcome.kind === 'idle') {
           record.stopRequested = true
           record.state = 'stopping'
@@ -421,17 +474,20 @@ export class ModuleDaemonManager {
         await this.options.clock.sleep(backoff, record.controller.signal)
       }
     } catch (error) {
+      const terminalError = error instanceof ModuleDaemonError
+        ? error
+        : record.stopRequested
+          ? new ModuleDaemonError('STOP_REQUESTED', 'Module daemon stopped while its lifecycle was pending', { cause: error })
+          : new ModuleDaemonError('SPAWN_FAILED', 'Module daemon lifecycle terminated unexpectedly', { cause: error })
       if (!record.readySettled) {
         record.readySettled = true
-        record.ready.reject(error)
+        record.ready.reject(terminalError)
       }
-      if (error instanceof ModuleDaemonError && error.code === 'PROCESS_CLEANUP_FAILED') {
-        this.rejectHealthyWaiters(record, error)
-      }
+      this.rejectHealthyWaiters(record, terminalError)
     } finally {
       try {
-        if (!record.cleanupFailed) await this.cleanupCurrent(record)
-        if (record.stopRequested && !record.process && !record.cleanupFailed) {
+        if (!record.cleanupFailed) await this.cleanupCurrent(record, this.stopCleanupReason())
+        if (record.stopRequested && !record.launch && !record.process && !record.cleanupFailed) {
           record.state = 'stopped'
           if (!record.readySettled) {
             record.readySettled = true
@@ -461,11 +517,50 @@ export class ModuleDaemonManager {
     }
     record.endpoint = endpoint
 
-    const environment = createMinimalEnvironment(this.baseEnvironment, {
+    const baseEnvironment = createMinimalEnvironment(this.baseEnvironment, {
       id: record.id,
       version: record.version,
       endpoint,
+      ...(this.moduleDataRoot === undefined ? {} : { dataRoot: join(this.moduleDataRoot, record.id) }),
     })
+
+    let environment = baseEnvironment
+    if (this.options.prepareLaunch) {
+      const launchController = new AbortController()
+      const signal = AbortSignal.any([record.controller.signal, launchController.signal])
+      let lease: ModuleDaemonLaunchLease
+      try {
+        lease = await this.options.prepareLaunch(Object.freeze({
+          id: record.id,
+          version: record.version,
+          activatedRoot: record.activatedRoot,
+          executable: record.executable,
+          endpoint: Object.freeze({ ...endpoint }),
+          restartCount: record.restartCount,
+          signal,
+        }))
+      } catch (error) {
+        launchController.abort()
+        if (error instanceof ModuleDaemonError) throw error
+        throw new ModuleDaemonError(
+          'LAUNCH_PREPARATION_FAILED',
+          'Unable to prepare per-launch module resources',
+          { cause: error },
+        )
+      }
+      if (!lease || typeof lease !== 'object' || typeof lease.cleanup !== 'function') {
+        launchController.abort()
+        throw new ModuleDaemonError(
+          'LAUNCH_PREPARATION_FAILED',
+          'Launch preparation did not return a revocable lease',
+        )
+      }
+      record.launch = { lease, controller: launchController, cleaned: false }
+      environment = mergeLaunchEnvironment(baseEnvironment, lease.environment, record.request.platform)
+      if (record.stopRequested || signal.aborted) {
+        throw new ModuleDaemonError('STOP_REQUESTED', 'Module daemon stopped before launch resources were spawned')
+      }
+    }
     try {
       record.process = await this.options.process.spawn({
         executable: record.executable,
@@ -588,37 +683,111 @@ export class ModuleDaemonManager {
     throw new ModuleDaemonError('STOP_REQUESTED', 'Module daemon stop requested')
   }
 
-  private async cleanupCurrent(record: DaemonRecord): Promise<void> {
+  private async cleanupCurrent(
+    record: DaemonRecord,
+    reason: ModuleDaemonLaunchCleanupReason,
+  ): Promise<void> {
+    const failures: ModuleDaemonError[] = []
+    if (record.launch) {
+      try {
+        await this.cleanupLaunch(record, record.launch, reason)
+      } catch (error) {
+        failures.push(error instanceof ModuleDaemonError
+          ? error
+          : new ModuleDaemonError('LAUNCH_CLEANUP_FAILED', 'Unable to clean up per-launch module resources', { cause: error }))
+      }
+    }
+
     const moduleProcess = record.process
     const endpoint = record.endpoint
     if (moduleProcess) {
       try {
         await moduleProcess.stopTree(this.stopGraceMs)
       } catch (error) {
-        record.cleanupFailed = true
-        record.cleanupFailureCount += 1
-        record.state = 'crashed'
         const message = `Unable to clean up module process tree for pid ${moduleProcess.pid}`
-        this.setDiagnostic(record, 'PROCESS_CLEANUP_FAILED', message)
-        this.emit(record)
-        record.cleanupError = new ModuleDaemonError('PROCESS_CLEANUP_FAILED', message, { cause: error })
-        throw record.cleanupError
+        failures.push(new ModuleDaemonError('PROCESS_CLEANUP_FAILED', message, { cause: error }))
       }
-      if (record.process === moduleProcess) record.process = undefined
-      record.cleanupFailed = false
-      record.cleanupError = undefined
+      if (!failures.some((error) => error.code === 'PROCESS_CLEANUP_FAILED')
+        && record.process === moduleProcess) {
+        record.process = undefined
+      }
     }
-    if (endpoint) {
-      await this.options.health.releaseEndpoint?.(endpoint)
-      if (record.endpoint === endpoint) record.endpoint = undefined
+
+    if (endpoint && (!moduleProcess || record.process !== moduleProcess)) {
+      try {
+        await this.options.health.releaseEndpoint?.(endpoint)
+        if (record.endpoint === endpoint) record.endpoint = undefined
+      } catch (error) {
+        failures.push(new ModuleDaemonError(
+          'PROCESS_CLEANUP_FAILED',
+          `Unable to release module health endpoint ${endpoint.host}:${endpoint.port}`,
+          { cause: error },
+        ))
+      }
     }
+
+    if (failures.length > 0) {
+      const failure = failures[0]!
+      record.cleanupFailed = true
+      record.cleanupFailureCount += 1
+      record.cleanupError = failure
+      record.state = 'crashed'
+      this.setDiagnostic(record, failure.code, failure.message)
+      this.emit(record)
+      throw failure
+    }
+
+    record.cleanupFailed = false
+    record.cleanupError = undefined
+  }
+
+  private async cleanupLaunch(
+    record: DaemonRecord,
+    owned: OwnedLaunchLease,
+    reason: ModuleDaemonLaunchCleanupReason,
+  ): Promise<void> {
+    owned.controller.abort()
+    if (owned.cleaned) {
+      if (record.launch === owned) record.launch = undefined
+      return
+    }
+    const attempt = owned.cleanupPromise ?? Promise.resolve().then(() => owned.lease.cleanup(reason))
+    owned.cleanupPromise = attempt
+    try {
+      await attempt
+      owned.cleaned = true
+      if (record.launch === owned) record.launch = undefined
+    } catch (error) {
+      if (owned.cleanupPromise === attempt) owned.cleanupPromise = undefined
+      throw new ModuleDaemonError(
+        'LAUNCH_CLEANUP_FAILED',
+        'Unable to clean up per-launch module resources',
+        { cause: error },
+      )
+    }
+  }
+
+  private cleanupReason(
+    record: DaemonRecord,
+    outcome: MonitorOutcome | undefined,
+  ): ModuleDaemonLaunchCleanupReason {
+    if (record.stopRequested) return this.stopCleanupReason()
+    if (!record.process) return 'spawn-failed'
+    if (outcome?.kind === 'idle') return 'stop'
+    return record.restartCount < this.restartLimit ? 'restart' : 'process-exit'
+  }
+
+  private stopCleanupReason(): ModuleDaemonLaunchCleanupReason {
+    return this.draining ? 'drain' : 'stop'
   }
 
   private async stopRecord(record: DaemonRecord): Promise<ModuleDaemonSnapshot> {
     const cleanupFailuresBeforeStop = record.cleanupFailureCount
     if (record.supervising) await record.lifecycle
     if (record.cleanupFailureCount > cleanupFailuresBeforeStop) throw record.cleanupError
-    if (record.process || record.endpoint) await this.cleanupCurrent(record)
+    if (record.launch || record.process || record.endpoint) {
+      await this.cleanupCurrent(record, this.stopCleanupReason())
+    }
     record.state = 'stopped'
     this.emit(record)
     return this.snapshot(record)

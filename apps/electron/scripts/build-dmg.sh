@@ -265,13 +265,15 @@ fi
 # Run electron-builder
 npx electron-builder "${BUILDER_ARGS[@]}"
 
+if [ "$ARCH" = "arm64" ]; then
+    APP_ROOT="$ELECTRON_DIR/release/mac-arm64/Simulator.app"
+else
+    APP_ROOT="$ELECTRON_DIR/release/mac/Simulator.app"
+fi
+require_path "$APP_ROOT" "app bundle" "electron-builder did not create the expected app."
+bun "$ROOT_DIR/scripts/packaged-server-resources.ts" --app "$APP_ROOT"
+
 if [ "$UNSIGNED" = true ]; then
-    if [ "$ARCH" = "arm64" ]; then
-        APP_ROOT="$ELECTRON_DIR/release/mac-arm64/Simulator.app"
-    else
-        APP_ROOT="$ELECTRON_DIR/release/mac/Simulator.app"
-    fi
-    require_path "$APP_ROOT" "unsigned app bundle" "electron-builder did not create the expected app."
     bun "$ROOT_DIR/scripts/release/verify-public-build-privacy.ts" \
       "$APP_ROOT" \
       "$PUBLIC_PRIVACY_SENTINEL"

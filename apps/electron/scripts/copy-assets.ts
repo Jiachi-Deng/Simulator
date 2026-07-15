@@ -11,8 +11,13 @@
  * Run: bun scripts/copy-assets.ts
  */
 
-import { cpSync, copyFileSync, mkdirSync } from 'fs';
+import { cpSync, copyFileSync, mkdirSync, rmSync } from 'fs';
 import { join } from 'path';
+
+// Do not allow a removed server from resources/ to survive in dist/resources/.
+for (const server of ['session-mcp-server', 'pi-agent-server']) {
+  rmSync(join('dist', 'resources', server), { recursive: true, force: true });
+}
 
 // Copy all resources (icons, themes, docs, permissions, tool-icons, etc.)
 cpSync('resources', 'dist/resources', { recursive: true });

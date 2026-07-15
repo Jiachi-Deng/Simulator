@@ -1,6 +1,9 @@
-import type { ModuleManifest, ModulePlatform } from '@simulator/module-contract'
+import type { ModuleManifest, ModulePlatform, ModuleSha256 } from '@simulator/module-contract'
 
-export const MODULE_RELEASE_CATALOG_SCHEMA_VERSION = 1 as const
+export const MODULE_RELEASE_CATALOG_SCHEMA_VERSION_V1 = 1 as const
+export const MODULE_RELEASE_CATALOG_SCHEMA_VERSION_V2 = 2 as const
+/** Latest schema emitted by production publishers. Verification continues to accept v1. */
+export const MODULE_RELEASE_CATALOG_SCHEMA_VERSION = MODULE_RELEASE_CATALOG_SCHEMA_VERSION_V2
 export const MODULE_RELEASE_ENVELOPE_SCHEMA_VERSION = 1 as const
 export const MAX_TRUSTED_RELEASE_KEYS = 64
 export const MAX_MODULE_RELEASE_CATALOG_TTL_MS = 24 * 60 * 60 * 1_000
@@ -11,20 +14,40 @@ export interface ModuleArtifactSize {
   readonly size: number
 }
 
-export interface ModuleRelease {
+export interface ModuleArtifactInstallMetadataV2 {
+  readonly platform: ModulePlatform
+  readonly extractedManifestSha256: ModuleSha256
+}
+
+export interface ModuleReleaseV1 {
   readonly manifest: ModuleManifest
   readonly artifactSizes: readonly ModuleArtifactSize[]
 }
 
+export interface ModuleReleaseV2 extends ModuleReleaseV1 {
+  readonly hostVersionRange: string
+  readonly artifactInstallMetadata: readonly ModuleArtifactInstallMetadataV2[]
+}
+
+export type ModuleRelease = ModuleReleaseV1 | ModuleReleaseV2
+
 export interface ModuleReleaseCatalogV1 {
-  readonly schemaVersion: typeof MODULE_RELEASE_CATALOG_SCHEMA_VERSION
+  readonly schemaVersion: typeof MODULE_RELEASE_CATALOG_SCHEMA_VERSION_V1
   readonly sequence: number
   readonly issuedAt: string
   readonly expiresAt: string
-  readonly releases: readonly ModuleRelease[]
+  readonly releases: readonly ModuleReleaseV1[]
 }
 
-export type ModuleReleaseCatalog = ModuleReleaseCatalogV1
+export interface ModuleReleaseCatalogV2 {
+  readonly schemaVersion: typeof MODULE_RELEASE_CATALOG_SCHEMA_VERSION_V2
+  readonly sequence: number
+  readonly issuedAt: string
+  readonly expiresAt: string
+  readonly releases: readonly ModuleReleaseV2[]
+}
+
+export type ModuleReleaseCatalog = ModuleReleaseCatalogV1 | ModuleReleaseCatalogV2
 
 export interface ModuleReleaseEnvelopeV1 {
   readonly schemaVersion: typeof MODULE_RELEASE_ENVELOPE_SCHEMA_VERSION
@@ -77,10 +100,14 @@ export type ModuleReleaseTrustDiagnosticCode =
   | 'INVALID_RELEASE'
   | 'INVALID_MANIFEST'
   | 'INVALID_ARTIFACT_SIZE'
+  | 'INVALID_HOST_VERSION_RANGE'
+  | 'INVALID_EXTRACTED_MANIFEST_SHA256'
   | 'DUPLICATE_MODULE_VERSION'
   | 'DUPLICATE_PLATFORM'
   | 'MISSING_PLATFORM_SIZE'
   | 'UNKNOWN_PLATFORM_SIZE'
+  | 'MISSING_PLATFORM_INSTALL_METADATA'
+  | 'UNKNOWN_PLATFORM_INSTALL_METADATA'
 
 export type ModuleReleaseTrustStage = 'envelope' | 'trust' | 'signature' | 'bytes' | 'catalog' | 'rollback'
 

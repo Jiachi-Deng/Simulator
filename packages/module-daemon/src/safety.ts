@@ -70,6 +70,7 @@ export function createMinimalEnvironment(
     id: string
     version: string
     endpoint: LoopbackEndpoint
+    dataRoot?: string
   },
   platform: NodeJS.Platform = process.platform,
 ): Readonly<Record<string, string>> {
@@ -79,6 +80,7 @@ export function createMinimalEnvironment(
     'SIMULATOR_MODULE_VERSION',
     'SIMULATOR_MODULE_HEALTH_HOST',
     'SIMULATOR_MODULE_HEALTH_PORT',
+    'SIMULATOR_MODULE_DATA_ROOT',
   ])
   const seen = new Set<string>()
   for (const [key, value] of Object.entries(baseEnvironment)) {
@@ -99,5 +101,6 @@ export function createMinimalEnvironment(
   environment.SIMULATOR_MODULE_VERSION = values.version
   environment.SIMULATOR_MODULE_HEALTH_HOST = values.endpoint.host
   environment.SIMULATOR_MODULE_HEALTH_PORT = String(values.endpoint.port)
+  if (values.dataRoot !== undefined) environment.SIMULATOR_MODULE_DATA_ROOT = values.dataRoot
   return Object.freeze(environment)
 }

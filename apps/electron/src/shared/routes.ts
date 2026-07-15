@@ -190,6 +190,10 @@ export const routes = {
         ? `projects/project/${projectSlug}` as const
         : 'projects' as const,
 
+    /** Module center, optionally opening the fixed OpenDesign stage. */
+    modules: (moduleId?: 'open-design') =>
+      moduleId ? `modules/${moduleId}` as const : 'modules' as const,
+
     /** Kanban board view (sessions navigator, board view mode, all sessions) */
     board: () => 'board' as const,
   },

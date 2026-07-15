@@ -150,6 +150,13 @@
         "@radix-ui/react-label": "^2.1.8",
         "@radix-ui/react-popover": "^1.1.15",
         "@radix-ui/react-switch": "^1.2.6",
+        "@simulator/module-agent-gateway": "workspace:*",
+        "@simulator/module-contract": "workspace:*",
+        "@simulator/module-coordinator": "workspace:*",
+        "@simulator/module-daemon": "workspace:*",
+        "@simulator/module-downloader": "workspace:*",
+        "@simulator/module-installer": "workspace:*",
+        "@simulator/module-registry": "workspace:*",
         "@tanstack/react-table": "^8.21.3",
         "chrono-node": "^2.9.0",
         "cmdk": "^1.1.1",
@@ -261,6 +268,14 @@
         "typescript": "^5.8.2",
       },
     },
+    "packages/module-agent-gateway": {
+      "name": "@simulator/module-agent-gateway",
+      "version": "0.11.1",
+      "devDependencies": {
+        "@types/node": "^25.0.8",
+        "typescript": "^5.8.2",
+      },
+    },
     "packages/module-contract": {
       "name": "@simulator/module-contract",
       "version": "0.11.1",
@@ -269,6 +284,22 @@
       },
       "devDependencies": {
         "@types/semver": "^7.7.1",
+        "typescript": "^5.8.2",
+      },
+    },
+    "packages/module-coordinator": {
+      "name": "@simulator/module-coordinator",
+      "version": "0.11.1",
+      "dependencies": {
+        "@simulator/module-contract": "workspace:*",
+        "@simulator/module-daemon": "workspace:*",
+        "@simulator/module-downloader": "workspace:*",
+        "@simulator/module-installer": "workspace:*",
+        "@simulator/module-registry": "workspace:*",
+      },
+      "devDependencies": {
+        "@simulator/module-release-trust": "workspace:*",
+        "@types/node": "^25.0.8",
         "typescript": "^5.8.2",
       },
     },
@@ -322,6 +353,7 @@
         "semver": "7.7.3",
       },
       "devDependencies": {
+        "@types/node": "^25.0.8",
         "@types/semver": "^7.7.1",
         "typescript": "^5.8.2",
       },
@@ -382,6 +414,7 @@
         "@craft-agent/core": "workspace:*",
         "@craft-agent/shared": "workspace:*",
         "@earendil-works/pi-ai": "0.80.6",
+        "@simulator/module-agent-gateway": "workspace:*",
         "jose": "^6.0.0",
         "sharp": "0.34.5",
         "ws": "^8.19.0",
@@ -1385,7 +1418,11 @@
 
     "@silvia-odwyer/photon-node": ["@silvia-odwyer/photon-node@0.3.4", "", {}, "sha512-bnly4BKB3KDTFxrUIcgCLbaeVVS8lrAkri1pEzskpmxu9MdfGQTy8b8EgcD83ywD3RPMsIulY8xJH5Awa+t9fA=="],
 
+    "@simulator/module-agent-gateway": ["@simulator/module-agent-gateway@workspace:packages/module-agent-gateway"],
+
     "@simulator/module-contract": ["@simulator/module-contract@workspace:packages/module-contract"],
+
+    "@simulator/module-coordinator": ["@simulator/module-coordinator@workspace:packages/module-coordinator"],
 
     "@simulator/module-daemon": ["@simulator/module-daemon@workspace:packages/module-daemon"],
 

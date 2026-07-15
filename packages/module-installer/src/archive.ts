@@ -1,19 +1,33 @@
 import { createReadStream } from 'node:fs'
+import { constants as fsConstants } from 'node:fs'
 import { open, stat } from 'node:fs/promises'
 import { posix } from 'node:path'
 import { createGunzip } from 'node:zlib'
-import { extract, list, type ReadEntry } from 'tar'
+import type { ReadEntry } from 'tar'
 import {
   ModuleInstallerError,
   type InstallLimits,
   type InstallProgress,
 } from './types.ts'
 
-const WINDOWS_DEVICE = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i
+const WINDOWS_DEVICE = /^(?:con|prn|aux|nul|conin\$|conout\$|com[1-9]|lpt[1-9])(?:\..*)?$/i
 const DRIVE_OR_UNC = /^(?:[A-Za-z]:|[/\\]{2})/
-const SAFE_PATH_SEGMENT = /^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$/
+const SAFE_ARCHIVE_PAYLOAD_SEGMENT = /^[A-Za-z0-9._$@+~\x5b\x5d-]+$/
 const TAR_BLOCK_SIZE = 512
 const TAR_METADATA_TYPES = new Set(['g', 'x', 'X', 'L', 'K', 'N'])
+
+let tarModule: Promise<typeof import('tar')> | undefined
+
+async function loadTar(): Promise<typeof import('tar')> {
+  if (!tarModule) {
+    // Bun's Windows fs.open does not implement libuv's optional file-map flag.
+    if (process.platform === 'win32' && process.versions.bun && fsConstants.UV_FS_O_FILEMAP) {
+      (fsConstants as { UV_FS_O_FILEMAP: number }).UV_FS_O_FILEMAP = 0
+    }
+    tarModule = import('tar')
+  }
+  return tarModule
+}
 
 export interface ArchiveEntryPlan {
   readonly archivePath: string
@@ -43,6 +57,17 @@ function limitExceeded(message: string): never {
   throw new ModuleInstallerError('ARCHIVE_LIMIT_EXCEEDED', message)
 }
 
+// Archive payloads may contain package-manager and framework-generated names.
+// Manifest executable paths remain governed by the stricter module contract.
+export function isPortableArchivePayloadSegment(segment: string): boolean {
+  return segment !== ''
+    && segment !== '.'
+    && segment !== '..'
+    && SAFE_ARCHIVE_PAYLOAD_SEGMENT.test(segment)
+    && !segment.endsWith('.')
+    && !WINDOWS_DEVICE.test(segment)
+}
+
 function validatePath(path: string, limits: InstallLimits): string {
   if (path.length === 0 || path.includes('\0') || /[\u0000-\u001f\u007f]/.test(path)) {
     invalidEntry('Archive contains an empty path or control characters')
@@ -62,10 +87,10 @@ function validatePath(path: string, limits: InstallLimits): string {
     limitExceeded(`Archive path exceeds maximum depth ${limits.maxDepth}`)
   }
   for (const segment of segments) {
-    if (!SAFE_PATH_SEGMENT.test(segment)) {
+    if (!SAFE_ARCHIVE_PAYLOAD_SEGMENT.test(segment)) {
       invalidEntry(`Archive path is outside the safe ASCII segment contract: ${JSON.stringify(path)}`)
     }
-    if (segment.endsWith('.') || WINDOWS_DEVICE.test(segment)) {
+    if (!isPortableArchivePayloadSegment(segment)) {
       invalidEntry(`Archive path has a platform-ambiguous component: ${JSON.stringify(path)}`)
     }
   }
@@ -159,7 +184,7 @@ async function inspectRawTarHeaders(path: string, limits: InstallLimits, signal?
   if (dataBytesRemaining !== 0 || buffer.length !== 0 || !ended) invalidEntry('Tar archive is truncated or lacks a canonical end marker')
 }
 
-function asPlan(entry: ReadEntry, limits: InstallLimits): ArchiveEntryPlan {
+function asPlan(entry: ReadEntry, limits: InstallLimits, executablePaths: ReadonlySet<string>): ArchiveEntryPlan {
   if (entry.type !== 'File' && entry.type !== 'Directory') {
     invalidEntry(`Archive entry type ${entry.type} is forbidden: ${JSON.stringify(entry.path)}`)
   }
@@ -168,8 +193,9 @@ function asPlan(entry: ReadEntry, limits: InstallLimits): ArchiveEntryPlan {
   if (entry.linkpath) invalidEntry(`Archive links are forbidden: ${JSON.stringify(entry.path)}`)
   if (!Number.isSafeInteger(entry.size) || entry.size < 0) invalidEntry('Archive entry has an invalid size')
   if (entry.type === 'Directory' && entry.size !== 0) invalidEntry('Archive directory has a non-zero size')
-  if (entry.size > limits.maxFileBytes) {
-    limitExceeded(`Archive file exceeds ${limits.maxFileBytes} bytes: ${JSON.stringify(entry.path)}`)
+  const maxFileBytes = executablePaths.has(relativePath) ? limits.maxExecutableFileBytes : limits.maxFileBytes
+  if (entry.size > maxFileBytes) {
+    limitExceeded(`Archive file exceeds ${maxFileBytes} bytes: ${JSON.stringify(entry.path)}`)
   }
   return {
     archivePath,
@@ -201,6 +227,7 @@ export async function assertGzipFile(path: string): Promise<void> {
 export async function inspectArchive(
   archivePath: string,
   limits: InstallLimits,
+  executablePaths: ReadonlySet<string>,
   signal: AbortSignal | undefined,
   report: ProgressReporter,
 ): Promise<ArchivePlan> {
@@ -212,6 +239,7 @@ export async function inspectArchive(
 
   try {
     await inspectRawTarHeaders(archivePath, limits, signal)
+    const { list } = await loadTar()
     await list({
       file: archivePath,
       gzip: true,
@@ -223,7 +251,7 @@ export async function inspectArchive(
         try {
           abortIfRequested(signal)
           if (entries.size >= limits.maxEntries) limitExceeded(`Archive exceeds ${limits.maxEntries} entries`)
-          const planned = asPlan(entry, limits)
+          const planned = asPlan(entry, limits, executablePaths)
           if (entries.has(planned.archivePath)) invalidEntry(`Archive has a duplicate path: ${JSON.stringify(entry.path)}`)
           const key = collisionKey(planned.archivePath)
           const prior = collisionKeys.get(key)
@@ -272,6 +300,7 @@ export async function extractArchive(
   destination: string,
   plan: ArchivePlan,
   limits: InstallLimits,
+  executablePaths: ReadonlySet<string>,
   signal: AbortSignal | undefined,
   report: ProgressReporter,
 ): Promise<void> {
@@ -279,6 +308,7 @@ export async function extractArchive(
   let extractedBytes = 0
   let validationError: ModuleInstallerError | undefined
   try {
+    const { extract } = await loadTar()
     await extract({
       file: archivePath,
       cwd: destination,
@@ -297,7 +327,7 @@ export async function extractArchive(
         try {
           abortIfRequested(signal)
           const entry = rawEntry as ReadEntry
-          const actual = asPlan(entry, limits)
+          const actual = asPlan(entry, limits, executablePaths)
           const expected = plan.entries.get(actual.archivePath)
           if (!expected || seen.has(actual.archivePath)) invalidEntry(`Archive changed between inspection and extraction: ${JSON.stringify(path)}`)
           if (actual.type !== expected.type || actual.size !== expected.size || actual.mode !== expected.mode) {
@@ -331,14 +361,16 @@ export async function extractArchive(
   if (seenExtracted !== expectedExtracted) invalidEntry('Archive extraction entry count mismatch')
 }
 
-export function validateEntrypointPlan(plan: ArchivePlan, entrypoint: string): void {
-  const planned = plan.entries.get(posix.join('module', entrypoint))
-  if (!planned || planned.type !== 'file' || (planned.mode & 0o100) === 0) {
-    throw new ModuleInstallerError('ENTRYPOINT_INVALID', 'Declared entrypoint must be an owner-executable regular file')
+export function validateEntrypointPlan(plan: ArchivePlan, executablePaths: ReadonlySet<string>): void {
+  for (const path of executablePaths) {
+    const planned = plan.entries.get(posix.join('module', path))
+    if (!planned || planned.type !== 'file' || (planned.mode & 0o100) === 0) {
+      throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Declared executable must be an owner-executable regular file: ${JSON.stringify(path)}`)
+    }
   }
   for (const entry of plan.entries.values()) {
-    if (entry.type === 'file' && (entry.mode & 0o111) !== 0 && entry.relativePath !== entrypoint) {
-      throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Executable file is not the declared entrypoint: ${JSON.stringify(entry.relativePath)}`)
+    if (entry.type === 'file' && (entry.mode & 0o111) !== 0 && !executablePaths.has(entry.relativePath)) {
+      throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Executable file is not declared by the artifact allowlist: ${JSON.stringify(entry.relativePath)}`)
     }
   }
 }

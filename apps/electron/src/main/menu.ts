@@ -13,6 +13,7 @@ type ClientResolver = (webContentsId: number) => string | undefined
 let cachedWindowManager: WindowManager | null = null
 let cachedEventSink: EventSink | null = null
 let cachedClientResolver: ClientResolver | null = null
+let cachedOpenDesignEscapeHandler: (() => void | Promise<void>) | null = null
 
 /**
  * Creates and sets the application menu for macOS.
@@ -34,6 +35,12 @@ export function createApplicationMenu(windowManager: WindowManager, sink?: Event
 export function setMenuEventSink(sink: EventSink, resolver: ClientResolver): void {
   cachedEventSink = sink
   cachedClientResolver = resolver
+}
+
+/** Keeps a native macOS escape hatch available while a full-content Module view covers the renderer. */
+export function setOpenDesignModuleEscapeHandler(handler: (() => void | Promise<void>) | null): void {
+  cachedOpenDesignEscapeHandler = handler
+  void rebuildMenu()
 }
 
 /**
@@ -190,9 +197,20 @@ export async function rebuildMenu(): Promise<void> {
     },
 
     // Debug menu (development only)
-    ...(!app.isPackaged ? [{
+    ...(!app.isPackaged || isDebugMode ? [{
       label: i18n.t("menu.debug"),
       submenu: [
+        ...(isDebugMode ? [{
+          label: i18n.t("menu.openDesignBackToAgent"),
+          enabled: cachedOpenDesignEscapeHandler !== null,
+          click: async () => {
+            try {
+              await cachedOpenDesignEscapeHandler?.()
+            } catch {
+              mainLog.error('[debug-menu] OpenDesign stop failed')
+            }
+          },
+        }, { type: 'separator' as const }] : []),
         {
           label: i18n.t("menu.checkForUpdates"),
           click: async () => {

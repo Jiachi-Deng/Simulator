@@ -3,11 +3,13 @@ import { mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from 
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { gzipSync, gunzipSync } from 'node:zlib'
-import type { ModuleId, ModuleSha256, ModuleVersion } from '@simulator/module-contract'
+import { parseModuleManifest, type ModuleId, type ModuleSha256, type ModuleVersion } from '@simulator/module-contract'
+import { inspectArchive, isPortableArchivePayloadSegment } from '../archive.ts'
 import { ModuleInstaller } from '../installer.ts'
 import {
   ModuleInstallerError,
   SimulatedInstallerCrash,
+  DEFAULT_INSTALL_LIMITS,
   type InstallLimits,
   type InstallerFaultPoint,
   type ModuleUsageGuard,
@@ -15,6 +17,7 @@ import {
 import {
   buildTarGz,
   descriptor,
+  expectedTreeHash,
   sha256,
   VALID_ENTRIES,
   writeArtifact,
@@ -23,6 +26,20 @@ import {
 
 const roots: string[] = []
 const MODULE_ID = 'org.simulator.fixture' as ModuleId
+const OPEN_DESIGN_PATH_EVIDENCE = Object.freeze({
+  legacyRejectedPathCount: 3_428,
+  uniqueLegacyRejectedSegmentCount: 136,
+  requiredAdditionalCharacters: Object.freeze(['$', '+', '@', '[', ']', '~']),
+  representativeSegments: Object.freeze([
+    '.pnpm',
+    '_not-found',
+    '@open-design',
+    '[[...slug]]',
+    '@img+sharp-darwin-arm64@0.34.5',
+    '$oc$slug',
+    '0a~oa.js',
+  ]),
+})
 
 class TestUsageGuard implements ModuleUsageGuard {
   readonly inUse = new Set<string>()
@@ -123,6 +140,57 @@ describe('ModuleInstaller production tar.gz path', () => {
     expect(result.extractedManifestSha256).toBe(descriptor(source.archive, entries).extractedManifestSha256)
   })
 
+  it('installs the exact safe ASCII segment additions evidenced by OpenDesign staging', async () => {
+    expect(OPEN_DESIGN_PATH_EVIDENCE).toMatchObject({
+      legacyRejectedPathCount: 3_428,
+      uniqueLegacyRejectedSegmentCount: 136,
+    })
+    const additionalCharacters = [...new Set(
+      OPEN_DESIGN_PATH_EVIDENCE.representativeSegments
+        .join('')
+        .split('')
+        .filter((character) => !/[A-Za-z0-9._-]/.test(character)),
+    )].sort()
+    expect(additionalCharacters).toEqual([...OPEN_DESIGN_PATH_EVIDENCE.requiredAdditionalCharacters])
+
+    const root = await tempRoot()
+    const entries = [
+      ...VALID_ENTRIES,
+      { path: 'module/.pnpm', type: '5' },
+      { path: 'module/_not-found', content: 'underscore' },
+      { path: 'module/@open-design', type: '5' },
+      { path: 'module/@open-design/[[...slug]]', type: '5' },
+      { path: 'module/@open-design/[[...slug]]/$oc$slug', content: 'route' },
+      { path: 'module/@img+sharp-darwin-arm64@0.34.5', type: '5' },
+      { path: 'module/0a~oa.js', content: 'tilde' },
+    ] as const satisfies readonly TarFixtureEntry[]
+    const source = await artifactAt(root, entries)
+    const result = await new ModuleInstaller(join(root, 'modules-root')).install({
+      descriptor: descriptor(source.archive, entries),
+      archivePath: source.path,
+    })
+
+    expect(await readFile(join(result.installedPath, '@open-design', '[[...slug]]', '$oc$slug'), 'utf8')).toBe('route')
+    expect(await readFile(join(result.installedPath, '0a~oa.js'), 'utf8')).toBe('tilde')
+  })
+
+  it('keeps the manifest executable path contract stricter than archive payload segments', () => {
+    expect(isPortableArchivePayloadSegment('@open-design')).toBe(true)
+    const parsed = parseModuleManifest({
+      schemaVersion: 1,
+      id: 'org.simulator.fixture',
+      version: '1.0.0',
+      artifacts: [{
+        platform: 'darwin-arm64',
+        entrypoint: '@open-design',
+        url: 'https://modules.example.test/fixture.tar.gz',
+        sha256: '0'.repeat(64),
+      }],
+      capabilities: ['workspace.read'],
+    })
+    expect(parsed.ok).toBe(false)
+  })
+
   it('retains LKG, rolls back atomically, and protects active/LKG/in-use versions from uninstall', async () => {
     const root = await tempRoot()
     const usageGuard = new TestUsageGuard()
@@ -154,6 +222,95 @@ describe('ModuleInstaller production tar.gz path', () => {
     expect((await stat(join(result.installedPath, 'bin'))).mode & 0o777).toBe(0o700)
     expect((await stat(join(result.installedPath, 'bin', 'module'))).mode & 0o777).toBe(0o700)
     expect((await stat(join(result.installedPath, 'data.txt'))).mode & 0o777).toBe(0o600)
+  })
+
+  it('allows only declared auxiliary executables, normalizes their modes, and includes them in the tree hash', async () => {
+    const root = await tempRoot()
+    const entries = [
+      ...VALID_ENTRIES,
+      { path: 'module/runtime', type: '5', mode: 0o755 },
+      { path: 'module/runtime/node', type: '0', mode: 0o755, content: 'runtime-binary' },
+      { path: 'module/bin/spawn-helper', type: '0', mode: 0o755, content: 'helper' },
+    ] as const satisfies readonly TarFixtureEntry[]
+    const source = await artifactAt(root, entries)
+    const valid = descriptor(source.archive, entries, '1.0.0', ['runtime/node', 'bin/spawn-helper'])
+    const result = await new ModuleInstaller(join(root, 'modules-root')).install({ descriptor: valid, archivePath: source.path })
+
+    expect((await stat(join(result.installedPath, 'runtime', 'node'))).mode & 0o777).toBe(0o700)
+    expect((await stat(join(result.installedPath, 'bin', 'spawn-helper'))).mode & 0o777).toBe(0o700)
+    expect(result.extractedManifestSha256).toBe(valid.extractedManifestSha256)
+  })
+
+  it.each([
+    {
+      name: 'a missing declared auxiliary executable',
+      entries: VALID_ENTRIES,
+      auxiliaryExecutables: ['runtime/node'],
+    },
+    {
+      name: 'a declared auxiliary executable directory',
+      entries: [...VALID_ENTRIES, { path: 'module/runtime', type: '5', mode: 0o755 }, { path: 'module/runtime/node', type: '5', mode: 0o755 }],
+      auxiliaryExecutables: ['runtime/node'],
+    },
+    {
+      name: 'a declared auxiliary executable without owner execute permission',
+      entries: [...VALID_ENTRIES, { path: 'module/runtime', type: '5', mode: 0o755 }, { path: 'module/runtime/node', mode: 0o644, content: 'runtime' }],
+      auxiliaryExecutables: ['runtime/node'],
+    },
+  ] as const)('rejects $name', async ({ entries, auxiliaryExecutables }) => {
+    const root = await tempRoot()
+    const source = await artifactAt(root, entries)
+    const installer = new ModuleInstaller(join(root, 'modules-root'))
+    await expect(installer.install({
+      descriptor: descriptor(source.archive, entries, '1.0.0', auxiliaryExecutables),
+      archivePath: source.path,
+    })).rejects.toMatchObject({ code: 'ENTRYPOINT_INVALID' })
+  })
+
+  it('permits the larger executable limit only for declared auxiliary executables', async () => {
+    const root = await tempRoot()
+    const runtimeEntries = [
+      ...VALID_ENTRIES,
+      { path: 'module/runtime', type: '5', mode: 0o755 },
+      { path: 'module/runtime/node', mode: 0o755, content: 'r'.repeat(25) },
+    ] as const satisfies readonly TarFixtureEntry[]
+    const runtime = await artifactAt(root, runtimeEntries)
+    const limits = { maxFileBytes: 24, maxExecutableFileBytes: 26 }
+    await expect(new ModuleInstaller(join(root, 'runtime-module'), { limits }).install({
+      descriptor: descriptor(runtime.archive, runtimeEntries, '1.0.0', ['runtime/node']),
+      archivePath: runtime.path,
+    })).resolves.toMatchObject({ activeVersion: '1.0.0' })
+
+    const ordinaryEntries = [...VALID_ENTRIES, { path: 'module/runtime.bin', content: 'r'.repeat(25) }] as const satisfies readonly TarFixtureEntry[]
+    const ordinary = await artifactAt(root, ordinaryEntries)
+    await expect(new ModuleInstaller(join(root, 'ordinary-module'), { limits }).install({
+      descriptor: descriptor(ordinary.archive, ordinaryEntries),
+      archivePath: ordinary.path,
+    })).rejects.toMatchObject({ code: 'ARCHIVE_LIMIT_EXCEEDED' })
+  })
+
+  it('retains the bounded M1 archive envelope, accepts exactly 8,192 entries, and rejects the next entry', async () => {
+    expect(DEFAULT_INSTALL_LIMITS.maxArchiveBytes).toBe(192 * 1024 * 1024)
+    expect(DEFAULT_INSTALL_LIMITS.maxEntries).toBe(8_192)
+    const root = await tempRoot()
+    const entries = [
+      ...VALID_ENTRIES,
+      ...Array.from({ length: DEFAULT_INSTALL_LIMITS.maxEntries - VALID_ENTRIES.length }, (_, index) => ({
+        path: `module/files/f${index}`,
+        content: '',
+      })),
+    ] as const satisfies readonly TarFixtureEntry[]
+    const source = await artifactAt(root, entries)
+    const executablePaths = new Set(['bin/module'])
+    await expect(inspectArchive(source.path, DEFAULT_INSTALL_LIMITS, executablePaths, undefined, () => {})).resolves.toMatchObject({
+      entries: expect.any(Map),
+    })
+
+    const overflowEntries = [...entries, { path: 'module/files/overflow', content: '' }] as const satisfies readonly TarFixtureEntry[]
+    const overflow = await artifactAt(root, overflowEntries)
+    await expect(inspectArchive(overflow.path, DEFAULT_INSTALL_LIMITS, executablePaths, undefined, () => {})).rejects.toMatchObject({
+      code: 'ARCHIVE_LIMIT_EXCEEDED',
+    })
   })
 
   it('rejects archive and extracted-manifest hash mismatches without changing active state', async () => {
@@ -196,13 +353,23 @@ describe('ModuleInstaller production tar.gz path', () => {
 
 describe('malicious archive matrix', () => {
   const malicious: ReadonlyArray<{ name: string; entries: readonly TarFixtureEntry[] }> = [
+    { name: 'empty path segment', entries: [{ path: 'module//escape', content: 'x' }] },
+    { name: 'dot path segment', entries: [{ path: 'module/./escape', content: 'x' }] },
     { name: 'traversal', entries: [{ path: 'module/../escape', content: 'x' }] },
     { name: 'absolute path', entries: [{ path: '/module/bin/module', mode: 0o755, content: 'x' }] },
     { name: 'Windows drive path', entries: [{ path: 'C:/module/bin/module', mode: 0o755, content: 'x' }] },
+    { name: 'Windows UNC path', entries: [{ path: '//server/share/module', content: 'x' }] },
     { name: 'Windows backslash', entries: [{ path: 'module\\bin\\module', mode: 0o755, content: 'x' }] },
+    { name: 'Windows alternate data stream colon', entries: [{ path: 'module/data.txt:stream', content: 'x' }] },
+    { name: 'Windows device name', entries: [...VALID_ENTRIES, { path: 'module/CON.txt', content: 'x' }] },
+    { name: 'Windows console input device', entries: [...VALID_ENTRIES, { path: 'module/CONIN$', content: 'x' }] },
+    { name: 'Windows console output device with extension', entries: [...VALID_ENTRIES, { path: 'module/CONOUT$.txt', content: 'x' }] },
+    { name: 'Windows trailing dot', entries: [...VALID_ENTRIES, { path: 'module/data.', content: 'x' }] },
     { name: 'unexpected top-level layout', entries: [{ path: 'payload/bin/module', mode: 0o755, content: 'x' }] },
     { name: 'duplicate path', entries: [...VALID_ENTRIES, { path: 'module/data.txt', content: 'again' }] },
     { name: 'case-fold collision', entries: [...VALID_ENTRIES, { path: 'module/DATA.txt', content: 'again' }] },
+    { name: 'macOS leading-dot case-fold collision', entries: [...VALID_ENTRIES, { path: 'module/.next', content: 'a' }, { path: 'module/.NEXT', content: 'b' }] },
+    { name: 'Windows scoped-package case-fold collision', entries: [...VALID_ENTRIES, { path: 'module/@scope', content: 'a' }, { path: 'module/@SCOPE', content: 'b' }] },
     { name: 'Unicode normalization collision', entries: [...VALID_ENTRIES, { path: 'module/d\u0061\u0301ta', content: 'a' }, { path: 'module/d\u00e1ta', content: 'b' }] },
     { name: 'symbolic link', entries: [...VALID_ENTRIES, { path: 'module/link', type: '2', linkpath: '../../escape' }] },
     { name: 'hard link', entries: [...VALID_ENTRIES, { path: 'module/link', type: '1', linkpath: '../../escape' }] },
@@ -212,6 +379,8 @@ describe('malicious archive matrix', () => {
     { name: 'contiguous/special file', entries: [...VALID_ENTRIES, { path: 'module/special', type: '7' }] },
     { name: 'extra executable', entries: [...VALID_ENTRIES, { path: 'module/helper', mode: 0o755, content: 'x' }] },
     { name: 'group-only executable entrypoint', entries: VALID_ENTRIES.map((entry) => entry.path === 'module/bin/module' ? { ...entry, mode: 0o050 } : entry) },
+    { name: 'space in path', entries: [...VALID_ENTRIES, { path: 'module/not portable', content: 'x' }] },
+    { name: 'control character in path', entries: [...VALID_ENTRIES, { path: 'module/control\tname', content: 'x' }] },
     { name: 'non-ASCII path', entries: [...VALID_ENTRIES, { path: 'module/caf\u00e9', content: 'x' }] },
   ]
 
@@ -227,6 +396,25 @@ describe('malicious archive matrix', () => {
       expect((await installer.getState(MODULE_ID)).activeVersion).toBeNull()
     })
   }
+
+  it.each([
+    '',
+    '.',
+    '..',
+    'contains space',
+    'control\u0000name',
+    'control\u001fname',
+    'control\u007fname',
+    'caf\u00e9',
+    'name!',
+    'CON',
+    'CONIN$',
+    'conout$.txt',
+    'lpt1.log',
+    'trailing.',
+  ])('rejects non-portable payload segment %j before or after extraction', (segment) => {
+    expect(isPortableArchivePayloadSegment(segment)).toBe(false)
+  })
 
   it('rejects zip input as an unsupported production format before parsing', async () => {
     const root = await tempRoot()
@@ -389,6 +577,36 @@ describe('transaction fault injection and recovery', () => {
     await paused
     try {
       await expect(installer.recoverAll()).rejects.toMatchObject({ code: 'BUSY' })
+    } finally {
+      release()
+    }
+    await installing
+  })
+
+  it('keeps fresh staging when a separate recovery instance races the temp write', async () => {
+    const root = await tempRoot()
+    const source = await artifactAt(root)
+    const moduleRoot = join(root, 'modules-root')
+    let release!: () => void
+    let reached!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const paused = new Promise<void>((resolve) => { reached = resolve })
+    const installer = new ModuleInstaller(moduleRoot, {
+      async faultInjector(point) {
+        if (point === 'after-archive-copy') {
+          reached()
+          await gate
+        }
+      },
+    })
+    const installing = installer.install({ descriptor: descriptor(source.archive, VALID_ENTRIES), archivePath: source.path })
+    await paused
+    const stagingRoot = join(moduleRoot, '.module-installer', 'staging')
+    const [stagingEntry] = await readdir(stagingRoot)
+    expect(stagingEntry).toBeDefined()
+    try {
+      await new ModuleInstaller(moduleRoot).recoverAll()
+      expect(await exists(join(stagingRoot, stagingEntry!))).toBe(true)
     } finally {
       release()
     }
@@ -653,6 +871,32 @@ describe('transaction fault injection and recovery', () => {
     releaseReference()
   })
 
+  it('restores an exact activation target idempotently and rejects live version references', async () => {
+    const root = await tempRoot()
+    const usageGuard = new TestUsageGuard()
+    const installer = new ModuleInstaller(join(root, 'modules-root'), { usageGuard })
+    const source = await artifactAt(root)
+    await installer.install({ descriptor: descriptor(source.archive, VALID_ENTRIES, '1.0.0'), archivePath: source.path })
+    await installer.install({ descriptor: descriptor(source.archive, VALID_ENTRIES, '2.0.0'), archivePath: source.path })
+
+    usageGuard.inUse.add('2.0.0')
+    await expect(installer.restoreState({
+      moduleId: MODULE_ID,
+      activeVersion: '1.0.0' as ModuleVersion,
+      lastKnownGoodVersion: null,
+    })).rejects.toMatchObject({ code: 'PROTECTED_VERSION' })
+    usageGuard.inUse.clear()
+
+    const target = {
+      moduleId: MODULE_ID,
+      activeVersion: '1.0.0' as ModuleVersion,
+      lastKnownGoodVersion: null,
+    }
+    expect(await installer.restoreState(target)).toMatchObject(target)
+    expect(await installer.restoreState(target)).toMatchObject(target)
+    expect(await installer.getState(MODULE_ID)).toEqual(target)
+  })
+
   it('treats a durable state switch as committed when cleanup is interrupted', async () => {
     const root = await tempRoot()
     const source = await artifactAt(root)
@@ -718,7 +962,15 @@ describe('descriptor and root validation', () => {
     await expect(installer.install({ descriptor: valid, archivePath: linkedArchive })).rejects.toMatchObject({ code: 'ARCHIVE_INVALID' })
   })
 
-  it('computes fixture hashes deterministically', () => {
+  it('computes executable-aware fixture hashes deterministically', () => {
     expect(sha256('same')).toBe(sha256('same'))
+    const entries = [
+      ...VALID_ENTRIES,
+      { path: 'module/runtime', type: '5', mode: 0o755 },
+      { path: 'module/runtime/node', mode: 0o755, content: 'runtime' },
+    ] as const satisfies readonly TarFixtureEntry[]
+    const executablePaths = new Set(['bin/module', 'runtime/node'])
+    expect(expectedTreeHash(entries, executablePaths)).toBe(expectedTreeHash([...entries].reverse(), executablePaths))
+    expect(expectedTreeHash(entries, executablePaths)).not.toBe(expectedTreeHash(entries))
   })
 })

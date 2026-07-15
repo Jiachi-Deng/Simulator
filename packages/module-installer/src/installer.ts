@@ -25,6 +25,8 @@ import {
   type InstallResult,
   type ModuleInstallerOptions,
   type ResolvedDescriptor,
+  type RestoreModuleStateRequest,
+  type RestoreModuleStateResult,
   type RollbackResult,
   type UninstallRequest,
   type VerifiedArtifactDescriptor,
@@ -45,7 +47,7 @@ interface StateFile {
   readonly lastKnownGoodVersion: string | null
 }
 
-type JournalOperation = 'install' | 'rollback' | 'uninstall'
+type JournalOperation = 'install' | 'restore' | 'rollback' | 'uninstall'
 type JournalCheckpoint = 'prepared' | 'version-published' | 'state-activated'
 
 interface JournalFile {
@@ -137,7 +139,7 @@ function parseState(value: unknown): StateFile {
 function parseJournal(value: unknown, expectedModuleId: string): JournalFile {
   if (!isPlainObject(value)
     || value.schemaVersion !== JOURNAL_SCHEMA_VERSION
-    || (value.operation !== 'install' && value.operation !== 'rollback' && value.operation !== 'uninstall')
+    || (value.operation !== 'install' && value.operation !== 'restore' && value.operation !== 'rollback' && value.operation !== 'uninstall')
     || (value.checkpoint !== 'prepared' && value.checkpoint !== 'version-published' && value.checkpoint !== 'state-activated')
     || typeof value.transactionId !== 'string'
     || !TRANSACTION_ID_PATTERN.test(value.transactionId)
@@ -171,6 +173,17 @@ function validateLimits(overrides?: Partial<InstallLimits>): InstallLimits {
   return Object.freeze(limits)
 }
 
+function sameStringArray(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+  const normalizedLeft = left ?? []
+  const normalizedRight = right ?? []
+  return normalizedLeft.length === normalizedRight.length
+    && normalizedLeft.every((value, index) => value === normalizedRight[index])
+}
+
+function executablePaths(artifact: ResolvedDescriptor['artifact']): ReadonlySet<string> {
+  return new Set([artifact.entrypoint, ...(artifact.auxiliaryExecutables ?? [])])
+}
+
 function resolveDescriptor(descriptor: VerifiedArtifactDescriptor): ResolvedDescriptor {
   if (!isPlainObject(descriptor) || descriptor.verified !== true || descriptor.format !== 'tar.gz') {
     throw new ModuleInstallerError('DESCRIPTOR_INVALID', 'Installer requires a verified tar.gz artifact descriptor')
@@ -184,6 +197,7 @@ function resolveDescriptor(descriptor: VerifiedArtifactDescriptor): ResolvedDesc
   const artifact = parsed.value.artifacts.find((candidate) => candidate.platform === descriptor.artifact?.platform)
   if (!artifact
     || artifact.entrypoint !== descriptor.artifact.entrypoint
+    || !sameStringArray(artifact.auxiliaryExecutables, descriptor.artifact.auxiliaryExecutables)
     || artifact.url !== descriptor.artifact.url
     || artifact.sha256 !== descriptor.artifact.sha256) {
     throw new ModuleInstallerError('DESCRIPTOR_INVALID', 'Descriptor artifact does not exactly match its verified manifest')
@@ -265,24 +279,26 @@ export class ModuleInstaller {
         await this.#fault('after-archive-copy')
         await assertGzipFile(archive)
 
-        const plan = await inspectArchive(archive, this.#limits, request.signal, report)
-        validateEntrypointPlan(plan, descriptor.artifact.entrypoint)
+        const declaredExecutablePaths = executablePaths(descriptor.artifact)
+        const plan = await inspectArchive(archive, this.#limits, declaredExecutablePaths, request.signal, report)
+        validateEntrypointPlan(plan, declaredExecutablePaths)
         await this.#fault('after-archive-inspection')
-        await extractArchive(archive, payload, plan, this.#limits, request.signal, report)
+        await extractArchive(archive, payload, plan, this.#limits, declaredExecutablePaths, request.signal, report)
         await this.#fault('after-extraction')
-        await normalizeAndVerifyModes(payload, descriptor.artifact.entrypoint)
+        await normalizeAndVerifyModes(payload, declaredExecutablePaths)
 
-        const tree = await hashExtractedTree(payload, this.#limits, request.signal, report)
+        const tree = await hashExtractedTree(payload, this.#limits, request.signal, report, declaredExecutablePaths)
         if (tree.sha256 !== descriptor.extractedManifestSha256) {
           throw new ModuleInstallerError('TREE_HASH_MISMATCH', 'Extracted file manifest SHA-256 does not match verified descriptor')
         }
-        const entrypoint = tree.files.get(descriptor.artifact.entrypoint)
-        if (!entrypoint?.executable) {
-          throw new ModuleInstallerError('ENTRYPOINT_INVALID', 'Extracted entrypoint is missing or not executable')
+        for (const executablePath of declaredExecutablePaths) {
+          if (!tree.files.get(executablePath)?.executable) {
+            throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Extracted declared executable is missing or not executable: ${JSON.stringify(executablePath)}`)
+          }
         }
         for (const [path, file] of tree.files) {
-          if (file.executable && path !== descriptor.artifact.entrypoint) {
-            throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Extracted executable is not the declared entrypoint: ${JSON.stringify(path)}`)
+          if (file.executable && !declaredExecutablePaths.has(path)) {
+            throw new ModuleInstallerError('ENTRYPOINT_INVALID', `Extracted executable is not declared by the artifact allowlist: ${JSON.stringify(path)}`)
           }
         }
 
@@ -416,6 +432,95 @@ export class ModuleInstaller {
       }
       return { ...publicState(moduleId, nextState), activePath: lkgPath }
     })
+  }
+
+  async restoreState(request: RestoreModuleStateRequest): Promise<RestoreModuleStateResult> {
+    this.#validateModuleId(request.moduleId)
+    for (const [name, version] of [
+      ['activeVersion', request.activeVersion],
+      ['lastKnownGoodVersion', request.lastKnownGoodVersion],
+    ] as const) {
+      if (version !== null && !validVersion(version)) {
+        throw new ModuleInstallerError('DESCRIPTOR_INVALID', `${name} is invalid`)
+      }
+    }
+    if (!this.#usageGuard) {
+      throw new ModuleInstallerError('USAGE_GUARD_REQUIRED', 'State restoration requires an authoritative host usage guard')
+    }
+    return this.#usageGuard.runExclusive(request.moduleId, async (lease) => this.#exclusive(request.moduleId, async () => {
+      await this.#ensureRoot()
+      const paths = await this.#ensureModuleLayout(request.moduleId)
+      await this.#assertIdle(paths)
+      const previousState = await this.#readState(paths.state)
+      const nextState: StateFile = {
+        schemaVersion: STATE_SCHEMA_VERSION,
+        activeVersion: request.activeVersion,
+        lastKnownGoodVersion: request.lastKnownGoodVersion,
+      }
+      if (statesEqual(previousState, nextState)) {
+        return {
+          ...publicState(request.moduleId, nextState),
+          activePath: nextState.activeVersion === null ? null : join(paths.versionsDirectory, nextState.activeVersion),
+        }
+      }
+      const referencedVersions = [...new Set([
+        previousState.activeVersion,
+        previousState.lastKnownGoodVersion,
+        nextState.activeVersion,
+        nextState.lastKnownGoodVersion,
+      ].filter((version): version is ModuleVersion => version !== null))]
+      for (const version of referencedVersions) {
+        if (await lease.isVersionInUse(version)) {
+          throw new ModuleInstallerError('PROTECTED_VERSION', `Cannot restore state while version ${version} is in use`)
+        }
+        if ((version === nextState.activeVersion || version === nextState.lastKnownGoodVersion)
+          && !(await pathExists(join(paths.versionsDirectory, version)))) {
+          throw new ModuleInstallerError('NOT_INSTALLED', `Cannot restore missing module version ${version}`)
+        }
+      }
+      const journalVersion = nextState.activeVersion
+        ?? nextState.lastKnownGoodVersion
+        ?? previousState.activeVersion
+        ?? previousState.lastKnownGoodVersion
+      if (journalVersion === null) {
+        throw new ModuleInstallerError('JOURNAL_INVALID', 'State restoration has no journal version')
+      }
+      const transactionId = randomUUID()
+      let journal: JournalFile = {
+        schemaVersion: JOURNAL_SCHEMA_VERSION,
+        operation: 'restore',
+        checkpoint: 'prepared',
+        transactionId,
+        moduleId: request.moduleId,
+        version: journalVersion,
+        previousState,
+        nextState,
+      }
+      await this.#claimJournal(paths, journal)
+      try {
+        await this.#fault('after-journal-prepared')
+        await this.#fault('before-state-rename')
+        await atomicWriteJson(paths.state, nextState)
+        await this.#fault('after-state-rename')
+        journal = { ...journal, checkpoint: 'state-activated' }
+        await atomicWriteJson(paths.journal, journal)
+        await this.#fault('after-state-activated')
+        await this.#fault('before-cleanup')
+        await this.#cleanupTransaction(paths, transactionId)
+      } catch (error) {
+        if (error instanceof SimulatedInstallerCrash) throw error
+        const committed = statesEqual(await this.#readState(paths.state), nextState)
+        await this.#recoverModule(request.moduleId)
+        if (!committed) {
+          if (error instanceof ModuleInstallerError) throw error
+          throw new ModuleInstallerError('FILESYSTEM_ERROR', error instanceof Error ? error.message : String(error), error)
+        }
+      }
+      return {
+        ...publicState(request.moduleId, nextState),
+        activePath: nextState.activeVersion === null ? null : join(paths.versionsDirectory, nextState.activeVersion),
+      }
+    }))
   }
 
   async uninstall(request: UninstallRequest): Promise<void> {
