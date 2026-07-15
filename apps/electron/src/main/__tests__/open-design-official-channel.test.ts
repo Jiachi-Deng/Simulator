@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, mock } from 'bun:test'
 import { generateKeyPairSync } from 'node:crypto'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import type { ModuleCoordinatorInstallRequest } from '@simulator/module-coordinator'
@@ -15,6 +15,26 @@ import { OPEN_DESIGN_MODULE_ID } from '../../shared/open-design-module-ipc'
 
 const roots: string[] = []
 const CATALOG_URL = 'https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.1/open-design-catalog.json'
+const OFFICIAL_CATALOG_URL = 'https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.1/org.simulator.open-design-0.14.1-catalog-v2-envelope.json'
+const OFFICIAL_RESOURCE_PATH = join(import.meta.dir, '..', '..', '..', 'resources', 'open-design-official-channel.json')
+const OFFICIAL_RESOURCE = {
+  catalogUrl: OFFICIAL_CATALOG_URL,
+  githubRelease: {
+    owner: 'Jiachi-Deng',
+    repository: 'Simulator',
+    tag: 'open-design-v0.14.1',
+  },
+  moduleId: OPEN_DESIGN_MODULE_ID,
+  platform: 'darwin-arm64',
+  schemaVersion: 1,
+  trustedKeys: [{
+    activeFrom: '2026-07-15T00:00:00.000Z',
+    activeUntil: '2027-07-15T00:00:00.000Z',
+    keyId: 'open-design-release-2026-01',
+    publicKey: 'KvpR89GuQd670SZMZuuR+aK4FUIprxRlqE58K3twQZk=',
+  }],
+  version: '0.14.1',
+}
 
 function publicKeyBase64(): string {
   const pair = generateKeyPairSync('ed25519')
@@ -57,6 +77,33 @@ afterEach(async () => {
 })
 
 describe('loadOpenDesignOfficialChannel', () => {
+  it('ships the exact production channel and trust root as a build-owned resource', async () => {
+    const bytes = await readFile(OFFICIAL_RESOURCE_PATH)
+    expect(bytes).toEqual(Buffer.from(JSON.stringify(OFFICIAL_RESOURCE)))
+
+    const result = await loadOpenDesignOfficialChannel({
+      isPackaged: true,
+      resourcesPath: '/unused',
+      platform: 'darwin-arm64',
+      readConfig: async (path) => {
+        expect(path).toBe(join('/unused', OPEN_DESIGN_OFFICIAL_CHANNEL_CONFIG_RELATIVE_PATH))
+        return bytes
+      },
+    })
+
+    expect(result).toMatchObject({
+      status: 'ready',
+      channel: {
+        githubReleaseRedirectPolicy: { owner: 'Jiachi-Deng', repository: 'Simulator' },
+        releaseRequest: {
+          catalogUrl: OFFICIAL_CATALOG_URL,
+          moduleId: OPEN_DESIGN_MODULE_ID,
+          version: '0.14.1',
+        },
+      },
+    })
+  })
+
   it('loads a strict packaged exact-tag channel with built-in public trust roots', async () => {
     const resourcesPath = await packagedFixture()
     const result = await loadOpenDesignOfficialChannel({
