@@ -10,4 +10,6 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Bug Fixes
 
+- **OpenDesign production requests stay usable** — Simulator Host mode no longer sends the standalone `od-default` plugin ID when that plugin is not installed, and a visible OpenDesign workspace now renews its daemon lease so it cannot disappear after five minutes of active use.
+
 ## Breaking Changes

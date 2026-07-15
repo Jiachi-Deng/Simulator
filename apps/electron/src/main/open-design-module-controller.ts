@@ -23,6 +23,7 @@ import {
 } from '../shared/open-design-module-ipc'
 
 const POLL_INTERVAL_MS = 150
+const VISIBLE_KEEPALIVE_INTERVAL_MS = 60_000
 const OPEN_DESIGN_COORDINATOR_MODULE_ID = OPEN_DESIGN_MODULE_ID as ModuleId
 
 type Awaitable<T> = T | Promise<T>
@@ -30,7 +31,7 @@ type Awaitable<T> = T | Promise<T>
 export interface OpenDesignModuleRuntime {
   readonly coordinator: Pick<ModuleCoordinator, 'install' | 'start' | 'stop' | 'snapshot'>
   readonly registry: Pick<ModuleRegistry, 'snapshot'>
-  readonly daemon: Pick<ModuleDaemonManager, 'get' | 'subscribe'>
+  readonly daemon: Pick<ModuleDaemonManager, 'get' | 'subscribe' | 'touch'>
   readonly view: Pick<ModuleViewPort, 'query'> & {
     setPresentation(moduleId: ModuleId, presentation: {
       readonly rect?: OpenDesignModuleViewBounds
@@ -197,8 +198,7 @@ export function reduceOpenDesignModuleState(input: OpenDesignModuleReducerInput)
 
   const daemonRunning = input.daemon !== undefined
     && input.daemon.state !== 'stopped'
-  const viewRunning = input.view?.state === 'attaching' || input.view?.state === 'attached'
-  if (daemonRunning || viewRunning) return Object.freeze({ status: 'running', ...common })
+  if (daemonRunning) return Object.freeze({ status: 'running', ...common })
 
   if (installed?.activeVersion) return Object.freeze({ status: 'available', ...common })
   if (installed && installed.versions.length > 0) {
@@ -253,8 +253,11 @@ export class OpenDesignModuleController {
   #subscriptionRuntime?: OpenDesignModuleRuntime
   #unsubscribeDaemon?: () => void
   #cancelPoll?: () => void
+  #cancelVisibleKeepalive?: () => void
   #publishFlight?: Promise<void>
   #pollGeneration = 0
+  #visibleKeepaliveGeneration = 0
+  #viewVisible = false
   #disposed = false
 
   constructor(options: OpenDesignModuleControllerOptions) {
@@ -361,6 +364,13 @@ export class OpenDesignModuleController {
       ...(presentation.bounds ? { rect: presentation.bounds } : {}),
       visible: presentation.visible,
     })
+    this.#viewVisible = presentation.visible
+    if (presentation.visible) {
+      lookup.runtime.daemon.touch(OPEN_DESIGN_COORDINATOR_MODULE_ID)
+      this.#startVisibleKeepalive()
+    } else {
+      this.#stopVisibleKeepalive()
+    }
     return this.getState()
   }
 
@@ -399,6 +409,7 @@ export class OpenDesignModuleController {
     if (this.#disposed) return
     this.#disposed = true
     this.#stopPolling()
+    this.#stopVisibleKeepalive()
     this.#clearSubscription()
   }
 
@@ -534,6 +545,31 @@ export class OpenDesignModuleController {
     this.#pollGeneration += 1
     this.#cancelPoll?.()
     this.#cancelPoll = undefined
+  }
+
+  #startVisibleKeepalive(): void {
+    this.#stopVisibleKeepalive()
+    this.#viewVisible = true
+    const generation = this.#visibleKeepaliveGeneration
+    const schedule = () => {
+      if (this.#disposed || !this.#viewVisible || generation !== this.#visibleKeepaliveGeneration) return
+      this.#cancelVisibleKeepalive = this.#clock.setTimeout(() => {
+        this.#cancelVisibleKeepalive = undefined
+        if (this.#disposed || !this.#viewVisible || generation !== this.#visibleKeepaliveGeneration) return
+        const lookup = this.#runtimeLookup()
+        if (lookup.status !== 'ready'
+          || !lookup.runtime.daemon.touch(OPEN_DESIGN_COORDINATOR_MODULE_ID)) return
+        schedule()
+      }, VISIBLE_KEEPALIVE_INTERVAL_MS)
+    }
+    schedule()
+  }
+
+  #stopVisibleKeepalive(): void {
+    this.#visibleKeepaliveGeneration += 1
+    this.#viewVisible = false
+    this.#cancelVisibleKeepalive?.()
+    this.#cancelVisibleKeepalive = undefined
   }
 
   async #publishCurrentState(): Promise<void> {

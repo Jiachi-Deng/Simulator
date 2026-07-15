@@ -239,6 +239,7 @@ interface Harness {
     install: ModuleCoordinatorInstallRequest[]
     start: Array<{ moduleId: string; operationId?: string }>
     stop: Array<{ moduleId: string; operationId?: string }>
+    touch: ModuleId[]
   }
   readonly listeners: Set<(snapshot: ModuleDaemonSnapshot) => void>
   activeVersion?: ModuleVersion
@@ -265,7 +266,7 @@ function createHarness(installed = false): Harness {
     view: undefined,
     operations: [],
     unsubscribes: 0,
-    calls: { install: [], start: [], stop: [] },
+    calls: { install: [], start: [], stop: [], touch: [] },
   } as unknown as Harness
 
   const complete = (kind: 'install' | 'start' | 'stop', operationId: string) => {
@@ -306,6 +307,10 @@ function createHarness(installed = false): Harness {
     },
     daemon: {
       get: () => harness.daemon,
+      touch(moduleId) {
+        harness.calls.touch.push(moduleId)
+        return harness.daemon?.state === 'healthy' || harness.daemon?.state === 'degraded'
+      },
       subscribe(listener) {
         listeners.add(listener)
         return () => {
@@ -405,6 +410,15 @@ describe('reduceOpenDesignModuleState', () => {
       daemon: daemonSnapshot('healthy'),
     })
     expect(ignoresHistoricalEvent.status).toBe('running')
+
+    const ignoresStaleAttachedView = reduceOpenDesignModuleState({
+      availability: 'ready',
+      coordinator: coordinatorSnapshot(),
+      registry: registrySnapshot(VERSION),
+      daemon: daemonSnapshot('stopped'),
+      view: viewSnapshot('attached'),
+    })
+    expect(ignoresStaleAttachedView.status).toBe('available')
   })
 })
 
@@ -519,6 +533,30 @@ describe('OpenDesignModuleController', () => {
     installFlight.resolve(operationResult('install', operationId))
     await flight
 
+    expect(clock.tasks.size).toBe(0)
+    controller.dispose()
+  })
+
+  it('keeps a visible OpenDesign daemon active and cancels the lease when hidden', async () => {
+    const harness = createHarness(true)
+    harness.daemon = daemonSnapshot('healthy')
+    harness.view = viewSnapshot('attached')
+    const clock = new FakeClock()
+    const controller = createController(harness, { clock })
+
+    expect(await controller.setViewPresentation({
+      visible: true,
+      bounds: { x: 220, y: 48, width: 980, height: 752 },
+    })).toMatchObject({ status: 'running' })
+    expect(harness.calls.touch).toEqual([MODULE_ID])
+    expect(clock.delays).toEqual([60_000])
+    expect(clock.tasks.size).toBe(1)
+
+    clock.runNext()
+    expect(harness.calls.touch).toEqual([MODULE_ID, MODULE_ID])
+    expect(clock.tasks.size).toBe(1)
+
+    await controller.setViewPresentation({ visible: false })
     expect(clock.tasks.size).toBe(0)
     controller.dispose()
   })

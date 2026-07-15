@@ -1308,7 +1308,59 @@ index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..6af814f96a34b1f362f3445c11dc30d6
    );
  
    const handleChangeDefaultDesignSystem = useCallback(
-@@ -2287,12 +2329,11 @@ function AppInner() {
+@@ -1431,6 +1473,10 @@ function AppInner() {
+       (input.metadata?.promptTemplate?.prompt?.trim() || undefined);
+ 
+       const metadata = mergeLinkedDirsIntoMetadata(input.metadata, input.linkedDirs);
++      const projectPluginId = simulatorHostRuntimeMode
++        && input.pluginId === DEFAULT_UNSELECTED_SCENARIO_PLUGIN_ID
++        ? undefined
++        : input.pluginId;
+       const kind = metadata?.kind ?? null;
+       const fidelity = fidelityToTracking(metadata?.fidelity ?? null);
+       const creationSource: 'blank' | 'template' | 'zip' | 'folder' =
+@@ -1444,11 +1490,11 @@ function AppInner() {
+           pendingPrompt: derivedPendingPrompt,
+           metadata,
+           ...(input.conversationMode ? { conversationMode: input.conversationMode } : {}),
+-          ...(input.pluginId ? { pluginId: input.pluginId } : {}),
++          ...(projectPluginId ? { pluginId: projectPluginId } : {}),
+           ...(input.appliedPluginSnapshotId
+             ? { appliedPluginSnapshotId: input.appliedPluginSnapshotId }
+             : {}),
+-          ...(input.pluginInputs ? { pluginInputs: input.pluginInputs } : {}),
++          ...(projectPluginId && input.pluginInputs ? { pluginInputs: input.pluginInputs } : {}),
+         });
+       } catch (err) {
+         const errorCode =
+@@ -1481,7 +1527,7 @@ function AppInner() {
+             project_id: null,
+             project_kind: projectKindFromMetadataToTracking(metadata),
+             fidelity,
+-            ...(input.pluginId ? { plugin_id: input.pluginId } : {}),
++            ...(projectPluginId ? { plugin_id: projectPluginId } : {}),
+             ...(input.pluginType ? { plugin_type: input.pluginType } : {}),
+             result: 'failed',
+             error_code: 'CREATE_REQUEST_FAILED',
+@@ -1561,7 +1607,7 @@ function AppInner() {
+           project_id: result.project.id,
+           project_kind: projectKindFromMetadataToTracking(metadata),
+           fidelity,
+-          ...(input.pluginId ? { plugin_id: input.pluginId } : {}),
++          ...(projectPluginId ? { plugin_id: projectPluginId } : {}),
+           ...(input.pluginType ? { plugin_type: input.pluginType } : {}),
+           result: 'success',
+         },
+@@ -1656,7 +1702,7 @@ function AppInner() {
+       navigate(projectRoute);
+       return true;
+     },
+-    [analytics.track, rememberLocalProject],
++    [analytics.track, rememberLocalProject, simulatorHostRuntimeMode],
+   );
+ 
+   const handleCreateProjectFromDesignSystem = useCallback(
+@@ -2287,12 +2333,11 @@ function AppInner() {
    // EntryView / ProjectView split so the discovery surface stays
    // independent of any active project.
    let appMain: ReactNode;
