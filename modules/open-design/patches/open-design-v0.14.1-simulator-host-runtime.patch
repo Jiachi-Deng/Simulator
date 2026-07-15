@@ -1111,7 +1111,7 @@ index 062b86a662dbf7c5491909972ead83fa3b5a17ee..9c9ecad2ba0ebee5e15099b0918c9678
      : webOutputMode === 'standalone'
        ? {
 diff --git a/apps/web/src/App.tsx b/apps/web/src/App.tsx
-index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..2ef108f840016582a2683408d07c3e9352ae2233 100644
+index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..6af814f96a34b1f362f3445c11dc30d6a4afe36c 100644
 --- a/apps/web/src/App.tsx
 +++ b/apps/web/src/App.tsx
 @@ -65,9 +65,14 @@ import {
@@ -1158,7 +1158,7 @@ index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..2ef108f840016582a2683408d07c3e93
    useEffect(() => {
      const body = activeProjectId
        ? { projectId: activeProjectId, fileName: activeFileName }
-@@ -956,12 +974,20 @@ function AppInner() {
+@@ -956,12 +974,21 @@ function AppInner() {
          fetchDaemonConfig(),
          fetchComposioConfigFromDaemon(),
          fetchMediaProvidersFromDaemon(),
@@ -1170,8 +1170,9 @@ index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..2ef108f840016582a2683408d07c3e93
 +        nextSimulatorHostRuntimeMode,
        ]) => {
          if (cancelled) return;
-+        setSimulatorHostRuntimeMode(nextSimulatorHostRuntimeMode);
-+        if (nextSimulatorHostRuntimeMode) {
++        const normalizedSimulatorHostRuntimeMode = nextSimulatorHostRuntimeMode !== false;
++        setSimulatorHostRuntimeMode(normalizedSimulatorHostRuntimeMode);
++        if (normalizedSimulatorHostRuntimeMode) {
 +          document.documentElement.setAttribute('data-simulator-host-runtime', 'true');
 +        } else {
 +          document.documentElement.removeAttribute('data-simulator-host-runtime');
@@ -1179,7 +1180,7 @@ index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..2ef108f840016582a2683408d07c3e93
          const daemonMediaProvidersLoaded =
            daemonMediaProvidersResult.status === 'ok'
              ? daemonMediaProvidersResult.providers
-@@ -985,7 +1011,7 @@ function AppInner() {
+@@ -985,7 +1012,7 @@ function AppInner() {
            baseConfig.mediaProviders,
            daemonMediaProvidersLoaded,
          );
@@ -1188,7 +1189,7 @@ index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..2ef108f840016582a2683408d07c3e93
            clearStaleAmrModelChoiceOnProfileChange(
              baseConfig,
              mergeDaemonConfig(baseConfig, daemonConfig),
-@@ -996,6 +1022,9 @@ function AppInner() {
+@@ -996,6 +1023,9 @@ function AppInner() {
          if (!hasLocalComposioKey && daemonComposioConfig) {
            next.composio = daemonComposioConfig;
          }
@@ -1198,7 +1199,7 @@ index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..2ef108f840016582a2683408d07c3e93
          saveConfig(next);
          if (
            daemonMediaProvidersResult.status === 'ok' &&
-@@ -1020,7 +1049,11 @@ function AppInner() {
+@@ -1020,7 +1050,11 @@ function AppInner() {
          // banner keys off `privacyDecisionAt`. They may coexist on the
          // first launch; the banner sits above the modal layer so it
          // stays actionable regardless of the active view.
@@ -1211,7 +1212,7 @@ index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..2ef108f840016582a2683408d07c3e93
            navigate({ kind: 'home', view: 'onboarding' }, { replace: true });
          }
          setDaemonConfigLoaded(true);
-@@ -1193,7 +1226,10 @@ function AppInner() {
+@@ -1193,7 +1227,10 @@ function AppInner() {
      // a half-typed key can't survive in localStorage. If the dialog is
      // closing, preserve any onboarding completion that the close gesture
      // already committed so an unmount autosave cannot re-open the welcome flow.
@@ -1223,7 +1224,7 @@ index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..2ef108f840016582a2683408d07c3e93
      latestPersistedConfigRef.current = persisted;
      saveConfig(persisted);
      setConfig(persisted);
-@@ -1212,7 +1248,7 @@ function AppInner() {
+@@ -1212,7 +1249,7 @@ function AppInner() {
          : Promise.resolve(),
        syncConfigToDaemon(persisted, { throwOnError: true }),
      ]);
@@ -1232,7 +1233,7 @@ index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..2ef108f840016582a2683408d07c3e93
  
    /**
     * Explicit Composio API-key save. Called from the section-local
-@@ -1235,12 +1271,13 @@ function AppInner() {
+@@ -1235,12 +1272,13 @@ function AppInner() {
  
    const handleModeChange = useCallback(
      (mode: AppConfig['mode']) => {
@@ -1247,7 +1248,7 @@ index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..2ef108f840016582a2683408d07c3e93
    );
  
    // Quick theme switch from the settings dropdown in the entry view.
-@@ -1269,17 +1306,19 @@ function AppInner() {
+@@ -1269,17 +1307,19 @@ function AppInner() {
  
    const handleAgentChange = useCallback(
      (agentId: string) => {
@@ -1268,7 +1269,7 @@ index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..2ef108f840016582a2683408d07c3e93
        const current = latestPersistedConfigRef.current;
        const prev = current.agentModels?.[agentId] ?? {};
        const merged = { ...prev, ...choice };
-@@ -1293,7 +1332,7 @@ function AppInner() {
+@@ -1293,7 +1333,7 @@ function AppInner() {
        void syncConfigToDaemon(next);
        setConfig(next);
      },
@@ -1277,7 +1278,7 @@ index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..2ef108f840016582a2683408d07c3e93
    );
  
    // BYOK protocol switch — also flips `mode` to 'api' so the user does
-@@ -1302,12 +1341,13 @@ function AppInner() {
+@@ -1302,12 +1342,13 @@ function AppInner() {
    // user had previously configured for the target protocol.
    const handleApiProtocolChange = useCallback(
      (protocol: ApiProtocol) => {
@@ -1292,7 +1293,7 @@ index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..2ef108f840016582a2683408d07c3e93
    );
  
    // BYOK model picker — patches `model` (and the per-protocol shadow
-@@ -1315,12 +1355,13 @@ function AppInner() {
+@@ -1315,12 +1356,13 @@ function AppInner() {
    // mid-session without retyping their key.
    const handleApiModelChange = useCallback(
      (model: string) => {
@@ -1307,7 +1308,7 @@ index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..2ef108f840016582a2683408d07c3e93
    );
  
    const handleChangeDefaultDesignSystem = useCallback(
-@@ -2287,12 +2328,11 @@ function AppInner() {
+@@ -2287,12 +2329,11 @@ function AppInner() {
    // EntryView / ProjectView split so the discovery surface stays
    // independent of any active project.
    let appMain: ReactNode;

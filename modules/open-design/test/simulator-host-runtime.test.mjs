@@ -68,6 +68,7 @@ test("pinned patch covers every Simulator Host-only integration surface", () => 
   assert.match(additions, /normalizeSimulatorHostConfig/);
   assert.match(additions, /onboardingCompleted: true/);
   assert.match(additions, /pendingRuntimeBootstrap = !daemonConfigLoaded/);
+  assert.match(additions, /normalizedSimulatorHostRuntimeMode = nextSimulatorHostRuntimeMode !== false/);
   assert.match(additions, /window\.location\.pathname === '\/onboarding'/);
   assert.match(additions, /navigate\(\{ kind: 'home', view: 'home' \}, \{ replace: true \}\)/);
   assert.match(additions, /data-testid="settings-simulator-host-runtime"/);
