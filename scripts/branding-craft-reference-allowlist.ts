@@ -154,6 +154,28 @@ export const CRAFT_REFERENCE_ALLOWLIST: CraftReferenceCategory[] = [
       || path === 'packages/shared/CLAUDE.md',
   },
   {
+    id: 'open-design-craft-host-runtime-terminology',
+    reason: 'OpenDesign deliberately reuses the embedded Craft workspace and agent runtime; these exact implementation, test, rights, and provenance lines distinguish that trusted Host from the Simulator module boundary.',
+    matches: ({ path, line }) =>
+      (/^apps\/electron\/src\/main\/module-agent-runtime(?:\.test)?\.ts$/.test(path)
+        && /Craft workspace/.test(line))
+      || (path === 'modules/open-design/README.md'
+        && /Craft workspace.*credential/.test(line))
+      || (path === 'modules/open-design/resource-decisions.json'
+        && /Host-only OpenDesign uses Craft(?: system typography|-owned module chrome)/.test(line))
+      || (path === 'packages/module-agent-gateway/src/types.ts'
+        && /Raw Craft session id/.test(line))
+      || (path === 'packages/server-core/src/sessions/module-agent-adapter.ts'
+        && /Craft(?:'s full| workspace| created)/.test(line)),
+  },
+  {
+    id: 'localized-open-design-craft-host-copy',
+    reason: 'The Module Center intentionally names the still-visible Craft workspace and sidebar so users understand that OpenDesign runs inside, and can return to, the primary embedded Host surface.',
+    matches: ({ path, line }) =>
+      /^packages\/shared\/src\/i18n\/locales\/(?:de|en|es|hu|ja|pl|zh-Hans)\.json$/.test(path)
+      && /"modules\.(?:subtitle|openDesign\.hostNote)"/.test(line),
+  },
+  {
     id: 'external-cli-tool-identity',
     reason: 'The craft-agent CLI command and its tool icon are compatibility-facing external identifiers.',
     matches: ({ path }) =>
