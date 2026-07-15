@@ -36,10 +36,10 @@ test("produces a deterministic SPDX document from the pinned lock and staged pac
   const first = await produceSbom({ sourceRoot, artifactRoot, provenance, target });
   const second = await produceSbom({ sourceRoot, artifactRoot, provenance, target });
   assert.deepEqual(first.bytes, second.bytes);
-  assert.equal(first.document.packages.length, 8);
-  assert.equal(first.document.relationships.length, 8);
+  assert.equal(first.document.packages.length, 5);
+  assert.equal(first.document.relationships.length, 5);
   assert.equal(first.bytes.includes(Buffer.from(root)), false);
-  assert.equal(validateSbom({ sbom: first.document, sha256: first.sha256, provenance, policy }).packages.length, 8);
+  assert.equal(validateSbom({ sbom: first.document, sha256: first.sha256, provenance, policy }).packages.length, 5);
 
   lock.packages[`${provenance.sbom.requiredPackages[0].name}@${provenance.sbom.requiredPackages[0].version}`].resolution.integrity = `sha512-${Buffer.alloc(64).toString("base64")}`;
   const changedBytes = Buffer.from(stringify(lock), "utf8");

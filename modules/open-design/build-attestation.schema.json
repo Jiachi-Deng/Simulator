@@ -28,7 +28,7 @@
     }, "additionalProperties": false}},
     "sbom": {"type": "object", "required": ["documentSha256", "lockfileSha256", "packages"], "properties": {
       "documentSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "lockfileSha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-      "packages": {"type": "array", "minItems": 8, "maxItems": 8, "items": {"type": "object", "required": ["name", "version", "contentSha512", "licenseDeclared", "noticeStatus"], "properties": {
+      "packages": {"type": "array", "minItems": 5, "maxItems": 5, "items": {"type": "object", "required": ["name", "version", "contentSha512", "licenseDeclared", "noticeStatus"], "properties": {
         "name": {"type": "string", "minLength": 1, "maxLength": 128}, "version": {"type": "string", "minLength": 1, "maxLength": 64}, "contentSha512": {"type": "string", "pattern": "^[0-9a-f]{128}$"}, "licenseDeclared": {"type": "string", "minLength": 1, "maxLength": 128}, "noticeStatus": {"enum": ["NONE", "PRESENT"]}
       }, "additionalProperties": false}}
     }, "additionalProperties": false},

@@ -81,14 +81,11 @@
   },
   "sbom": {
     "requiredPackages": [
-      {"name": "@img/sharp-darwin-arm64", "version": "0.34.5", "contentSha512": "8a6b50dd63095db318e1fc5bfcd769e87053355b5609423459da1bca17867f9f9a77ac57f152033bcbb6c44e2a73f7ebd3c08a1bfedd0ec785b67e8cea0febdf", "licenseDeclared": "Apache-2.0", "noticeStatus": "NONE"},
-      {"name": "@img/sharp-libvips-darwin-arm64", "version": "1.2.4", "contentSha512": "cea8e3a3b45ab457c5a0fd0c910e758dfb856419d5136a5189ac9d289d46feb1d9be7b2b1c039c4002c88bdb00e5ca39c5e9d0753ba00afb5bd5cb9fefc55fe2", "licenseDeclared": "LGPL-3.0-or-later", "noticeStatus": "NONE"},
       {"name": "better-sqlite3", "version": "12.10.0", "contentSha512": "0b2cda65140ac87901d992277d34e5da7bd3df711b0e98e42c46c4f3f65c9372e5e8ed2aaafb8676b278e4782d1fe1f291183cf084d8dc076b78118def468149", "licenseDeclared": "MIT", "noticeStatus": "NONE"},
       {"name": "bindings", "version": "1.5.0", "contentSha512": "a76abfb7f9a1bee3a3fd478b955eb9eba183fe0ba8c25af4847c42948d16f66ecc59890bd45d212e8fb401ec6cf4748f0ad4754974344c3dcc30aad765a8db89", "licenseDeclared": "MIT", "noticeStatus": "NONE"},
       {"name": "blake3-wasm", "version": "2.1.5", "contentSha512": "175f8af046df399138f5db683ed9b1510ae95da048977202bdab0b87e9c9b5ad31933fbd905ffbb9eb7d7cb9f02aa843ae68fa83ee8add3c3dc903d483691ae6", "licenseDeclared": "MIT", "noticeStatus": "NONE"},
       {"name": "file-uri-to-path", "version": "1.0.0", "contentSha512": "d19b7eb372fb55fd5b8b0599dbd6804625582f1ee23069c4525f71df77db07f8f78d1f35bbf3b62dba8af819b508348d0ca56d27f623c18ed351de5291e2d02f", "licenseDeclared": "MIT", "noticeStatus": "NONE"},
-      {"name": "node-pty", "version": "1.1.0", "contentSha512": "db426ab6eb58e893d74d49cbd228f5b9a77b41ed5b693e3a972a25876b1210d0dde2c4f3299e279801647800110cac2694b8cfc7a5ca465c11531c233b2fa552", "licenseDeclared": "MIT", "noticeStatus": "NONE"},
-      {"name": "sharp", "version": "0.34.5", "contentSha512": "3aef48e45b7d58d7026d7ad4f5c3203c17022bc2e2c0ba9c6f2c16dede280d5dfb9f5a73a6e34bb1888057c78e0e78dbb509520f067671411e433e04e781e5b6", "licenseDeclared": "Apache-2.0", "noticeStatus": "NONE"}
+      {"name": "node-pty", "version": "1.1.0", "contentSha512": "db426ab6eb58e893d74d49cbd228f5b9a77b41ed5b693e3a972a25876b1210d0dde2c4f3299e279801647800110cac2694b8cfc7a5ca465c11531c233b2fa552", "licenseDeclared": "MIT", "noticeStatus": "NONE"}
     ]
   },
   "buildInputs": [
