@@ -8,7 +8,8 @@ import { promisify } from "node:util";
 
 import { stagingAssert, stagingFail } from "./staging-error.mjs";
 
-export const REQUIRED_NATIVE_PACKAGES = Object.freeze(["better-sqlite3", "node-pty", "sharp"]);
+export const REQUIRED_NATIVE_BUILD_PACKAGES = Object.freeze(["better-sqlite3", "node-pty", "sharp"]);
+export const REQUIRED_STAGED_NATIVE_PACKAGES = Object.freeze(["better-sqlite3", "node-pty"]);
 const NATIVE_EXTENSIONS = new Set([".node", ".so", ".dylib", ".dll", ".exe"]);
 const NODE_PTY_HELPER_SUFFIX = "/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper";
 const execFile = promisify(execFileCallback);
@@ -21,7 +22,7 @@ export function assertNativeBuildsAllowed(manifest) {
   const ignored = pnpm.ignoredBuiltDependencies ?? [];
   stagingAssert(Array.isArray(allowed) && allowed.every((value) => typeof value === "string"), "NATIVE_BUILD_POLICY_INVALID", "pnpm.onlyBuiltDependencies must be a string array");
   stagingAssert(Array.isArray(ignored) && ignored.every((value) => typeof value === "string"), "NATIVE_BUILD_POLICY_INVALID", "pnpm.ignoredBuiltDependencies must be a string array when present");
-  for (const packageName of REQUIRED_NATIVE_PACKAGES) {
+  for (const packageName of REQUIRED_NATIVE_BUILD_PACKAGES) {
     stagingAssert(!ignored.includes(packageName) && allowed.includes(packageName), "NATIVE_BUILD_IGNORED", `${packageName} is not allowed to run its native build by pnpm`);
   }
 }
@@ -51,7 +52,7 @@ export async function inspectNativeRuntime({
   const missingMetadata = [];
   await visitDirectory(root, "");
   if (missingMetadata.length > 0) stagingFail("NATIVE_METADATA_MISSING", `nativeTarget metadata is required for: ${missingMetadata.sort((left, right) => Buffer.compare(Buffer.from(left), Buffer.from(right))).join(", ")}`);
-  for (const packageName of REQUIRED_NATIVE_PACKAGES) {
+  for (const packageName of REQUIRED_STAGED_NATIVE_PACKAGES) {
     stagingAssert(seenPackages.has(packageName), "NATIVE_PACKAGE_MISSING", `${packageName} has no staged native binary`);
   }
   return entries.sort((left, right) => Buffer.compare(Buffer.from(left.path), Buffer.from(right.path)));

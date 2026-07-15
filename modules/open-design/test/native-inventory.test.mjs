@@ -50,7 +50,7 @@ test("pins every target-native path and excludes the complete sharp optimizer cl
   }
 });
 
-test("records target platform, architecture, and Node ABI for required native packages", async (t) => {
+test("records target platform, architecture, and Node ABI without requiring the pruned sharp optimizer", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "open-design-native-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const files = [
@@ -58,7 +58,6 @@ test("records target platform, architecture, and Node ABI for required native pa
     { path: "runtime/daemon/node_modules/blake3-wasm/dist/wasm/nodejs/blake3_js_bg.wasm", format: "wasm-module", bytes: Buffer.from([0x00, 0x61, 0x73, 0x6d, 1, 0, 0, 0]), mode: 0o644 },
     { path: "runtime/daemon/node_modules/node-pty/prebuilds/darwin-arm64/pty.node", format: "node-addon", bytes: arm64MachO(), mode: 0o644 },
     { path: "runtime/daemon/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper", format: "executable", bytes: arm64MachO(), mode: 0o755 },
-    { path: "runtime/packages/web-sidecar/node_modules/@img/sharp-darwin-arm64/lib/sharp.node", format: "node-addon", bytes: arm64MachO(), mode: 0o644 },
   ];
   await Promise.all(files.map(async (file) => {
     await mkdir(path.dirname(path.join(root, file.path)), { recursive: true });
@@ -73,7 +72,7 @@ test("records target platform, architecture, and Node ABI for required native pa
     sourceCtimeMs: Date.now(),
   })));
   const inventory = await inspectNativeRuntime({ artifactRoot: root, metadata, target, runtime, buildEvidence: { buildStartedAtMs: Date.now() - 1000, copied }, loadAddon: async () => loaded });
-  assert.deepEqual(inventory.map((entry) => entry.resourceClass), ["native-binary", "wasm-resource", "native-binary", "executable-native", "native-binary"]);
+  assert.deepEqual(inventory.map((entry) => entry.resourceClass), ["native-binary", "wasm-resource", "native-binary", "executable-native"]);
   assert.ok(inventory.every((entry) => entry.platform === "darwin" && entry.arch === "arm64" && entry.nodeAbi === "137"));
   assert.ok(inventory.every((entry) => entry.freshFromBuild));
   assert.ok(inventory.filter((entry) => entry.format === "node-addon").every((entry) => entry.load?.nodeVersion === "v24.18.0"));
