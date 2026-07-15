@@ -74,7 +74,7 @@ export async function prepareProductionStaging({
   allowUnreviewedLocalArtifact = false,
   dryRun = false,
   run,
-  runCommand = defaultCommandRunner,
+  runCommand = runBuildCommand,
 } = {}) {
   const distribution = resolveDistribution({ developmentLocalOnly, allowUnreviewedLocalArtifact });
   const [provenanceInput, policyInput, decisionsInput, targetInput] = await Promise.all([
@@ -395,9 +395,9 @@ function isPlainObject(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-async function defaultCommandRunner(commandName, args, options) {
+export async function runBuildCommand(commandName, args, options) {
   await new Promise((resolve, reject) => {
-    const child = spawn(commandName, args, { ...options, stdio: "inherit" });
+    const child = spawn(commandName, args, { ...options, stdio: ["ignore", process.stderr, process.stderr] });
     child.once("error", reject);
     child.once("exit", (code, signal) => code === 0 ? resolve() : reject(new Error(`${commandName} exited with ${signal ?? `code ${code}`}`)));
   });

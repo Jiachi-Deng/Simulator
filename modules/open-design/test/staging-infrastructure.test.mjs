@@ -1,14 +1,17 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { link, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import { copyStagingInputs } from "../src/staging-copier.mjs";
-import { createBuildAttestation, createBuildPlan, resolveDistribution, runBuildPlan, validateSbom, writeArtifactManifest } from "../src/stage-open-design.mjs";
+import { createBuildAttestation, createBuildPlan, resolveDistribution, runBuildCommand, runBuildPlan, validateSbom, writeArtifactManifest } from "../src/stage-open-design.mjs";
 import { canonicalJsonBytes } from "../src/validate-artifact.mjs";
 
 const moduleRoot = new URL("../", import.meta.url);
+const execFileAsync = promisify(execFile);
 const policy = JSON.parse(await readFile(new URL("artifact-policy.json", moduleRoot), "utf8"));
 const provenance = JSON.parse(await readFile(new URL("provenance.json", moduleRoot), "utf8"));
 const sbom = JSON.parse(await readFile(new URL("fixtures/minimal-sbom.spdx.json", moduleRoot), "utf8"));
@@ -193,6 +196,26 @@ test("build plan invokes exact pnpm through exact Node in a private checkout and
   const seen = [];
   await runBuildPlan(plan, async (command, args, options) => { seen.push({ command, args, options }); });
   assert.deepEqual(seen.map((entry) => entry.args), plan.commands.map((entry) => entry.args));
+});
+
+test("build command diagnostics use stderr and leave stdout JSON-only", async () => {
+  const moduleUrl = new URL("../src/stage-open-design.mjs", import.meta.url).href;
+  const script = `
+    import { runBuildCommand } from ${JSON.stringify(moduleUrl)};
+    await runBuildCommand(process.execPath, ["-e", ${JSON.stringify("process.stdout.write('build stdout\\n'); process.stderr.write('build stderr\\n');")}], {
+      cwd: process.cwd(),
+      env: process.env,
+    });
+    process.stdout.write(JSON.stringify({ ok: true }) + "\\n");
+  `;
+  const result = await execFileAsync(process.execPath, ["--input-type=module", "-e", script]);
+  assert.equal(result.stdout, '{"ok":true}\n');
+  assert.equal(result.stderr, "build stdout\nbuild stderr\n");
+
+  await assert.rejects(
+    runBuildCommand(process.execPath, ["-e", "process.exit(7)"], { cwd: process.cwd(), env: process.env }),
+    /exited with code 7/,
+  );
 });
 
 test("produces identical attestation bytes across private paths, times, and native ctimes", async () => {
