@@ -1,0 +1,562 @@
+name: OpenDesign Official Release
+
+on:
+  schedule:
+    - cron: "23 */12 * * *"
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Initial publication is manual; refresh may also be run manually.
+        required: true
+        default: refresh
+        type: choice
+        options:
+          - refresh
+          - initial
+      source_run_id:
+        description: Successful origin/main run containing the fixed initial-input artifact; required only for initial.
+        required: false
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: open-design-official-release-v0.14.1
+  cancel-in-progress: false
+
+env:
+  RELEASE_OWNER: Jiachi-Deng
+  RELEASE_REPOSITORY: Simulator
+  RELEASE_TAG: open-design-v0.14.1
+  MODULE_VERSION: 0.14.1
+  ARCHIVE_ASSET: org.simulator.open-design-0.14.1-darwin-arm64.tar.gz
+  CATALOG_ASSET: org.simulator.open-design-0.14.1-catalog-v2.json
+  ENVELOPE_ASSET: org.simulator.open-design-0.14.1-catalog-v2-envelope.json
+  CONFIG_ASSET: open-design-official-channel.json
+  METADATA_ASSET: org.simulator.open-design-0.14.1-release-metadata.json
+
+jobs:
+  initial:
+    name: Initial OpenDesign publication
+    if: >-
+      github.repository == 'Jiachi-Deng/Simulator' &&
+      github.ref == 'refs/heads/main' &&
+      vars.OPEN_DESIGN_RELEASE_ENABLED == 'true' &&
+      github.event_name == 'workflow_dispatch' &&
+      inputs.operation == 'initial'
+    runs-on: macos-15
+    timeout-minutes: 45
+    environment:
+      name: open-design-production
+      url: https://github.com/Jiachi-Deng/Simulator/releases/tag/open-design-v0.14.1
+    env:
+      KEY_ID: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ID }}
+      KEY_ACTIVE_FROM: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ACTIVE_FROM }}
+      KEY_ACTIVE_UNTIL: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ACTIVE_UNTIL }}
+      HOST_VERSION_RANGE: ${{ vars.OPEN_DESIGN_HOST_VERSION_RANGE }}
+
+    steps:
+      - name: Checkout fixed main source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24.18.0"
+          cache: npm
+          cache-dependency-path: modules/open-design/package-lock.json
+
+      - name: Validate fixed release authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(uname -m)" = "arm64"
+          test -n "$KEY_ID"
+          test -n "$KEY_ACTIVE_FROM"
+          test -n "$KEY_ACTIVE_UNTIL"
+          test -n "$HOST_VERSION_RANGE"
+
+      - name: Install exact publisher dependencies
+        working-directory: modules/open-design
+        run: npm ci
+
+      - name: Download and validate sealed initial input
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$SOURCE_RUN_ID" =~ ^[1-9][0-9]*$ ]] || { echo "source_run_id must be a positive run ID"; exit 1; }
+          run_json=$(gh api "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/runs/$SOURCE_RUN_ID")
+          test "$(jq -r .conclusion <<<"$run_json")" = "success"
+          test "$(jq -r .head_branch <<<"$run_json")" = "main"
+          test "$(jq -r .head_sha <<<"$run_json")" = "$GITHUB_SHA"
+          test "$(jq -r .repository.full_name <<<"$run_json")" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
+          test "$(jq -r .path <<<"$run_json")" = ".github/workflows/open-design-production-input.yml"
+          case "$(jq -r .event <<<"$run_json")" in
+            push|workflow_dispatch) ;;
+            *) echo "source_run_id must identify the fixed production-input workflow"; exit 1 ;;
+          esac
+
+          work="$RUNNER_TEMP/open-design-initial"
+          download="$work/download"
+          mkdir -m 700 -p "$download"
+          gh run download "$SOURCE_RUN_ID" \
+            --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --name open-design-production-input \
+            --dir "$download"
+          test "$(find "$download" -maxdepth 1 -type f | wc -l | tr -d ' ')" = "2"
+          test -f "$download/open-design-production-input.tar.gz"
+          test -f "$download/SHA256SUMS"
+          test "$(wc -l < "$download/SHA256SUMS" | tr -d ' ')" = "1"
+          grep -Eq '^[0-9a-f]{64}  open-design-production-input\.tar\.gz$' "$download/SHA256SUMS"
+          (cd "$download" && shasum -a 256 -c SHA256SUMS)
+
+          tar -tzf "$download/open-design-production-input.tar.gz" > "$work/archive-paths.txt"
+          while IFS= read -r member; do
+            case "$member" in
+              open-design-production-input/*) ;;
+              *) echo "Unexpected initial-input archive path"; exit 1 ;;
+            esac
+            [[ "$member" != /* && "$member" != *"../"* && "$member" != *"/.." ]] || exit 1
+          done < "$work/archive-paths.txt"
+          if tar -tvzf "$download/open-design-production-input.tar.gz" | awk '$1 ~ /^[lh]/ { found=1 } END { exit found ? 0 : 1 }'; then
+            echo "Initial-input archive must not contain links"
+            exit 1
+          fi
+          tar -xzf "$download/open-design-production-input.tar.gz" -C "$work"
+          input="$work/open-design-production-input"
+          test -d "$input/staging"
+          test -x "$input/node/bin/node"
+          test -f "$input/node/LICENSE"
+          printf 'INITIAL_INPUT=%s\nINITIAL_OUTPUT=%s\nPUBLIC_KEY_FILE=%s\n' \
+            "$input" "$work/output" "$work/release-public.pem" >> "$GITHUB_ENV"
+
+      - name: Create bounded initial catalog window
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { appendFileSync } from "node:fs";
+          const issuedAtMs = Date.now();
+          const issuedAt = new Date(issuedAtMs).toISOString();
+          const expiresAt = new Date(issuedAtMs + 20 * 60 * 60 * 1000).toISOString();
+          appendFileSync(process.env.GITHUB_ENV, `CATALOG_SEQUENCE=1\nCATALOG_ISSUED_AT=${issuedAt}\nCATALOG_EXPIRES_AT=${expiresAt}\nVERIFICATION_TIME_MS=${issuedAtMs + 1000}\n`);
+          NODE
+
+      - name: Dry-run initial production package
+        shell: bash
+        run: |
+          set -euo pipefail
+          node modules/open-design/package/production-cli.mjs \
+            --dry-run \
+            --staging-root "$INITIAL_INPUT/staging" \
+            --node-bin "$INITIAL_INPUT/node/bin/node" \
+            --node-license "$INITIAL_INPUT/node/LICENSE" \
+            --release-tag "$RELEASE_TAG" \
+            --catalog-sequence "$CATALOG_SEQUENCE" \
+            --catalog-issued-at "$CATALOG_ISSUED_AT" \
+            --catalog-expires-at "$CATALOG_EXPIRES_AT" \
+            --host-version-range "$HOST_VERSION_RANGE" \
+            --key-id "$KEY_ID" \
+            --key-active-from "$KEY_ACTIVE_FROM" \
+            --key-active-until "$KEY_ACTIVE_UNTIL" \
+            --verification-time "$VERIFICATION_TIME_MS" > "$RUNNER_TEMP/open-design-initial-dry-run.json"
+
+      - name: Build signed initial assets and derive public verification key
+        shell: bash
+        env:
+          OPEN_DESIGN_RELEASE_PRIVATE_KEY: ${{ secrets.OPEN_DESIGN_RELEASE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          set +x
+          umask 077
+          test -n "$OPEN_DESIGN_RELEASE_PRIVATE_KEY"
+          node modules/open-design/package/production-cli.mjs \
+            --staging-root "$INITIAL_INPUT/staging" \
+            --node-bin "$INITIAL_INPUT/node/bin/node" \
+            --node-license "$INITIAL_INPUT/node/LICENSE" \
+            --output "$INITIAL_OUTPUT" \
+            --release-tag "$RELEASE_TAG" \
+            --catalog-sequence "$CATALOG_SEQUENCE" \
+            --catalog-issued-at "$CATALOG_ISSUED_AT" \
+            --catalog-expires-at "$CATALOG_EXPIRES_AT" \
+            --host-version-range "$HOST_VERSION_RANGE" \
+            --key-id "$KEY_ID" \
+            --key-active-from "$KEY_ACTIVE_FROM" \
+            --key-active-until "$KEY_ACTIVE_UNTIL" \
+            --verification-time "$VERIFICATION_TIME_MS" \
+            --private-key-env OPEN_DESIGN_RELEASE_PRIVATE_KEY > "$RUNNER_TEMP/open-design-initial-build.json"
+          node --input-type=module <<'NODE'
+          import { createPrivateKey, createPublicKey } from "node:crypto";
+          import { writeFileSync } from "node:fs";
+          const privateKey = createPrivateKey({ key: process.env.OPEN_DESIGN_RELEASE_PRIVATE_KEY, format: "pem" });
+          const publicKey = createPublicKey(privateKey).export({ format: "pem", type: "spki" });
+          writeFileSync(process.env.PUBLIC_KEY_FILE, publicKey, { mode: 0o600, flag: "wx" });
+          NODE
+
+      - name: Verify initial bundle before publication
+        shell: bash
+        run: |
+          set -euo pipefail
+          node modules/open-design/package/production-cli.mjs \
+            --verify \
+            --bundle-root "$INITIAL_OUTPUT" \
+            --release-tag "$RELEASE_TAG" \
+            --key-id "$KEY_ID" \
+            --key-active-from "$KEY_ACTIVE_FROM" \
+            --key-active-until "$KEY_ACTIVE_UNTIL" \
+            --public-key-file "$PUBLIC_KEY_FILE" \
+            --verification-time "$VERIFICATION_TIME_MS" > "$RUNNER_TEMP/open-design-initial-verify.json"
+          expected=$(printf '%s\n' "$ARCHIVE_ASSET" "$CATALOG_ASSET" "$ENVELOPE_ASSET" "$CONFIG_ASSET" "$METADATA_ASSET" | LC_ALL=C sort)
+          actual=$(find "$INITIAL_OUTPUT" -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)
+          test "$actual" = "$expected"
+
+      - name: Publish fixed-tag release through a draft transaction
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          if gh release view "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" >/dev/null 2>&1; then
+            echo "Fixed OpenDesign release already exists"
+            exit 1
+          fi
+          if git ls-remote --exit-code origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Fixed OpenDesign tag already exists"
+            exit 1
+          fi
+          cleanup_required=1
+          cleanup() {
+            status=$?
+            if [[ "$cleanup_required" = 1 ]]; then
+              gh release delete "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --cleanup-tag --yes >/dev/null 2>&1 || true
+            fi
+            exit "$status"
+          }
+          trap cleanup EXIT
+          gh release create "$RELEASE_TAG" \
+            --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "OpenDesign v$MODULE_VERSION" \
+            --notes "Simulator OpenDesign official module assets." \
+            --draft \
+            "$INITIAL_OUTPUT/$ARCHIVE_ASSET" \
+            "$INITIAL_OUTPUT/$CATALOG_ASSET" \
+            "$INITIAL_OUTPUT/$ENVELOPE_ASSET" \
+            "$INITIAL_OUTPUT/$CONFIG_ASSET" \
+            "$INITIAL_OUTPUT/$METADATA_ASSET"
+
+          expected=$(printf '%s\n' "$ARCHIVE_ASSET" "$CATALOG_ASSET" "$ENVELOPE_ASSET" "$CONFIG_ASSET" "$METADATA_ASSET" | LC_ALL=C sort)
+          actual=$(gh release view "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --json assets --jq '.assets[].name' | LC_ALL=C sort)
+          test "$actual" = "$expected"
+          remote="$RUNNER_TEMP/open-design-initial-remote"
+          mkdir -m 700 "$remote"
+          gh release download "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --dir "$remote"
+          for asset in "$ARCHIVE_ASSET" "$CATALOG_ASSET" "$ENVELOPE_ASSET" "$CONFIG_ASSET" "$METADATA_ASSET"; do
+            cmp "$INITIAL_OUTPUT/$asset" "$remote/$asset"
+          done
+          gh release edit "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --draft=false
+          cleanup_required=0
+          trap - EXIT
+
+      - name: Remove transient verification material
+        if: ${{ always() }}
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/open-design-initial" "$RUNNER_TEMP/open-design-initial-"*.json
+
+  refresh:
+    name: Refresh OpenDesign catalog
+    if: >-
+      github.repository == 'Jiachi-Deng/Simulator' &&
+      github.ref == 'refs/heads/main' &&
+      vars.OPEN_DESIGN_RELEASE_ENABLED == 'true' &&
+      (github.event_name == 'schedule' ||
+       (github.event_name == 'workflow_dispatch' && inputs.operation == 'refresh'))
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: open-design-production
+      url: https://github.com/Jiachi-Deng/Simulator/releases/tag/open-design-v0.14.1
+    env:
+      KEY_ID: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ID }}
+      KEY_ACTIVE_FROM: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ACTIVE_FROM }}
+      KEY_ACTIVE_UNTIL: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ACTIVE_UNTIL }}
+
+    steps:
+      - name: Checkout fixed main source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24.18.0"
+          cache: npm
+          cache-dependency-path: modules/open-design/package-lock.json
+
+      - name: Validate fixed refresh authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -n "$KEY_ID"
+          test -n "$KEY_ACTIVE_FROM"
+          test -n "$KEY_ACTIVE_UNTIL"
+
+      - name: Install exact publisher dependencies
+        working-directory: modules/open-design
+        run: npm ci
+
+      - name: Download exact fixed-tag production bundle
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$(gh release view "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --json isDraft --jq .isDraft)" = "false"
+          work="$RUNNER_TEMP/open-design-refresh"
+          source="$work/source"
+          mkdir -m 700 -p "$source"
+          for asset in "$ARCHIVE_ASSET" "$CATALOG_ASSET" "$ENVELOPE_ASSET" "$CONFIG_ASSET" "$METADATA_ASSET"; do
+            gh release download "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --pattern "$asset" --dir "$source"
+            chmod 600 "$source/$asset"
+          done
+          test "$(find "$source" -maxdepth 1 -type f | wc -l | tr -d ' ')" = "5"
+          printf 'REFRESH_WORK=%s\nSOURCE_BUNDLE=%s\nREFRESH_OUTPUT=%s\nVERIFY_BUNDLE=%s\nPUBLIC_KEY_FILE=%s\n' \
+            "$work" "$source" "$work/output" "$work/verify" "$work/release-public.pem" >> "$GITHUB_ENV"
+
+      - name: Derive monotonic refresh state and bounded window
+        shell: bash
+        run: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync } from "node:fs";
+          const catalog = JSON.parse(readFileSync(`${process.env.SOURCE_BUNDLE}/${process.env.CATALOG_ASSET}`, "utf8"));
+          if (catalog.schemaVersion !== 2 || !Number.isSafeInteger(catalog.sequence) || catalog.sequence < 1) throw new Error("Invalid prior catalog state");
+          const previousIssuedAtMs = Date.parse(catalog.issuedAt);
+          if (!Number.isFinite(previousIssuedAtMs) || new Date(previousIssuedAtMs).toISOString() !== catalog.issuedAt) throw new Error("Invalid prior issuedAt");
+          const issuedAtMs = Math.max(Date.now(), previousIssuedAtMs + 1000);
+          const issuedAt = new Date(issuedAtMs).toISOString();
+          const expiresAt = new Date(issuedAtMs + 20 * 60 * 60 * 1000).toISOString();
+          appendFileSync(process.env.GITHUB_ENV,
+            `PREVIOUS_SEQUENCE=${catalog.sequence}\nPREVIOUS_ISSUED_AT=${catalog.issuedAt}\nCATALOG_SEQUENCE=${catalog.sequence + 1}\nCATALOG_ISSUED_AT=${issuedAt}\nCATALOG_EXPIRES_AT=${expiresAt}\nVERIFICATION_TIME_MS=${issuedAtMs + 1000}\n`);
+          NODE
+
+      - name: Dry-run catalog refresh
+        shell: bash
+        run: |
+          set -euo pipefail
+          node modules/open-design/package/production-cli.mjs \
+            --refresh \
+            --dry-run \
+            --bundle-root "$SOURCE_BUNDLE" \
+            --release-tag "$RELEASE_TAG" \
+            --catalog-sequence "$CATALOG_SEQUENCE" \
+            --catalog-issued-at "$CATALOG_ISSUED_AT" \
+            --catalog-expires-at "$CATALOG_EXPIRES_AT" \
+            --previous-sequence "$PREVIOUS_SEQUENCE" \
+            --previous-issued-at "$PREVIOUS_ISSUED_AT" \
+            --key-id "$KEY_ID" \
+            --key-active-from "$KEY_ACTIVE_FROM" \
+            --key-active-until "$KEY_ACTIVE_UNTIL" \
+            --verification-time "$VERIFICATION_TIME_MS" > "$RUNNER_TEMP/open-design-refresh-dry-run.json"
+
+      - name: Create signed refresh assets and derive public verification key
+        shell: bash
+        env:
+          OPEN_DESIGN_RELEASE_PRIVATE_KEY: ${{ secrets.OPEN_DESIGN_RELEASE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          set +x
+          umask 077
+          test -n "$OPEN_DESIGN_RELEASE_PRIVATE_KEY"
+          node modules/open-design/package/production-cli.mjs \
+            --refresh \
+            --bundle-root "$SOURCE_BUNDLE" \
+            --output "$REFRESH_OUTPUT" \
+            --release-tag "$RELEASE_TAG" \
+            --catalog-sequence "$CATALOG_SEQUENCE" \
+            --catalog-issued-at "$CATALOG_ISSUED_AT" \
+            --catalog-expires-at "$CATALOG_EXPIRES_AT" \
+            --previous-sequence "$PREVIOUS_SEQUENCE" \
+            --previous-issued-at "$PREVIOUS_ISSUED_AT" \
+            --key-id "$KEY_ID" \
+            --key-active-from "$KEY_ACTIVE_FROM" \
+            --key-active-until "$KEY_ACTIVE_UNTIL" \
+            --verification-time "$VERIFICATION_TIME_MS" \
+            --private-key-env OPEN_DESIGN_RELEASE_PRIVATE_KEY > "$RUNNER_TEMP/open-design-refresh-build.json"
+          node --input-type=module <<'NODE'
+          import { createPrivateKey, createPublicKey } from "node:crypto";
+          import { writeFileSync } from "node:fs";
+          const privateKey = createPrivateKey({ key: process.env.OPEN_DESIGN_RELEASE_PRIVATE_KEY, format: "pem" });
+          const publicKey = createPublicKey(privateKey).export({ format: "pem", type: "spki" });
+          writeFileSync(process.env.PUBLIC_KEY_FILE, publicKey, { mode: 0o600, flag: "wx" });
+          NODE
+
+      - name: Reconstruct and verify complete refreshed bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected=$(printf '%s\n' "$CATALOG_ASSET" "$ENVELOPE_ASSET" "$METADATA_ASSET" | LC_ALL=C sort)
+          actual=$(find "$REFRESH_OUTPUT" -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)
+          test "$actual" = "$expected"
+          mkdir -m 700 "$VERIFY_BUNDLE"
+          cp "$SOURCE_BUNDLE/$ARCHIVE_ASSET" "$VERIFY_BUNDLE/$ARCHIVE_ASSET"
+          cp "$SOURCE_BUNDLE/$CONFIG_ASSET" "$VERIFY_BUNDLE/$CONFIG_ASSET"
+          cp "$REFRESH_OUTPUT/$CATALOG_ASSET" "$VERIFY_BUNDLE/$CATALOG_ASSET"
+          cp "$REFRESH_OUTPUT/$ENVELOPE_ASSET" "$VERIFY_BUNDLE/$ENVELOPE_ASSET"
+          cp "$REFRESH_OUTPUT/$METADATA_ASSET" "$VERIFY_BUNDLE/$METADATA_ASSET"
+          chmod 600 "$VERIFY_BUNDLE"/*
+          node modules/open-design/package/production-cli.mjs \
+            --verify \
+            --bundle-root "$VERIFY_BUNDLE" \
+            --release-tag "$RELEASE_TAG" \
+            --key-id "$KEY_ID" \
+            --key-active-from "$KEY_ACTIVE_FROM" \
+            --key-active-until "$KEY_ACTIVE_UNTIL" \
+            --public-key-file "$PUBLIC_KEY_FILE" \
+            --previous-sequence "$PREVIOUS_SEQUENCE" \
+            --previous-issued-at "$PREVIOUS_ISSUED_AT" \
+            --verification-time "$VERIFICATION_TIME_MS" > "$RUNNER_TEMP/open-design-refresh-verify.json"
+
+      - name: Replace only refresh assets through a draft rollback transaction
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          canonical=("$CATALOG_ASSET" "$ENVELOPE_ASSET" "$METADATA_ASSET")
+          suffix="refresh-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          stage="$REFRESH_WORK/stage"
+          candidate_names=()
+          candidate_ids=()
+          old_ids=()
+          old_renamed=(0 0 0)
+          hidden=0
+          transaction_verified=0
+          success=0
+          mkdir -m 700 "$stage"
+
+          asset_id() {
+            local name=$1
+            gh api "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/releases/tags/$RELEASE_TAG" \
+              --jq ".assets[] | select(.name == \"$name\") | .id"
+          }
+          rollback() {
+            local status=$?
+            set +e
+            if [[ "$success" = 0 ]]; then
+              if [[ "$hidden" = 1 && "$transaction_verified" = 0 ]]; then
+                for i in 2 1 0; do
+                  [[ -n "${candidate_ids[$i]:-}" ]] && gh api -X DELETE "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/releases/assets/${candidate_ids[$i]}" >/dev/null 2>&1
+                  if [[ "${old_renamed[$i]:-0}" = 1 ]]; then
+                    gh api -X PATCH "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/releases/assets/${old_ids[$i]}" -f "name=${canonical[$i]}" >/dev/null 2>&1
+                  fi
+                done
+                restored=$(gh release view "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --json assets --jq '.assets[].name' | LC_ALL=C sort)
+                expected=$(printf '%s\n' "$ARCHIVE_ASSET" "$CATALOG_ASSET" "$ENVELOPE_ASSET" "$CONFIG_ASSET" "$METADATA_ASSET" | LC_ALL=C sort)
+                if [[ "$restored" = "$expected" ]]; then
+                  gh release edit "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --draft=false >/dev/null 2>&1
+                else
+                  echo "Rollback needs manual recovery; release remains draft" >&2
+                fi
+              elif [[ "$hidden" = 0 ]]; then
+                for name in "${candidate_names[@]:-}"; do
+                  id=$(asset_id "$name")
+                  [[ -n "$id" ]] && gh api -X DELETE "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/releases/assets/$id" >/dev/null 2>&1
+                done
+              else
+                echo "Verified replacement cleanup failed; release remains draft for manual recovery" >&2
+              fi
+            fi
+            exit "$status"
+          }
+          trap rollback EXIT
+
+          for name in "${canonical[@]}"; do
+            candidate="$name.candidate-$suffix"
+            candidate_names+=("$candidate")
+            cp "$REFRESH_OUTPUT/$name" "$stage/$candidate"
+            gh release upload "$RELEASE_TAG" "$stage/$candidate" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY"
+            candidate_ids+=("$(asset_id "$candidate")")
+            old_ids+=("$(asset_id "$name")")
+          done
+          for i in 0 1 2; do
+            test -n "${candidate_ids[$i]}"
+            test -n "${old_ids[$i]}"
+          done
+          candidate_remote="$REFRESH_WORK/candidate-verify"
+          mkdir -m 700 "$candidate_remote"
+          for name in "${candidate_names[@]}"; do
+            gh release download "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --pattern "$name" --dir "$candidate_remote"
+            cmp "$stage/$name" "$candidate_remote/$name"
+          done
+
+          gh release edit "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --draft=true
+          hidden=1
+          for i in 0 1 2; do
+            gh api -X PATCH "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/releases/assets/${old_ids[$i]}" -f "name=${canonical[$i]}.backup-$suffix" >/dev/null
+            old_renamed[$i]=1
+            gh api -X PATCH "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/releases/assets/${candidate_ids[$i]}" -f "name=${canonical[$i]}" >/dev/null
+          done
+
+          remote="$REFRESH_WORK/remote-verify"
+          mkdir -m 700 "$remote"
+          for asset in "$ARCHIVE_ASSET" "$CATALOG_ASSET" "$ENVELOPE_ASSET" "$CONFIG_ASSET" "$METADATA_ASSET"; do
+            gh release download "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --pattern "$asset" --dir "$remote"
+            chmod 600 "$remote/$asset"
+          done
+          cmp "$SOURCE_BUNDLE/$ARCHIVE_ASSET" "$remote/$ARCHIVE_ASSET"
+          cmp "$SOURCE_BUNDLE/$CONFIG_ASSET" "$remote/$CONFIG_ASSET"
+          node modules/open-design/package/production-cli.mjs \
+            --verify \
+            --bundle-root "$remote" \
+            --release-tag "$RELEASE_TAG" \
+            --key-id "$KEY_ID" \
+            --key-active-from "$KEY_ACTIVE_FROM" \
+            --key-active-until "$KEY_ACTIVE_UNTIL" \
+            --public-key-file "$PUBLIC_KEY_FILE" \
+            --previous-sequence "$PREVIOUS_SEQUENCE" \
+            --previous-issued-at "$PREVIOUS_ISSUED_AT" \
+            --verification-time "$VERIFICATION_TIME_MS" > "$RUNNER_TEMP/open-design-refresh-remote-verify.json"
+          transaction_verified=1
+
+          for id in "${old_ids[@]}"; do
+            for attempt in 1 2 3 4 5; do
+              if gh api -X DELETE "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/releases/assets/$id" >/dev/null 2>&1; then
+                break
+              fi
+              test "$attempt" -lt 5
+              sleep "$attempt"
+            done
+          done
+          expected=$(printf '%s\n' "$ARCHIVE_ASSET" "$CATALOG_ASSET" "$ENVELOPE_ASSET" "$CONFIG_ASSET" "$METADATA_ASSET" | LC_ALL=C sort)
+          actual=$(gh release view "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --json assets --jq '.assets[].name' | LC_ALL=C sort)
+          test "$actual" = "$expected"
+          gh release edit "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --draft=false
+          hidden=0
+          success=1
+          trap - EXIT
+
+      - name: Remove transient signing and release material
+        if: ${{ always() }}
+        shell: bash
+        run: rm -rf "$RUNNER_TEMP/open-design-refresh" "$RUNNER_TEMP/open-design-refresh-"*.json
