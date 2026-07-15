@@ -1,8 +1,9 @@
 # OpenDesign Runtime Third-Party Notices
 
-This file inventories only the native and WASM resources retained by the
-Simulator Host-only OpenDesign runtime. It does not clear any resource whose
-decision remains `review` or `pending` in `resource-decisions.json`.
+This file inventories the native and WASM resources retained by the Simulator
+Host-only OpenDesign runtime, plus a fail-closed audit for the excluded image
+optimizer closure. It does not clear any resource whose decision remains
+`review` or `pending` in `resource-decisions.json`.
 
 ## Cleared retained resources
 
