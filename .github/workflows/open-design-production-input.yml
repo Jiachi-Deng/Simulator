@@ -120,8 +120,12 @@ jobs:
           test "$(shasum -a 256 "$pnpm_bin" | awk '{print $1}')" = "$PNPM_EXECUTABLE_SHA256"
           test "$("$node_bin" "$pnpm_bin" --version)" = "$PNPM_VERSION"
 
-          printf 'PRODUCTION_WORK=%s\nUPSTREAM_SOURCE=%s\nTOOLCHAIN_NODE_ROOT=%s\nTOOLCHAIN_NODE_BIN=%s\nTOOLCHAIN_PNPM_BIN=%s\n' \
-            "$work" "$source" "$node_root" "$node_bin" "$pnpm_bin" >> "$GITHUB_ENV"
+          build_work_parent=$(mktemp -d /tmp/od-build.XXXXXX)
+          chmod 700 "$build_work_parent"
+          test "$(stat -f '%Lp' "$build_work_parent")" = "700"
+
+          printf 'PRODUCTION_WORK=%s\nUPSTREAM_SOURCE=%s\nTOOLCHAIN_NODE_ROOT=%s\nTOOLCHAIN_NODE_BIN=%s\nTOOLCHAIN_PNPM_BIN=%s\nBUILD_WORK_PARENT=%s\n' \
+            "$work" "$source" "$node_root" "$node_bin" "$pnpm_bin" "$build_work_parent" >> "$GITHUB_ENV"
 
       - name: Install exact staging policy dependencies
         shell: bash
@@ -136,12 +140,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -m 700 -p "$PRODUCTION_WORK/plan-build" "$PRODUCTION_WORK/plan-publish"
+          mkdir -m 700 -p "$PRODUCTION_WORK/plan-publish"
           "$TOOLCHAIN_NODE_BIN" modules/open-design/src/stage-open-design.mjs \
             --dry-run \
             --source "$UPSTREAM_SOURCE" \
             --staging-root "$PRODUCTION_WORK/plan-publish/staging" \
-            --work-parent "$PRODUCTION_WORK/plan-build" \
+            --work-parent "$BUILD_WORK_PARENT" \
             --target "$GITHUB_WORKSPACE/modules/open-design/fixtures/staging-target.darwin-arm64.json" \
             --node-bin "$TOOLCHAIN_NODE_BIN" \
             --pnpm-bin "$TOOLCHAIN_PNPM_BIN" > "$PRODUCTION_WORK/stage-plan.json"
@@ -152,12 +156,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -m 700 -p "$PRODUCTION_WORK/build" "$PRODUCTION_WORK/publish"
+          mkdir -m 700 -p "$PRODUCTION_WORK/publish"
           staging="$PRODUCTION_WORK/publish/staging"
           "$TOOLCHAIN_NODE_BIN" modules/open-design/src/stage-open-design.mjs \
             --source "$UPSTREAM_SOURCE" \
             --staging-root "$staging" \
-            --work-parent "$PRODUCTION_WORK/build" \
+            --work-parent "$BUILD_WORK_PARENT" \
             --target "$GITHUB_WORKSPACE/modules/open-design/fixtures/staging-target.darwin-arm64.json" \
             --node-bin "$TOOLCHAIN_NODE_BIN" \
             --pnpm-bin "$TOOLCHAIN_PNPM_BIN" > "$PRODUCTION_WORK/stage-result.json"
@@ -215,4 +219,8 @@ jobs:
       - name: Remove transient production material
         if: ${{ always() }}
         shell: bash
-        run: rm -rf "$RUNNER_TEMP/open-design-production-input"
+        run: |
+          rm -rf "$RUNNER_TEMP/open-design-production-input"
+          if [[ -n "${BUILD_WORK_PARENT:-}" ]]; then
+            rm -rf "$BUILD_WORK_PARENT"
+          fi
