@@ -4,8 +4,27 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
+import { isAllowedPatchPath } from "../src/apply-simulator-patch.mjs";
+
 const moduleRoot = new URL("../", import.meta.url);
 const patchText = await readFile(new URL("patches/open-design-v0.14.1-simulator-host-runtime.patch", moduleRoot), "utf8");
+
+test("strict patch allowlist matches all 22 pinned Host integration paths and rejects scope expansion", async () => {
+  const provenance = JSON.parse(await readFile(new URL("provenance.json", moduleRoot), "utf8"));
+  const changedPaths = provenance.simulatorPatch.changedPaths;
+  assert.equal(changedPaths.length, 22);
+  assert.ok(changedPaths.every(isAllowedPatchPath));
+  for (const unsupported of [
+    "apps/web/src/components/FileViewer.tsx",
+    "apps/web/src/components/Unexpected.tsx",
+    "apps/web/public/logo.svg",
+    "apps/desktop/src/main.ts",
+    "../package.json",
+    "/absolute/package.json",
+  ]) {
+    assert.equal(isAllowedPatchPath(unsupported), false, unsupported);
+  }
+});
 
 test("pinned patch covers every Simulator Host-only integration surface", () => {
   const changedPaths = [...patchText.matchAll(/^diff --git a\/(.+?) b\//gm)].map((match) => match[1]);

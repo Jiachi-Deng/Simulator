@@ -84,21 +84,33 @@ function isNormalizedRelativePath(relativePath) {
   return typeof relativePath === "string" && relativePath.length > 0 && !path.isAbsolute(relativePath) && path.posix.normalize(relativePath) === relativePath && !relativePath.includes("\\") && !relativePath.split("/").some((part) => !part || part === "." || part === "..");
 }
 
-function isAllowedPatchPath(relativePath) {
-  return isNormalizedRelativePath(relativePath) && (
-    relativePath === "package.json"
-    || relativePath === "apps/daemon/src/server.ts"
-    || relativePath === "apps/daemon/src/simulator-host-agent.ts"
-    || relativePath === "apps/daemon/src/routes/runs.ts"
-    || relativePath === "apps/daemon/src/routes/static-resource.ts"
-    || relativePath === "apps/daemon/src/routes/vela.ts"
-    || relativePath === "apps/daemon/src/runtimes/registry.ts"
-    || relativePath === "apps/daemon/src/runtimes/runs.ts"
-    || relativePath === "apps/daemon/src/runtimes/defs/simulator-host.ts"
-    || relativePath === "apps/web/src/components/EntryShell.tsx"
-    || relativePath === "apps/web/src/providers/daemon.ts"
-    || relativePath === "apps/web/src/providers/simulator-host-mode.js"
-  );
+const ALLOWED_PATCH_PATHS = new Set([
+  "apps/daemon/src/routes/runs.ts",
+  "apps/daemon/src/routes/static-resource.ts",
+  "apps/daemon/src/routes/vela.ts",
+  "apps/daemon/src/runtimes/defs/simulator-host.ts",
+  "apps/daemon/src/runtimes/registry.ts",
+  "apps/daemon/src/runtimes/runs.ts",
+  "apps/daemon/src/server.ts",
+  "apps/daemon/src/simulator-host-agent.ts",
+  "apps/web/next.config.ts",
+  "apps/web/src/App.tsx",
+  "apps/web/src/components/AvatarMenu.tsx",
+  "apps/web/src/components/EntrySettingsMenu.tsx",
+  "apps/web/src/components/EntryShell.tsx",
+  "apps/web/src/components/FileWorkspace.tsx",
+  "apps/web/src/components/InlineModelSwitcher.tsx",
+  "apps/web/src/components/ProjectView.tsx",
+  "apps/web/src/components/SettingsDialog.tsx",
+  "apps/web/src/index.css",
+  "apps/web/src/providers/daemon.ts",
+  "apps/web/src/providers/simulator-host-mode.js",
+  "apps/web/src/styles/simulator-host.css",
+  "package.json",
+]);
+
+export function isAllowedPatchPath(relativePath) {
+  return isNormalizedRelativePath(relativePath) && ALLOWED_PATCH_PATHS.has(relativePath);
 }
 
 async function changedPathsInCheckout(checkoutRoot, run) {
