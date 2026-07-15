@@ -12,7 +12,7 @@
 
 - Next.js standalone server，以及对应 static/public 文件。
 - OpenDesign daemon 与其运行所需的 production runtime。
-- Simulator Host Runtime adapter。模块不携带 Vela 或 OpenCode agent executable；运行时只通过 Host 发放的 launch-scoped loopback grant 复用 Craft 当前 Claude/Pi Runtime。
+- Simulator Host Runtime adapter。模块不携带 Vela 或 OpenCode agent executable；运行时只通过 Host 发放的 launch-scoped loopback grant 复用 Simulator 当前 Workspace 的 AI 连接。
 - LICENSE、producer 生成的 SPDX SBOM、resource metadata、provenance、build attestation 和 artifact manifest。
 
 明确排除 nested Electron、desktop/packaged app、installer、updater、dev dependencies、cache、test、coverage、plugin 和 skill。模板、字体、图片及 native binaries 不会因位于允许目录就自动获准；它们必须先在 `resource-decisions.json` 中完成逐项权利和风险决策。
@@ -67,7 +67,9 @@ SIMULATOR_ALLOW_UNREVIEWED_LOCAL_ARTIFACT=1 npm run stage -- \
 
 Simulator-owned clean-room patch 基于 pinned `open-design-v0.14.1`：一方面在 manifest 的 `pnpm.onlyBuiltDependencies` 增加 `node-pty`，另一方面加入 `Simulator Host Runtime` adapter。Simulator 模式下 `/api/agents` 只返回该 Runtime，所有 `/api/runs` 都在 AMR preflight、local CLI discovery 和 process spawn 前转发到 Host Gateway；Gateway 配置、认证、协议或流式响应失败时 fail closed，不回退到 AMR、Vela、OpenCode 或系统 CLI。adapter 使用 opaque session/turn ID，支持 SSE transcript、cancel 与 close；只把最终 prompt 和 canonical working directory 交给 Host，不发送 Craft workspace、connection、model 或 credential。
 
-Host grant 只通过 `SIMULATOR_HOST_AGENT_URL` 与 `SIMULATOR_HOST_AGENT_TOKEN_FILE` 进入 daemon sidecar。launcher 要求 loopback `http:` URL，以及 owner-only `0600`、非 symlink、64 位小写十六进制 token file；web sidecar 不接收这两个变量。patch 本身、十二个 changed path 的 preimage/postimage、exact Node、ABI、pnpm executable 和 build input digest 全部固定，任一 drift 都会在 build 前停止。该实现为 Simulator 原创 clean-room code，不复制 Proma AGPL 实现。
+Host mode 在 daemon config 和 `/api/agents` capability 完成前只显示 workspace loader，然后原子锁定 `daemon + simulator-host-runtime`、关闭模块独立 telemetry、跳过 Cloud/AMR 登录与完整 Onboarding，并直接进入原生 Home。Home、Studio 双栏、Design Files、preview、manual edit、comments 和 Version History 保留；Runtime/model/BYOK/wallet/quota/upgrade/CLI、外部社区、嵌入 Browser，以及当前 WebContentsView 安全边界下无法完成的 download/export 入口隐藏。正常连接只在 Home/Composer 显示低干扰的“当前 Workspace 连接”状态，Settings 的 Execution 变为只读 Host Runtime 摘要。standalone Next config 全局禁用 image optimizer，因此 Host-only staging 可以删除 `sharp`、`@img/sharp-*` 与 `@img/sharp-libvips-*`，不会改变 Design File preview 的普通文件服务路径。
+
+Host grant 只通过 `SIMULATOR_HOST_AGENT_URL` 与 `SIMULATOR_HOST_AGENT_TOKEN_FILE` 进入 daemon sidecar。launcher 要求 loopback `http:` URL，以及 owner-only `0600`、非 symlink、64 位小写十六进制 token file；web sidecar 不接收这两个变量。patch 本身、二十二个 changed path 的 preimage/postimage、exact Node、ABI、pnpm executable 和 build input digest 全部固定，任一 drift 都会在 build 前停止。该实现为 Simulator 原创 clean-room code，不复制 Proma AGPL 实现。
 
 ## Issue #87 当前 blocker
 

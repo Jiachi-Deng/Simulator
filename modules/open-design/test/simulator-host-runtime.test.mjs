@@ -18,9 +18,19 @@ test("pinned patch covers every Simulator Host-only integration surface", () => 
     "apps/daemon/src/runtimes/runs.ts",
     "apps/daemon/src/server.ts",
     "apps/daemon/src/simulator-host-agent.ts",
+    "apps/web/next.config.ts",
+    "apps/web/src/App.tsx",
+    "apps/web/src/components/AvatarMenu.tsx",
+    "apps/web/src/components/EntrySettingsMenu.tsx",
     "apps/web/src/components/EntryShell.tsx",
+    "apps/web/src/components/FileWorkspace.tsx",
+    "apps/web/src/components/InlineModelSwitcher.tsx",
+    "apps/web/src/components/ProjectView.tsx",
+    "apps/web/src/components/SettingsDialog.tsx",
+    "apps/web/src/index.css",
     "apps/web/src/providers/daemon.ts",
     "apps/web/src/providers/simulator-host-mode.js",
+    "apps/web/src/styles/simulator-host.css",
     "package.json",
   ]);
   const additions = patchText.split("\n").filter((line) => line.startsWith("+") && !line.startsWith("+++")).join("\n");
@@ -36,7 +46,70 @@ test("pinned patch covers every Simulator Host-only integration surface", () => 
   assert.match(additions, /if \(isSimulatorHostAgentMode\(\)\) return;/);
   assert.doesNotMatch(additions, /isSimulatorHostAgentMode\(process\.env\)|isSimulatorHostAgentMode\(env\)/);
   assert.match(additions, /agentId: SIMULATOR_HOST_AGENT_ID,[\s\S]*model: null,[\s\S]*reasoning: null/);
+  assert.match(additions, /normalizeSimulatorHostConfig/);
+  assert.match(additions, /onboardingCompleted: true/);
+  assert.match(additions, /pendingRuntimeBootstrap = !daemonConfigLoaded/);
+  assert.match(additions, /window\.location\.pathname === '\/onboarding'/);
+  assert.match(additions, /navigate\(\{ kind: 'home', view: 'home' \}, \{ replace: true \}\)/);
+  assert.match(additions, /data-testid="settings-simulator-host-runtime"/);
+  assert.match(additions, /simulatorHostRuntimeMode \? undefined : handleShareToOpenDesign/);
+  assert.match(additions, /createBrowser: simulatorHostRuntimeMode \? undefined/);
+  assert.match(additions, /data-simulator-host-runtime='true'[\s\S]*\.chrome-file-action-menus/);
+  assert.match(additions, /images: \{ unoptimized: true \}/);
+  assert.match(additions, /Simulator current Workspace connection/);
   assert.doesNotMatch(additions, /PromaHost|PROMA_HOST|OD_RESOURCE_ROOT|resolveAmrPreflight|detectAgents\(/);
+  assert.doesNotMatch(changedPaths.join("\n"), /FileViewer|HomeView|WorkspaceTabsBar/);
+});
+
+test("Host mode atomically normalizes and scrubs standalone execution choices", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "simulator-host-config-normalization-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const policyModule = await importMaterializedNewFile(root, "apps/web/src/providers/simulator-host-mode.js");
+  const normalized = policyModule.normalizeSimulatorHostConfig({
+    mode: "api",
+    apiKey: "must-not-survive",
+    apiProtocolConfigs: { openai: { apiKey: "must-not-survive" } },
+    byokProviderConfigDrafts: { openai: { apiConfig: { apiKey: "must-not-survive" } } },
+    mediaProviders: { image: { apiKey: "must-not-survive" } },
+    agentId: "amr",
+    agentModels: { amr: { model: "cloud-model" } },
+    agentCliEnv: { amr: { OPEN_DESIGN_AMR_PROFILE: "cloud" } },
+    agentCliEnvIntent: { amr: { OPEN_DESIGN_AMR_PROFILE: "set" } },
+    onboardingCompleted: false,
+    telemetry: { metrics: true, content: true },
+    theme: "dark",
+  });
+  assert.equal(policyModule.isSimulatorHostAgentConfig(normalized), true);
+  assert.deepEqual(
+    {
+      mode: normalized.mode,
+      apiKey: normalized.apiKey,
+      apiProtocolConfigs: normalized.apiProtocolConfigs,
+      byokProviderConfigDrafts: normalized.byokProviderConfigDrafts,
+      mediaProviders: normalized.mediaProviders,
+      agentId: normalized.agentId,
+      agentModels: normalized.agentModels,
+      agentCliEnv: normalized.agentCliEnv,
+      agentCliEnvIntent: normalized.agentCliEnvIntent,
+      onboardingCompleted: normalized.onboardingCompleted,
+      telemetry: normalized.telemetry,
+      theme: normalized.theme,
+    },
+    {
+      mode: "daemon",
+      apiKey: "",
+      apiProtocolConfigs: {},
+      byokProviderConfigDrafts: {},
+      mediaProviders: {},
+      agentId: "simulator-host-runtime",
+      agentModels: {},
+      agentCliEnv: {},
+      agentCliEnvIntent: {},
+      onboardingCompleted: true,
+      telemetry: { metrics: false, content: false },
+      theme: "dark",
+    },
+  );
 });
 
 test("Host mode captures then scrubs the bearer environment before child processes can inherit it", async (t) => {

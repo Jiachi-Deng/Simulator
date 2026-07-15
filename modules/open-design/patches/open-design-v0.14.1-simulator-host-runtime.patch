@@ -100,7 +100,7 @@ index 07b8f1cc9d229138be744ae8ea833c0bda8ae76d..c7b0afeda8103feac8b020f55333ffd2
    const getPublicBaseUrl = deps.http.getPublicBaseUrl ?? ((req: Request) => {
 diff --git a/apps/daemon/src/runtimes/defs/simulator-host.ts b/apps/daemon/src/runtimes/defs/simulator-host.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..bb395a9b2ad522969699815cd644d3899f697ab0
+index 0000000000000000000000000000000000000000..a90bb278f1558b87116b815a5c50ec69863850d6
 --- /dev/null
 +++ b/apps/daemon/src/runtimes/defs/simulator-host.ts
 @@ -0,0 +1,12 @@
@@ -111,7 +111,7 @@ index 0000000000000000000000000000000000000000..bb395a9b2ad522969699815cd644d389
 +  name: 'Simulator Host Runtime',
 +  bin: process.execPath,
 +  versionArgs: ['--version'],
-+  fallbackModels: [{ id: 'host-selected', label: 'Craft selected connection', default: true }],
++  fallbackModels: [{ id: 'host-selected', label: 'Simulator current Workspace connection', default: true }],
 +  supportsCustomModel: false,
 +  buildArgs: () => [],
 +  streamFormat: 'simulator-host-runtime',
@@ -249,7 +249,8 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f
  import {
    createRunLifecycleTracer,
    runLifecycleMarkersForStreamEvent,
-@@ -2871,11 +2877,11 @@ export async function startServer({
+@@ -2870,7 +2876,7 @@ export async function startServer({
+     agents: agentDeps,
      validation: validationDeps,
    });
 -  registerTerminalRoutes(app, {
@@ -257,12 +258,7 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f
      db,
      http: httpDeps,
      paths: pathDeps,
-     projectStore: projectStoreDeps,
-     projectFiles: projectFileDeps,
-     terminals: terminalService,
-   });
-   registerImportRoutes(app, {
-@@ -4020,6 +4025,15 @@ export async function startServer({
+@@ -4020,6 +4026,15 @@ export async function startServer({
      lifecycle.mark('chat_run_started');
      /** @type {Partial<ChatRequest> & { imagePaths?: string[] }} */
      chatBody = chatBody || {};
@@ -278,7 +274,7 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f
      const {
        agentId,
        message,
-@@ -4265,7 +4279,8 @@ export async function startServer({
+@@ -4265,7 +4280,8 @@ export async function startServer({
          };
        }
      }
@@ -288,7 +284,7 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f
        ? toolTokenRegistry.mint({
            runId,
            projectId,
-@@ -4295,7 +4310,9 @@ export async function startServer({
+@@ -4295,7 +4311,9 @@ export async function startServer({
          activeChatRunHandles.delete(sinkRunId);
        };
      }
@@ -299,7 +295,7 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f
      const commentHint = renderCommentAttachmentHint(safeCommentAttachments);
  
      // Resolve external MCP config + stored OAuth tokens up-front so the
-@@ -5177,6 +5194,19 @@ export async function startServer({
+@@ -5177,6 +5195,19 @@ export async function startServer({
        design.runs.finish(run, status, code, signal);
        return false;
      };
@@ -319,7 +315,7 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f
      const mcpServers = buildLiveArtifactsMcpServersForAgent(def, {
        enabled: Boolean(toolTokenGrant?.token),
        command: process.execPath,
-@@ -7583,9 +7609,11 @@ export async function startServer({
+@@ -7583,9 +7614,11 @@ export async function startServer({
      // on the agent's final status (live artifact discovery, lastRun summary
      // metadata) lives inside the `completion` promise.
      const appConfig = await readAppConfig(RUNTIME_DATA_DIR);
@@ -334,7 +330,7 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f
      if (!agentId) {
        const agents = await detectAgents(appConfig.agentCliEnv ?? {}).catch(() => []);
        agentId = agents.find((agent) => agent.available)?.id ?? null;
-@@ -7754,8 +7782,10 @@ export async function startServer({
+@@ -7754,8 +7787,10 @@ export async function startServer({
    // and dispatches into the same chat runner used by manual runs.
    routineService.setRunHandler(async ({ routine, trigger, startedAt, runId }) => {
      const appConfig = await readAppConfig(RUNTIME_DATA_DIR);
@@ -347,7 +343,7 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f
      if (!agentId) {
        const agents = await detectAgents(appConfig.agentCliEnv ?? {}).catch(() => []);
        agentId = agents.find((agent) => agent.available)?.id ?? null;
-@@ -8205,7 +8236,8 @@ export async function startServer({
+@@ -8205,6 +8240,7 @@ export async function startServer({
        daemonShutdownStarted = true;
        daemonShuttingDown = true;
        await design.runs.shutdownActive({ graceMs: resolveChatRunShutdownGraceMs() });
@@ -355,10 +351,9 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f
        await terminalService.shutdownActive();
        await design.analytics.shutdown();
      };
-     let server;
 diff --git a/apps/daemon/src/simulator-host-agent.ts b/apps/daemon/src/simulator-host-agent.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..2cdc1a275b12f41f40ec647b0bad56a1e281deaf
+index 0000000000000000000000000000000000000000..13ff76eb0abe133ba273bbd5cdc9a28fe3365759
 --- /dev/null
 +++ b/apps/daemon/src/simulator-host-agent.ts
 @@ -0,0 +1,730 @@
@@ -427,7 +422,7 @@ index 0000000000000000000000000000000000000000..2cdc1a275b12f41f40ec647b0bad56a1
 +    name: 'Simulator Host Runtime',
 +    bin: process.execPath,
 +    versionArgs: ['--version'],
-+    models: [{ id: 'host-selected', label: 'Craft selected connection', default: true }],
++    models: [{ id: 'host-selected', label: 'Simulator current Workspace connection', default: true }],
 +    modelsSource: 'live',
 +    available: configured,
 +    path: configured ? process.execPath : null,
@@ -1092,58 +1087,895 @@ index 0000000000000000000000000000000000000000..2cdc1a275b12f41f40ec647b0bad56a1
 +    else if (sessionRecord) releaseCachedSession(sessionRecord);
 +  }
 +}
+diff --git a/apps/web/next.config.ts b/apps/web/next.config.ts
+index 062b86a662dbf7c5491909972ead83fa3b5a17ee..9c9ecad2ba0ebee5e15099b0918c9678ff619359 100644
+--- a/apps/web/next.config.ts
++++ b/apps/web/next.config.ts
+@@ -157,6 +157,10 @@ function configuredAllowedDevHosts(): string[] {
+ 
+ const nextConfig: NextConfig = {
+   allowedDevOrigins: configuredAllowedDevHosts(),
++  // Simulator Host mode does not use Next's image optimizer. Keeping every
++  // image URL unoptimized lets the sealed standalone runtime omit sharp and
++  // its platform-specific libvips payload without changing preview files.
++  images: { unoptimized: true },
+   outputFileTracingRoot: WORKSPACE_ROOT,
+   reactStrictMode: true,
+   // Emit browser sourcemaps so packaged-runtime exceptions can be symbolicated
+@@ -180,7 +184,6 @@ const nextConfig: NextConfig = {
+         // the daemon's static fallback simple (every directory has its own
+         // index.html on disk).
+         trailingSlash: true,
+-        images: { unoptimized: true },
+       }
+     : webOutputMode === 'standalone'
+       ? {
+diff --git a/apps/web/src/App.tsx b/apps/web/src/App.tsx
+index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..2ef108f840016582a2683408d07c3e9352ae2233 100644
+--- a/apps/web/src/App.tsx
++++ b/apps/web/src/App.tsx
+@@ -65,9 +65,14 @@ import {
+   RUNS_CHANGED_EVENT,
+   fetchAmrModels,
+   fetchVelaLoginStatus,
++  isSimulatorHostRuntimeMode,
+   listProjectRuns,
+   type VelaLoginStatus,
+ } from './providers/daemon';
++import {
++  SIMULATOR_HOST_AGENT_ID,
++  normalizeSimulatorHostConfig,
++} from './providers/simulator-host-mode';
+ import { AMR_LOGIN_STATUS_EVENT } from './components/amrLoginPolling';
+ import { goBack, navigate, useRoute } from './router';
+ import {
+@@ -411,6 +416,7 @@ function AppInner() {
+   const [settingsHighlight, setSettingsHighlight] = useState<SettingsHighlight>(null);
+   const [integrationInitialTab, setIntegrationInitialTab] = useState<IntegrationTab>('mcp');
+   const [daemonLive, setDaemonLive] = useState(false);
++  const [simulatorHostRuntimeMode, setSimulatorHostRuntimeMode] = useState(false);
+   const [agents, setAgents] = useState<AgentInfo[]>([]);
+   const amrModelsRef = useRef<AmrModelsResponse | null>(null);
+   const amrPollGenerationRef = useRef(0);
+@@ -724,8 +730,20 @@ function AppInner() {
+   // it.
+   const showPrivacyConsent =
+     daemonConfigLoaded &&
++    !simulatorHostRuntimeMode &&
+     config.privacyDecisionAt == null &&
+     config.onboardingCompleted === true;
++  useEffect(() => {
++    if (typeof document === 'undefined') return;
++    if (simulatorHostRuntimeMode) {
++      document.documentElement.setAttribute('data-simulator-host-runtime', 'true');
++    } else {
++      document.documentElement.removeAttribute('data-simulator-host-runtime');
++    }
++    return () => {
++      document.documentElement.removeAttribute('data-simulator-host-runtime');
++    };
++  }, [simulatorHostRuntimeMode]);
+   useEffect(() => {
+     const body = activeProjectId
+       ? { projectId: activeProjectId, fileName: activeFileName }
+@@ -956,12 +974,20 @@ function AppInner() {
+         fetchDaemonConfig(),
+         fetchComposioConfigFromDaemon(),
+         fetchMediaProvidersFromDaemon(),
++        isSimulatorHostRuntimeMode(),
+       ]).then(([
+         daemonConfig,
+         daemonComposioConfig,
+         daemonMediaProvidersResult,
++        nextSimulatorHostRuntimeMode,
+       ]) => {
+         if (cancelled) return;
++        setSimulatorHostRuntimeMode(nextSimulatorHostRuntimeMode);
++        if (nextSimulatorHostRuntimeMode) {
++          document.documentElement.setAttribute('data-simulator-host-runtime', 'true');
++        } else {
++          document.documentElement.removeAttribute('data-simulator-host-runtime');
++        }
+         const daemonMediaProvidersLoaded =
+           daemonMediaProvidersResult.status === 'ok'
+             ? daemonMediaProvidersResult.providers
+@@ -985,7 +1011,7 @@ function AppInner() {
+           baseConfig.mediaProviders,
+           daemonMediaProvidersLoaded,
+         );
+-        const next = mergeDaemonMediaProviders(
++        let next = mergeDaemonMediaProviders(
+           clearStaleAmrModelChoiceOnProfileChange(
+             baseConfig,
+             mergeDaemonConfig(baseConfig, daemonConfig),
+@@ -996,6 +1022,9 @@ function AppInner() {
+         if (!hasLocalComposioKey && daemonComposioConfig) {
+           next.composio = daemonComposioConfig;
+         }
++        if (nextSimulatorHostRuntimeMode) {
++          next = normalizeSimulatorHostConfig(next);
++        }
+         saveConfig(next);
+         if (
+           daemonMediaProvidersResult.status === 'ok' &&
+@@ -1020,7 +1049,11 @@ function AppInner() {
+         // banner keys off `privacyDecisionAt`. They may coexist on the
+         // first launch; the banner sits above the modal layer so it
+         // stays actionable regardless of the active view.
+-        if (!next.onboardingCompleted) {
++        if (nextSimulatorHostRuntimeMode) {
++          if (window.location.pathname === '/onboarding') {
++            navigate({ kind: 'home', view: 'home' }, { replace: true });
++          }
++        } else if (!next.onboardingCompleted) {
+           navigate({ kind: 'home', view: 'onboarding' }, { replace: true });
+         }
+         setDaemonConfigLoaded(true);
+@@ -1193,7 +1226,10 @@ function AppInner() {
+     // a half-typed key can't survive in localStorage. If the dialog is
+     // closing, preserve any onboarding completion that the close gesture
+     // already committed so an unmount autosave cannot re-open the welcome flow.
+-    const persisted = buildPersistedConfig(next, configRef.current);
++    const lockedNext = simulatorHostRuntimeMode
++      ? normalizeSimulatorHostConfig(next)
++      : next;
++    const persisted = buildPersistedConfig(lockedNext, configRef.current);
+     latestPersistedConfigRef.current = persisted;
+     saveConfig(persisted);
+     setConfig(persisted);
+@@ -1212,7 +1248,7 @@ function AppInner() {
+         : Promise.resolve(),
+       syncConfigToDaemon(persisted, { throwOnError: true }),
+     ]);
+-  }, [daemonMediaProviders, daemonMediaProvidersFetchState]);
++  }, [daemonMediaProviders, daemonMediaProvidersFetchState, simulatorHostRuntimeMode]);
+ 
+   /**
+    * Explicit Composio API-key save. Called from the section-local
+@@ -1235,12 +1271,13 @@ function AppInner() {
+ 
+   const handleModeChange = useCallback(
+     (mode: AppConfig['mode']) => {
++      if (simulatorHostRuntimeMode) return;
+       const next = { ...latestPersistedConfigRef.current, mode };
+       latestPersistedConfigRef.current = next;
+       saveConfig(next);
+       setConfig(next);
+     },
+-    [],
++    [simulatorHostRuntimeMode],
+   );
+ 
+   // Quick theme switch from the settings dropdown in the entry view.
+@@ -1269,17 +1306,19 @@ function AppInner() {
+ 
+   const handleAgentChange = useCallback(
+     (agentId: string) => {
++      if (simulatorHostRuntimeMode || agentId === SIMULATOR_HOST_AGENT_ID) return;
+       const next = { ...latestPersistedConfigRef.current, agentId };
+       latestPersistedConfigRef.current = next;
+       saveConfig(next);
+       void syncConfigToDaemon(next);
+       setConfig(next);
+     },
+-    [],
++    [simulatorHostRuntimeMode],
+   );
+ 
+   const handleAgentModelChange = useCallback(
+     (agentId: string, choice: { model?: string; reasoning?: string }) => {
++      if (simulatorHostRuntimeMode || agentId === SIMULATOR_HOST_AGENT_ID) return;
+       const current = latestPersistedConfigRef.current;
+       const prev = current.agentModels?.[agentId] ?? {};
+       const merged = { ...prev, ...choice };
+@@ -1293,7 +1332,7 @@ function AppInner() {
+       void syncConfigToDaemon(next);
+       setConfig(next);
+     },
+-    [],
++    [simulatorHostRuntimeMode],
+   );
+ 
+   // BYOK protocol switch — also flips `mode` to 'api' so the user does
+@@ -1302,12 +1341,13 @@ function AppInner() {
+   // user had previously configured for the target protocol.
+   const handleApiProtocolChange = useCallback(
+     (protocol: ApiProtocol) => {
++      if (simulatorHostRuntimeMode) return;
+       const next = switchApiProtocolConfig(config, protocol);
+       saveConfig(next);
+       void syncConfigToDaemon(next);
+       setConfig(next);
+     },
+-    [config],
++    [config, simulatorHostRuntimeMode],
+   );
+ 
+   // BYOK model picker — patches `model` (and the per-protocol shadow
+@@ -1315,12 +1355,13 @@ function AppInner() {
+   // mid-session without retyping their key.
+   const handleApiModelChange = useCallback(
+     (model: string) => {
++      if (simulatorHostRuntimeMode) return;
+       const next = updateCurrentApiProtocolConfig(config, { model });
+       saveConfig(next);
+       void syncConfigToDaemon(next);
+       setConfig(next);
+     },
+-    [config],
++    [config, simulatorHostRuntimeMode],
+   );
+ 
+   const handleChangeDefaultDesignSystem = useCallback(
+@@ -2287,12 +2328,11 @@ function AppInner() {
+   // EntryView / ProjectView split so the discovery surface stays
+   // independent of any active project.
+   let appMain: ReactNode;
+-  const pendingFirstRunOnboardingRoute =
+-    route.kind === 'home' &&
+-    route.view === 'home' &&
+-    config.onboardingCompleted !== true &&
+-    !daemonConfigLoaded;
+-  if (pendingFirstRunOnboardingRoute) {
++  // Do not render a stale standalone/Cloud surface while daemon config and the
++  // Host-only capability are still resolving. In Simulator this makes the
++  // transition atomic: loader -> native Home, never loader -> onboarding -> Home.
++  const pendingRuntimeBootstrap = !daemonConfigLoaded;
++  if (pendingRuntimeBootstrap) {
+     appMain = (
+       <div className="entry-shell entry-shell--no-header">
+         <CenteredLoader label={t('entry.loadingWorkspace')} />
+diff --git a/apps/web/src/components/AvatarMenu.tsx b/apps/web/src/components/AvatarMenu.tsx
+index ab73af33a8487af489abd8df7a8815ca1f0aa444..86cbcd6b8abda745826de8827c1a5394e294ad92 100644
+--- a/apps/web/src/components/AvatarMenu.tsx
++++ b/apps/web/src/components/AvatarMenu.tsx
+@@ -32,6 +32,10 @@ import {
+ } from '../runtime/amr-guidance';
+ import { isMacPlatform } from '../utils/platform';
+ import { isVisibleLocalCliAgent } from '../utils/visibleAgents';
++import {
++  SIMULATOR_HOST_RUNTIME_DESCRIPTION,
++  isSimulatorHostAgentConfig,
++} from '../providers/simulator-host-mode';
+ 
+ interface Props {
+   config: AppConfig;
+@@ -320,6 +324,35 @@ export function AvatarMenu({
+       : SUGGESTED_MODELS_BY_PROTOCOL[apiProtocol] ?? [],
+   );
+ 
++  if (isSimulatorHostAgentConfig(config)) {
++    const hostReady = daemonLive && agents.some(
++      (agent) => agent.id === config.agentId && agent.available,
++    );
++    const statusLabel = hostReady
++      ? SIMULATOR_HOST_RUNTIME_DESCRIPTION
++      : '正在连接 Simulator';
++    return (
++      <div
++        className={`avatar-menu avatar-menu--${placement}`}
++        data-testid="simulator-host-runtime-composer-indicator"
++      >
++        <span
++          className="avatar-agent-trigger simulator-host-runtime-avatar od-tooltip"
++          role="status"
++          aria-label={statusLabel}
++          data-tooltip={statusLabel}
++          data-tooltip-placement={placement === 'up' ? 'top' : 'bottom'}
++        >
++          <AgentIcon id="simulator-host-runtime" size={20} />
++          <span
++            className={`simulator-host-runtime-dot${hostReady ? ' is-ready' : ''}`}
++            aria-hidden="true"
++          />
++        </span>
++      </div>
++    );
++  }
++
+   return (
+     <div className={`avatar-menu avatar-menu--${placement}`} ref={wrapRef}>
+       <button
+diff --git a/apps/web/src/components/EntrySettingsMenu.tsx b/apps/web/src/components/EntrySettingsMenu.tsx
+index 47019924446d2a15d0c2c323357193a260a6ff89..ced196d11688a65297cc282e3ce057c1f7d6ba76 100644
+--- a/apps/web/src/components/EntrySettingsMenu.tsx
++++ b/apps/web/src/components/EntrySettingsMenu.tsx
+@@ -28,6 +28,7 @@ import { formatDiscordPresenceCount, useDiscordPresence } from './useDiscordPres
+ import { Icon } from './Icon';
+ import { SocialShareGrid } from './SocialShareGrid';
+ import { enterpriseUrl } from './enterpriseUrl';
++import { isSimulatorHostAgentConfig } from '../providers/simulator-host-mode';
+ 
+ const DISCORD_URL = 'https://discord.gg/mHAjSMV6gz';
+ const X_URL = 'https://x.com/OpenDesignHQ';
+@@ -97,6 +98,7 @@ export function EntrySettingsMenu({
+   const triggerRef = useRef<HTMLButtonElement | null>(null);
+   const langListRef = useRef<HTMLDivElement | null>(null);
+   const activeTheme = config.theme ?? 'system';
++  const simulatorHostRuntimeMode = isSimulatorHostAgentConfig(config);
+   const discordOnlineLabel = discordPresence
+     ? t('entry.discordOnlineLabel', {
+         count: formatDiscordPresenceCount(discordPresence.onlineCount),
+@@ -135,7 +137,7 @@ export function EntrySettingsMenu({
+   }, [langOpen, open]);
+ 
+   useEffect(() => {
+-    if (!open) return;
++    if (!open || simulatorHostRuntimeMode) return;
+     const onClick = (event: MouseEvent) => {
+       if (!wrapRef.current) return;
+       if (!wrapRef.current.contains(event.target as Node)) setOpen(false);
+@@ -178,7 +180,7 @@ export function EntrySettingsMenu({
+     return () => {
+       cancelled = true;
+     };
+-  }, [open, openDesignShareRequest]);
++  }, [open, openDesignShareRequest, simulatorHostRuntimeMode]);
+ 
+   return (
+     <div className="entry-settings-menu" ref={wrapRef}>
+@@ -321,6 +323,8 @@ export function EntrySettingsMenu({
+             </div>
+           </section>
+ 
++          {!simulatorHostRuntimeMode ? (
++            <>
+           <section className="entry-settings-menu__section">
+             <div className="entry-settings-menu__section-title">
+               <Icon name="external-link" size={13} />
+@@ -535,6 +539,9 @@ export function EntrySettingsMenu({
+             <Icon name="external-link" size={12} className="entry-settings-menu__item-end" />
+           </a>
+ 
++            </>
++          ) : null}
++
+           <div className="entry-settings-menu__divider" aria-hidden />
+ 
+           <button
 diff --git a/apps/web/src/components/EntryShell.tsx b/apps/web/src/components/EntryShell.tsx
-index 19fe95db34ce35a4959c07a72f700c4199702878..b7cba9cefb9ab6fc2ac9a90dcbf56f70fc015eaa 100644
+index 19fe95db34ce35a4959c07a72f700c4199702878..5a1c898f4b6ac30a409a1a97b9e5bcc0be8cc1dc 100644
 --- a/apps/web/src/components/EntryShell.tsx
 +++ b/apps/web/src/components/EntryShell.tsx
-@@ -1444,6 +1444,10 @@ function OnboardingView({
-       provider.protocol === apiProtocol &&
-       provider.baseUrl === (config.apiProviderBaseUrl ?? config.baseUrl),
-   ) ?? null;
-+  const simulatorHostAgent = agents.find(
-+    (agent) => agent.id === 'simulator-host-runtime' && agent.available,
-+  ) ?? null;
-+  const simulatorHostRuntimeMode = simulatorHostAgent !== null;
-   const availableCliAgents = agents.filter((agent) => agent.available && agent.id !== 'amr');
-   const visibleAgents = availableCliAgents.filter((agent) => visibleAgentIds.includes(agent.id));
-   const amrAgent = agents.find((agent) => agent.id === 'amr' && agent.available) ?? null;
-@@ -1515,6 +1519,14 @@ function OnboardingView({
-     };
-   }, []);
+@@ -177,6 +177,7 @@ import {
+   providerModelsCacheKey,
+   type ProviderModelsCache,
+ } from './providerModelsCache';
++import { isSimulatorHostAgentConfig } from '../providers/simulator-host-mode';
  
+ // Persist the entry nav-rail open/collapsed state so it survives both a
+ // home -> project -> home navigation (EntryShell unmounts on the project
+@@ -535,6 +536,11 @@ export function EntryShell({
+   // view from the route rather than keeping it in component state.
+   const route = useRoute();
+   const view: EntryViewKind = route.kind === 'home' ? route.view : 'home';
++  const simulatorHostRuntimeMode = isSimulatorHostAgentConfig(config);
 +  useEffect(() => {
-+    if (!simulatorHostAgent || runtime !== null) return;
-+    setRuntime('local');
-+    onModeChange('daemon');
-+    onAgentChange(simulatorHostAgent.id);
-+    setConnectExpanded('local');
-+  }, [onAgentChange, onModeChange, runtime, simulatorHostAgent]);
++    if (!simulatorHostRuntimeMode || view !== 'onboarding') return;
++    navigate({ kind: 'home', view: 'home' }, { replace: true });
++  }, [simulatorHostRuntimeMode, view]);
+   const [newProjectOpen, setNewProjectOpen] = useState(false);
+   // Hard block from the pre-run balance gate on a home submit (empty wallet
+   // or signed out); non-null renders the AmrBalanceDialog on the home page —
+@@ -893,6 +899,14 @@ export function EntryShell({
+   );
+ 
+ 
++  if (view === 'onboarding' && simulatorHostRuntimeMode) {
++    return (
++      <div className="entry-shell entry-shell--no-header">
++        <CenteredLoader label={t('entry.loadingWorkspace')} />
++      </div>
++    );
++  }
 +
+   if (view === 'onboarding') {
+     return (
+       <div className="entry-shell entry-shell--no-header entry-shell--onboarding">
+@@ -986,7 +1000,9 @@ export function EntryShell({
+               <Icon name="panel-left" size={20} />
+             </button>
+             <div className="entry-main__topbar-chips entry-main__topbar-chips--icon-only">
+-              <GithubStarBadge />
++              {!simulatorHostRuntimeMode ? (
++                <>
++                  <GithubStarBadge />
+               <a
+                 className="entry-workspace-chip od-tooltip"
+                 href={enterpriseUrl(uiLocale)}
+@@ -1034,7 +1050,6 @@ export function EntryShell({
+                   </>
+                 ) : null}
+               </a>
+-              {view === 'home' ? null : executionSwitcher}
+               <button
+                 type="button"
+                 className="use-everywhere-chip od-tooltip"
+@@ -1058,14 +1073,21 @@ export function EntryShell({
+                   {t('entry.useEverywhereTitle')}
+                 </span>
+               </button>
++                </>
++              ) : null}
++              {view === 'home' ? null : executionSwitcher}
+             </div>
+-            <UpdaterPopup
+-              allowSilentUpdates={config.allowSilentUpdates}
+-              onAllowSilentUpdatesChange={(allowSilentUpdates) =>
+-                onConfigPersist({ ...config, allowSilentUpdates })
+-              }
+-            />
+-            <WhatsNewPopup active={view === 'home'} />
++            {!simulatorHostRuntimeMode ? (
++              <>
++                <UpdaterPopup
++                  allowSilentUpdates={config.allowSilentUpdates}
++                  onAllowSilentUpdatesChange={(allowSilentUpdates) =>
++                    onConfigPersist({ ...config, allowSilentUpdates })
++                  }
++                />
++                <WhatsNewPopup active={view === 'home'} />
++              </>
++            ) : null}
+             {avatarMenu}
+             {amrBalanceGateBlock ? (
+               <AmrBalanceDialog
+diff --git a/apps/web/src/components/FileWorkspace.tsx b/apps/web/src/components/FileWorkspace.tsx
+index dc418554bd91136114645a7c4aa10a471b3a3353..1c4bec5d5a922d25722c07d6bc4ea397ff946f5d 100644
+--- a/apps/web/src/components/FileWorkspace.tsx
++++ b/apps/web/src/components/FileWorkspace.tsx
+@@ -117,6 +117,7 @@ import { QuestionsPanel } from './QuestionsPanel';
+ import { QuickSwitcher } from './QuickSwitcher';
+ import { SketchEditor } from './SketchEditor';
+ import { SketchEnginePrewarm } from './SketchEnginePrewarm';
++import { isSimulatorHostAgentConfig } from '../providers/simulator-host-mode';
+ import {
+   emptySketchScene,
+   isSketchJsonFileName,
+@@ -612,6 +613,7 @@ export function FileWorkspace({
+   focusQuestionsRequest = null,
+ }: Props) {
+   const t = useT();
++  const simulatorHostRuntimeMode = isSimulatorHostAgentConfig(chatConfig);
+   // The chat column only shows a compact Questions banner; the form itself
+   // lives here, including after submission when a banner click can reopen the
+   // answered preview.
+@@ -642,7 +644,9 @@ export function FileWorkspace({
+     lastTabsStatePropRef.current = tabsState;
+   }
+   const [activeTab, setActiveTab] = useState<string>(
+-    tabsState.active ?? defaultRootTab,
++    simulatorHostRuntimeMode && isBrowserTabId(tabsState.active ?? '')
++      ? defaultRootTab
++      : tabsState.active ?? defaultRootTab,
+   );
+ 
+   const [showLibraryPicker, setShowLibraryPicker] = useState(false);
+@@ -679,7 +683,7 @@ export function FileWorkspace({
+     setProjectFolders(EMPTY_PROJECT_FOLDERS);
+   }
+   const [browserTabs, setBrowserTabs] = useState<BrowserWorkspaceTab[]>(
+-    () => browserTabsFromState(tabsState.browserTabs),
++    () => simulatorHostRuntimeMode ? [] : browserTabsFromState(tabsState.browserTabs),
+   );
+   const [browserNavigateRequests, setBrowserNavigateRequests] = useState<
+     Record<string, { url: string; nonce: number }>
+@@ -840,8 +844,12 @@ export function FileWorkspace({
+   // (or on project switch). Fall back to the Design Files browser so a
+   // fresh project lands in a useful place.
    useEffect(() => {
-     if (!amrAgent || runtime !== null) return;
-     setRuntime('amr');
-@@ -1556,10 +1568,10 @@ function OnboardingView({
-     // The cold-start stream finished without AMR. Re-probe once before we
-     // conclude AMR is unavailable, so the cloud sign-in stays usable even when
-     // AMR was slow to surface in the initial agent list.
--    if (amrAgent || amrAgentRefreshAttemptedRef.current || agentsLoading) return;
-+    if (simulatorHostRuntimeMode || amrAgent || amrAgentRefreshAttemptedRef.current || agentsLoading) return;
-     amrAgentRefreshAttemptedRef.current = true;
-     void Promise.resolve(onRefreshAgents()).catch(() => undefined);
--  }, [amrAgent, agentsLoading, onRefreshAgents]);
-+  }, [amrAgent, agentsLoading, onRefreshAgents, simulatorHostRuntimeMode]);
+-    setActiveTab(tabsState.active ?? defaultRootTab);
+-  }, [tabsState.active, defaultRootTab]);
++    setActiveTab(
++      simulatorHostRuntimeMode && isBrowserTabId(tabsState.active ?? '')
++        ? defaultRootTab
++        : tabsState.active ?? defaultRootTab,
++    );
++  }, [tabsState.active, defaultRootTab, simulatorHostRuntimeMode]);
  
    useEffect(() => {
-     // Fetch login status on mount in parallel with agent discovery so the
-@@ -2530,7 +2542,7 @@ function OnboardingView({
-   // Connect step, default face: a minimal, centered Open Design Cloud sign-in
-   // landing. No stepper, no runtime cards — just the cloud CTA, a secondary
-   // link into the full runtime chooser, and a top-left language/theme bar.
--  if (step === 0 && connectExpanded === null) {
-+  if (step === 0 && connectExpanded === null && !simulatorHostRuntimeMode) {
-     const activeTheme: AppTheme = config.theme ?? 'system';
-     const resolvedDark =
-       activeTheme === 'dark' ||
+     setBrowserTabs([]);
+@@ -882,10 +890,12 @@ export function FileWorkspace({
+   }, [loadSketchFile, sketchFiles]);
+ 
+   useEffect(() => {
+-    const nextBrowserTabs = browserTabsFromState(tabsState.browserTabs);
++    const nextBrowserTabs = simulatorHostRuntimeMode
++      ? []
++      : browserTabsFromState(tabsState.browserTabs);
+     setBrowserTabs(nextBrowserTabs);
+     browserTabSequenceRef.current = maxBrowserTabSequence(nextBrowserTabs);
+-  }, [tabsState.browserTabs]);
++  }, [tabsState.browserTabs, simulatorHostRuntimeMode]);
+ 
+   function workspaceTabsState(
+     tabs: string[],
+@@ -1133,10 +1143,10 @@ export function FileWorkspace({
+   }, [openRequest]);
+ 
+   useEffect(() => {
+-    if (!browserOpenRequest) return;
++    if (simulatorHostRuntimeMode || !browserOpenRequest) return;
+     openRequestedBrowserTab(browserOpenRequest);
+     // eslint-disable-next-line react-hooks/exhaustive-deps
+-  }, [browserOpenRequest]);
++  }, [browserOpenRequest, simulatorHostRuntimeMode]);
+ 
+   // Share request: ensure the target file is open + active so the FileViewer
+   // below receives the matching `shareRequest` and opens its Share menu.
+@@ -2406,7 +2416,7 @@ export function FileWorkspace({
+     openTab: openFile,
+     // Browser is owned by this branch's DesignBrowserPanel: spin up a browser
+     // tab synchronously (no daemon round-trip) and let the launcher close.
+-    createBrowser: () => openBrowserTab(),
++    createBrowser: simulatorHostRuntimeMode ? undefined : () => openBrowserTab(),
+     createSketch: () => void startNewSketch(),
+     createDocument: () => void createMarkdownDocument(),
+     uploadDesignFiles: () => fileInputRef.current?.click(),
+diff --git a/apps/web/src/components/InlineModelSwitcher.tsx b/apps/web/src/components/InlineModelSwitcher.tsx
+index 000924396bb9314823363eba57f19341fd9a39ac..0671b7c129286068f794cf62f0cfc54daf51ec4c 100644
+--- a/apps/web/src/components/InlineModelSwitcher.tsx
++++ b/apps/web/src/components/InlineModelSwitcher.tsx
+@@ -79,6 +79,10 @@ import {
+   providerModelsCacheKey,
+   type ProviderModelsCache,
+ } from './providerModelsCache';
++import {
++  SIMULATOR_HOST_RUNTIME_DESCRIPTION,
++  isSimulatorHostAgentConfig,
++} from '../providers/simulator-host-mode';
+ 
+ interface Props {
+   config: AppConfig;
+@@ -645,6 +649,38 @@ export function InlineModelSwitcher({
+     }
+   }, [config.agentId, config.mode, open]);
+ 
++  if (isSimulatorHostAgentConfig(config)) {
++    const hostReady = daemonLive && agents.some(
++      (agent) => agent.id === config.agentId && agent.available,
++    );
++    const statusLabel = hostReady ? 'Simulator' : '正在连接 Simulator';
++    const accessibleLabel = `${statusLabel} · ${SIMULATOR_HOST_RUNTIME_DESCRIPTION}`;
++    return (
++      <div
++        className={`inline-switcher${compact ? ' inline-switcher--compact' : ''}`}
++        data-testid="simulator-host-runtime-indicator"
++      >
++        <div
++          className="inline-switcher__chip simulator-host-runtime-chip od-tooltip"
++          role="status"
++          aria-label={accessibleLabel}
++          data-tooltip={accessibleLabel}
++          data-tooltip-placement="bottom"
++        >
++          <span
++            className={`simulator-host-runtime-dot${hostReady ? ' is-ready' : ''}`}
++            aria-hidden="true"
++          />
++          <span className="inline-switcher__chip-text">
++            <span className="inline-switcher__chip-primary">{statusLabel}</span>
++            <span className="inline-switcher__chip-sep" aria-hidden="true">·</span>
++            <span className="inline-switcher__chip-model">当前 Workspace 连接</span>
++          </span>
++        </div>
++      </div>
++    );
++  }
++
+   return (
+     <div
+       className={`inline-switcher${compact ? ' inline-switcher--compact' : ''}`}
+diff --git a/apps/web/src/components/ProjectView.tsx b/apps/web/src/components/ProjectView.tsx
+index 6f6b5afd109c32068a0f331955975bfc025c185d..ffd14fa5ca2927777d8ee8bd478b86a797403b1a 100644
+--- a/apps/web/src/components/ProjectView.tsx
++++ b/apps/web/src/components/ProjectView.tsx
+@@ -261,6 +261,7 @@ import { effectiveAgentModelChoice } from './agentModelSelection';
+ import { mediaExecutionPolicyForProjectMetadata } from '../media/execution-policy';
+ import { mediaModelProviderId } from '../media/models';
+ import { byokProviderRequiresApiKey } from '../utils/byokProvider';
++import { isSimulatorHostAgentConfig } from '../providers/simulator-host-mode';
+ import {
+   useByokImageModelOptions,
+   useByokVideoModelOptions,
+@@ -1348,6 +1349,7 @@ export function ProjectView({
+ }: Props) {
+   const { locale, t } = useI18n();
+   const analytics = useAnalytics();
++  const simulatorHostRuntimeMode = isSimulatorHostAgentConfig(config);
+   // Onboarding first-generation funnel (spec §11.1). Consume the pending entry
+   // (set by the Home recommendation) exactly once on mount; the refs guard the
+   // two lifecycle events so each fires only for the genuine first send / first
+@@ -8070,6 +8072,7 @@ export function ProjectView({
+   }, [finalize]);
+ 
+   const handleContinueInCli = useCallback(async () => {
++    if (simulatorHostRuntimeMode) return;
+     const projectDir = projectDetail.resolvedDir;
+     if (!projectDir) {
+       setProjectActionsToast({
+@@ -8112,6 +8115,7 @@ export function ProjectView({
+     designMdState.transcriptMessageCount,
+     designMdState.designSystemId,
+     designMdState.currentArtifact,
++    simulatorHostRuntimeMode,
+     terminalLauncher,
+   ]);
+ 
+@@ -8210,6 +8214,7 @@ export function ProjectView({
+   // Quick Switcher shortcut. ⌘+Shift+K is free (⌘+P is the only
+   // existing primary-modifier shortcut on this surface).
+   useEffect(() => {
++    if (simulatorHostRuntimeMode) return;
+     const onKeyDown = (e: KeyboardEvent) => {
+       const primary = isMacPlatform() ? e.metaKey && !e.ctrlKey : e.ctrlKey && !e.metaKey;
+       if (primary && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'k') {
+@@ -8221,7 +8226,7 @@ export function ProjectView({
+     };
+     window.addEventListener('keydown', onKeyDown, { capture: true });
+     return () => window.removeEventListener('keydown', onKeyDown, { capture: true });
+-  }, [designMdState.exists, handleContinueInCli]);
++  }, [designMdState.exists, handleContinueInCli, simulatorHostRuntimeMode]);
+ 
+   // PluginLoopHome auto-send: when the user submits on Home, app.tsx
+   // sets `sessionStorage['od:auto-send-first:<projectId>']` and routes
+@@ -8432,7 +8437,9 @@ export function ProjectView({
+               onRequestPluginFolderAgentAction={handlePluginFolderAgentAction}
+               activePluginActionPaths={activePluginActionPaths}
+               hiddenPluginActionPaths={hiddenAssistantPluginActionPaths}
+-              onShareToOpenDesign={handleShareToOpenDesign}
++              onShareToOpenDesign={
++                simulatorHostRuntimeMode ? undefined : handleShareToOpenDesign
++              }
+               shareToOpenDesignBusyMessageId={shareToOpenDesignBusyMessageId}
+               forceStreamingMessageIds={forceStreamingPluginMessageIds}
+               initialDraft={chatInitialDraft}
+@@ -8440,8 +8447,12 @@ export function ProjectView({
+               onOpenQuestions={openQuestionsTab}
+               onContinueRemainingTasks={handleContinueRemainingTasks}
+               onAssistantFeedback={handleAssistantFeedback}
+-              onArtifactShare={handleArtifactShare}
+-              onArtifactDownload={handleArtifactDownload}
++              onArtifactShare={
++                simulatorHostRuntimeMode ? undefined : handleArtifactShare
++              }
++              onArtifactDownload={
++                simulatorHostRuntimeMode ? undefined : handleArtifactDownload
++              }
+               onForkFromMessage={handleForkFromMessage}
+               forkingMessageId={forkingMessageId}
+               onNewConversation={handleNewConversation}
+@@ -8608,10 +8619,14 @@ export function ProjectView({
+           commentQueueOnSend={commentQueueOnSend}
+           commentSendDisabled={currentConversationQueueDisabled}
+           openRequest={openRequest}
+-          browserOpenRequest={browserOpenRequest}
+-          pinnedBrowserTabId={projectIsProgrammaticBrandExtraction ? BRAND_BROWSER_TAB_ID : null}
+-          shareRequest={shareRequest}
+-          downloadRequest={downloadRequest}
++          browserOpenRequest={simulatorHostRuntimeMode ? null : browserOpenRequest}
++          pinnedBrowserTabId={
++            !simulatorHostRuntimeMode && projectIsProgrammaticBrandExtraction
++              ? BRAND_BROWSER_TAB_ID
++              : null
++          }
++          shareRequest={simulatorHostRuntimeMode ? null : shareRequest}
++          downloadRequest={simulatorHostRuntimeMode ? null : downloadRequest}
+           slideNavRequest={slideNavRequest}
+           liveArtifactEvents={liveArtifactEvents}
+           designSystemActivityEvents={designSystemActivityEvents}
+@@ -8622,7 +8637,9 @@ export function ProjectView({
+           onRemovePreviewComment={removePreviewComment}
+           onSendBoardCommentAttachments={handleSendBoardCommentAttachments}
+           onBrandExtractionStopRequest={projectIsProgrammaticBrandExtraction ? handleStop : undefined}
+-          onRequestBrowserUsePrompt={handleBrowserUsePrompt}
++          onRequestBrowserUsePrompt={
++            simulatorHostRuntimeMode ? undefined : handleBrowserUsePrompt
++          }
+           onPluginFolderAgentAction={handlePluginFolderAgentAction}
+           activePluginActionPaths={activePluginActionPaths}
+           preferredPreviewFile={currentProject.metadata?.entryFile ?? null}
+@@ -8673,6 +8690,7 @@ export function ProjectView({
+           conversationId={activeConversationId}
+           headerActions={(
+             <>
++              {!simulatorHostRuntimeMode ? (
+               <HandoffButton
+                 projectId={project.id}
+                 projectName={project.name}
+@@ -8683,6 +8701,7 @@ export function ProjectView({
+                 metricsConsent={config.telemetry?.metrics === true}
+                 installationId={config.installationId}
+               />
++              ) : null}
+               <EntrySettingsMenu
+                 config={config}
+                 onThemeChange={handleThemeChange}
+diff --git a/apps/web/src/components/SettingsDialog.tsx b/apps/web/src/components/SettingsDialog.tsx
+index 2dc9d96c9e82e805e29fa4e675c4558291e94876..d2ae431a3f5246de047189b5aa66cde32995f7a7 100644
+--- a/apps/web/src/components/SettingsDialog.tsx
++++ b/apps/web/src/components/SettingsDialog.tsx
+@@ -189,6 +189,11 @@ import {
+   requestNotificationPermission,
+   showCompletionNotification,
+ } from '../utils/notifications';
++import {
++  SIMULATOR_HOST_RUNTIME_DESCRIPTION,
++  SIMULATOR_HOST_RUNTIME_LABEL,
++  isSimulatorHostAgentConfig,
++} from '../providers/simulator-host-mode';
+ 
+ export type SettingsSection =
+   | 'execution'
+@@ -216,6 +221,12 @@ export type SettingsSection =
+   | 'library'
+   | 'about';
+ 
++function simulatorHostVisibleSettingsSection(section: SettingsSection): SettingsSection {
++  return section === 'media' || section === 'privacy' || section === 'about'
++    ? 'execution'
++    : section;
++}
++
+ interface ByokProviderPreset {
+   id: string;
+   title: string;
+@@ -1344,6 +1355,7 @@ export function SettingsDialog({
+     ...initial,
+     baseUrl: resolveFixedOriginBaseUrl(initial.apiProtocol ?? 'anthropic', initial.baseUrl),
+   }));
++  const simulatorHostRuntimeMode = isSimulatorHostAgentConfig(cfg);
+   const [maxTokensInput, setMaxTokensInput] = useState(
+     initial.maxTokens == null ? '' : String(initial.maxTokens),
+   );
+@@ -1416,7 +1428,11 @@ export function SettingsDialog({
+       ? { [initial.apiProtocol ?? 'anthropic']: byokProviderKeyForConfig(initial) }
+       : {},
+   );
+-  const [activeSection, setActiveSection] = useState<SettingsSection>(initialSection);
++  const [activeSection, setActiveSection] = useState<SettingsSection>(() =>
++    isSimulatorHostAgentConfig(initial)
++      ? simulatorHostVisibleSettingsSection(initialSection)
++      : initialSection,
++  );
+   const [settingsSidebarCollapsed, setSettingsSidebarCollapsed] = useState(false);
+   const [settingsFullscreen, setSettingsFullscreen] = useState(false);
+   // Scroll the right-hand content pane back to the top whenever the user
+@@ -1738,8 +1754,12 @@ export function SettingsDialog({
+   // routes through this when the MCP tab is active so the user can press the
+   // single Save button at the bottom instead of hunting for the inner one.
+   useEffect(() => {
+-    setActiveSection(initialSection);
+-  }, [initialSection]);
++    setActiveSection(
++      simulatorHostRuntimeMode
++        ? simulatorHostVisibleSettingsSection(initialSection)
++        : initialSection,
++    );
++  }, [initialSection, simulatorHostRuntimeMode]);
+ 
+   // settings_view — fires whenever the active section changes (and once on
+   // mount). Keying the fire on a section+section-string lets us dedupe
+@@ -3506,7 +3526,12 @@ export function SettingsDialog({
+   // BYOK content so "Local CLI" only renders once (in the seg-control tab),
+   // not twice (heading + tab).
+   const sectionHeader: Record<SettingsSection, { title: string; subtitle: string }> = {
+-    execution: { title: t('settings.title'), subtitle: t('settings.subtitle') },
++    execution: simulatorHostRuntimeMode
++      ? {
++          title: SIMULATOR_HOST_RUNTIME_LABEL,
++          subtitle: SIMULATOR_HOST_RUNTIME_DESCRIPTION,
++        }
++      : { title: t('settings.title'), subtitle: t('settings.subtitle') },
+     instructions: {
+       title: t('settings.instructionsTitle'),
+       subtitle: t('settings.instructionsSubtitle'),
+@@ -3544,6 +3569,9 @@ export function SettingsDialog({
+     about: { title: t('settings.about'), subtitle: t('settings.aboutHint') },
+   };
+   const activeHeader = sectionHeader[activeSection];
++  const simulatorHostReady = daemonLive && agents.some(
++    (agent) => agent.id === cfg.agentId && agent.available,
++  );
+   const visibleAgents = agents.filter(isVisibleLocalCliAgent);
+   const installedAgents = orderAgentsWithOpenDesignFirst(
+     visibleAgents.filter((a) => a.available),
+@@ -3933,8 +3961,16 @@ export function SettingsDialog({
+             >
+               <Icon name="sliders" size={18} />
+               <span>
+-                <strong>{t('settings.envConfigure')}</strong>
+-                <small>{`${t('settings.localCli')} / ${t('settings.modeApiMeta')}`}</small>
++                <strong>
++                  {simulatorHostRuntimeMode
++                    ? SIMULATOR_HOST_RUNTIME_LABEL
++                    : t('settings.envConfigure')}
++                </strong>
++                <small>
++                  {simulatorHostRuntimeMode
++                    ? '当前 Workspace 连接'
++                    : `${t('settings.localCli')} / ${t('settings.modeApiMeta')}`}
++                </small>
+               </span>
+             </button>
+             <button
+@@ -3959,6 +3995,7 @@ export function SettingsDialog({
+                 <small>{t('settings.memoryHint')}</small>
+               </span>
+             </button>
++            {!simulatorHostRuntimeMode ? (
+             <button
+               type="button"
+               className={`settings-nav-item${activeSection === 'media' ? ' active' : ''}`}
+@@ -3970,6 +4007,7 @@ export function SettingsDialog({
+                 <small>Image / video / audio</small>
+               </span>
+             </button>
++            ) : null}
+             <button
+               type="button"
+               className={`settings-nav-item${activeSection === 'mcpClient' ? ' active' : ''}`}
+@@ -4080,6 +4118,7 @@ export function SettingsDialog({
+                 <small>{t('settings.projectLocationsHint')}</small>
+               </span>
+             </button>
++            {!simulatorHostRuntimeMode ? (
+             <button
+               type="button"
+               className={`settings-nav-item${activeSection === 'privacy' ? ' active' : ''}`}
+@@ -4091,6 +4130,8 @@ export function SettingsDialog({
+                 <small>{t('settings.privacyHint')}</small>
+               </span>
+             </button>
++            ) : null}
++            {!simulatorHostRuntimeMode ? (
+             <button
+               type="button"
+               className={`settings-nav-item${activeSection === 'about' ? ' active' : ''}`}
+@@ -4102,9 +4143,33 @@ export function SettingsDialog({
+                 <small>{t('settings.aboutHint')}</small>
+               </span>
+             </button>
++            ) : null}
+           </aside>
+           <div className="settings-content" ref={settingsContentRef}>
+-          {activeSection === 'execution' ? (
++          {activeSection === 'execution' && simulatorHostRuntimeMode ? (
++            <section
++              className="settings-section"
++              data-testid="settings-simulator-host-runtime"
++              aria-label={SIMULATOR_HOST_RUNTIME_LABEL}
++            >
++              <div className="empty-card" role="status">
++                <div className="simulator-host-settings-status">
++                  <span
++                    className={`simulator-host-runtime-dot${simulatorHostReady ? ' is-ready' : ''}`}
++                    aria-hidden="true"
++                  />
++                  <strong>{SIMULATOR_HOST_RUNTIME_LABEL}</strong>
++                </div>
++                <p>{SIMULATOR_HOST_RUNTIME_DESCRIPTION}</p>
++                <p className="hint">
++                  {simulatorHostReady
++                    ? 'AI Runtime 由 Simulator 管理，无需在 OpenDesign 中登录或选择模型。'
++                    : '正在连接 Simulator；连接恢复后可继续当前设计任务。'}
++                </p>
++              </div>
++            </section>
++          ) : null}
++          {activeSection === 'execution' && !simulatorHostRuntimeMode ? (
+             <>
+               <div
+                 className="seg-control"
+diff --git a/apps/web/src/index.css b/apps/web/src/index.css
+index 685f2defee0519c26003ad21670e465527639307..321df6601ff4780a42a33d6e4d8f82e11058080c 100644
+--- a/apps/web/src/index.css
++++ b/apps/web/src/index.css
+@@ -30,3 +30,4 @@
+ @import './styles/viewer/routines.css';
+ @import './styles/modal-window-drag.css';
+ @import './styles/entrance.css';
++@import './styles/simulator-host.css';
 diff --git a/apps/web/src/providers/daemon.ts b/apps/web/src/providers/daemon.ts
 index 5f5b9ed8fe4122db928827003dcef25c9c67867a..1ffd99983a5b18aa3b4acb7f9177de5e23a0bdec 100644
 --- a/apps/web/src/providers/daemon.ts
@@ -1234,19 +2066,45 @@ index 5f5b9ed8fe4122db928827003dcef25c9c67867a..1ffd99983a5b18aa3b4acb7f9177de5e
      return { ok: false };
 diff --git a/apps/web/src/providers/simulator-host-mode.js b/apps/web/src/providers/simulator-host-mode.js
 new file mode 100644
-index 0000000000000000000000000000000000000000..d355ea1dd21af8c67be2d17b64db54aba43e1df6
+index 0000000000000000000000000000000000000000..81a92591d000b8bdd71471b2e41df7525a8c5550
 --- /dev/null
 +++ b/apps/web/src/providers/simulator-host-mode.js
-@@ -0,0 +1,28 @@
+@@ -0,0 +1,54 @@
 +export const SIMULATOR_HOST_AGENT_ID = 'simulator-host-runtime';
++export const SIMULATOR_HOST_RUNTIME_LABEL = 'Simulator Host Runtime';
++export const SIMULATOR_HOST_RUNTIME_DESCRIPTION = '使用 Simulator 当前 Workspace 连接';
 +
-+export function createSimulatorHostNetworkPolicy(fetchImpl = globalThis.fetch) {
++export function isSimulatorHostAgentConfig(config) {
++  return config?.mode === 'daemon' && config?.agentId === SIMULATOR_HOST_AGENT_ID;
++}
++
++export function normalizeSimulatorHostConfig(config) {
++  return {
++    ...config,
++    mode: 'daemon',
++    apiKey: '',
++    apiProtocolConfigs: {},
++    byokProviderConfigDrafts: {},
++    mediaProviders: {},
++    agentId: SIMULATOR_HOST_AGENT_ID,
++    agentModels: {},
++    agentCliEnv: {},
++    agentCliEnvIntent: {},
++    onboardingCompleted: true,
++    telemetry: { metrics: false, content: false },
++  };
++}
++
++export function createSimulatorHostNetworkPolicy(fetchImpl) {
 +  /** @type {Promise<boolean> | null} */
 +  let modePromise = null;
 +
 +  const isSimulatorHostRuntimeMode = async () => {
 +    if (!modePromise) {
-+      modePromise = fetchImpl('/api/agents', { cache: 'no-store' })
++      // Resolve the global fetch lazily. The browser installs it before app
++      // bootstrap, while tests replace it after importing this module.
++      const activeFetch = fetchImpl ?? globalThis.fetch;
++      modePromise = activeFetch('/api/agents', { cache: 'no-store' })
 +        .then(async (response) => {
 +          if (!response.ok) return true;
 +          const body = await response.json();
@@ -1262,9 +2120,54 @@ index 0000000000000000000000000000000000000000..d355ea1dd21af8c67be2d17b64db54ab
 +    isSimulatorHostRuntimeMode,
 +    async fetchIfAllowed(input, init) {
 +      if (await isSimulatorHostRuntimeMode()) return null;
-+      return fetchImpl(input, init);
++      return (fetchImpl ?? globalThis.fetch)(input, init);
 +    },
 +  };
++}
+diff --git a/apps/web/src/styles/simulator-host.css b/apps/web/src/styles/simulator-host.css
+new file mode 100644
+index 0000000000000000000000000000000000000000..61e60d62f4c4f1e4a31af8c2511cf0a13ca94329
+--- /dev/null
++++ b/apps/web/src/styles/simulator-host.css
+@@ -0,0 +1,39 @@
++.simulator-host-runtime-chip {
++  cursor: default;
++}
++
++.simulator-host-runtime-dot {
++  width: 7px;
++  height: 7px;
++  flex: 0 0 7px;
++  border-radius: 999px;
++  background: var(--text-tertiary);
++  box-shadow: 0 0 0 2px color-mix(in srgb, var(--text-tertiary) 16%, transparent);
++}
++
++.simulator-host-runtime-dot.is-ready {
++  background: #36a269;
++  box-shadow: 0 0 0 2px color-mix(in srgb, #36a269 18%, transparent);
++}
++
++.simulator-host-runtime-avatar {
++  cursor: default;
++}
++
++.simulator-host-settings-status {
++  display: flex;
++  align-items: center;
++  gap: 8px;
++  margin-bottom: 8px;
++}
++
++/* Simulator's embedded WebContentsView deliberately denies downloads. Keep
++   preview/edit/version-history intact while removing controls that cannot
++   complete in this security boundary. */
++html[data-simulator-host-runtime='true'] .chrome-file-action-menus,
++html[data-simulator-host-runtime='true'] .markdown-workbench .chrome-share-menu,
++html[data-simulator-host-runtime='true'] .df-preview-download,
++html[data-simulator-host-runtime='true'] .df-batch-actions > button:first-child,
++html[data-simulator-host-runtime='true'] a[download] {
++  display: none !important;
 +}
 diff --git a/package.json b/package.json
 index 7fddb1fc2a5e1d08df126728ae67dc870e6536fe..109f063cc82467ca1c89f87da40b10d05975c101 100644
