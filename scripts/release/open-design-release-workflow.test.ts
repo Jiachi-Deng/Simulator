@@ -112,6 +112,12 @@ describe("OpenDesign official release workflow", () => {
       expect(install.indexOf("bun install")).toBeLessThan(install.indexOf("npm ci"))
     }
 
+    const nestedInstall = spawnSync("npm", ["ci", "--ignore-scripts"], {
+      cwd: join(root, "modules/open-design"),
+      encoding: "utf8",
+    })
+    expect(nestedInstall.status, `${nestedInstall.stdout}\n${nestedInstall.stderr}`).toBe(0)
+
     const imported = spawnSync("node", [
       "--input-type=module",
       "--eval",
