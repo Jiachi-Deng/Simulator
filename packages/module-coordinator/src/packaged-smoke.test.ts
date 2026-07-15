@@ -26,7 +26,7 @@ const SUPERVISOR_CRASH_TIMEOUT_MS = 2_000
 const REPLACEMENT_READY_TIMEOUT_MS = 6_000
 const VIEW_REATTACH_TIMEOUT_MS = 3_000
 const PACKAGED_FIXTURE_BUILD_TIMEOUT_MS = 60_000
-const PACKAGED_LIFECYCLE_TIMEOUT_MS = 45_000
+const PACKAGED_LIFECYCLE_TIMEOUT_MS = process.platform === 'win32' ? 60_000 : 30_000
 const systems: PackagedSystem[] = []
 let compiledFixture: Promise<{ bytes: Buffer; entrypoint: string }> | undefined
 let compiledFixtureRoot: string | undefined
@@ -472,7 +472,7 @@ describe('packaged fake module with production runtime adapters', () => {
     expect(restarted).toMatchObject({ state: 'healthy', restartCount: 1 })
     expect(await system.view.query(id as ModuleId)).toMatchObject({ state: 'attached' })
     expectOperationOk(await system.coordinator.stop({ operationId: 'slow-start-stop', moduleId: id as ModuleId }))
-  }, 30_000)
+  }, PACKAGED_LIFECYCLE_TIMEOUT_MS)
 
   it('fails closed on readiness failure without attaching a frontend or leaking a runtime lease', async () => {
     const packaged = await packagedArchive()
@@ -482,7 +482,7 @@ describe('packaged fake module with production runtime adapters', () => {
     expect((await system.coordinator.start({ operationId: 'readiness-start', moduleId: id as ModuleId })).ok).toBe(false)
     expect(await system.view.query(id as ModuleId)).toBeUndefined()
     expect(await system.usage.runExclusive(id as ModuleId, async (lease) => lease.isVersionInUse('1.0.0' as ModuleVersion))).toBe(false)
-  }, 30_000)
+  }, PACKAGED_LIFECYCLE_TIMEOUT_MS)
 
   it('records restart budget exhaustion and detaches the frontend', async () => {
     const packaged = await packagedArchive()
@@ -514,7 +514,7 @@ describe('packaged fake module with production runtime adapters', () => {
     }
     expect(system.daemon.get(id as ModuleId)).toMatchObject({ state: 'crashed', diagnostic: { code: 'RESTART_BUDGET_EXHAUSTED' } })
     await system.coordinator.stop({ operationId: 'budget-stop', moduleId: id as ModuleId })
-  }, 30_000)
+  }, PACKAGED_LIFECYCLE_TIMEOUT_MS)
 
   it('isolates two running modules when one daemon crashes and restarts', async () => {
     const packaged = await packagedArchive()
@@ -538,7 +538,7 @@ describe('packaged fake module with production runtime adapters', () => {
     await Promise.all([left, right].map(async (id) => {
       expectOperationOk(await system.coordinator.stop({ operationId: `isolation-stop-${id}`, moduleId: id as ModuleId }))
     }))
-  }, 45_000)
+  }, PACKAGED_LIFECYCLE_TIMEOUT_MS)
 })
 
 describe('packaged fake module download and extraction failures', () => {
