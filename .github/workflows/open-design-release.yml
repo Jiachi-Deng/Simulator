@@ -71,6 +71,11 @@ jobs:
           cache: npm
           cache-dependency-path: modules/open-design/package-lock.json
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.10"
+
       - name: Validate fixed release authority
         shell: bash
         run: |
@@ -85,8 +90,9 @@ jobs:
           test -n "$HOST_VERSION_RANGE"
 
       - name: Install exact publisher dependencies
-        working-directory: modules/open-design
-        run: npm ci
+        run: |
+          bun install --frozen-lockfile --ignore-scripts
+          npm ci --ignore-scripts --prefix modules/open-design
 
       - name: Download and validate sealed initial input
         shell: bash
@@ -274,7 +280,11 @@ jobs:
       - name: Remove transient verification material
         if: ${{ always() }}
         shell: bash
-        run: rm -rf "$RUNNER_TEMP/open-design-initial" "$RUNNER_TEMP/open-design-initial-"*.json
+        run: |
+          if [[ -d "$RUNNER_TEMP/open-design-initial" ]]; then
+            chmod -R u+rwX "$RUNNER_TEMP/open-design-initial"
+          fi
+          rm -rf "$RUNNER_TEMP/open-design-initial" "$RUNNER_TEMP/open-design-initial-"*.json
 
   refresh:
     name: Refresh OpenDesign catalog
@@ -308,6 +318,11 @@ jobs:
           cache: npm
           cache-dependency-path: modules/open-design/package-lock.json
 
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.10"
+
       - name: Validate fixed refresh authority
         shell: bash
         run: |
@@ -320,8 +335,9 @@ jobs:
           test -n "$KEY_ACTIVE_UNTIL"
 
       - name: Install exact publisher dependencies
-        working-directory: modules/open-design
-        run: npm ci
+        run: |
+          bun install --frozen-lockfile --ignore-scripts
+          npm ci --ignore-scripts --prefix modules/open-design
 
       - name: Download exact fixed-tag production bundle
         shell: bash
@@ -559,4 +575,8 @@ jobs:
       - name: Remove transient signing and release material
         if: ${{ always() }}
         shell: bash
-        run: rm -rf "$RUNNER_TEMP/open-design-refresh" "$RUNNER_TEMP/open-design-refresh-"*.json
+        run: |
+          if [[ -d "$RUNNER_TEMP/open-design-refresh" ]]; then
+            chmod -R u+rwX "$RUNNER_TEMP/open-design-refresh"
+          fi
+          rm -rf "$RUNNER_TEMP/open-design-refresh" "$RUNNER_TEMP/open-design-refresh-"*.json
