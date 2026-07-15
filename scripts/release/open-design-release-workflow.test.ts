@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test"
-import { readFileSync } from "node:fs"
+import { spawnSync } from "node:child_process"
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { join } from "node:path"
 
 const root = join(import.meta.dir, "../..")
@@ -13,6 +15,12 @@ const documentation = readFileSync(documentationPath, "utf8")
 const staticValidation = readFileSync(staticValidationPath, "utf8")
 const producer = Bun.YAML.parse(producerSource) as Record<string, any>
 const workflow = Bun.YAML.parse(source) as Record<string, any>
+
+function step(jobName: "initial" | "refresh", name: string): Record<string, any> {
+  const found = workflow.jobs[jobName].steps.find((candidate: Record<string, any>) => candidate.name === name)
+  if (!found) throw new Error(`Missing ${jobName} step: ${name}`)
+  return found
+}
 
 describe("OpenDesign official release workflow", () => {
   test("has fixed authority, protected writes, and serialized initial/refresh entrypoints", () => {
@@ -92,6 +100,56 @@ describe("OpenDesign official release workflow", () => {
       expect(exposed[0].env.OPEN_DESIGN_RELEASE_PRIVATE_KEY).toBe(secretExpression)
       expect(exposed[0].run).toContain("--private-key-env OPEN_DESIGN_RELEASE_PRIVATE_KEY")
       expect(exposed[0].run).not.toContain(secretExpression)
+    }
+  })
+
+  test("installs both locked workspace and standalone publisher dependency closures", () => {
+    for (const jobName of ["initial", "refresh"] as const) {
+      expect(step(jobName, "Setup Bun").uses).toBe("oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6")
+      const install = step(jobName, "Install exact publisher dependencies").run
+      expect(install).toContain("bun install --frozen-lockfile --ignore-scripts")
+      expect(install).toContain("npm ci --ignore-scripts --prefix modules/open-design")
+      expect(install.indexOf("bun install")).toBeLessThan(install.indexOf("npm ci"))
+    }
+
+    const imported = spawnSync("node", [
+      "--input-type=module",
+      "--eval",
+      "import('./modules/open-design/package/production-package.mjs')",
+    ], { cwd: root, encoding: "utf8" })
+    expect(imported.status, imported.stderr).toBe(0)
+  })
+
+  test("restores owner write permission before deleting sealed runner trees", () => {
+    for (const [jobName, stepName, directory] of [
+      ["initial", "Remove transient verification material", "open-design-initial"],
+      ["refresh", "Remove transient signing and release material", "open-design-refresh"],
+    ] as const) {
+      const cleanup = step(jobName, stepName).run
+      expect(cleanup).toContain(`chmod -R u+rwX "$RUNNER_TEMP/${directory}"`)
+      expect(cleanup.indexOf("chmod -R u+rwX")).toBeLessThan(cleanup.indexOf("rm -rf"))
+
+      const fixture = mkdtempSync(join(tmpdir(), `simulator-${directory}-cleanup-`))
+      const runnerTemp = join(fixture, "runner")
+      const sealed = join(runnerTemp, directory, "sealed", "nested")
+      const payload = join(sealed, "payload.txt")
+      try {
+        mkdirSync(sealed, { recursive: true, mode: 0o700 })
+        writeFileSync(payload, "sealed\n", { mode: 0o600 })
+        chmodSync(payload, 0o444)
+        chmodSync(sealed, 0o555)
+        chmodSync(join(sealed, ".."), 0o555)
+        chmodSync(join(runnerTemp, directory), 0o555)
+        const removed = spawnSync("bash", ["-e", "-o", "pipefail", "-c", cleanup], {
+          env: { ...process.env, RUNNER_TEMP: runnerTemp },
+          encoding: "utf8",
+        })
+        expect(removed.status, `${removed.stdout}\n${removed.stderr}`).toBe(0)
+        expect(existsSync(join(runnerTemp, directory))).toBe(false)
+      } finally {
+        spawnSync("chmod", ["-R", "u+rwX", fixture])
+        rmSync(fixture, { recursive: true, force: true })
+      }
     }
   })
 

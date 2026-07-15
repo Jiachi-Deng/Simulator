@@ -74,6 +74,15 @@ dry-run, signing, and an independent installation round trip before creating a
 draft Release. The draft is published only after all five downloaded remote
 assets match; failure removes the draft and tag.
 
+The publisher runs with Node 24.18.0 and installs two independent locked
+dependency closures before loading the production CLI: the root Bun workspace
+lock provides the internal Module packages and their exact runtime dependencies,
+while `modules/open-design/package-lock.json` provides the standalone artifact
+policy dependencies. Lifecycle scripts are disabled for both installs. Cleanup
+is restricted to the job's private `RUNNER_TEMP` subtree; because the input and
+output trees are intentionally sealed read-only, the workflow restores owner
+write permission only inside that subtree immediately before deleting it.
+
 ## Scheduled and manual refresh
 
 The refresh job runs every 12 hours on Linux and may also be manually
