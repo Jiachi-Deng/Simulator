@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
@@ -114,6 +114,21 @@ async function fixtureFiles(mode = 0o600) {
   return { root, entryPath, tokenPath }
 }
 
+async function packagedExecutableFixture(sourceArtifact: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'host-agent-shim-packaged-'))
+  temporaryRoots.push(root)
+  const artifactDirectory = join(root, 'app', 'dist', 'resources', 'host-agent')
+  const bundledRuntimeDirectory = join(root, 'app', 'vendor', 'bun')
+  const artifact = join(artifactDirectory, 'simulator-host-agent.mjs')
+  const bundledRuntime = join(bundledRuntimeDirectory, 'bun')
+  await mkdir(artifactDirectory, { recursive: true })
+  await mkdir(bundledRuntimeDirectory, { recursive: true })
+  await writeFile(artifact, await readFile(sourceArtifact), { mode: 0o755 })
+  await chmod(artifact, 0o755)
+  await symlink(process.execPath, bundledRuntime)
+  return artifact
+}
+
 async function listen(
   handler: (request: IncomingMessage, response: ServerResponse) => void,
 ): Promise<{ server: Server; url: string }> {
@@ -139,9 +154,9 @@ function json(response: ServerResponse, value: unknown): void {
 }
 
 describe('Host Agent shim', () => {
-  it('ships a zero-argument executable that works directly with an empty PATH and under Bun', async () => {
-    const artifact = join(repositoryRoot, 'apps/electron/resources/host-agent/simulator-host-agent.mjs')
-    const bunResult = await execFileAsync(process.execPath, [artifact, '--version'], {
+  it('ships a zero-argument executable that works in a clean packaged layout and under Bun', async () => {
+    const sourceArtifact = join(repositoryRoot, 'apps/electron/resources/host-agent/simulator-host-agent.mjs')
+    const bunResult = await execFileAsync(process.execPath, [sourceArtifact, '--version'], {
       env: {},
       timeout: 5_000,
     })
@@ -150,6 +165,7 @@ describe('Host Agent shim', () => {
     expect(bunResult.stderr).toBe('')
 
     if (process.platform !== 'win32') {
+      const artifact = await packagedExecutableFixture(sourceArtifact)
       const directResult = await execFileAsync(artifact, ['--version'], {
         env: { PATH: '' },
         timeout: 5_000,

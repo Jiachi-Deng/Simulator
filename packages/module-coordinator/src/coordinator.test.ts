@@ -19,6 +19,12 @@ import { SimulatedCoordinatorCrash, type ModuleCoordinatorCheckpoint, type Modul
 import { ModuleRuntimeUseGate } from './usage-gate.ts'
 import { InMemoryModuleCoordinatorStore } from './testing/memory-store.ts'
 
+// These are outer test watchdogs, not product deadlines. Windows CI performs
+// substantially slower real filesystem identity/link operations; keep the
+// operation assertions identical while allowing their cleanup to finish before
+// Bun starts afterEach and removes the trusted root.
+const CRASH_MATRIX_TEST_TIMEOUT_MS = process.platform === 'win32' ? 30_000 : 15_000
+
 const NOW = Date.parse('2026-07-12T18:00:00.000Z')
 const MODULE_ID = 'org.simulator.packaged-fake'
 const CATALOG_URL = 'https://modules.example.test/catalog.json'
@@ -509,7 +515,7 @@ describe('ModuleCoordinator all-operation forward crash matrix', () => {
         if (kind === 'uninstall') {
           expect(restarted.registry.snapshot().modules[0]?.versions.map((item) => item.version)).not.toContain('1.0.0')
         }
-      }, 15_000)
+      }, CRASH_MATRIX_TEST_TIMEOUT_MS)
     }
   }
 })
@@ -567,7 +573,7 @@ describe('ModuleCoordinator all-operation compensation crash matrix', () => {
         const module = restarted.registry.snapshot().modules.find((item) => item.id === MODULE_ID)
         expect(module?.activeVersion ?? null).toBe(operation?.source.activeVersion ?? null)
         expect((await restarted.view.query(MODULE_ID as ModuleId))?.state === 'attached').toBe(operation?.source.viewAttached ?? false)
-      }, 15_000)
+      }, CRASH_MATRIX_TEST_TIMEOUT_MS)
     }
   }
 })
@@ -600,7 +606,7 @@ describe('ModuleCoordinator update failure restoration matrix', () => {
       })
       expect((await system.view.query(MODULE_ID as ModuleId))?.state).toBe('attached')
       expect(system.process.requests.at(-1)?.env.SIMULATOR_MODULE_ID).toBe(MODULE_ID)
-    }, 15_000)
+    }, CRASH_MATRIX_TEST_TIMEOUT_MS)
   }
 })
 

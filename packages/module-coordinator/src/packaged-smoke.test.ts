@@ -26,7 +26,11 @@ const SUPERVISOR_CRASH_TIMEOUT_MS = 2_000
 const REPLACEMENT_READY_TIMEOUT_MS = 6_000
 const VIEW_REATTACH_TIMEOUT_MS = 3_000
 const PACKAGED_FIXTURE_BUILD_TIMEOUT_MS = 60_000
-const PACKAGED_LIFECYCLE_TIMEOUT_MS = process.platform === 'win32' ? 60_000 : 30_000
+// Outer watchdog only: the product restart/readiness phases below retain their
+// narrow deadlines. Two packaged modules require repeated executable extraction
+// and process-tree setup, which is much slower under Windows CI filesystem
+// scanning; do not let Bun begin root cleanup while that test promise is live.
+const PACKAGED_LIFECYCLE_TIMEOUT_MS = process.platform === 'win32' ? 120_000 : 30_000
 const systems: PackagedSystem[] = []
 let compiledFixture: Promise<{ bytes: Buffer; entrypoint: string }> | undefined
 let compiledFixtureRoot: string | undefined
