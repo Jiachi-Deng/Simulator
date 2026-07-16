@@ -52,6 +52,12 @@ const DEFAULT_SERVER_LIMITS: Readonly<HostAgentBrokerServerLimits> = Object.free
   // same Idempotency-Key. Keep the unclaimed Run alive beyond that first
   // timeout so an ambiguously-lost response can recover the original Run.
   ownershipClaimTimeoutMs: 12_000,
+  // A dead Shim closes its loopback socket even when SIGKILL/OOM prevents its
+  // own finally cleanup. Preserve short Last-Event-ID reconnects, then reap.
+  claimedClientDisconnectGraceMs: 5_000,
+  // SSE is one-way, so an authenticated status heartbeat bounds a half-open
+  // client even when the HTTP implementation leaves its socket in CLOSE_WAIT.
+  claimedClientLeaseTimeoutMs: 45_000,
 })
 
 class PayloadTooLargeError extends Error {}
@@ -98,8 +104,17 @@ function writeError(response: ServerResponse, code: HostAgentErrorCode): void {
   writeJson(response, HOST_AGENT_ERROR_DEFINITIONS[code].httpStatus, createHostAgentErrorResponse(code))
 }
 
-function validateCoreSnapshot(input: unknown) {
-  try { return parseHostAgentRunSnapshot(input) } catch { throw new HostAgentBrokerCoreClientError('INTERNAL_ERROR') }
+function validateCoreSnapshot(input: unknown, expectedRunHandle?: string) {
+  try {
+    const snapshot = parseHostAgentRunSnapshot(input)
+    if (expectedRunHandle !== undefined && snapshot.runHandle !== expectedRunHandle) {
+      throw new HostAgentBrokerCoreClientError('INTERNAL_ERROR')
+    }
+    return snapshot
+  } catch (error) {
+    if (error instanceof HostAgentBrokerCoreClientError) throw error
+    throw new HostAgentBrokerCoreClientError('INTERNAL_ERROR')
+  }
 }
 
 function parseContentLength(request: IncomingMessage): number | undefined {
@@ -159,6 +174,39 @@ async function readBody(request: IncomingMessage, maxBytes: number, timeoutMs: n
     request.once('error', onError)
     if (request.readableEnded) onEnd()
   })
+}
+
+interface TransportCloseObservation {
+  readonly closed: Promise<void>
+  isClosed(): boolean
+  dispose(): void
+}
+
+function observeTransportClose(request: IncomingMessage, response: ServerResponse): TransportCloseObservation {
+  let closed = false
+  let resolveClosed!: () => void
+  const closedPromise = new Promise<void>((resolve) => { resolveClosed = resolve })
+  const onClosed = (): void => {
+    if (closed) return
+    closed = true
+    resolveClosed()
+  }
+  const dispose = (): void => {
+    request.off('aborted', onClosed)
+    request.socket.off('close', onClosed)
+    request.socket.off('end', onClosed)
+    request.socket.off('error', onClosed)
+    response.off('close', onClosed)
+    response.off('finish', onClosed)
+  }
+  request.once('aborted', onClosed)
+  request.socket.once('close', onClosed)
+  request.socket.once('end', onClosed)
+  request.socket.once('error', onClosed)
+  response.once('close', onClosed)
+  response.once('finish', onClosed)
+  if (request.aborted || request.socket.destroyed || response.destroyed || response.writableEnded) onClosed()
+  return { closed: closedPromise, isClosed: () => closed, dispose }
 }
 
 class SseWriter {
@@ -234,9 +282,17 @@ export interface HostAgentBrokerServerOptions {
 interface RunRequestOwnership {
   readonly idempotencyKey: string
   readonly runHandle: string
-  state: 'pending' | 'claiming' | 'claimed' | 'cleaning'
+  state: 'pending' | 'claiming' | 'claimed' | 'disconnected' | 'cleaning'
+  leaseGeneration: number
   timer?: ReturnType<typeof setTimeout>
   cleanup?: Promise<void>
+  activeResponse?: ServerResponse
+}
+
+interface EventStreamClaim {
+  ownership?: RunRequestOwnership
+  leaseGeneration?: number
+  previousState?: 'pending' | 'disconnected'
 }
 
 /** Loopback-only, grant-bound v2 HTTP/SSE worker. */
@@ -250,6 +306,8 @@ export class HostAgentBrokerServer {
   readonly #ownershipByRun = new Map<string, RunRequestOwnership>()
   #server?: Server
   #address?: HostAgentBrokerServerAddress
+  #stopping = false
+  #stopPromise?: Promise<void>
   #activeRequests = 0
   #activeSse = 0
 
@@ -273,21 +331,25 @@ export class HostAgentBrokerServer {
     activeRequests: number
     sseSubscribers: number
     unclaimedRuns: number
+    reconnectGraceRuns: number
   }> {
     let unclaimedRuns = 0
+    let reconnectGraceRuns = 0
     for (const ownership of this.#ownershipByRun.values()) {
       if (ownership.state !== 'claimed') unclaimedRuns += 1
+      if (ownership.state === 'disconnected') reconnectGraceRuns += 1
     }
     return {
       sockets: this.#sockets.size,
       activeRequests: this.#activeRequests,
       sseSubscribers: this.#activeSse,
       unclaimedRuns,
+      reconnectGraceRuns,
     }
   }
 
   async start(): Promise<HostAgentBrokerServerAddress> {
-    if (this.#server || this.#address) throw new TypeError('Host Agent broker has already started')
+    if (this.#server || this.#address || this.#stopping) throw new TypeError('Host Agent broker has already started')
     const server = createServer({
       maxHeaderSize: 16 * 1024,
       headersTimeout: this.#limits.headerTimeoutMs,
@@ -342,7 +404,13 @@ export class HostAgentBrokerServer {
     return this.#address
   }
 
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
+    this.#stopPromise ??= this.#stop()
+    return this.#stopPromise
+  }
+
+  async #stop(): Promise<void> {
+    this.#stopping = true
     const server = this.#server
     this.#address = undefined
     this.#server = undefined
@@ -351,16 +419,21 @@ export class HostAgentBrokerServer {
     for (const socket of this.#sockets) socket.destroy()
     this.#sockets.clear()
     const cleanup = [...this.#ownershipByRun.values()]
-      .filter((ownership) => ownership.state === 'pending' || ownership.state === 'claiming')
-      .map((ownership) => this.#beginAutomaticCleanup(ownership))
-    await Promise.allSettled(cleanup)
+      .map((ownership) => this.#beginAutomaticCleanup(ownership, true))
+    const cleanupResults = await Promise.allSettled(cleanup)
     for (const ownership of this.#ownershipByRun.values()) {
       if (ownership.timer) clearTimeout(ownership.timer)
+      ownership.timer = undefined
+    }
+    if (server) await new Promise<void>((resolve) => server.close(() => resolve()))
+    if (cleanupResults.some((result) => result.status === 'rejected')) {
+      // A stopped Broker cannot safely restore an ownership lease. Preserve
+      // the failed record and reject shutdown so the Supervisor can fail the
+      // protocol path closed instead of reporting a clean reap.
+      throw new HostAgentBrokerCoreClientError('CLEANUP_FAILED')
     }
     this.#ownershipByKey.clear()
     this.#ownershipByRun.clear()
-    if (!server) return
-    await new Promise<void>((resolve) => server.close(() => resolve()))
   }
 
   async #handleRequest(request: IncomingMessage, response: ServerResponse): Promise<void> {
@@ -409,27 +482,35 @@ export class HostAgentBrokerServer {
     }
     if (route.route === 'runs.get') {
       await this.#requireEmptyBody(request)
-      this.#claimRun(route.runHandle)
-      writeJson(response, 200, validateCoreSnapshot(await this.#coreClient.getRun(route.runHandle)))
+      const snapshot = validateCoreSnapshot(await this.#coreClient.getRun(route.runHandle), route.runHandle)
+      // Status polling proves a live owner only while provider work can still
+      // make progress. A terminal/closing snapshot must not let a Shim blocked
+      // on stdout retain its hidden Session forever; the existing lease then
+      // performs strict cancel/close/reap.
+      if (snapshot.state === 'accepted' || snapshot.state === 'starting' || snapshot.state === 'running') {
+        this.#renewClaimedLease(route.runHandle)
+      }
+      writeJson(response, 200, snapshot)
       return
     }
     if (route.route === 'runs.cancel') {
       await this.#requireEmptyBody(request)
-      writeJson(response, 200, validateCoreSnapshot(await this.#coreClient.cancelRun(route.runHandle)))
+      writeJson(response, 200, validateCoreSnapshot(await this.#coreClient.cancelRun(route.runHandle), route.runHandle))
       return
     }
     if (route.route === 'runs.delete') {
       await this.#requireEmptyBody(request)
       // closeRun resolves only after strict Host cleanup/reap has completed.
-      const ownership = this.#beginExplicitClose(route.runHandle)
+      const transition = this.#beginExplicitClose(route.runHandle)
+      const result: { snapshot?: ReturnType<typeof validateCoreSnapshot> } = {}
+      const cleanup = this.#completeExplicitClose(route.runHandle, transition, result)
+      if (transition.ownership) transition.ownership.cleanup = cleanup
       try {
-        const snapshot = validateCoreSnapshot(await this.#coreClient.closeRun(route.runHandle))
-        if (snapshot.state !== 'closed') throw new HostAgentBrokerCoreClientError('CLEANUP_FAILED')
-        this.#forgetOwnership(ownership.ownership)
-        writeJson(response, 200, snapshot)
-      } catch (error) {
-        this.#restoreAfterExplicitCloseFailure(ownership)
-        throw error
+        await cleanup
+        if (!result.snapshot) throw new HostAgentBrokerCoreClientError('CLEANUP_FAILED')
+        writeJson(response, 200, result.snapshot)
+      } finally {
+        if (transition.ownership?.cleanup === cleanup) transition.ownership.cleanup = undefined
       }
       return
     }
@@ -473,9 +554,13 @@ export class HostAgentBrokerServer {
 
   async #serveEvents(request: IncomingMessage, response: ServerResponse, runHandle: string): Promise<void> {
     await this.#requireEmptyBody(request)
+    // Once the empty SSE GET is consumed there is no client request body left.
+    // Keep the socket read side flowing so a SIGKILL/OOM FIN is surfaced as
+    // end/close instead of remaining indefinitely in kernel CLOSE_WAIT.
+    request.socket.resume()
     if (this.#activeSse >= this.#limits.maxSseSubscribers) throw Object.assign(new Error(), { code: 'RATE_LIMITED' })
     const afterSequence = parseLastEventId(singleHeader(request, HOST_AGENT_HEADERS.lastEventId, false))
-    const ownershipClaim = this.#beginEventStreamClaim(runHandle)
+    const ownershipClaim = this.#beginEventStreamClaim(runHandle, afterSequence)
     let ownershipClaimed = false
     this.#activeSse += 1
     const earlyEvents: HostAgentEvent[] = []
@@ -485,9 +570,13 @@ export class HostAgentBrokerServer {
     let closedEventSeen = false
     let subscription: HostAgentBrokerCoreSubscription | undefined
     let coreBoundaryInvalid = false
+    const transport = observeTransportClose(request, response)
     const listener = (rawEvent: HostAgentEvent): void => {
       let event: HostAgentEvent
-      try { event = parseHostAgentEvent(rawEvent) } catch {
+      try {
+        event = parseHostAgentEvent(rawEvent)
+        if (event.runHandle !== runHandle) throw new HostAgentBrokerCoreClientError('INTERNAL_ERROR')
+      } catch {
         coreBoundaryInvalid = true
         if (writer) response.destroy()
         return
@@ -504,38 +593,18 @@ export class HostAgentBrokerServer {
     }
     try {
       const subscriptionPromise = this.#coreClient.subscribeRun(runHandle, afterSequence, listener)
-      subscription = await new Promise<HostAgentBrokerCoreSubscription>((resolve, reject) => {
-        let settled = false
-        const cleanup = (): void => {
-          request.off('aborted', aborted)
-          request.socket.off('close', aborted)
-          request.socket.off('end', aborted)
-          request.socket.off('error', aborted)
-          response.off('close', aborted)
-        }
-        const finish = (value: HostAgentBrokerCoreSubscription): void => {
-          if (settled) {
-            void value.unsubscribe()
-            return
-          }
-          settled = true
-          cleanup()
-          resolve(value)
-        }
-        const fail = (error: unknown): void => {
-          if (settled) return
-          settled = true
-          cleanup()
-          reject(error)
-        }
-        const aborted = (): void => fail(new RequestAbortedError())
-        request.once('aborted', aborted)
-        request.socket.once('close', aborted)
-        request.socket.once('end', aborted)
-        request.socket.once('error', aborted)
-        response.once('close', aborted)
-        void subscriptionPromise.then(finish, fail)
+      const guardedSubscription = subscriptionPromise.then((value) => {
+        if (!transport.isClosed()) return value
+        // A late MessagePort subscription may resolve after its HTTP owner is
+        // gone. Reap it without allowing a rejected (or synchronously-throwing)
+        // unsubscribe to become a Worker-level unhandled rejection.
+        void Promise.resolve().then(() => value.unsubscribe()).catch(() => undefined)
+        throw new RequestAbortedError()
       })
+      subscription = await Promise.race([
+        guardedSubscription,
+        transport.closed.then(() => { throw new RequestAbortedError() }),
+      ])
       // IncomingMessage.destroyed becomes true after a fully-consumed normal
       // request, so only transport/response destruction proves takeover loss.
       if (request.aborted || request.socket.destroyed || response.destroyed) {
@@ -549,33 +618,23 @@ export class HostAgentBrokerServer {
       response.setHeader('Connection', 'keep-alive')
       response.setHeader('X-Accel-Buffering', 'no')
       response.flushHeaders()
-      // Successful SSE headers are the explicit ownership handoff. From this
-      // point onward a disconnect belongs to the Shim, which must cancel and
-      // DELETE; the Broker must not race it with automatic cleanup.
-      this.#commitEventStreamClaim(ownershipClaim)
+      // Successful SSE headers are the ownership handoff. The Shim normally
+      // cancels and DELETEs; Broker cleanup starts only after disconnect grace
+      // or lease expiry, and generation guards keep it from racing a reconnect.
+      this.#commitEventStreamClaim(ownershipClaim, response)
       ownershipClaimed = true
       this.#sseResponses.add(response)
-      const finished = new Promise<void>((resolve) => {
-        let settled = false
-        const done = (): void => {
-          if (settled) return
-          settled = true
-          resolve()
-        }
-        request.once('aborted', done)
-        request.once('close', done)
-        response.once('close', done)
-        response.once('finish', done)
-      })
       writer = new SseWriter(response, this.#limits.maxSseBufferedBytes)
       for (const event of earlyEvents) writer.writeEvent(event)
       const heartbeat = setInterval(() => writer?.heartbeat(), this.#limits.heartbeatIntervalMs)
       heartbeat.unref?.()
       if (closedEventSeen) writer.finishAfterFlush()
-      await finished
+      await transport.closed
       clearInterval(heartbeat)
     } finally {
-      if (!ownershipClaimed) this.#restoreEventStreamClaim(ownershipClaim)
+      transport.dispose()
+      if (ownershipClaimed) this.#releaseEventStreamClaim(ownershipClaim)
+      else this.#restoreEventStreamClaim(ownershipClaim)
       this.#sseResponses.delete(response)
       this.#activeSse = Math.max(0, this.#activeSse - 1)
       await subscription?.unsubscribe()
@@ -615,6 +674,7 @@ export class HostAgentBrokerServer {
       idempotencyKey,
       runHandle,
       state: 'pending' as const,
+      leaseGeneration: 0,
     }
     if (!byKey && !byRun) {
       this.#ownershipByKey.set(idempotencyKey, ownership)
@@ -627,59 +687,92 @@ export class HostAgentBrokerServer {
   }
 
   #scheduleOwnershipExpiry(ownership: RunRequestOwnership): void {
+    this.#scheduleAutomaticCleanup(ownership, this.#limits.ownershipClaimTimeoutMs)
+  }
+
+  #scheduleDisconnectExpiry(ownership: RunRequestOwnership): void {
+    this.#scheduleAutomaticCleanup(ownership, this.#limits.claimedClientDisconnectGraceMs)
+  }
+
+  #scheduleClaimedLeaseExpiry(ownership: RunRequestOwnership): void {
+    this.#scheduleAutomaticCleanup(ownership, this.#limits.claimedClientLeaseTimeoutMs, true)
+  }
+
+  #scheduleAutomaticCleanup(
+    ownership: RunRequestOwnership,
+    timeoutMs: number,
+    forceClaimed = false,
+  ): void {
     if (ownership.timer) clearTimeout(ownership.timer)
+    const expectedState = ownership.state
+    const expectedLeaseGeneration = ownership.leaseGeneration
     ownership.timer = setTimeout(() => {
       ownership.timer = undefined
-      void this.#beginAutomaticCleanup(ownership).catch(() => undefined)
-    }, this.#limits.ownershipClaimTimeoutMs)
+      if (this.#ownershipByRun.get(ownership.runHandle) !== ownership
+        || ownership.state !== expectedState
+        || ownership.leaseGeneration !== expectedLeaseGeneration) return
+      void this.#beginAutomaticCleanup(ownership, forceClaimed).catch(() => undefined)
+    }, timeoutMs)
     ownership.timer.unref?.()
   }
 
-  #claimRun(runHandle: string): void {
+  #beginEventStreamClaim(runHandle: string, afterSequence: number | undefined): EventStreamClaim {
     const ownership = this.#ownershipByRun.get(runHandle)
-    if (!ownership || ownership.state === 'claimed') return
+    if (!ownership) return {}
+    if (ownership.state === 'claimed') {
+      // A reconnect that proves it consumed a canonical event may replace an
+      // old half-open transport. A second initial subscriber is a stale owner.
+      if (afterSequence === undefined) throw new HostAgentBrokerCoreClientError('RUNTIME_UNAVAILABLE')
+      ownership.activeResponse?.destroy()
+      ownership.activeResponse = undefined
+      ownership.state = 'disconnected'
+    }
     if (ownership.state === 'cleaning' || ownership.state === 'claiming') {
       throw new HostAgentBrokerCoreClientError('RUNTIME_UNAVAILABLE')
     }
-    ownership.state = 'claimed'
-    if (ownership.timer) clearTimeout(ownership.timer)
-    ownership.timer = undefined
-  }
-
-  #beginEventStreamClaim(runHandle: string): { ownership?: RunRequestOwnership } {
-    const ownership = this.#ownershipByRun.get(runHandle)
-    if (!ownership || ownership.state === 'claimed') return {}
-    if (ownership.state === 'cleaning' || ownership.state === 'claiming') {
-      throw new HostAgentBrokerCoreClientError('RUNTIME_UNAVAILABLE')
-    }
+    const previousState = ownership.state
     ownership.state = 'claiming'
+    ownership.leaseGeneration += 1
     // A stalled subscribe/transport handshake is not an ownership transfer.
     // Keep it bounded so worker shutdown or a lost client cannot strand a Run.
     this.#scheduleOwnershipExpiry(ownership)
-    return { ownership }
+    return { ownership, leaseGeneration: ownership.leaseGeneration, previousState }
   }
 
-  #commitEventStreamClaim(input: { ownership?: RunRequestOwnership }): void {
-    const ownership = input.ownership
+  #commitEventStreamClaim(input: EventStreamClaim, response: ServerResponse): void {
+    const { ownership, leaseGeneration } = input
     if (!ownership) return
-    if (ownership.state !== 'claiming') {
+    if (ownership.state !== 'claiming' || ownership.leaseGeneration !== leaseGeneration) {
       throw new HostAgentBrokerCoreClientError('RUNTIME_UNAVAILABLE')
     }
     ownership.state = 'claimed'
+    ownership.activeResponse = response
     if (ownership.timer) clearTimeout(ownership.timer)
     ownership.timer = undefined
+    this.#scheduleClaimedLeaseExpiry(ownership)
   }
 
-  #restoreEventStreamClaim(input: { ownership?: RunRequestOwnership }): void {
-    const ownership = input.ownership
-    if (!ownership || ownership.state !== 'claiming') return
-    ownership.state = 'pending'
-    this.#scheduleOwnershipExpiry(ownership)
+  #restoreEventStreamClaim(input: EventStreamClaim): void {
+    const { ownership, leaseGeneration, previousState } = input
+    if (!ownership || !previousState || ownership.state !== 'claiming'
+      || ownership.leaseGeneration !== leaseGeneration) return
+    ownership.state = previousState
+    if (previousState === 'disconnected') this.#scheduleDisconnectExpiry(ownership)
+    else this.#scheduleOwnershipExpiry(ownership)
+  }
+
+  #releaseEventStreamClaim(input: EventStreamClaim): void {
+    const { ownership, leaseGeneration } = input
+    if (!ownership || ownership.state !== 'claimed'
+      || ownership.leaseGeneration !== leaseGeneration) return
+    ownership.activeResponse = undefined
+    ownership.state = 'disconnected'
+    this.#scheduleDisconnectExpiry(ownership)
   }
 
   #beginExplicitClose(runHandle: string): {
     ownership?: RunRequestOwnership
-    previousState?: 'pending' | 'claimed'
+    previousState?: 'pending' | 'claimed' | 'disconnected'
   } {
     const ownership = this.#ownershipByRun.get(runHandle)
     if (!ownership) return {}
@@ -693,23 +786,56 @@ export class HostAgentBrokerServer {
     return { ownership, previousState }
   }
 
+  async #completeExplicitClose(
+    runHandle: string,
+    transition: {
+      ownership?: RunRequestOwnership
+      previousState?: 'pending' | 'claimed' | 'disconnected'
+    },
+    result: { snapshot?: ReturnType<typeof validateCoreSnapshot> },
+  ): Promise<void> {
+    try {
+      const snapshot = validateCoreSnapshot(await this.#coreClient.closeRun(runHandle), runHandle)
+      if (snapshot.state !== 'closed') throw new HostAgentBrokerCoreClientError('CLEANUP_FAILED')
+      result.snapshot = snapshot
+      this.#forgetOwnership(transition.ownership)
+    } catch (error) {
+      // During live service a failed DELETE restores the exact prior lease so
+      // automatic reap can retry. Shutdown has no live Broker to own that
+      // lease, so preserving cleaning state and rejecting stop is fail-closed.
+      if (!this.#stopping) this.#restoreAfterExplicitCloseFailure(transition)
+      throw error
+    }
+  }
+
   #restoreAfterExplicitCloseFailure(input: {
     ownership?: RunRequestOwnership
-    previousState?: 'pending' | 'claimed'
+    previousState?: 'pending' | 'claimed' | 'disconnected'
   }): void {
     const { ownership, previousState } = input
     if (!ownership || !previousState || ownership.state !== 'cleaning') return
     ownership.state = previousState
     if (previousState === 'pending') this.#scheduleOwnershipExpiry(ownership)
+    else if (previousState === 'disconnected') this.#scheduleDisconnectExpiry(ownership)
+    else this.#scheduleClaimedLeaseExpiry(ownership)
   }
 
-  #beginAutomaticCleanup(ownership: RunRequestOwnership): Promise<void> {
-    if (ownership.state === 'claimed') return Promise.resolve()
+  #beginAutomaticCleanup(ownership: RunRequestOwnership, forceClaimed = false): Promise<void> {
+    if (this.#ownershipByRun.get(ownership.runHandle) !== ownership) return Promise.resolve()
     if (ownership.cleanup) return ownership.cleanup
+    if (ownership.state === 'cleaning') {
+      // Cleaning without a tracked operation must never let shutdown report a
+      // successful strict reap. This is an invariant breach, not an idle Run.
+      return Promise.reject(new HostAgentBrokerCoreClientError('CLEANUP_FAILED'))
+    }
+    if (ownership.state === 'claimed' && !forceClaimed) return Promise.resolve()
+    const previousState = ownership.state
+    ownership.activeResponse?.destroy()
+    ownership.activeResponse = undefined
     ownership.state = 'cleaning'
     if (ownership.timer) clearTimeout(ownership.timer)
     ownership.timer = undefined
-    const cleanup = this.#cleanupUnclaimedRun(ownership)
+    const cleanup = this.#cleanupOrphanedRun(ownership, previousState)
       .finally(() => {
         ownership.cleanup = undefined
       })
@@ -717,18 +843,24 @@ export class HostAgentBrokerServer {
     return cleanup
   }
 
-  async #cleanupUnclaimedRun(ownership: RunRequestOwnership): Promise<void> {
+  async #cleanupOrphanedRun(
+    ownership: RunRequestOwnership,
+    previousState: RunRequestOwnership['state'],
+  ): Promise<void> {
     try {
       // Never replay. Cancellation establishes the one terminal outcome; close
       // then waits for Session/provider/process reap before ownership is gone.
-      validateCoreSnapshot(await this.#coreClient.cancelRun(ownership.runHandle))
-      const closed = validateCoreSnapshot(await this.#coreClient.closeRun(ownership.runHandle))
+      validateCoreSnapshot(await this.#coreClient.cancelRun(ownership.runHandle), ownership.runHandle)
+      const closed = validateCoreSnapshot(await this.#coreClient.closeRun(ownership.runHandle), ownership.runHandle)
       if (closed.state !== 'closed') throw new HostAgentBrokerCoreClientError('CLEANUP_FAILED')
       this.#forgetOwnership(ownership)
     } catch (error) {
       if (this.#ownershipByRun.get(ownership.runHandle) === ownership) {
-        ownership.state = 'pending'
-        if (this.#server) this.#scheduleOwnershipExpiry(ownership)
+        ownership.state = previousState === 'claimed' ? 'disconnected' : previousState
+        if (this.#server) {
+          if (ownership.state === 'disconnected') this.#scheduleDisconnectExpiry(ownership)
+          else this.#scheduleOwnershipExpiry(ownership)
+        }
       }
       throw error
     }
@@ -746,6 +878,12 @@ export class HostAgentBrokerServer {
     }
   }
 
+  #renewClaimedLease(runHandle: string): void {
+    const ownership = this.#ownershipByRun.get(runHandle)
+    if (!ownership || ownership.state !== 'claimed') return
+    this.#scheduleClaimedLeaseExpiry(ownership)
+  }
+
   #validateLimits(): void {
     const ceiling: HostAgentBrokerServerLimits = { ...DEFAULT_SERVER_LIMITS }
     for (const key of Object.keys(this.#limits) as Array<keyof HostAgentBrokerServerLimits>) {
@@ -756,6 +894,9 @@ export class HostAgentBrokerServer {
     }
     if (this.#limits.heartbeatIntervalMs >= this.#limits.idleTimeoutMs) {
       throw new TypeError('Heartbeat must be shorter than the idle timeout')
+    }
+    if (this.#limits.claimedClientLeaseTimeoutMs <= this.#limits.heartbeatIntervalMs * 3) {
+      throw new TypeError('Claimed-client lease must tolerate heartbeat request failures')
     }
   }
 }

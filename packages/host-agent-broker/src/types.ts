@@ -45,4 +45,8 @@ export interface HostAgentBrokerServerLimits {
   maxSseBufferedBytes: number
   /** Grace period for the client to prove it received a newly-created Run handle. */
   ownershipClaimTimeoutMs: number
+  /** Grace period for the owning SSE client to reconnect after its transport closes. */
+  claimedClientDisconnectGraceMs: number
+  /** Maximum time a claimed SSE owner may go without a successful status heartbeat. */
+  claimedClientLeaseTimeoutMs: number
 }

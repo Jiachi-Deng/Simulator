@@ -1,5 +1,4 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { once } from 'node:events'
 import { lstat, readFile, realpath } from 'node:fs/promises'
 import type { Readable, Writable } from 'node:stream'
 import {
@@ -19,6 +18,9 @@ import { parseHostAgentJsonBytes } from '@simulator/host-agent-contract/node'
 const REQUEST_TIMEOUT_MS = 10_000
 const CLEANUP_TIMEOUT_MS = 5_000
 const TERMINAL_CLOSE_TIMEOUT_MS = 15_000
+const TERMINAL_STATUS_GRACE_MS = 1_000
+const STDOUT_DRAIN_TIMEOUT_MS = 5_000
+const CLIENT_LEASE_HEARTBEAT_INTERVAL_MS = HOST_AGENT_LIMITS.heartbeatIntervalMs
 const MAX_CREATE_ATTEMPTS = 3
 const MAX_SSE_RECONNECTS = 3
 const MAX_HTTP_RESPONSE_BYTES = 512 * 1024
@@ -38,6 +40,10 @@ export interface HostAgentShimOptions {
   fetch?: Fetch
   /** Test-only override; the packaged entrypoint always uses the closed default. */
   terminalCloseTimeoutMs?: number
+  /** Test-only override; the packaged entrypoint renews on the contract heartbeat interval. */
+  clientLeaseHeartbeatIntervalMs?: number
+  /** Test-only override; the packaged entrypoint uses the bounded stdout drain deadline. */
+  stdoutDrainTimeoutMs?: number
 }
 
 interface ValidatedEnvironment {
@@ -85,6 +91,7 @@ export async function runHostAgentShim(options: HostAgentShimOptions): Promise<n
   let closedEvent: HostAgentEvent | undefined
   let environment: ValidatedEnvironment | undefined
   const fetchImpl = options.fetch ?? globalThis.fetch
+  const stdoutDrainTimeoutMs = validatedStdoutDrainTimeout(options.stdoutDrainTimeoutMs)
 
   try {
     environment = await validateEnvironment(options)
@@ -112,8 +119,39 @@ export async function runHostAgentShim(options: HostAgentShimOptions): Promise<n
       rejectTerminalFailure = reject
     })
     let terminalCloseTimer: ReturnType<typeof setTimeout> | undefined
+    let terminalStatusTimer: ReturnType<typeof setTimeout> | undefined
+    let terminalStatusObserved = false
+    let stdoutBackpressured = false
     const streamController = new AbortController()
     const streamSignal = AbortSignal.any([options.signal, streamController.signal])
+    const failUnconsumedTerminal = (): void => {
+      if (terminal || closed || streamController.signal.aborted) return
+      streamController.abort(new ShimError('CLEANUP_FAILED'))
+    }
+    const observeTerminalStatus = (): void => {
+      if (terminal || closed) return
+      terminalStatusObserved = true
+      if (stdoutBackpressured) {
+        failUnconsumedTerminal()
+        return
+      }
+      terminalStatusTimer ??= setTimeout(failUnconsumedTerminal, TERMINAL_STATUS_GRACE_MS)
+      terminalStatusTimer.unref?.()
+    }
+    const setStdoutBackpressure = (blocked: boolean): void => {
+      stdoutBackpressured = blocked
+      if (blocked && terminalStatusObserved) failUnconsumedTerminal()
+    }
+    const leaseController = new AbortController()
+    const leaseSignal = AbortSignal.any([options.signal, leaseController.signal])
+    const leaseTask = maintainClientLease(
+      fetchImpl,
+      environment,
+      runHandle,
+      validatedClientLeaseHeartbeatInterval(options.clientLeaseHeartbeatIntervalMs),
+      leaseSignal,
+      observeTerminalStatus,
+    )
     let reconnects = 0
     const failTerminalCleanup = (): void => {
       if (terminalFailure) return
@@ -134,6 +172,8 @@ export async function runHostAgentShim(options: HostAgentShimOptions): Promise<n
               validateEventTransition(state, event)
               if (isTerminal(event)) {
                 terminal = true
+                if (terminalStatusTimer) clearTimeout(terminalStatusTimer)
+                terminalStatusTimer = undefined
                 terminalType = event.type
                 terminalEvent = event
                 const closeTimeoutMs = validatedTerminalCloseTimeout(options.terminalCloseTimeoutMs)
@@ -155,7 +195,23 @@ export async function runHostAgentShim(options: HostAgentShimOptions): Promise<n
                 closed = true
                 closedEvent = event
               } else {
-                await write(options.stdout, `${JSON.stringify(event)}\n`)
+                try {
+                  await write(
+                    options.stdout,
+                    `${JSON.stringify(event)}\n`,
+                    streamSignal,
+                    setStdoutBackpressure,
+                    stdoutDrainTimeoutMs,
+                  )
+                } catch (error) {
+                  // stdout is the json-event-stream delivery boundary. Once a
+                  // canonical event cannot be delivered, reconnecting with its
+                  // already-advanced cursor would silently skip that event.
+                  // Abort the whole Shim path so lease polling stops and catch
+                  // performs exactly one cancel + strict close instead.
+                  streamController.abort(error instanceof Error ? error : new ShimError('RUNTIME_UNAVAILABLE'))
+                  throw error
+                }
               }
             },
           }), terminalFailurePromise])
@@ -163,6 +219,7 @@ export async function runHostAgentShim(options: HostAgentShimOptions): Promise<n
         } catch (error) {
           if (terminalFailure) throw terminalFailure
           if (options.signal.aborted) throw error
+          if (streamSignal.aborted) throw abortReason(streamSignal)
           if (error instanceof HttpShimError && error.publicCode === 'REPLAY_UNAVAILABLE') throw error
           if (closed || reconnects >= MAX_SSE_RECONNECTS) throw error
           reconnects += 1
@@ -170,7 +227,10 @@ export async function runHostAgentShim(options: HostAgentShimOptions): Promise<n
         }
       }
     } finally {
+      leaseController.abort(new ShimError('CANCELLED'))
+      await leaseTask
       if (terminalCloseTimer) clearTimeout(terminalCloseTimer)
+      if (terminalStatusTimer) clearTimeout(terminalStatusTimer)
     }
     if (!terminal || !terminalType || !terminalEvent || !closedEvent || !closePromise) {
       throw new ShimError('INVALID_EVENT_ORDER')
@@ -184,8 +244,8 @@ export async function runHostAgentShim(options: HostAgentShimOptions): Promise<n
     // A terminal event is not observable by the ordinary Runtime parser until
     // strict Host cleanup has produced both DELETE=closed and run.closed. This
     // prevents a completed-looking transcript from escaping when reap fails.
-    await write(options.stdout, `${JSON.stringify(terminalEvent)}\n`)
-    await write(options.stdout, `${JSON.stringify(closedEvent)}\n`)
+    await write(options.stdout, `${JSON.stringify(terminalEvent)}\n`, undefined, undefined, stdoutDrainTimeoutMs)
+    await write(options.stdout, `${JSON.stringify(closedEvent)}\n`, undefined, undefined, stdoutDrainTimeoutMs)
     return terminalType === 'turn.completed' ? 0 : terminalType === 'turn.interrupted' ? 2 : 1
   } catch (error) {
     if (environment && runHandle && !closed && !terminal) {
@@ -200,6 +260,22 @@ function validatedTerminalCloseTimeout(value: number | undefined): number {
   if (value === undefined) return TERMINAL_CLOSE_TIMEOUT_MS
   if (!Number.isSafeInteger(value) || value < 10 || value > TERMINAL_CLOSE_TIMEOUT_MS) {
     throw new TypeError('terminalCloseTimeoutMs must be an integer within the closed test range')
+  }
+  return value
+}
+
+function validatedClientLeaseHeartbeatInterval(value: number | undefined): number {
+  if (value === undefined) return CLIENT_LEASE_HEARTBEAT_INTERVAL_MS
+  if (!Number.isSafeInteger(value) || value < 10 || value > CLIENT_LEASE_HEARTBEAT_INTERVAL_MS) {
+    throw new TypeError('clientLeaseHeartbeatIntervalMs must be an integer within the closed test range')
+  }
+  return value
+}
+
+function validatedStdoutDrainTimeout(value: number | undefined): number {
+  if (value === undefined) return STDOUT_DRAIN_TIMEOUT_MS
+  if (!Number.isSafeInteger(value) || value < 10 || value > STDOUT_DRAIN_TIMEOUT_MS) {
+    throw new TypeError('stdoutDrainTimeoutMs must be an integer within the closed test range')
   }
   return value
 }
@@ -472,6 +548,41 @@ async function closeRun(
   })
 }
 
+async function maintainClientLease(
+  fetchImpl: Fetch,
+  environment: ValidatedEnvironment,
+  runHandle: string,
+  intervalMs: number,
+  signal: AbortSignal,
+  onTerminalStatus: () => void,
+): Promise<void> {
+  while (!signal.aborted) {
+    try {
+      await delay(intervalMs, signal)
+    } catch {
+      return
+    }
+    if (signal.aborted) return
+    try {
+      const current = await requestSnapshot(fetchImpl, environment, `/v2/runs/${runHandle}`, {
+        method: 'GET', headers: {}, signal,
+      })
+      if (current.runHandle !== runHandle) throw new ShimError('INVALID_HOST_RESPONSE')
+      // A terminal/closing snapshot cannot represent forward provider
+      // progress. Stop advertising liveness and notify the event consumer so
+      // stdout backpressure cannot retain either the hidden Session or Shim.
+      if (current.state !== 'accepted' && current.state !== 'starting' && current.state !== 'running') {
+        onTerminalStatus()
+        return
+      }
+    } catch {
+      // A single heartbeat failure must not replay or duplicate provider work.
+      // The bounded Broker lease is the final authority after repeated misses.
+      if (signal.aborted) return
+    }
+  }
+}
+
 async function bestEffortCancelAndClose(
   fetchImpl: Fetch,
   environment: ValidatedEnvironment,
@@ -543,9 +654,58 @@ async function fetchWithTimeout(
   return fetchImpl(url, { ...init, signal })
 }
 
-async function write(stream: Writable, value: string): Promise<void> {
+async function write(
+  stream: Writable,
+  value: string,
+  signal?: AbortSignal,
+  onBackpressureChange?: (blocked: boolean) => void,
+  drainTimeoutMs = STDOUT_DRAIN_TIMEOUT_MS,
+): Promise<void> {
+  if (signal?.aborted) throw abortReason(signal)
   if (stream.write(value)) return
-  await once(stream, 'drain')
+  onBackpressureChange?.(true)
+  const timeoutSignal = AbortSignal.timeout(drainTimeoutMs)
+  const drainSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
+  try {
+    await new Promise<void>((resolve, reject) => {
+      let settled = false
+      const cleanup = (): void => {
+        stream.off('drain', onDrain)
+        stream.off('error', onError)
+        stream.off('close', onClose)
+        drainSignal.removeEventListener('abort', onAbort)
+      }
+      const finish = (): void => {
+        if (settled) return
+        settled = true
+        cleanup()
+        resolve()
+      }
+      const fail = (error: Error): void => {
+        if (settled) return
+        settled = true
+        cleanup()
+        reject(error)
+      }
+      const onDrain = (): void => finish()
+      const onError = (): void => fail(new ShimError('RUNTIME_UNAVAILABLE'))
+      const onClose = (): void => fail(new ShimError('RUNTIME_UNAVAILABLE'))
+      const onAbort = (): void => {
+        const reason = signal?.aborted ? abortReason(signal) : new ShimError('RUNTIME_UNAVAILABLE')
+        fail(reason)
+        // A daemon that never consumes stdout must not retain the Shim process
+        // after the Host has already made the Run terminal and reaped it.
+        stream.destroy()
+      }
+      stream.once('drain', onDrain)
+      stream.once('error', onError)
+      stream.once('close', onClose)
+      drainSignal.addEventListener('abort', onAbort, { once: true })
+      if (drainSignal.aborted) onAbort()
+    })
+  } finally {
+    onBackpressureChange?.(false)
+  }
 }
 
 function diagnostic(stream: Writable, code: string): void {

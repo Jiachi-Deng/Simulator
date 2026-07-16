@@ -40,6 +40,36 @@ class Capture extends Writable {
   }
 }
 
+class BackpressuredCapture extends Writable {
+  value = ''
+  readonly blocked: Promise<void>
+  #notifyBlocked!: () => void
+  #release?: (error?: Error | null) => void
+  #released = false
+
+  constructor() {
+    super({ highWaterMark: 1 })
+    this.blocked = new Promise<void>((resolve) => { this.#notifyBlocked = resolve })
+  }
+
+  override _write(chunk: Buffer | string, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    this.value += chunk.toString()
+    if (this.#released) {
+      callback()
+      return
+    }
+    this.#release = callback
+    this.#notifyBlocked()
+  }
+
+  release(): void {
+    this.#released = true
+    const callback = this.#release
+    this.#release = undefined
+    callback?.()
+  }
+}
+
 function snapshot(state: HostAgentRunState) {
   const terminal = ['completed', 'failed', 'interrupted', 'closing', 'closed'].includes(state)
   return parseHostAgentRunSnapshot({
@@ -241,6 +271,189 @@ describe('Host Agent shim', () => {
     expect(eventRequestCursors).toEqual([undefined, '3'])
     expect(stdout.value.trim().split('\n').map((line) => JSON.parse(line).sequence)).toEqual([1, 2, 3, 4, 5])
     expect(stderr.value).toBe('')
+  })
+
+  it('renews the claimed-client lease during a quiet running Turn', async () => {
+    const files = await fixtureFiles()
+    let stream: ServerResponse | undefined
+    let heartbeatRequests = 0
+    const { url } = await listen((request, response) => {
+      request.resume()
+      request.on('end', () => {
+        if (request.method === 'POST' && request.url === '/v2/runs') {
+          json(response, snapshot('accepted'))
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}/events`) {
+          stream = response
+          response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+          response.flushHeaders()
+          writeSse(response, accepted)
+          writeSse(response, started)
+          writeSse(response, delta)
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}`) {
+          heartbeatRequests += 1
+          json(response, snapshot('running'))
+          if (heartbeatRequests === 1) writeSse(stream!, completed)
+        } else if (request.method === 'DELETE' && request.url === `/v2/runs/${RUN}`) {
+          writeSse(stream!, closed)
+          stream!.end()
+          json(response, snapshot('closed'))
+        } else response.writeHead(404).end()
+      })
+    })
+    const stdout = new Capture()
+    const stderr = new Capture()
+    const code = await runHostAgentShim({
+      argv: [], entryPath: files.entryPath, cwd: files.root,
+      env: {
+        SIMULATOR_HOST_AGENT_URL: url,
+        SIMULATOR_HOST_AGENT_TOKEN_FILE: files.tokenPath,
+        SIMULATOR_HOST_AGENT_SHIM_PATH: files.entryPath,
+        SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',
+      },
+      stdin: Readable.from(['quiet turn']), stdout, stderr,
+      signal: new AbortController().signal,
+      clientLeaseHeartbeatIntervalMs: 10,
+    })
+    expect(code).toBe(0)
+    expect(heartbeatRequests).toBeGreaterThanOrEqual(1)
+    expect(stdout.value.trim().split('\n').map((line) => JSON.parse(line).type)).toEqual([
+      'run.accepted', 'turn.started', 'message.delta', 'turn.completed', 'run.closed',
+    ])
+    expect(stderr.value).toBe('')
+  })
+
+  it('exits and strictly closes on terminal status even when stdout never drains', async () => {
+    const files = await fixtureFiles()
+    let stream: ServerResponse | undefined
+    let heartbeatRequests = 0
+    let cancelRequests = 0
+    let closeRequests = 0
+    const { url } = await listen((request, response) => {
+      request.resume()
+      request.on('end', () => {
+        if (request.method === 'POST' && request.url === '/v2/runs') {
+          json(response, snapshot('accepted'))
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}/events`) {
+          stream = response
+          response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+          response.flushHeaders()
+          writeSse(response, accepted)
+          writeSse(response, started)
+          writeSse(response, delta)
+          writeSse(response, completed)
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}`) {
+          heartbeatRequests += 1
+          json(response, snapshot('completed'))
+        } else if (request.method === 'POST' && request.url === `/v2/runs/${RUN}/cancel`) {
+          cancelRequests += 1
+          json(response, snapshot('completed'))
+        } else if (request.method === 'DELETE' && request.url === `/v2/runs/${RUN}`) {
+          closeRequests += 1
+          stream?.end()
+          json(response, snapshot('closed'))
+        } else response.writeHead(404).end()
+      })
+    })
+    const stdout = new BackpressuredCapture()
+    const stderr = new Capture()
+    const running = runHostAgentShim({
+      argv: [], entryPath: files.entryPath, cwd: files.root,
+      env: {
+        SIMULATOR_HOST_AGENT_URL: url,
+        SIMULATOR_HOST_AGENT_TOKEN_FILE: files.tokenPath,
+        SIMULATOR_HOST_AGENT_SHIM_PATH: files.entryPath,
+        SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',
+      },
+      stdin: Readable.from(['terminal while stdout is unread']), stdout, stderr,
+      signal: new AbortController().signal,
+      clientLeaseHeartbeatIntervalMs: 10,
+    })
+
+    await stdout.blocked
+    for (let attempt = 0; attempt < 100 && heartbeatRequests === 0; attempt += 1) await Bun.sleep(2)
+    expect(heartbeatRequests).toBe(1)
+    await Bun.sleep(40)
+    expect(heartbeatRequests).toBe(1)
+
+    const result = await Promise.race([
+      running,
+      Bun.sleep(500).then(() => 'timeout' as const),
+    ])
+    expect(result).toBe(1)
+    expect(cancelRequests).toBe(1)
+    expect(closeRequests).toBe(1)
+    expect(stdout.destroyed).toBe(true)
+    expect(stdout.value).toContain('run.accepted')
+    expect(stdout.value).not.toContain('turn.completed')
+    expect(stdout.value).not.toContain('run.closed')
+    expect(stderr.value).toBe('[simulator-host-agent] CLEANUP_FAILED\n')
+  })
+
+  it('treats running-Turn stdout failure as fatal without cursor reconnect or lease leakage', async () => {
+    const files = await fixtureFiles()
+    const streams = new Set<ServerResponse>()
+    let eventRequests = 0
+    let statusRequests = 0
+    let cancelRequests = 0
+    let closeRequests = 0
+    const { url } = await listen((request, response) => {
+      request.resume()
+      request.on('end', () => {
+        if (request.method === 'POST' && request.url === '/v2/runs') {
+          json(response, snapshot('accepted'))
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}/events`) {
+          eventRequests += 1
+          streams.add(response)
+          response.once('close', () => streams.delete(response))
+          response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+          response.flushHeaders()
+          writeSse(response, accepted)
+          writeSse(response, started)
+          writeSse(response, delta)
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}`) {
+          statusRequests += 1
+          json(response, snapshot('running'))
+        } else if (request.method === 'POST' && request.url === `/v2/runs/${RUN}/cancel`) {
+          cancelRequests += 1
+          json(response, snapshot('interrupted'))
+        } else if (request.method === 'DELETE' && request.url === `/v2/runs/${RUN}`) {
+          closeRequests += 1
+          for (const active of streams) active.end()
+          json(response, snapshot('closed'))
+        } else response.writeHead(404).end()
+      })
+    })
+    const stdout = new BackpressuredCapture()
+    const stderr = new Capture()
+    const running = runHostAgentShim({
+      argv: [], entryPath: files.entryPath, cwd: files.root,
+      env: {
+        SIMULATOR_HOST_AGENT_URL: url,
+        SIMULATOR_HOST_AGENT_TOKEN_FILE: files.tokenPath,
+        SIMULATOR_HOST_AGENT_SHIM_PATH: files.entryPath,
+        SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',
+      },
+      stdin: Readable.from(['running turn with unread stdout']), stdout, stderr,
+      signal: new AbortController().signal,
+      clientLeaseHeartbeatIntervalMs: 10,
+      stdoutDrainTimeoutMs: 25,
+    })
+
+    await stdout.blocked
+    const result = await Promise.race([
+      running,
+      Bun.sleep(500).then(() => 'timeout' as const),
+    ])
+    expect(result).toBe(1)
+    expect(eventRequests).toBe(1)
+    expect(cancelRequests).toBe(1)
+    expect(closeRequests).toBe(1)
+    expect(stdout.destroyed).toBe(true)
+    expect(stderr.value).toBe('[simulator-host-agent] RUNTIME_UNAVAILABLE\n')
+    expect(statusRequests).toBeGreaterThan(0)
+    const statusRequestsAtExit = statusRequests
+    await Bun.sleep(40)
+    expect(statusRequests).toBe(statusRequestsAtExit)
   })
 
   it('recovers a lost create response with the same idempotency key without duplicating work', async () => {

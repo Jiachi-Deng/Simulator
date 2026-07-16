@@ -2,7 +2,6 @@
 
 // src/shim.ts
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { once } from "node:events";
 import { lstat, readFile, realpath } from "node:fs/promises";
 
 // ../host-agent-contract/src/constants.ts
@@ -620,6 +619,9 @@ function parseHostAgentJsonBytes(input, maxBytes) {
 var REQUEST_TIMEOUT_MS = 1e4;
 var CLEANUP_TIMEOUT_MS = 5000;
 var TERMINAL_CLOSE_TIMEOUT_MS = 15000;
+var TERMINAL_STATUS_GRACE_MS = 1000;
+var STDOUT_DRAIN_TIMEOUT_MS = 5000;
+var CLIENT_LEASE_HEARTBEAT_INTERVAL_MS = HOST_AGENT_LIMITS.heartbeatIntervalMs;
 var MAX_CREATE_ATTEMPTS = 3;
 var MAX_SSE_RECONNECTS = 3;
 var MAX_HTTP_RESPONSE_BYTES = 512 * 1024;
@@ -660,6 +662,7 @@ async function runHostAgentShim(options) {
   let closedEvent;
   let environment;
   const fetchImpl = options.fetch ?? globalThis.fetch;
+  const stdoutDrainTimeoutMs = validatedStdoutDrainTimeout(options.stdoutDrainTimeoutMs);
   try {
     environment = await validateEnvironment(options);
     const prompt = await readPrompt(options.stdin, options.signal);
@@ -686,8 +689,35 @@ async function runHostAgentShim(options) {
       rejectTerminalFailure = reject;
     });
     let terminalCloseTimer;
+    let terminalStatusTimer;
+    let terminalStatusObserved = false;
+    let stdoutBackpressured = false;
     const streamController = new AbortController;
     const streamSignal = AbortSignal.any([options.signal, streamController.signal]);
+    const failUnconsumedTerminal = () => {
+      if (terminal || closed || streamController.signal.aborted)
+        return;
+      streamController.abort(new ShimError("CLEANUP_FAILED"));
+    };
+    const observeTerminalStatus = () => {
+      if (terminal || closed)
+        return;
+      terminalStatusObserved = true;
+      if (stdoutBackpressured) {
+        failUnconsumedTerminal();
+        return;
+      }
+      terminalStatusTimer ??= setTimeout(failUnconsumedTerminal, TERMINAL_STATUS_GRACE_MS);
+      terminalStatusTimer.unref?.();
+    };
+    const setStdoutBackpressure = (blocked) => {
+      stdoutBackpressured = blocked;
+      if (blocked && terminalStatusObserved)
+        failUnconsumedTerminal();
+    };
+    const leaseController = new AbortController;
+    const leaseSignal = AbortSignal.any([options.signal, leaseController.signal]);
+    const leaseTask = maintainClientLease(fetchImpl, environment, runHandle, validatedClientLeaseHeartbeatInterval(options.clientLeaseHeartbeatIntervalMs), leaseSignal, observeTerminalStatus);
     let reconnects = 0;
     const failTerminalCleanup = () => {
       if (terminalFailure)
@@ -708,6 +738,9 @@ async function runHostAgentShim(options) {
               validateEventTransition(state, event);
               if (isTerminal(event)) {
                 terminal = true;
+                if (terminalStatusTimer)
+                  clearTimeout(terminalStatusTimer);
+                terminalStatusTimer = undefined;
                 terminalType = event.type;
                 terminalEvent = event;
                 const closeTimeoutMs = validatedTerminalCloseTimeout(options.terminalCloseTimeoutMs);
@@ -729,8 +762,13 @@ async function runHostAgentShim(options) {
                 closed = true;
                 closedEvent = event;
               } else {
-                await write(options.stdout, `${JSON.stringify(event)}
-`);
+                try {
+                  await write(options.stdout, `${JSON.stringify(event)}
+`, streamSignal, setStdoutBackpressure, stdoutDrainTimeoutMs);
+                } catch (error) {
+                  streamController.abort(error instanceof Error ? error : new ShimError("RUNTIME_UNAVAILABLE"));
+                  throw error;
+                }
               }
             }
           }), terminalFailurePromise]);
@@ -741,6 +779,8 @@ async function runHostAgentShim(options) {
             throw terminalFailure;
           if (options.signal.aborted)
             throw error;
+          if (streamSignal.aborted)
+            throw abortReason(streamSignal);
           if (error instanceof HttpShimError && error.publicCode === "REPLAY_UNAVAILABLE")
             throw error;
           if (closed || reconnects >= MAX_SSE_RECONNECTS)
@@ -750,8 +790,12 @@ async function runHostAgentShim(options) {
         }
       }
     } finally {
+      leaseController.abort(new ShimError("CANCELLED"));
+      await leaseTask;
       if (terminalCloseTimer)
         clearTimeout(terminalCloseTimer);
+      if (terminalStatusTimer)
+        clearTimeout(terminalStatusTimer);
     }
     if (!terminal || !terminalType || !terminalEvent || !closedEvent || !closePromise) {
       throw new ShimError("INVALID_EVENT_ORDER");
@@ -763,9 +807,9 @@ async function runHostAgentShim(options) {
       throw new ShimError("CLEANUP_FAILED");
     }
     await write(options.stdout, `${JSON.stringify(terminalEvent)}
-`);
+`, undefined, undefined, stdoutDrainTimeoutMs);
     await write(options.stdout, `${JSON.stringify(closedEvent)}
-`);
+`, undefined, undefined, stdoutDrainTimeoutMs);
     return terminalType === "turn.completed" ? 0 : terminalType === "turn.interrupted" ? 2 : 1;
   } catch (error) {
     if (environment && runHandle && !closed && !terminal) {
@@ -780,6 +824,22 @@ function validatedTerminalCloseTimeout(value) {
     return TERMINAL_CLOSE_TIMEOUT_MS;
   if (!Number.isSafeInteger(value) || value < 10 || value > TERMINAL_CLOSE_TIMEOUT_MS) {
     throw new TypeError("terminalCloseTimeoutMs must be an integer within the closed test range");
+  }
+  return value;
+}
+function validatedClientLeaseHeartbeatInterval(value) {
+  if (value === undefined)
+    return CLIENT_LEASE_HEARTBEAT_INTERVAL_MS;
+  if (!Number.isSafeInteger(value) || value < 10 || value > CLIENT_LEASE_HEARTBEAT_INTERVAL_MS) {
+    throw new TypeError("clientLeaseHeartbeatIntervalMs must be an integer within the closed test range");
+  }
+  return value;
+}
+function validatedStdoutDrainTimeout(value) {
+  if (value === undefined)
+    return STDOUT_DRAIN_TIMEOUT_MS;
+  if (!Number.isSafeInteger(value) || value < 10 || value > STDOUT_DRAIN_TIMEOUT_MS) {
+    throw new TypeError("stdoutDrainTimeoutMs must be an integer within the closed test range");
   }
   return value;
 }
@@ -1044,6 +1104,33 @@ async function closeRun(fetchImpl, environment, runHandle, signal) {
     signal
   });
 }
+async function maintainClientLease(fetchImpl, environment, runHandle, intervalMs, signal, onTerminalStatus) {
+  while (!signal.aborted) {
+    try {
+      await delay(intervalMs, signal);
+    } catch {
+      return;
+    }
+    if (signal.aborted)
+      return;
+    try {
+      const current = await requestSnapshot(fetchImpl, environment, `/v2/runs/${runHandle}`, {
+        method: "GET",
+        headers: {},
+        signal
+      });
+      if (current.runHandle !== runHandle)
+        throw new ShimError("INVALID_HOST_RESPONSE");
+      if (current.state !== "accepted" && current.state !== "starting" && current.state !== "running") {
+        onTerminalStatus();
+        return;
+      }
+    } catch {
+      if (signal.aborted)
+        return;
+    }
+  }
+}
 async function bestEffortCancelAndClose(fetchImpl, environment, runHandle) {
   const timeout = AbortSignal.timeout(CLEANUP_TIMEOUT_MS);
   try {
@@ -1098,10 +1185,55 @@ async function fetchWithTimeout(fetchImpl, url, init, timeoutMs, applyTimeout = 
   const signal = applyTimeout ? AbortSignal.any([init.signal, AbortSignal.timeout(timeoutMs)]) : init.signal;
   return fetchImpl(url, { ...init, signal });
 }
-async function write(stream, value) {
+async function write(stream, value, signal, onBackpressureChange, drainTimeoutMs = STDOUT_DRAIN_TIMEOUT_MS) {
+  if (signal?.aborted)
+    throw abortReason(signal);
   if (stream.write(value))
     return;
-  await once(stream, "drain");
+  onBackpressureChange?.(true);
+  const timeoutSignal = AbortSignal.timeout(drainTimeoutMs);
+  const drainSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+  try {
+    await new Promise((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        stream.off("drain", onDrain);
+        stream.off("error", onError);
+        stream.off("close", onClose);
+        drainSignal.removeEventListener("abort", onAbort);
+      };
+      const finish = () => {
+        if (settled)
+          return;
+        settled = true;
+        cleanup();
+        resolve();
+      };
+      const fail = (error) => {
+        if (settled)
+          return;
+        settled = true;
+        cleanup();
+        reject(error);
+      };
+      const onDrain = () => finish();
+      const onError = () => fail(new ShimError("RUNTIME_UNAVAILABLE"));
+      const onClose = () => fail(new ShimError("RUNTIME_UNAVAILABLE"));
+      const onAbort = () => {
+        const reason = signal?.aborted ? abortReason(signal) : new ShimError("RUNTIME_UNAVAILABLE");
+        fail(reason);
+        stream.destroy();
+      };
+      stream.once("drain", onDrain);
+      stream.once("error", onError);
+      stream.once("close", onClose);
+      drainSignal.addEventListener("abort", onAbort, { once: true });
+      if (drainSignal.aborted)
+        onAbort();
+    });
+  } finally {
+    onBackpressureChange?.(false);
+  }
 }
 function diagnostic(stream, code) {
   const safe = /^[A-Z][A-Z0-9_]{0,63}$/.test(code) ? code : "INTERNAL_ERROR";
