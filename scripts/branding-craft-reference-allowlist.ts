@@ -169,6 +169,19 @@ export const CRAFT_REFERENCE_ALLOWLIST: CraftReferenceCategory[] = [
         && /Craft(?:'s full| workspace| created)/.test(line)),
   },
   {
+    id: 'm1-host-agent-craft-runtime-terminology',
+    reason: 'M1 Host Agent implementation, contract, generated Shim, and focused tests name the embedded Craft runtime only to define priority, lifecycle, and failure-isolation boundaries.',
+    matches: ({ path, line }) =>
+      (path === 'CHANGELOG.md'
+        && /Host-owned `simulator-host-agent`|OpenDesign v2.*(?:transient Craft Session|Craft Turn)/.test(line))
+      || path === 'apps/electron/resources/host-agent/simulator-host-agent.mjs'
+      || /^apps\/electron\/src\/host-agent\/(?:__tests__\/(?:module-turn-lease|supervisor)\.test|module-turn-lease|supervisor|v1-compatibility-runtime|worker-entry)\.ts$/.test(path)
+      || /^apps\/electron\/src\/main\/module-agent-runtime(?:\.test)?\.ts$/.test(path)
+      || /^(?:packages\/host-agent-contract\/(?:schema\/host-agent-v2\.schema\.json|src\/constants\.ts)|packages\/host-agent-run-core\/src\/run-core(?:\.test)?\.ts)$/.test(path)
+      || path === 'packages/pi-agent-server/src/file-tool-path-input.ts'
+      || /^(?:packages\/server-core\/src\/(?:handlers\/session-manager-interface|sessions\/(?:module-agent-adapter|visible-craft-turn-gate(?:\.test)?|visible-craft-turn-priority\.test))|packages\/shared\/src\/agent\/(?:module-agent-tool-boundary|provider-process-reaper))\.ts$/.test(path),
+  },
+  {
     id: 'localized-open-design-craft-host-copy',
     reason: 'The Module Center intentionally names the still-visible Craft workspace and sidebar so users understand that OpenDesign runs inside, and can return to, the primary embedded Host surface.',
     matches: ({ path, line }) =>

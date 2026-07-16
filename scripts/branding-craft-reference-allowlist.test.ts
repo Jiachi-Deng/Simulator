@@ -58,6 +58,19 @@ describe('remaining Craft references', () => {
     expect([...'support@craft.do'.matchAll(CRAFT_REFERENCE_PATTERN)].map((match) => match[0])).toEqual(['support@craft.do'])
   })
 
+  test('M1 runtime terminology remains scoped to the Host Agent implementation', () => {
+    expect(categoryForCraftReference({
+      path: 'packages/host-agent-run-core/src/run-core.ts',
+      line: 'A visible Craft turn has priority.',
+      value: 'Craft',
+    })?.id).toBe('m1-host-agent-craft-runtime-terminology')
+    expect(categoryForCraftReference({
+      path: 'apps/electron/src/renderer/components/UnrelatedProductCopy.tsx',
+      line: 'Welcome to Craft',
+      value: 'Craft',
+    })).toBeUndefined()
+  })
+
   test('current package metadata and desktop artifacts use Simulator ownership', () => {
     const electronPackage = JSON.parse(readFileSync(resolve(repoRoot, 'apps/electron/package.json'), 'utf8'))
     const serverPackage = JSON.parse(readFileSync(resolve(repoRoot, 'packages/server/package.json'), 'utf8'))
