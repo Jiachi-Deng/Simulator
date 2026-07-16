@@ -1,6 +1,7 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { join, relative } from "node:path"
 import { spawnSync } from "node:child_process"
+import { findVersionMismatches } from "../check-version"
 
 export interface RepositoryState {
   dirty: boolean
@@ -42,20 +43,6 @@ const RELEASE_NOTE_TEMPLATE_LINES = new Set([
   "## Bug Fixes",
   "## Breaking Changes",
 ])
-
-function manifestPaths(rootDir: string): string[] {
-  const paths = [join(rootDir, "package.json")]
-  for (const parentName of ["apps", "packages"]) {
-    const parent = join(rootDir, parentName)
-    if (!existsSync(parent)) continue
-    for (const entry of readdirSync(parent, { withFileTypes: true })) {
-      if (!entry.isDirectory() || (parentName === "apps" && entry.name === "online-docs")) continue
-      const path = join(parent, entry.name, "package.json")
-      if (existsSync(path)) paths.push(path)
-    }
-  }
-  return paths.sort()
-}
 
 function noteContentLines(content: string): string[] {
   return content
@@ -108,17 +95,20 @@ export function validateEngineeringRc(input: ValidationInput): ValidationResult 
     details: [`ref=${ref}`, `source=${repository.sourceSha}`, `main=${repository.mainSha}`],
   })
 
-  const mismatches: string[] = []
-  for (const path of manifestPaths(rootDir)) {
-    const manifest = JSON.parse(readFileSync(path, "utf8")) as { version?: string }
-    if (productVersion === null || manifest.version !== productVersion) {
-      mismatches.push(`${relative(rootDir, path)}: ${manifest.version ?? "<missing>"}`)
-    }
-  }
+  const rootManifestVersion = JSON.parse(readFileSync(join(rootDir, "package.json"), "utf8")) as { version?: string }
+  const mismatches = productVersion === null
+    ? ["invalid RC label"]
+    : [
+        ...(rootManifestVersion.version === productVersion
+          ? []
+          : [`package.json: ${rootManifestVersion.version ?? "<missing>"}`]),
+        ...findVersionMismatches(rootDir)
+          .map((mismatch) => `${relative(rootDir, mismatch.path)}: ${mismatch.actual}`),
+      ]
   add({
     id: "manifests.product-version",
     ok: mismatches.length === 0,
-    message: "All distributable workspace manifests must match the stable Host product version derived from the RC label.",
+    message: "All distributable workspace manifests and bun.lock workspace entries must match the stable Host product version derived from the RC label.",
     ...(mismatches.length ? { details: mismatches } : {}),
   })
 

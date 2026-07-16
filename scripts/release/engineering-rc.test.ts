@@ -17,6 +17,14 @@ function write(path: string, content: string): void {
 function fixture(): void {
   write("package.json", JSON.stringify({ name: "root", version: productVersion }))
   write("apps/electron/package.json", JSON.stringify({ name: "desktop", version: productVersion }))
+  write("bun.lock", JSON.stringify({
+    lockfileVersion: 1,
+    configVersion: 1,
+    workspaces: {
+      "": { name: "root" },
+      "apps/electron": { name: "desktop", version: productVersion },
+    },
+  }))
   write(`apps/electron/resources/release-notes/${productVersion}.md`, `# Simulator ${productVersion}\n\n- Shippable change.\n`)
   write("apps/electron/resources/release-notes/next.md", "# Pending Release Notes\n\nThis file accumulates release notes for the next unreleased version.\n\n## Features\n\n## Improvements\n\n## Bug Fixes\n\n## Breaking Changes\n")
 }
@@ -100,6 +108,19 @@ describe("engineering RC contract", () => {
     fixture()
     write("package.json", JSON.stringify({ name: "root", version: rcLabel }))
     write("apps/electron/package.json", JSON.stringify({ name: "desktop", version: rcLabel }))
+    expect(failedIds(validate())).toContain("manifests.product-version")
+  })
+
+  test("rejects a stale Host workspace version in bun.lock", () => {
+    fixture()
+    write("bun.lock", JSON.stringify({
+      lockfileVersion: 1,
+      configVersion: 1,
+      workspaces: {
+        "": { name: "root" },
+        "apps/electron": { name: "desktop", version: "1.2.2" },
+      },
+    }))
     expect(failedIds(validate())).toContain("manifests.product-version")
   })
 
