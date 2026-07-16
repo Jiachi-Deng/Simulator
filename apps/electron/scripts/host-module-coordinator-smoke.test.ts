@@ -65,7 +65,7 @@ describe('Electron packaged Host Agent smoke scenarios', () => {
     expect(publicWrapperFailure(new Error('SMOKE_CHILD_FAILED internalToken=123'))).toBe('SMOKE_INTERNAL_ERROR')
     expect(publicWrapperFailure(new Error('SMOKE_CHILD_FAILED INTERNAL_TOKEN=123'))).toBe('SMOKE_INTERNAL_ERROR')
     expect(publicWrapperFailure(new Error('SMOKE_CHILD_FAILED phase=worker-recovery'))).toBe('SMOKE_INTERNAL_ERROR')
-    expect(publicWrapperFailure(new Error('SMOKE_CHILD_FAILED phase=91'))).toBe('SMOKE_INTERNAL_ERROR')
+    expect(publicWrapperFailure(new Error('SMOKE_CHILD_FAILED phase=69'))).toBe('SMOKE_INTERNAL_ERROR')
     expect(publicWrapperFailure(new Error('SMOKE_CHILD_FAILED phase=90 phase=90'))).toBe('SMOKE_INTERNAL_ERROR')
   })
 

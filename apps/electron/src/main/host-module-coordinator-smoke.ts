@@ -650,7 +650,8 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
     observedProcessIds.add(daemon.pid)
     const resource = await fetch(`http://${daemon.endpoint.host}:${daemon.endpoint.port}/resource/data.txt`)
     const resourceText = await resource.text()
-    const fetchJourney = async (endpoint: { host: string; port: number }) => {
+    const fetchJourney = async (endpoint: { host: string; port: number }, phaseBase: 60 | 90 | 120) => {
+      failurePhase = phaseBase
       const previousProviderGroups = new Set(moduleProviderGroups)
       let samplingError: Error | undefined
       const sample = (): void => {
@@ -660,6 +661,7 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
         }
       }
       sample()
+      failurePhase = phaseBase + 1
       const sampler = setInterval(sample, PROCESS_TREE_SAMPLE_MS)
       let response: Response
       try {
@@ -668,26 +670,32 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
         clearInterval(sampler)
         sample()
       }
+      failurePhase = phaseBase + 2
       if (samplingError) throw samplingError
       if (!response.ok) throw new Error(`Module Host Agent smoke endpoint failed with ${response.status}`)
       const journey = validateHostAgentJourney(await response.json(), contractVersion)
+      failurePhase = phaseBase + 3
       const journeyProviderGroups = [...moduleProviderGroups]
         .filter((pgid) => !previousProviderGroups.has(pgid))
       if (journeyProviderGroups.length === 0) {
         throw new Error('Module Host Agent journey did not expose a dedicated provider process group')
       }
+      failurePhase = phaseBase + 4
       const residualProviderGroups = await waitForProcessGroupsToExit(journeyProviderGroups, 5_000)
       if (residualProviderGroups.length > 0) {
         throw new Error(`Module Host Agent journey left provider process groups: ${residualProviderGroups.join(',')}`)
       }
+      failurePhase = phaseBase + 5
       return journey
     }
 
-    failurePhase = 60
-    const firstJourney = await fetchJourney(daemon.endpoint)
+    const firstJourney = await fetchJourney(daemon.endpoint, 60)
+    failurePhase = 66
     terminalSessionOffset = assertJourneySessionPattern(terminalSessionIds, terminalSessionOffset, contractVersion)
     for (const pid of firstJourney.processIds) observedProcessIds.add(pid)
+    failurePhase = 67
     assertNoHiddenSessionResidue(smoke, workspace.id, sessionPath)
+    failurePhase = 68
     const firstCleanJourney = await waitForCleanJourneySnapshot(
       smoke.moduleAgentRuntime,
       contractVersion === 1 ? 'v1' : 'v2',
@@ -724,12 +732,14 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
     const workerRecoveredDaemon = smoke.runtime.daemon.get(manifest.id)
     if (!workerRecoveredDaemon?.endpoint || !workerRecoveredDaemon.pid) throw new Error('Worker-recovered daemon endpoint disappeared')
     observedProcessIds.add(workerRecoveredDaemon.pid)
-    failurePhase = 90
-    const secondJourney = await fetchJourney(workerRecoveredDaemon.endpoint)
+    const secondJourney = await fetchJourney(workerRecoveredDaemon.endpoint, 90)
+    failurePhase = 96
     terminalSessionOffset = assertJourneySessionPattern(terminalSessionIds, terminalSessionOffset, contractVersion)
     if (secondJourney.tokenFile === firstJourney.tokenFile) throw new Error('Worker recovery reused a revoked launch token path')
     for (const pid of secondJourney.processIds) observedProcessIds.add(pid)
+    failurePhase = 97
     assertNoHiddenSessionResidue(smoke, workspace.id, sessionPath)
+    failurePhase = 98
     const secondCleanJourney = await waitForCleanJourneySnapshot(
       smoke.moduleAgentRuntime,
       contractVersion === 1 ? 'v1' : 'v2',
@@ -768,14 +778,16 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
     const daemonRecovered = smoke.runtime.daemon.get(manifest.id)
     if (!daemonRecovered?.endpoint || !daemonRecovered.pid) throw new Error('Restarted daemon endpoint disappeared')
     observedProcessIds.add(daemonRecovered.pid)
-    failurePhase = 120
-    const thirdJourney = await fetchJourney(daemonRecovered.endpoint)
+    const thirdJourney = await fetchJourney(daemonRecovered.endpoint, 120)
+    failurePhase = 126
     terminalSessionOffset = assertJourneySessionPattern(terminalSessionIds, terminalSessionOffset, contractVersion)
     if (new Set([firstJourney.tokenFile, secondJourney.tokenFile, thirdJourney.tokenFile]).size !== 3) {
       throw new Error('Module recovery reused a launch token path')
     }
     for (const pid of thirdJourney.processIds) observedProcessIds.add(pid)
+    failurePhase = 127
     assertNoHiddenSessionResidue(smoke, workspace.id, sessionPath)
+    failurePhase = 128
     const thirdCleanJourney = await waitForCleanJourneySnapshot(
       smoke.moduleAgentRuntime,
       contractVersion === 1 ? 'v1' : 'v2',

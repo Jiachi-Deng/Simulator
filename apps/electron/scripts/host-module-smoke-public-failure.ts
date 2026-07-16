@@ -1,5 +1,13 @@
 const SMOKE_INTERNAL_ERROR = 'SMOKE_INTERNAL_ERROR'
-const SAFE_SMOKE_PHASES = new Set(Array.from({ length: 15 }, (_, index) => (index + 1) * 10))
+const SAFE_SMOKE_PHASES = new Set([
+  10, 20, 30, 40, 50,
+  60, 61, 62, 63, 64, 65, 66, 67, 68,
+  70, 80,
+  90, 91, 92, 93, 94, 95, 96, 97, 98,
+  100, 110,
+  120, 121, 122, 123, 124, 125, 126, 127, 128,
+  130, 140, 150,
+])
 
 const SAFE_ARGUMENT_FAILURES = new Set([
   'Unknown argument',
