@@ -1,0 +1,1345 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simulator.local/schemas/host-agent-v2.schema.json",
+  "title": "Simulator Host Agent v2 closed wire contract",
+  "description": "Provider-neutral closed JSON messages shared by Host, Worker, Shim, and OpenDesign parser.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/createRunRequest"
+    },
+    {
+      "$ref": "#/$defs/capabilitiesResponse"
+    },
+    {
+      "$ref": "#/$defs/runSnapshot"
+    },
+    {
+      "$ref": "#/$defs/event"
+    },
+    {
+      "$ref": "#/$defs/errorResponse"
+    }
+  ],
+  "$defs": {
+    "runHandle": {
+      "type": "string",
+      "pattern": "^run_[0-9a-f]{32}$"
+    },
+    "idempotencyKey": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$",
+      "minLength": 1,
+      "maxLength": 128,
+      "x-simulator-maxUtf8Bytes": 128
+    },
+    "lastEventId": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$",
+      "x-simulator-maxSafeInteger": 9007199254740991
+    },
+    "createRunRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contractVersion",
+        "prompt"
+      ],
+      "properties": {
+        "contractVersion": {
+          "const": 2
+        },
+        "prompt": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?=[\\s\\S]*\\S)[^\\u0000]*$",
+          "x-simulator-maxUtf8Bytes": 2097152
+        },
+        "workingDirectory": {
+          "type": "string",
+          "minLength": 1,
+          "format": "simulator-canonical-absolute-posix-path",
+          "x-simulator-maxUtf8Bytes": 4096
+        }
+      }
+    },
+    "capabilitiesResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contractVersion",
+        "capability",
+        "features",
+        "limits"
+      ],
+      "properties": {
+        "contractVersion": {
+          "const": 2
+        },
+        "capability": {
+          "const": "host-agent.run"
+        },
+        "features": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "streaming",
+            "cancellation",
+            "reconnect",
+            "idempotency"
+          ],
+          "properties": {
+            "streaming": {
+              "const": true
+            },
+            "cancellation": {
+              "const": true
+            },
+            "reconnect": {
+              "const": true
+            },
+            "idempotency": {
+              "const": true
+            }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "maxPromptBytes",
+            "maxEventBytes",
+            "maxDeltaBytes",
+            "maxReplayEvents",
+            "maxReplayBytes",
+            "maxSseSubscribers",
+            "maxConcurrentRuns",
+            "maxRunDurationMs"
+          ],
+          "properties": {
+            "maxPromptBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2097152
+            },
+            "maxEventBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 262144
+            },
+            "maxDeltaBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65536
+            },
+            "maxReplayEvents": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1024
+            },
+            "maxReplayBytes": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 8388608
+            },
+            "maxSseSubscribers": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2
+            },
+            "maxConcurrentRuns": {
+              "const": 1
+            },
+            "maxRunDurationMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 1800000
+            }
+          }
+        }
+      }
+    },
+    "runSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contractVersion",
+        "runHandle",
+        "state",
+        "createdAt",
+        "updatedAt"
+      ],
+      "properties": {
+        "contractVersion": {
+          "const": 2
+        },
+        "runHandle": {
+          "type": "string",
+          "pattern": "^run_[0-9a-f]{32}$"
+        },
+        "state": {
+          "enum": [
+            "accepted",
+            "starting",
+            "running",
+            "completed",
+            "failed",
+            "interrupted",
+            "closing",
+            "closed"
+          ]
+        },
+        "createdAt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "updatedAt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "terminalAt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "closedAt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "state": {
+              "enum": [
+                "accepted",
+                "starting",
+                "running"
+              ]
+            }
+          },
+          "not": {
+            "anyOf": [
+              {
+                "required": [
+                  "terminalAt"
+                ]
+              },
+              {
+                "required": [
+                  "closedAt"
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "properties": {
+            "state": {
+              "enum": [
+                "completed",
+                "failed",
+                "interrupted",
+                "closing"
+              ]
+            }
+          },
+          "required": [
+            "terminalAt"
+          ],
+          "not": {
+            "required": [
+              "closedAt"
+            ]
+          }
+        },
+        {
+          "properties": {
+            "state": {
+              "const": "closed"
+            }
+          },
+          "required": [
+            "terminalAt",
+            "closedAt"
+          ]
+        }
+      ],
+      "x-simulator-invariant": "createdAt <= terminalAt <= closedAt <= updatedAt for fields that are present"
+    },
+    "event": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "contractVersion",
+            "eventId",
+            "sequence",
+            "runHandle",
+            "occurredAt",
+            "type",
+            "data"
+          ],
+          "properties": {
+            "contractVersion": {
+              "const": 2
+            },
+            "eventId": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "runHandle": {
+              "type": "string",
+              "pattern": "^run_[0-9a-f]{32}$"
+            },
+            "occurredAt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "type": {
+              "const": "run.accepted"
+            },
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "maxProperties": 0
+            }
+          },
+          "x-simulator-invariant": "eventId is the canonical decimal representation of sequence",
+          "x-simulator-maxUtf8Bytes": 262144
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "contractVersion",
+            "eventId",
+            "sequence",
+            "runHandle",
+            "occurredAt",
+            "type",
+            "data"
+          ],
+          "properties": {
+            "contractVersion": {
+              "const": 2
+            },
+            "eventId": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "runHandle": {
+              "type": "string",
+              "pattern": "^run_[0-9a-f]{32}$"
+            },
+            "occurredAt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "type": {
+              "const": "turn.started"
+            },
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "maxProperties": 0
+            }
+          },
+          "x-simulator-invariant": "eventId is the canonical decimal representation of sequence",
+          "x-simulator-maxUtf8Bytes": 262144
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "contractVersion",
+            "eventId",
+            "sequence",
+            "runHandle",
+            "occurredAt",
+            "type",
+            "data"
+          ],
+          "properties": {
+            "contractVersion": {
+              "const": 2
+            },
+            "eventId": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "runHandle": {
+              "type": "string",
+              "pattern": "^run_[0-9a-f]{32}$"
+            },
+            "occurredAt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "type": {
+              "const": "message.delta"
+            },
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "delta"
+              ],
+              "properties": {
+                "delta": {
+                  "type": "string",
+                  "minLength": 1,
+                  "x-simulator-maxUtf8Bytes": 65536
+                }
+              }
+            }
+          },
+          "x-simulator-invariant": "eventId is the canonical decimal representation of sequence",
+          "x-simulator-maxUtf8Bytes": 262144
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "contractVersion",
+            "eventId",
+            "sequence",
+            "runHandle",
+            "occurredAt",
+            "type",
+            "data"
+          ],
+          "properties": {
+            "contractVersion": {
+              "const": 2
+            },
+            "eventId": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "runHandle": {
+              "type": "string",
+              "pattern": "^run_[0-9a-f]{32}$"
+            },
+            "occurredAt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "type": {
+              "const": "reasoning.delta"
+            },
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "delta"
+              ],
+              "properties": {
+                "delta": {
+                  "type": "string",
+                  "minLength": 1,
+                  "x-simulator-maxUtf8Bytes": 65536
+                }
+              }
+            }
+          },
+          "x-simulator-invariant": "eventId is the canonical decimal representation of sequence",
+          "x-simulator-maxUtf8Bytes": 262144
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "contractVersion",
+            "eventId",
+            "sequence",
+            "runHandle",
+            "occurredAt",
+            "type",
+            "data"
+          ],
+          "properties": {
+            "contractVersion": {
+              "const": 2
+            },
+            "eventId": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "runHandle": {
+              "type": "string",
+              "pattern": "^run_[0-9a-f]{32}$"
+            },
+            "occurredAt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "type": {
+              "const": "activity"
+            },
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "phase",
+                "kind"
+              ],
+              "properties": {
+                "phase": {
+                  "enum": [
+                    "started",
+                    "finished"
+                  ]
+                },
+                "kind": {
+                  "enum": [
+                    "runtime",
+                    "tool"
+                  ]
+                },
+                "label": {
+                  "type": "string",
+                  "minLength": 1,
+                  "x-simulator-maxUtf8Bytes": 4096
+                }
+              }
+            }
+          },
+          "x-simulator-invariant": "eventId is the canonical decimal representation of sequence",
+          "x-simulator-maxUtf8Bytes": 262144
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "contractVersion",
+            "eventId",
+            "sequence",
+            "runHandle",
+            "occurredAt",
+            "type",
+            "data"
+          ],
+          "properties": {
+            "contractVersion": {
+              "const": 2
+            },
+            "eventId": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "runHandle": {
+              "type": "string",
+              "pattern": "^run_[0-9a-f]{32}$"
+            },
+            "occurredAt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "type": {
+              "const": "presentation.item"
+            },
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "itemId",
+                "kind"
+              ],
+              "properties": {
+                "itemId": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+                },
+                "kind": {
+                  "enum": [
+                    "text",
+                    "image",
+                    "file",
+                    "preview"
+                  ]
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "x-simulator-maxUtf8Bytes": 4096
+                },
+                "text": {
+                  "type": "string",
+                  "minLength": 1,
+                  "x-simulator-maxUtf8Bytes": 262144
+                },
+                "uri": {
+                  "type": "string",
+                  "minLength": 1,
+                  "x-simulator-maxUtf8Bytes": 8192
+                },
+                "mediaType": {
+                  "type": "string",
+                  "pattern": "^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$"
+                }
+              }
+            }
+          },
+          "x-simulator-invariant": "eventId is the canonical decimal representation of sequence",
+          "x-simulator-maxUtf8Bytes": 262144
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "contractVersion",
+            "eventId",
+            "sequence",
+            "runHandle",
+            "occurredAt",
+            "type",
+            "data"
+          ],
+          "properties": {
+            "contractVersion": {
+              "const": 2
+            },
+            "eventId": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "runHandle": {
+              "type": "string",
+              "pattern": "^run_[0-9a-f]{32}$"
+            },
+            "occurredAt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "type": {
+              "const": "turn.completed"
+            },
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "finalText": {
+                  "type": "string",
+                  "x-simulator-maxUtf8Bytes": 262144
+                }
+              }
+            }
+          },
+          "x-simulator-invariant": "eventId is the canonical decimal representation of sequence",
+          "x-simulator-maxUtf8Bytes": 262144
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "contractVersion",
+            "eventId",
+            "sequence",
+            "runHandle",
+            "occurredAt",
+            "type",
+            "data"
+          ],
+          "properties": {
+            "contractVersion": {
+              "const": 2
+            },
+            "eventId": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "runHandle": {
+              "type": "string",
+              "pattern": "^run_[0-9a-f]{32}$"
+            },
+            "occurredAt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "type": {
+              "const": "turn.failed"
+            },
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "code",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "code": {
+                      "const": "RUNTIME_UNAVAILABLE"
+                    },
+                    "retryable": {
+                      "const": true
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "code",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "code": {
+                      "const": "TOOL_BOUNDARY_UNAVAILABLE"
+                    },
+                    "retryable": {
+                      "const": false
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "code",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "code": {
+                      "const": "RUN_TIMEOUT"
+                    },
+                    "retryable": {
+                      "const": true
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "code",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "code": {
+                      "const": "BROKER_DISCONNECTED"
+                    },
+                    "retryable": {
+                      "const": true
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "code",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "code": {
+                      "const": "INTERNAL_ERROR"
+                    },
+                    "retryable": {
+                      "const": false
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "x-simulator-invariant": "eventId is the canonical decimal representation of sequence",
+          "x-simulator-maxUtf8Bytes": 262144
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "contractVersion",
+            "eventId",
+            "sequence",
+            "runHandle",
+            "occurredAt",
+            "type",
+            "data"
+          ],
+          "properties": {
+            "contractVersion": {
+              "const": 2
+            },
+            "eventId": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "runHandle": {
+              "type": "string",
+              "pattern": "^run_[0-9a-f]{32}$"
+            },
+            "occurredAt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "type": {
+              "const": "turn.interrupted"
+            },
+            "data": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "reason",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "reason": {
+                      "const": "CLIENT_CANCELLED"
+                    },
+                    "retryable": {
+                      "const": false
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "reason",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "reason": {
+                      "const": "CRAFT_TURN_PREEMPTED"
+                    },
+                    "retryable": {
+                      "const": true
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "reason",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "reason": {
+                      "const": "BROKER_DISCONNECTED"
+                    },
+                    "retryable": {
+                      "const": true
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "reason",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "reason": {
+                      "const": "RUN_TIMEOUT"
+                    },
+                    "retryable": {
+                      "const": true
+                    }
+                  }
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "reason",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "reason": {
+                      "const": "HOST_SHUTDOWN"
+                    },
+                    "retryable": {
+                      "const": true
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          "x-simulator-invariant": "eventId is the canonical decimal representation of sequence",
+          "x-simulator-maxUtf8Bytes": 262144
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "contractVersion",
+            "eventId",
+            "sequence",
+            "runHandle",
+            "occurredAt",
+            "type",
+            "data"
+          ],
+          "properties": {
+            "contractVersion": {
+              "const": 2
+            },
+            "eventId": {
+              "type": "string",
+              "pattern": "^[1-9][0-9]*$"
+            },
+            "sequence": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 9007199254740991
+            },
+            "runHandle": {
+              "type": "string",
+              "pattern": "^run_[0-9a-f]{32}$"
+            },
+            "occurredAt": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "type": {
+              "const": "run.closed"
+            },
+            "data": {
+              "type": "object",
+              "additionalProperties": false,
+              "maxProperties": 0
+            }
+          },
+          "x-simulator-invariant": "eventId is the canonical decimal representation of sequence",
+          "x-simulator-maxUtf8Bytes": 262144
+        }
+      ],
+      "x-simulator-eventTypes": [
+        "run.accepted",
+        "turn.started",
+        "message.delta",
+        "reasoning.delta",
+        "activity",
+        "presentation.item",
+        "turn.completed",
+        "turn.failed",
+        "turn.interrupted",
+        "run.closed"
+      ]
+    },
+    "errorResponse": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "contractVersion",
+        "error"
+      ],
+      "properties": {
+        "contractVersion": {
+          "const": 2
+        },
+        "error": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "const": "INVALID_REQUEST"
+                },
+                "message": {
+                  "const": "The request is invalid."
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "const": "INVALID_CONTRACT_VERSION"
+                },
+                "message": {
+                  "const": "The contract version is not supported."
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "const": "UNAUTHORIZED"
+                },
+                "message": {
+                  "const": "Authentication failed."
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "const": "FORBIDDEN"
+                },
+                "message": {
+                  "const": "The operation is not permitted."
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "const": "RUN_NOT_FOUND"
+                },
+                "message": {
+                  "const": "The run was not found."
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "const": "RUN_ACTIVE"
+                },
+                "message": {
+                  "const": "A module run is already active."
+                },
+                "retryable": {
+                  "const": true
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "const": "IDEMPOTENCY_CONFLICT"
+                },
+                "message": {
+                  "const": "The idempotency key was already used for a different request."
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "const": "REPLAY_UNAVAILABLE"
+                },
+                "message": {
+                  "const": "The requested event replay is no longer available."
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "const": "PAYLOAD_TOO_LARGE"
+                },
+                "message": {
+                  "const": "The request payload is too large."
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "const": "RATE_LIMITED"
+                },
+                "message": {
+                  "const": "The Host Agent capacity limit was reached."
+                },
+                "retryable": {
+                  "const": true
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "const": "CRAFT_TURN_ACTIVE"
+                },
+                "message": {
+                  "const": "A visible Craft turn has priority."
+                },
+                "retryable": {
+                  "const": true
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "const": "RUNTIME_UNAVAILABLE"
+                },
+                "message": {
+                  "const": "The Host runtime is unavailable."
+                },
+                "retryable": {
+                  "const": true
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "const": "TOOL_BOUNDARY_UNAVAILABLE"
+                },
+                "message": {
+                  "const": "The required tool boundary is unavailable."
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "const": "BROKER_DISCONNECTED"
+                },
+                "message": {
+                  "const": "The Host Agent broker disconnected."
+                },
+                "retryable": {
+                  "const": true
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "const": "RUN_TIMEOUT"
+                },
+                "message": {
+                  "const": "The run exceeded its time limit."
+                },
+                "retryable": {
+                  "const": true
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "const": "CLEANUP_FAILED"
+                },
+                "message": {
+                  "const": "The run could not be safely closed."
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "code",
+                "message",
+                "retryable"
+              ],
+              "properties": {
+                "code": {
+                  "const": "INTERNAL_ERROR"
+                },
+                "message": {
+                  "const": "The Host Agent failed."
+                },
+                "retryable": {
+                  "const": false
+                }
+              }
+            }
+          ]
+        }
+      }
+    }
+  }
+}
