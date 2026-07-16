@@ -1,6 +1,6 @@
 {
   "name": "@simulator/host-agent-run-core",
-  "version": "0.11.1",
+  "version": "0.12.0",
   "license": "Apache-2.0",
   "description": "Main-process ownership and lifecycle core for transient Simulator Host Agent runs",
   "type": "module",

@@ -1,6 +1,6 @@
 {
   "name": "@simulator/host-agent-broker",
-  "version": "0.11.1",
+  "version": "0.12.0",
   "license": "Apache-2.0",
   "description": "Loopback-only HTTP/SSE broker and MessagePort RPC client for Simulator Host Agent v2",
   "type": "module",
