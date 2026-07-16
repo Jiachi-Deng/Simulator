@@ -13,14 +13,27 @@ on:
       - "packages/module-installer/**"
       - "packages/module-registry/**"
       - "packages/module-daemon/**"
+      - "packages/module-agent-gateway/**"
+      - "packages/host-agent-contract/**"
+      - "packages/host-agent-run-core/**"
+      - "packages/host-agent-broker/**"
+      - "packages/host-agent-shim/**"
+      - "modules/open-design/**"
       - "apps/electron/package.json"
       - "apps/electron/electron-builder.yml"
+      - "apps/electron/resources/host-agent/**"
+      - "apps/electron/scripts/copy-assets.ts"
+      - "apps/electron/scripts/host-module-coordinator-smoke.test.ts"
       - "apps/electron/scripts/host-module-coordinator-smoke.ts"
       - "apps/electron/scripts/stage-module-coordinator-smoke-resources.ts"
+      - "apps/electron/scripts/validate-assets.ts"
+      - "apps/electron/src/host-agent/**"
       - "apps/electron/src/main/electron-module-view-port.ts"
       - "apps/electron/src/main/host-module-coordinator.ts"
       - "apps/electron/src/main/host-module-coordinator-smoke.ts"
       - "apps/electron/src/main/index.ts"
+      - "apps/electron/src/main/module-agent-runtime.ts"
+      - "apps/electron/src/main/module-agent-runtime.test.ts"
       - "apps/electron/src/main/module-view-manager.ts"
       - "apps/electron/src/preload/module-view.ts"
   push:
@@ -36,14 +49,27 @@ on:
       - "packages/module-installer/**"
       - "packages/module-registry/**"
       - "packages/module-daemon/**"
+      - "packages/module-agent-gateway/**"
+      - "packages/host-agent-contract/**"
+      - "packages/host-agent-run-core/**"
+      - "packages/host-agent-broker/**"
+      - "packages/host-agent-shim/**"
+      - "modules/open-design/**"
       - "apps/electron/package.json"
       - "apps/electron/electron-builder.yml"
+      - "apps/electron/resources/host-agent/**"
+      - "apps/electron/scripts/copy-assets.ts"
+      - "apps/electron/scripts/host-module-coordinator-smoke.test.ts"
       - "apps/electron/scripts/host-module-coordinator-smoke.ts"
       - "apps/electron/scripts/stage-module-coordinator-smoke-resources.ts"
+      - "apps/electron/scripts/validate-assets.ts"
+      - "apps/electron/src/host-agent/**"
       - "apps/electron/src/main/electron-module-view-port.ts"
       - "apps/electron/src/main/host-module-coordinator.ts"
       - "apps/electron/src/main/host-module-coordinator-smoke.ts"
       - "apps/electron/src/main/index.ts"
+      - "apps/electron/src/main/module-agent-runtime.ts"
+      - "apps/electron/src/main/module-agent-runtime.test.ts"
       - "apps/electron/src/main/module-view-manager.ts"
       - "apps/electron/src/preload/module-view.ts"
   workflow_dispatch:
@@ -131,6 +157,8 @@ jobs:
       - run: bun install --frozen-lockfile
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Validate packaged smoke scenario closure
+        run: bun test apps/electron/scripts/host-module-coordinator-smoke.test.ts
       - name: Build Electron and subprocess bundles
         run: bun run electron:build
       - name: Stage packaged Electron native resources
@@ -142,8 +170,20 @@ jobs:
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: bunx electron-builder --dir --config electron-builder.yml --mac --publish never
-      - name: Run packaged Coordinator and WebContentsView lifecycle
+      - name: Validate exact packaged Host Agent resources
         run: |
           app_path="$(find apps/electron/release -maxdepth 3 -name Simulator.app -print -quit)"
           test -n "$app_path"
-          bun run test:module-coordinator:electron -- --app "$app_path"
+          app_path="$(cd "$(dirname "$app_path")" && pwd)/$(basename "$app_path")"
+          (cd apps/electron && bun scripts/validate-assets.ts --packaged-app "$app_path")
+          echo "PACKAGED_SIMULATOR_APP=$app_path" >> "$GITHUB_ENV"
+      - name: Run packaged v1 OpenDesign Compatibility protocol fixture
+        run: >-
+          bun run test:module-coordinator:electron --
+          --app "$PACKAGED_SIMULATOR_APP"
+          --scenario v1-compat
+      - name: Run packaged v2 OpenDesign ordinary Shim protocol fixture
+        run: >-
+          bun run test:module-coordinator:electron --
+          --app "$PACKAGED_SIMULATOR_APP"
+          --scenario v2-open-design-rc

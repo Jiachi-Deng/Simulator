@@ -2,17 +2,65 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 
-const appFlag = process.argv.indexOf('--app')
-const packagedApp = appFlag >= 0 ? process.argv[appFlag + 1] : undefined
-if (appFlag >= 0 && !packagedApp) throw new Error('--app requires a packaged Electron app or executable path')
+type SmokeScenario = 'v1-compat' | 'v2-open-design-rc'
+
+interface SmokeScenarioConfig {
+  readonly scenario: SmokeScenario
+  readonly moduleId: 'org.simulator.open-design'
+  readonly version: '0.14.5' | '0.14.6-rc.1'
+  readonly contractVersion: 1 | 2
+  readonly fixtureEntry: 'module.ts' | 'module-v2.ts'
+}
+
+function parseArguments(argv: readonly string[]): { packagedApp?: string; scenario: SmokeScenario } {
+  let packagedApp: string | undefined
+  let scenario: SmokeScenario | undefined
+  for (let index = 0; index < argv.length; index += 1) {
+    const argument = argv[index]
+    if (argument !== '--app' && argument !== '--scenario') throw new Error(`Unknown argument: ${argument}`)
+    const value = argv[index + 1]
+    if (!value || value.startsWith('--')) throw new Error(`${argument} requires a value`)
+    index += 1
+    if (argument === '--app') {
+      if (packagedApp !== undefined) throw new Error('--app may be specified only once')
+      packagedApp = value
+      continue
+    }
+    if (scenario !== undefined) throw new Error('--scenario may be specified only once')
+    if (value !== 'v1-compat' && value !== 'v2-open-design-rc') {
+      throw new Error('--scenario must be v1-compat or v2-open-design-rc')
+    }
+    scenario = value
+  }
+  if (!scenario) throw new Error('--scenario is required')
+  return { ...(packagedApp ? { packagedApp } : {}), scenario }
+}
+
+const options = parseArguments(process.argv.slice(2))
+const packagedApp = options.packagedApp
+const scenarioConfig: SmokeScenarioConfig = options.scenario === 'v1-compat'
+  ? {
+      scenario: 'v1-compat',
+      moduleId: 'org.simulator.open-design',
+      version: '0.14.5',
+      contractVersion: 1,
+      fixtureEntry: 'module.ts',
+    }
+  : {
+      scenario: 'v2-open-design-rc',
+      moduleId: 'org.simulator.open-design',
+      version: '0.14.6-rc.1',
+      contractVersion: 2,
+      fixtureEntry: 'module-v2.ts',
+    }
 
 const electronRoot = resolve(import.meta.dir, '..')
 const repoRoot = resolve(electronRoot, '..', '..')
 const fixtureRoot = join(repoRoot, 'packages', 'module-coordinator', 'fixtures', 'packaged-fake-module')
 const temporary = mkdtempSync(join(tmpdir(), 'simulator-electron-module-coordinator-smoke-'))
 const runtimeRoot = join(temporary, 'runtime')
-const moduleId = 'org.simulator.electron-product-smoke'
-const version = '1.0.0'
+const moduleId = scenarioConfig.moduleId
+const version = scenarioConfig.version
 const entrypoint = process.platform === 'win32' ? 'bin/module.exe' : 'bin/module'
 const installed = join(runtimeRoot, 'installed', 'modules', moduleId)
 const versionRoot = join(installed, 'versions', version)
@@ -30,7 +78,7 @@ const build = Bun.spawnSync([
   'build',
   '--compile',
   '--minify',
-  join(fixtureRoot, 'bin', 'module.ts'),
+  join(fixtureRoot, 'bin', scenarioConfig.fixtureEntry),
   '--outfile',
   executable,
 ], { stdout: 'pipe', stderr: 'pipe' })
@@ -54,7 +102,7 @@ writeFileSync(manifestPath, `${JSON.stringify({
   artifacts: [{
     platform,
     entrypoint,
-    url: 'https://modules.example.test/electron-product-smoke.tar.gz',
+    url: `https://modules.example.test/open-design/${version}.tar.gz`,
     sha256: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
   }],
   capabilities: ['host-agent.use'],
@@ -114,6 +162,13 @@ try {
     throw new Error(`Electron host module smoke failed (${exitCode}): ${JSON.stringify(result)}\n${stdout}\n${stderr}`)
   }
   if (result.packaged !== Boolean(packagedApp)) throw new Error(`Unexpected packaged state: ${JSON.stringify(result)}`)
+  if (result.protocolFixture !== true
+    || result.acceptanceScope !== 'deterministic-packaged-protocol-fixture-not-real-rc-or-paid-preview-acceptance'
+    || result.scenario !== scenarioConfig.scenario
+    || result.moduleId !== moduleId
+    || result.moduleVersion !== version) {
+    throw new Error(`Electron smoke did not return closed protocol-fixture identity: ${JSON.stringify(result)}`)
+  }
   const cleanup = result.cleanup as Record<string, unknown> | undefined
   const builtInAgent = result.builtInAgent as Record<string, unknown> | undefined
   const hostAgentRuntime = result.hostAgentRuntime as Record<string, unknown> | undefined
@@ -126,12 +181,24 @@ try {
     || builtInAgent?.deterministicTurn !== true || builtInAgent.serverHealthyBeforeModule !== true || builtInAgent.serverHealthyAfterModule !== true) {
     throw new Error(`Electron host module smoke assertions failed: ${JSON.stringify(result)}`)
   }
+  if (hostAgentRuntime.contractVersion !== scenarioConfig.contractVersion) {
+    throw new Error(`Electron smoke used the wrong Host Agent contract: ${JSON.stringify(result)}`)
+  }
+  if (scenarioConfig.scenario === 'v2-open-design-rc'
+    && (hostAgentRuntime.ordinaryJsonEventStreamCli !== true
+      || hostAgentRuntime.oneTurnPerSession !== true
+      || hostAgentRuntime.shimResourceHashVerified !== true)) {
+    // M1 #129 integration contract: main-process smoke must forward and verify
+    // the strict fixture evidence. Never substitute the legacy multi-turn bit
+    // for one-Turn/one-Session v2 proof.
+    throw new Error(`Electron v2 packaged protocol evidence is incomplete: ${JSON.stringify(result)}`)
+  }
   if (existsSync(join(configRoot, '.server.lock'))) throw new Error('Electron before-quit left the embedded server lock behind')
   const sessionPath = builtInAgent.sessionPath
   if (typeof sessionPath !== 'string' || !existsSync(join(sessionPath, 'session.jsonl'))) {
     throw new Error(`Electron before-quit did not flush the built-in Agent session: ${JSON.stringify(result)}`)
   }
-  console.log(`Electron host module coordinator smoke passed: ${JSON.stringify(result)}`)
+  console.log(`Electron host module coordinator smoke passed (${scenarioConfig.scenario}): ${JSON.stringify(result)}`)
 } finally {
   rmSync(temporary, { recursive: true, force: true })
 }
