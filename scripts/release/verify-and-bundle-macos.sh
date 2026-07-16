@@ -71,6 +71,7 @@ assert_no_updater_metadata "$UNZIP" "ZIP extraction root"
 
 verify_app() {
   local app=$1
+  local signature_evidence=$2
   local plist="$app/Contents/Info.plist"
   local executable_name executable
   assert_lstat_type "$app" "directory" "app bundle root"
@@ -90,7 +91,7 @@ verify_app() {
   assert_lstat_type "$executable" "regular file" "app executable"
   [[ -x "$executable" ]] || { echo "Missing executable in $app" >&2; exit 1; }
   bun "$SCRIPT_DIR/../packaged-server-resources.ts" --app "$app"
-  bun "$SCRIPT_DIR/verify-macos-signatures.ts" "$app"
+  bun "$SCRIPT_DIR/verify-macos-signatures.ts" "$app" | tee "$signature_evidence"
   python3 - "$executable" <<'PY'
 import subprocess, sys
 result = subprocess.run([sys.argv[1], "--version"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
@@ -102,19 +103,20 @@ PY
 write_inventory() {
   local app=$1
   local inventory=$2
-  local checksums=$3
-  local verification_code=$4
-  python3 "$SCRIPT_DIR/write-app-inventory.py" "$app" "$inventory" --spdx-files "$checksums" --spdx-package-verification-code "$verification_code"
+  local raw_inventory=$3
+  local checksums=$4
+  local verification_code=$5
+  python3 "$SCRIPT_DIR/write-app-inventory.py" "$app" "$inventory" --transport-canonicalization-policy macos-dmg-zip-v1 --raw-inventory "$raw_inventory" --spdx-files "$checksums" --spdx-package-verification-code "$verification_code"
 }
 
 DMG_APPS=("$MOUNT"/*.app)
 ZIP_APPS=("$UNZIP"/*.app)
 [[ ${#DMG_APPS[@]} -eq 1 ]] || { echo "DMG must contain one app" >&2; exit 1; }
 [[ ${#ZIP_APPS[@]} -eq 1 ]] || { echo "ZIP must contain one app" >&2; exit 1; }
-verify_app "${DMG_APPS[0]}"
-verify_app "${ZIP_APPS[0]}"
-write_inventory "${DMG_APPS[0]}" "$WORK/dmg-app-inventory.jsonl" "$WORK/dmg-files.sha256" "$WORK/dmg-package-verification-code.txt"
-write_inventory "${ZIP_APPS[0]}" "$WORK/zip-app-inventory.jsonl" "$WORK/zip-files.sha256" "$WORK/zip-package-verification-code.txt"
+verify_app "${DMG_APPS[0]}" "$WORK/dmg-signatures.json"
+verify_app "${ZIP_APPS[0]}" "$WORK/zip-signatures.json"
+write_inventory "${DMG_APPS[0]}" "$WORK/dmg-app-inventory.jsonl" "$WORK/dmg-app-inventory.raw.jsonl" "$WORK/dmg-files.sha256" "$WORK/dmg-package-verification-code.txt"
+write_inventory "${ZIP_APPS[0]}" "$WORK/zip-app-inventory.jsonl" "$WORK/zip-app-inventory.raw.jsonl" "$WORK/zip-files.sha256" "$WORK/zip-package-verification-code.txt"
 if ! cmp -s "$WORK/dmg-app-inventory.jsonl" "$WORK/zip-app-inventory.jsonl"; then
   echo "DMG and ZIP app filesystem inventories differ" >&2
   diff -u "$WORK/dmg-app-inventory.jsonl" "$WORK/zip-app-inventory.jsonl" >&2 || true
@@ -131,7 +133,32 @@ find "$BUNDLE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
 cp "$DMG" "$ZIP" "$BUNDLE_DIR/"
 cp "$WORK/dmg-files.sha256" "$BUNDLE_DIR/packaged-files.sha256"
 cp "$WORK/dmg-app-inventory.jsonl" "$BUNDLE_DIR/app-inventory.jsonl"
+cp "$WORK/dmg-app-inventory.raw.jsonl" "$BUNDLE_DIR/dmg-app-inventory.raw.jsonl"
+cp "$WORK/zip-app-inventory.raw.jsonl" "$BUNDLE_DIR/zip-app-inventory.raw.jsonl"
+cp "$WORK/dmg-signatures.json" "$BUNDLE_DIR/dmg-signatures.json"
+cp "$WORK/zip-signatures.json" "$BUNDLE_DIR/zip-signatures.json"
 cp "$WORK/dmg-package-verification-code.txt" "$BUNDLE_DIR/package-verification-code.txt"
+python3 - "$BUNDLE_DIR/transport-normalization-policy.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+Path(sys.argv[1]).write_text(json.dumps({
+    "schemaVersion": 1,
+    "policy": "macos-dmg-zip-v1",
+    "canonicalInventory": "app-inventory.jsonl",
+    "rawInventories": ["dmg-app-inventory.raw.jsonl", "zip-app-inventory.raw.jsonl"],
+    "ignoredExtendedAttributes": [
+        "com.apple.cs.CodeDirectory",
+        "com.apple.cs.CodeRequirements",
+        "com.apple.cs.CodeRequirements-1",
+        "com.apple.cs.CodeSignature"
+    ],
+    "ignoredExtendedAttributeScope": "non-executable regular files only",
+    "canonicalSymlinkMode": "0777",
+    "signaturePolicy": "unsigned-or-strictly-verified-adhoc",
+}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
 (
   cd "$BUNDLE_DIR"
   shasum -a 256 "$(basename "$DMG")" "$(basename "$ZIP")" > SHA256SUMS
