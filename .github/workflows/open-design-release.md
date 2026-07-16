@@ -8,10 +8,11 @@ RC publication requires `OPEN_DESIGN_PRERELEASE_ENABLED=true` and the protected
 `open-design-prerelease` Environment. Stable publication requires both
 `OPEN_DESIGN_RELEASE_ENABLED=true` and
 `OPEN_DESIGN_STABLE_CHANNEL_ENABLED=true`, the exact confirmation input, and
-the separately protected `open-design-production-stable` Environment. The
-existing 0.14.5 scheduled refresh remains in `open-design-production` and does
-not follow RC inputs. An absent variable or any value other than the exact
-lowercase string `true` leaves the corresponding path skipped.
+the separately protected `open-design-production-stable` Environment. Scheduled
+refresh remains stable-only in `open-design-production`; the one fixed RC may
+be refreshed only by a manual dispatch through `open-design-prerelease`. An
+absent variable or any value other than the exact lowercase string `true`
+leaves the corresponding path skipped.
 
 ## Required environment configuration
 
@@ -33,9 +34,9 @@ Environment that is intentionally enabled:
   variables.
 
 Protect every Environment according to the repository release policy. Required
-reviewers must be configured for `open-design-production-stable` and
-`open-design-acceptance-rollback`; naming an Environment in YAML does not by
-itself configure reviewer protection.
+reviewers must be configured for `open-design-prerelease`,
+`open-design-production-stable`, and `open-design-acceptance-rollback`; naming
+an Environment in YAML does not by itself configure reviewer protection.
 
 The fixed repository authority is `Jiachi-Deng/Simulator`. Initial publication
 accepts only these version-consistent identities:
@@ -149,30 +150,63 @@ write permission only inside that subtree immediately before deleting it.
 
 ## Scheduled and manual refresh
 
-The refresh job runs every 12 hours on Linux and may also be manually
-dispatched only with `release_track=stable`, the exact existing version/tag, and
-`REFRESH_OPEN_DESIGN_<current version with underscores>`. A fixed newest-first
-support matrix contains stable `0.14.6` followed by the `0.14.5` rollback
-baseline. The job selects the first tag that already exists as a non-draft,
-non-prerelease Release with exactly the five expected version-bound assets. It
-therefore refreshes `0.14.5` before stable promotion and automatically begins
-refreshing `0.14.6` after promotion, without a post-release source or SHA edit.
-It downloads the selected five fixed-tag assets,
-advances the signed Catalog state, runs refresh dry-run, signs through the
-Environment secret, reconstructs the full bundle, and verifies it before any
-GitHub mutation. A present-but-draft, prerelease, or asset-incomplete candidate
-fails closed instead of silently falling back.
-Initial and refresh jobs share one non-cancelling concurrency group, so the
-authenticated selected stable snapshot cannot race this workflow's scheduled refresh
-transaction.
+The Linux refresh job runs every 12 hours. A scheduled event is accepted only
+when `OPEN_DESIGN_RELEASE_ENABLED=true`; it has no dispatch inputs and always
+uses the stable path in `open-design-production`. A fixed newest-first stable
+support matrix contains `0.14.6` followed by the `0.14.5` rollback baseline.
+The job selects the first tag that already exists as a non-draft,
+non-prerelease Release with exactly its five version-bound assets. It therefore
+refreshes `0.14.5` before stable promotion and automatically begins refreshing
+`0.14.6` after promotion. A present-but-draft, prerelease, duplicate,
+asset-incomplete, or otherwise malformed candidate fails closed; only an
+actually absent `0.14.6` may fall back to `0.14.5`.
 
-Only the raw Catalog, envelope, and release metadata are replaceable. New
-assets are uploaded under temporary names first. The Release is then made draft
-while those three assets are renamed as a transaction. The immutable archive
-and official-channel configuration are downloaded again and compared before
-the Release is republished. A pre-verification failure rolls the old assets back
-before republishing; a failure after the new transaction is verified leaves the
-Release draft for manual recovery rather than exposing a partial public state.
+Manual stable refresh keeps the same support matrix, exact existing
+version/tag, confirmation
+`REFRESH_OPEN_DESIGN_<current version with underscores>`, enable variable, and
+`open-design-production` Environment. Manual prerelease refresh is a separate,
+narrow path: it accepts only version `0.14.6-rc.1`, tag
+`open-design-v0.14.6-rc.1`, and confirmation
+`REFRESH_OPEN_DESIGN_0_14_6_RC_1`; it additionally requires
+`OPEN_DESIGN_PRERELEASE_ENABLED=true` and approval of the protected
+`open-design-prerelease` Environment. It cannot select another prerelease or
+modify the stable official-channel configuration.
+
+The public RC Release must contain exactly four assets: archive, raw Catalog,
+envelope, and release metadata. It must not contain
+`open-design-official-channel.json`. After downloading those four assets, the
+single secret-bearing step derives the public key from the Environment private
+key and verifies the envelope signature at the signed Catalog's historical
+issuance time. It then fails closed unless the signed Catalog, release metadata,
+track/version/tag/prerelease flag, key and validity window, manifest, archive
+hash and size, extracted-tree metadata, Host range, URLs, refresh policy, and
+four-asset set all match exactly. Only after that authentication does it
+reconstruct `open-design-official-channel.json` inside an owner-only temporary
+directory for this run's production-CLI verification. That private file is
+never uploaded or copied into a public Release.
+
+Historical verification lets a valid RC whose original 20-hour Catalog window
+has already expired be authenticated without weakening current-time install
+rules. The workflow advances the sequence and issuance time, creates a new
+20-hour window, runs the production refresh dry-run, signs the replacement, and
+verifies the complete temporary bundle. Initial and refresh jobs share one
+non-cancelling concurrency group, so their authenticated snapshots cannot race
+one another.
+
+For both tracks, only the raw Catalog, envelope, and release metadata are
+replaceable. The archive bytes and SHA-256 must remain unchanged. Before any
+temporary candidate is uploaded, the workflow validates the exact public asset
+set and changes the Release to draft. While hidden, it downloads that set again
+and requires every byte to match the authenticated source snapshot, preventing
+a stale refresh from overwriting a concurrent external change. It then uploads
+and verifies temporary copies, atomically renames only those three assets,
+downloads the exact resulting four-asset RC or five-asset stable set,
+reconstructs the private RC config only for local verification, and republishes
+only after production verification.
+Consequently every publicly visible RC state has exactly four assets. A
+pre-verification failure restores the old assets before republishing; a failure
+after the new transaction is verified leaves the Release draft for manual
+recovery rather than exposing an invalid or partial public state.
 
 ## Debug and acceptance rollback gate
 

@@ -56,12 +56,14 @@ describe("OpenDesign official release workflow", () => {
     expect(workflow.on.workflow_dispatch.inputs.release_track.options).toEqual(["prerelease", "stable"])
     expect(workflow.jobs.initial.environment.name).toContain("open-design-production-stable")
     expect(workflow.jobs.initial.environment.name).toContain("open-design-prerelease")
-    expect(workflow.jobs.refresh.environment.name).toBe("open-design-production")
+    expect(workflow.jobs.refresh.environment.name).toContain("open-design-prerelease")
+    expect(workflow.jobs.refresh.environment.name).toContain("open-design-production")
     expect(workflow.jobs.initial.if).toContain("github.repository == 'Jiachi-Deng/Simulator'")
     expect(workflow.jobs.refresh.if).toContain("github.repository == 'Jiachi-Deng/Simulator'")
     expect(workflow.jobs.initial.if).toContain("vars.OPEN_DESIGN_PRERELEASE_ENABLED == 'true'")
     expect(workflow.jobs.initial.if).toContain("vars.OPEN_DESIGN_STABLE_CHANNEL_ENABLED == 'true'")
     expect(workflow.jobs.refresh.if).toContain("vars.OPEN_DESIGN_RELEASE_ENABLED == 'true'")
+    expect(workflow.jobs.refresh.if).toContain("vars.OPEN_DESIGN_PRERELEASE_ENABLED == 'true'")
     expect(workflow.jobs.initial.if).toContain("inputs.operation == 'initial'")
     expect(workflow.jobs.refresh.if).toContain("github.event_name == 'schedule'")
     const actionReferences = [...source.matchAll(/uses:\s+([^\s#]+)/g)].map((match) => match[1])
@@ -257,25 +259,71 @@ describe("OpenDesign official release workflow", () => {
     expect(authenticatedBuild.indexOf('rc-verify.json')).toBeLessThan(authenticatedBuild.indexOf("--dry-run"))
   })
 
-  test("refreshes only three assets behind a draft rollback transaction", () => {
+  test("refreshes stable on schedule or the exact RC manually without publishing an official config", () => {
     const refresh = source.slice(source.indexOf("  refresh:"))
-    const resolveStable = step("refresh", "Resolve current supported stable release").run
-    expect(resolveStable).toContain('candidate_versions=("0.14.6" "0.14.5")')
-    expect(resolveStable).toContain('test "$(jq -r .isDraft <<<"$release_state")" = false')
-    expect(resolveStable).toContain('test "$(jq -r .isPrerelease <<<"$release_state")" = false')
-    expect(resolveStable).toContain('test "$actual" = "$expected"')
-    expect(resolveStable).toContain("RELEASE_TAG=open-design-v%s")
-    expect(refresh.indexOf("Dry-run catalog refresh")).toBeLessThan(refresh.indexOf("Create signed refresh assets"))
+    const resolve = step("refresh", "Resolve exact refresh target").run
+    expect(resolve).toContain('candidate_versions=("0.14.6" "0.14.5")')
+    expect(resolve).toContain('test -z "$DISPATCH_RELEASE_TRACK"')
+    expect(resolve).toContain('selected_version="0.14.6-rc.1"')
+    expect(resolve).toContain('release_track="prerelease"')
+    expect(resolve).toContain('expected_prerelease="true"')
+    expect(resolve).toContain('config_required="false"')
+    expect(resolve).toContain('expected_host_version_range=">=0.12.0"')
+    expect(resolve).toContain('test "$(jq -r .isDraft <<<"$release_state")" = false')
+    expect(resolve).toContain('test "$(jq -r .isPrerelease <<<"$release_state")" = "$expected_prerelease"')
+    expect(resolve).toContain('test "$actual" = "$expected"')
+
+    const authority = step("refresh", "Validate fixed refresh authority").run
+    expect(authority).toContain('test "$MODULE_VERSION" = "0.14.6-rc.1"')
+    expect(authority).toContain('test "$RELEASE_TAG" = "open-design-v0.14.6-rc.1"')
+    expect(authority).toContain('test "$PUBLIC_ASSET_COUNT" = 4')
+    expect(authority).toContain('test "$STABLE_CHANNEL_CONFIRMATION" = "REFRESH_OPEN_DESIGN_0_14_6_RC_1"')
+
+    const download = step("refresh", "Download exact fixed-tag public bundle").run
+    expect(download).toContain('expected_assets=("$ARCHIVE_ASSET" "$CATALOG_ASSET" "$ENVELOPE_ASSET" "$METADATA_ASSET")')
+    expect(download).toContain('[[ "$CONFIG_REQUIRED" = false ]] || expected_assets+=("$CONFIG_ASSET")')
+    expect(download).toContain('test ! -e "$source/$CONFIG_ASSET"')
+    expect(download).toContain('refresh_input="$work/private-input"')
+
+    const state = step("refresh", "Derive monotonic refresh state and bounded window").run
+    expect(state).toContain("SOURCE_VERIFICATION_TIME_MS=${previousIssuedAtMs + 1000}")
+    expect(state).toContain("CATALOG_SEQUENCE=${catalog.sequence + 1}")
+    expect(state).toContain("issuedAtMs + 20 * 60 * 60 * 1000")
+
+    const signedRefresh = step("refresh", "Authenticate source, dry-run, and create signed refresh assets").run
+    expect(signedRefresh).toContain("verifyModuleReleaseCatalog")
+    expect(signedRefresh).toContain('metadata.module.version !== process.env.MODULE_VERSION')
+    expect(signedRefresh).toContain('metadata.githubRelease.tag !== process.env.RELEASE_TAG')
+    expect(signedRefresh).toContain('metadata.hostVersionRange !== release.hostVersionRange')
+    expect(signedRefresh).toContain('metadata.catalogRefreshPolicy.replaceReleaseAssets')
+    expect(signedRefresh).toContain('writeFileSync(join(process.env.REFRESH_INPUT, process.env.CONFIG_ASSET)')
+    expect(signedRefresh.indexOf("verifyModuleReleaseCatalog")).toBeLessThan(signedRefresh.indexOf("writeFileSync(join(process.env.REFRESH_INPUT"))
+    expect(signedRefresh).toContain('--verification-time "$SOURCE_VERIFICATION_TIME_MS"')
+    expect(signedRefresh).toContain('--verification-time "$VERIFICATION_TIME_MS"')
+    expect(signedRefresh.indexOf("--verify")).toBeLessThan(signedRefresh.indexOf("--dry-run"))
+    expect(signedRefresh.indexOf("--dry-run")).toBeLessThan(signedRefresh.indexOf("--private-key-env OPEN_DESIGN_RELEASE_PRIVATE_KEY"))
+    expect(signedRefresh).toContain('.mode == "refresh-dry-run" and .writes == []')
+    expect(signedRefresh).toContain('.previousCatalog.sequence == $previousSequence')
+    expect(signedRefresh).toContain('.plannedFiles == [$catalog, $envelope, $metadata]')
+    expect(signedRefresh).toContain('.immutableArchiveVerified == true and .verifiedWithModuleInstaller == true')
+
     expect(refresh.indexOf("Reconstruct and verify complete refreshed bundle")).toBeLessThan(refresh.indexOf("Replace only refresh assets"))
     expect(refresh).toContain('canonical=("$CATALOG_ASSET" "$ENVELOPE_ASSET" "$METADATA_ASSET")')
+    expect(refresh).toContain('public_assets=("$ARCHIVE_ASSET" "$CATALOG_ASSET" "$ENVELOPE_ASSET" "$METADATA_ASSET")')
     expect(refresh).toContain("rollback()")
     expect(refresh).toContain("transaction_verified=0")
     expect(refresh).toContain("--draft=true")
     expect(refresh).toContain("--draft=false")
     expect(refresh).toContain('cmp "$SOURCE_BUNDLE/$ARCHIVE_ASSET" "$remote/$ARCHIVE_ASSET"')
     expect(refresh).toContain('cmp "$SOURCE_BUNDLE/$CONFIG_ASSET" "$remote/$CONFIG_ASSET"')
+    expect(refresh).toContain('test ! -e "$remote/$CONFIG_ASSET"')
+    expect(refresh).toContain('cp "$REFRESH_INPUT/$CONFIG_ASSET" "$remote/$CONFIG_ASSET"')
+    expect(refresh.indexOf('gh release edit "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --draft=true')).toBeLessThan(refresh.indexOf('gh release upload "$RELEASE_TAG"'))
+    expect(refresh).toContain('cmp "$SOURCE_BUNDLE/$asset" "$preflight/$asset"')
+    expect(refresh.indexOf('cmp "$SOURCE_BUNDLE/$asset" "$preflight/$asset"')).toBeLessThan(refresh.indexOf('gh release upload "$RELEASE_TAG"'))
     expect(refresh).not.toContain('cp "$REFRESH_OUTPUT/$ARCHIVE_ASSET"')
     expect(refresh).not.toContain('cp "$REFRESH_OUTPUT/$CONFIG_ASSET"')
+    expect(refresh).not.toContain('gh release upload "$RELEASE_TAG" "$REFRESH_INPUT/$CONFIG_ASSET"')
     expect(refresh).not.toContain("--clobber")
   })
 
@@ -308,6 +356,7 @@ describe("OpenDesign official release workflow", () => {
     expect(staticValidation).toContain(".github/workflows/open-design-release.md")
     expect(staticValidation).toContain("scripts/release/*.test.ts")
     expect(staticValidation).toContain("YAML.safe_load(File.read")
+    expect(staticStep("Validate embedded release workflow Bash").run).toContain('Open3.capture3("bash", "-n"')
   })
 
   test("keeps every embedded release bash block and Node heredoc syntactically valid", () => {

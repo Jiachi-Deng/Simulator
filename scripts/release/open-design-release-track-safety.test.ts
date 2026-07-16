@@ -116,18 +116,26 @@ describe("OpenDesign release-track safety", () => {
     expect(verify).toContain('--previous-issued-at "$PRIOR_ISSUED_AT"')
   })
 
-  test("refreshes the newest existing release from the fixed stable support matrix", () => {
+  test("keeps scheduled refresh stable-only and allows only the fixed RC manually", () => {
     expect(workflow.env.RELEASE_TAG).toBeUndefined()
     expect(workflow.env.MODULE_VERSION).toBeUndefined()
-    expect(workflow.jobs.refresh.environment.name).toBe("open-design-production")
+    expect(workflow.jobs.refresh.environment.name).toContain("open-design-production")
+    expect(workflow.jobs.refresh.environment.name).toContain("open-design-prerelease")
     expect(workflow.jobs.refresh.if).toContain("github.event_name == 'schedule'")
     expect(workflow.jobs.refresh.if).toContain("inputs.operation == 'refresh'")
     expect(workflow.jobs.refresh.if).toContain("inputs.release_track == 'stable'")
-    const resolver = step("refresh", "Resolve current supported stable release").run
+    expect(workflow.jobs.refresh.if).toContain("inputs.release_track == 'prerelease'")
+    expect(workflow.jobs.refresh.if).toContain("vars.OPEN_DESIGN_RELEASE_ENABLED == 'true'")
+    expect(workflow.jobs.refresh.if).toContain("vars.OPEN_DESIGN_PRERELEASE_ENABLED == 'true'")
+    const resolver = step("refresh", "Resolve exact refresh target").run
     expect(resolver).toContain('candidate_versions=("0.14.6" "0.14.5")')
     expect(resolver.indexOf('"0.14.6"')).toBeLessThan(resolver.indexOf('"0.14.5"'))
+    expect(resolver).toContain('test -z "$DISPATCH_RELEASE_TRACK"')
+    expect(resolver).toContain('selected_version="0.14.6-rc.1"')
+    expect(resolver).toContain('release_track="prerelease"')
+    expect(resolver).toContain('config_required="false"')
     expect(resolver).toContain('test "$(jq -r .isDraft <<<"$release_state")" = false')
-    expect(resolver).toContain('test "$(jq -r .isPrerelease <<<"$release_state")" = false')
+    expect(resolver).toContain('test "$(jq -r .isPrerelease <<<"$release_state")" = "$expected_prerelease"')
     expect(resolver).toContain('test "$actual" = "$expected"')
     expect(resolver).toContain('test -n "$selected_version"')
     const authority = step("refresh", "Validate fixed refresh authority").run
@@ -135,6 +143,27 @@ describe("OpenDesign release-track safety", () => {
     expect(authority).toContain('test "$DISPATCH_RELEASE_TAG" = "$RELEASE_TAG"')
     expect(authority).toContain('expected_confirmation="REFRESH_OPEN_DESIGN_${MODULE_VERSION//./_}"')
     expect(authority).toContain('test "$STABLE_CHANNEL_CONFIRMATION" = "$expected_confirmation"')
-    expect(source.match(/--module-version "\$MODULE_VERSION"/g)).toHaveLength(7)
+    expect(authority).toContain('test "$STABLE_CHANNEL_CONFIRMATION" = "REFRESH_OPEN_DESIGN_0_14_6_RC_1"')
+    expect(authority).toContain('test "$PUBLIC_ASSET_COUNT" = 4')
+    expect(authority).toContain('test "$PUBLIC_ASSET_COUNT" = 5')
+  })
+
+  test("keeps the RC official config private and publishes exactly four assets after refresh", () => {
+    const signedRefresh = step("refresh", "Authenticate source, dry-run, and create signed refresh assets").run
+    expect(signedRefresh).toContain("verifyModuleReleaseCatalog")
+    expect(signedRefresh).toContain('metadata.trustedKey.publicKey !== publicKeyBase64')
+    expect(signedRefresh).toContain('writeFileSync(join(process.env.REFRESH_INPUT, process.env.CONFIG_ASSET)')
+
+    const transaction = step("refresh", "Replace only refresh assets through a draft rollback transaction").run
+    expect(transaction).toContain('public_assets=("$ARCHIVE_ASSET" "$CATALOG_ASSET" "$ENVELOPE_ASSET" "$METADATA_ASSET")')
+    expect(transaction).toContain('[[ "$CONFIG_REQUIRED" = false ]] || public_assets+=("$CONFIG_ASSET")')
+    expect(transaction).toContain('test "$(find "$remote" -maxdepth 1 -type f | wc -l | tr -d \' \')" = "$PUBLIC_ASSET_COUNT"')
+    expect(transaction).toContain('test ! -e "$remote/$CONFIG_ASSET"')
+    expect(transaction).toContain('cp "$REFRESH_INPUT/$CONFIG_ASSET" "$remote/$CONFIG_ASSET"')
+    expect(transaction.indexOf('--draft=true')).toBeLessThan(transaction.indexOf('gh release upload "$RELEASE_TAG"'))
+    expect(transaction).toContain('cmp "$SOURCE_BUNDLE/$asset" "$preflight/$asset"')
+    expect(transaction.indexOf('cmp "$SOURCE_BUNDLE/$asset" "$preflight/$asset"')).toBeLessThan(transaction.indexOf('gh release upload "$RELEASE_TAG"'))
+    expect(transaction).not.toContain('gh release upload "$RELEASE_TAG" "$REFRESH_INPUT/$CONFIG_ASSET"')
+    expect(transaction).toContain('cmp "$SOURCE_BUNDLE/$ARCHIVE_ASSET" "$remote/$ARCHIVE_ASSET"')
   })
 })

@@ -21,6 +21,8 @@ describe("release static validation workflow", () => {
   test("only runs static tests, YAML, shell, and diff checks", () => {
     expect(workflow).toContain("bun test scripts/release/*.test.ts")
     expect(workflow).toContain("YAML.safe_load(File.read")
+    expect(workflow).toContain("Validate embedded release workflow Bash")
+    expect(workflow).toContain('Open3.capture3("bash", "-n"')
     expect(workflow).toContain("bash -n")
     expect(workflow).toContain("git diff --check")
     expect(workflow).not.toContain("electron:dist")
