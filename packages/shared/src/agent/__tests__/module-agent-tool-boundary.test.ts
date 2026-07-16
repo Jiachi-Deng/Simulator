@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from 'bun:test';
-import { link, mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import { link, mkdir, mkdtemp, realpath, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   checkModuleAgentToolBoundary,
+  markModuleAgentSession,
   registerModuleAgentToolBoundary,
   unregisterModuleAgentToolBoundary,
 } from '../module-agent-tool-boundary.ts';
@@ -31,11 +32,23 @@ async function setupBoundary() {
 
 describe('Module Agent tool boundary', () => {
   it('allows project file operations and blocks traversal, shell, network, and unknown tools', async () => {
-    const { root, outside } = await setupBoundary();
-    expect(checkModuleAgentToolBoundary('module-session', 'Read', { file_path: 'inside.ts' }).allowed).toBe(true);
+    const { root, nested, outside } = await setupBoundary();
+    const canonicalRoot = await realpath(root);
+    const canonicalNested = await realpath(nested);
+    expect(checkModuleAgentToolBoundary('module-session', 'Read', { file_path: 'inside.ts' })).toMatchObject({
+      allowed: true,
+      canonicalPath: join(canonicalNested, 'inside.ts'),
+      canonicalInput: { file_path: join(canonicalNested, 'inside.ts') },
+    });
     expect(checkModuleAgentToolBoundary('module-session', 'Write', { file_path: join(root, 'new.ts') }).allowed).toBe(true);
-    expect(checkModuleAgentToolBoundary('module-session', 'Glob', { path: root, pattern: '**/*.ts' }).allowed).toBe(true);
-    expect(checkModuleAgentToolBoundary('module-session', 'Grep', { path: root, pattern: 'inside' }).allowed).toBe(true);
+    expect(checkModuleAgentToolBoundary('module-session', 'Glob', { path: root, pattern: '**/*.ts' })).toMatchObject({
+      allowed: true,
+      canonicalInput: { path: canonicalRoot, pattern: '**/*.ts' },
+    });
+    expect(checkModuleAgentToolBoundary('module-session', 'Grep', { pattern: 'inside' })).toMatchObject({
+      allowed: true,
+      canonicalInput: { path: canonicalNested, pattern: 'inside' },
+    });
 
     expect(checkModuleAgentToolBoundary('module-session', 'Read', { file_path: join(outside, 'secret.txt') }).allowed).toBe(false);
     expect(checkModuleAgentToolBoundary('module-session', 'Write', { file_path: '../../escape.txt' }).allowed).toBe(false);
@@ -45,6 +58,14 @@ describe('Module Agent tool boundary', () => {
     expect(checkModuleAgentToolBoundary('module-session', 'Bash', { command: 'cat /etc/passwd' }).allowed).toBe(false);
     expect(checkModuleAgentToolBoundary('module-session', 'WebFetch', { url: 'https://example.com' }).allowed).toBe(false);
     expect(checkModuleAgentToolBoundary('module-session', 'mcp__source__read', {}).allowed).toBe(false);
+  });
+
+  it('fails closed for a trusted Module session whose Host boundary is missing', () => {
+    markModuleAgentSession('module-session');
+    expect(checkModuleAgentToolBoundary('module-session', 'Read', { file_path: '/tmp/file' }))
+      .toEqual({ allowed: false, reason: 'Module Agent session has no active Host tool boundary.' });
+    expect(checkModuleAgentToolBoundary('module-session', 'Bash', { command: 'pwd' }).allowed).toBe(false);
+    expect(checkModuleAgentToolBoundary('ordinary-session', 'Bash', { command: 'pwd' }).allowed).toBe(true);
   });
 
   it('blocks symlink escapes and hard-linked file aliases', async () => {
@@ -89,5 +110,33 @@ describe('Module Agent tool boundary', () => {
     });
     expect(result).toMatchObject({ type: 'block' });
     if (result.type === 'block') expect(result.reason).toContain('cannot use the Bash tool');
+  });
+
+  it('rewrites allowed file and search inputs to canonical Host paths before provider execution', async () => {
+    const { root, nested } = await setupBoundary();
+    const canonicalNested = await realpath(nested);
+    const permissionManager = {
+      isCommandWhitelisted: () => true,
+      isDangerousCommand: () => false,
+      getBaseCommand: (command: string) => command,
+      extractDomainFromNetworkCommand: () => null,
+      isDomainWhitelisted: () => true,
+    };
+    const common = {
+      sessionId: 'module-session',
+      permissionMode: 'allow-all' as const,
+      workspaceRootPath: root,
+      workspaceId: 'workspace',
+      workingDirectory: nested,
+      activeSourceSlugs: [],
+      allSourceSlugs: [],
+      hasSourceActivation: false,
+      permissionManager,
+    };
+
+    expect(runPreToolUseChecks({ ...common, toolName: 'Read', input: { file_path: 'inside.ts' } }))
+      .toEqual({ type: 'modify', input: { file_path: join(canonicalNested, 'inside.ts') } });
+    expect(runPreToolUseChecks({ ...common, toolName: 'Glob', input: { pattern: '**/*.ts' } }))
+      .toEqual({ type: 'modify', input: { path: canonicalNested, pattern: '**/*.ts' } });
   });
 });

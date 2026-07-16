@@ -726,6 +726,10 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
     onDebug?.(`[ModuleAgentBoundary] blocking ${toolName} — ${reason}`);
     return { type: 'block', reason };
   }
+  // Module file/search tools must execute against the exact path that the
+  // Host authorized. Never let a provider reinterpret the original relative
+  // or aliased path after the boundary check.
+  const authorizedInput = moduleBoundary.canonicalInput ?? input;
 
   // Build permissions context for custom permissions.json rules
   const permissionsContext: PermissionsContext = {
@@ -750,7 +754,7 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
   // ============================================================
   const modeResult = shouldAllowToolInMode(
     toolName,
-    input,
+    authorizedInput,
     effectivePermissionMode,
     { plansFolderPath, dataFolderPath, permissionsContext }
   );
@@ -809,8 +813,8 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
   // ============================================================
   // 5. INPUT TRANSFORMS
   // ============================================================
-  let currentInput = input;
-  let wasModified = false;
+  let currentInput = authorizedInput;
+  let wasModified = authorizedInput !== input;
 
   // 5a. Path expansion
   const pathResult = expandToolPaths(toolName, currentInput, onDebug);
@@ -888,7 +892,7 @@ export function runPreToolUseChecks(ctx: PreToolUseInput): PreToolUseCheckResult
   if (effectivePermissionMode === 'ask') {
     const promptInfo = shouldPromptInAskMode(
       toolName,
-      input, // Use original input for permission decisions (before stripping)
+      authorizedInput, // Use the Host-authorized input before non-security transforms.
       permissionManager,
       permissionsContext,
       plansFolderPath,

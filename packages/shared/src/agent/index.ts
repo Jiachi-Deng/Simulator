@@ -3,6 +3,7 @@ export * from './claude-agent.ts';
 export * from './conversation-summary.ts';
 export {
   checkModuleAgentToolBoundary,
+  markModuleAgentSession,
   registerModuleAgentToolBoundary,
   unregisterModuleAgentToolBoundary,
   type ModuleAgentToolBoundaryResult,

@@ -7,6 +7,7 @@ import type {
 } from '@simulator/module-agent-gateway'
 import type { ISessionManager } from '../handlers/session-manager-interface'
 import {
+  markModuleAgentSession,
   registerModuleAgentToolBoundary,
   unregisterModuleAgentToolBoundary,
 } from '@craft-agent/shared/agent'
@@ -54,6 +55,10 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
       await this.sessions.deleteSession(session.id).catch(() => undefined)
       throw new Error('Craft created an invalid hidden module session')
     }
+    // Mark first so any accidental queued/tool work between session creation
+    // and boundary installation fails closed. createSession does not return to
+    // the Gateway until the canonical boundary is active.
+    markModuleAgentSession(session.id)
     try {
       // The launch grant may cover the Module's whole data area so it can
       // select a project, but an Agent session is confined to the one
@@ -61,6 +66,7 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
       // one OpenDesign project from reading sibling projects or daemon data.
       registerModuleAgentToolBoundary(session.id, workingDirectory, workingDirectory)
     } catch (error) {
+      unregisterModuleAgentToolBoundary(session.id)
       await this.sessions.deleteSession(session.id).catch(() => undefined)
       throw error
     }
