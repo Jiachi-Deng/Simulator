@@ -85,6 +85,7 @@ test("V0-V12 run against the exact pinned OpenDesign daemon and V13 remains an i
   delete hostEnv.NODE_TEST_CONTEXT;
   const host = await execFileAsync(process.execPath, [
     "--test",
+    "--test-reporter=tap",
     path.join(moduleRoot, "test", "simulator-host-runtime.test.mjs"),
   ], {
     cwd: moduleRoot,

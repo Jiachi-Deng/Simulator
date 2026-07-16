@@ -1,6 +1,7 @@
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { publicWrapperFailure } from './host-module-smoke-public-failure'
 
 type SmokeScenario = 'v1-compat' | 'v2-open-design-rc'
 
@@ -12,12 +13,50 @@ interface SmokeScenarioConfig {
   readonly fixtureEntry: 'module.ts' | 'module-v2.ts'
 }
 
+const INNER_WATCHDOG_TIMEOUT_MS = 40_000
+const OUTER_CLEANUP_BUDGET_MS = 10_000
+const OUTER_WATCHDOG_MARGIN_MS = 5_000
+const OUTER_WATCHDOG_TIMEOUT_MS = INNER_WATCHDOG_TIMEOUT_MS
+  + OUTER_CLEANUP_BUDGET_MS
+  + OUTER_WATCHDOG_MARGIN_MS
+const GRACEFUL_PROCESS_EXIT_MS = 3_000
+const FORCED_PROCESS_EXIT_MS = 2_000
+
+function closedFailure(
+  code: string,
+  details: Readonly<Record<string, number | undefined>> = {},
+): Error {
+  const suffix = Object.entries(details)
+    .filter((entry): entry is [string, number] => Number.isFinite(entry[1]))
+    .map(([key, value]) => `${key}=${value}`)
+    .join(' ')
+  return new Error(suffix ? `${code} ${suffix}` : code)
+}
+
+let reportingFatalFailure = false
+function reportFatalFailure(error: unknown): never {
+  if (!reportingFatalFailure) {
+    reportingFatalFailure = true
+    process.stderr.write(`[simulator-module-smoke] ${publicWrapperFailure(error)}\n`)
+  }
+  process.exit(1)
+}
+
+process.on('uncaughtException', reportFatalFailure)
+process.on('unhandledRejection', reportFatalFailure)
+
+function acceptanceTestTiming(name: string, fallback: number): number {
+  if (process.env.SIMULATOR_HOST_MODULE_ACCEPTANCE_TEST !== '1') return fallback
+  const value = Number(process.env[name])
+  return Number.isSafeInteger(value) && value >= 10 && value <= 10_000 ? value : fallback
+}
+
 function parseArguments(argv: readonly string[]): { packagedApp?: string; scenario: SmokeScenario } {
   let packagedApp: string | undefined
   let scenario: SmokeScenario | undefined
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]
-    if (argument !== '--app' && argument !== '--scenario') throw new Error(`Unknown argument: ${argument}`)
+    if (argument !== '--app' && argument !== '--scenario') throw new Error('Unknown argument')
     const value = argv[index + 1]
     if (!value || value.startsWith('--')) throw new Error(`${argument} requires a value`)
     index += 1
@@ -57,7 +96,7 @@ const scenarioConfig: SmokeScenarioConfig = options.scenario === 'v1-compat'
 const electronRoot = resolve(import.meta.dir, '..')
 const repoRoot = resolve(electronRoot, '..', '..')
 const fixtureRoot = join(repoRoot, 'packages', 'module-coordinator', 'fixtures', 'packaged-fake-module')
-const temporary = mkdtempSync(join(tmpdir(), 'simulator-electron-module-coordinator-smoke-'))
+const temporary = realpathSync(mkdtempSync(join(tmpdir(), 'simulator-electron-module-coordinator-smoke-')))
 const runtimeRoot = join(temporary, 'runtime')
 const moduleId = scenarioConfig.moduleId
 const version = scenarioConfig.version
@@ -83,7 +122,11 @@ const build = Bun.spawnSync([
   executable,
 ], { stdout: 'pipe', stderr: 'pipe' })
 if (build.exitCode !== 0) {
-  throw new Error(`Could not compile Electron smoke fixture: ${build.stdout.toString()}\n${build.stderr.toString()}`)
+  throw closedFailure('FIXTURE_BUILD_FAILED', {
+    status: build.exitCode,
+    stdoutBytes: build.stdout.byteLength,
+    stderrBytes: build.stderr.byteLength,
+  })
 }
 writeFileSync(join(versionRoot, 'frontend', 'index.html'), readFileSync(join(fixtureRoot, 'frontend', 'index.html')))
 writeFileSync(join(versionRoot, 'data.txt'), readFileSync(join(fixtureRoot, 'data.txt')))
@@ -114,11 +157,120 @@ function packagedExecutable(path: string): string {
   return join(absolute, 'Contents', 'MacOS', basename(absolute, '.app'))
 }
 
+function processExists(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+  }
+}
+
+function processGroupExists(pgid: number): boolean {
+  if (process.platform === 'win32') return false
+  try {
+    process.kill(-pgid, 0)
+    return true
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH'
+  }
+}
+
+async function waitForProcessesToExit(pids: readonly number[], timeoutMs: number): Promise<number[]> {
+  const deadline = Date.now() + timeoutMs
+  let remaining = [...new Set(pids)].filter(processExists)
+  while (remaining.length > 0 && Date.now() < deadline) {
+    await Bun.sleep(50)
+    remaining = remaining.filter(processExists)
+  }
+  return remaining
+}
+
+async function waitForProcessGroupsToExit(pgids: readonly number[], timeoutMs: number): Promise<number[]> {
+  const deadline = Date.now() + timeoutMs
+  let remaining = [...new Set(pgids)].filter(processGroupExists)
+  while (remaining.length > 0 && Date.now() < deadline) {
+    await Bun.sleep(50)
+    remaining = remaining.filter(processGroupExists)
+  }
+  return remaining
+}
+
+async function drainByteCount(stream: ReadableStream<Uint8Array>): Promise<number> {
+  const reader = stream.getReader()
+  let bytes = 0
+  while (true) {
+    const chunk = await reader.read()
+    if (chunk.done) return bytes
+    bytes += chunk.value.byteLength
+  }
+}
+
+async function awaitChildExitWithin(
+  child: { readonly exited: Promise<number> },
+  timeoutMs: number,
+): Promise<{ exited: true; status: number } | { exited: false }> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      child.exited.then((status) => ({ exited: true as const, status })),
+      new Promise<{ exited: false }>((resolvePromise) => {
+        timer = setTimeout(() => resolvePromise({ exited: false }), timeoutMs)
+      }),
+    ])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
+
+function collectedSmokeOwnedProcessGroups(path: string): number[] {
+  try {
+    const result = JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>
+    const values = result.smokeOwnedProcessGroups
+    if (!Array.isArray(values)) return []
+    return [...new Set(values.filter((value): value is number => (
+      Number.isSafeInteger(value) && value > 1
+    )))]
+  } catch {
+    return []
+  }
+}
+
+function signalProcessGroups(pgids: readonly number[], signal: NodeJS.Signals): void {
+  for (const pgid of pgids) {
+    try {
+      process.kill(-pgid, signal)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') {
+        throw closedFailure('SMOKE_OWNED_PROCESS_SIGNAL_FAILED')
+      }
+    }
+  }
+}
+
+async function reapCollectedProcessGroups(pgids: readonly number[]): Promise<void> {
+  if (process.platform === 'win32' || pgids.length === 0) return
+  signalProcessGroups(pgids, 'SIGTERM')
+  let remaining = await waitForProcessGroupsToExit(pgids, acceptanceTestTiming(
+    'SIMULATOR_HOST_MODULE_ACCEPTANCE_GRACE_MS',
+    GRACEFUL_PROCESS_EXIT_MS,
+  ))
+  if (remaining.length === 0) return
+  signalProcessGroups(remaining, 'SIGKILL')
+  remaining = await waitForProcessGroupsToExit(remaining, acceptanceTestTiming(
+    'SIMULATOR_HOST_MODULE_ACCEPTANCE_FORCE_WAIT_MS',
+    FORCED_PROCESS_EXIT_MS,
+  ))
+  if (remaining.length > 0) {
+    throw closedFailure('SMOKE_OWNED_PROCESS_REAP_FAILED')
+  }
+}
+
 const executablePath = packagedApp
   ? packagedExecutable(packagedApp)
   : join(repoRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'electron.cmd' : 'electron')
 const appArguments = packagedApp ? [] : [electronRoot]
-if (!existsSync(executablePath)) throw new Error(`Electron executable not found: ${executablePath}`)
+if (!existsSync(executablePath)) throw closedFailure('SMOKE_EXECUTABLE_MISSING')
 
 const child = Bun.spawn([
   executablePath,
@@ -147,42 +299,104 @@ const child = Bun.spawn([
   stdout: 'pipe',
   stderr: 'pipe',
 })
-const timeout = setTimeout(() => child.kill(), 45_000)
-const [exitCode, stdout, stderr] = await Promise.all([
-  child.exited,
-  new Response(child.stdout).text(),
-  new Response(child.stderr).text(),
-])
-clearTimeout(timeout)
+const stdoutBytesPromise = drainByteCount(child.stdout)
+const stderrBytesPromise = drainByteCount(child.stderr)
+const outerTimeoutMs = acceptanceTestTiming(
+  'SIMULATOR_HOST_MODULE_ACCEPTANCE_OUTER_TIMEOUT_MS',
+  OUTER_WATCHDOG_TIMEOUT_MS,
+)
+let exit = await awaitChildExitWithin(child, outerTimeoutMs)
+let watchdogTimedOut = false
+if (!exit.exited) {
+  watchdogTimedOut = true
+  const ownedProcessGroups = collectedSmokeOwnedProcessGroups(resultPath)
+  child.kill('SIGTERM')
+  exit = await awaitChildExitWithin(child, acceptanceTestTiming(
+    'SIMULATOR_HOST_MODULE_ACCEPTANCE_GRACE_MS',
+    GRACEFUL_PROCESS_EXIT_MS,
+  ))
+  if (!exit.exited) {
+    child.kill('SIGKILL')
+    exit = await awaitChildExitWithin(child, acceptanceTestTiming(
+      'SIMULATOR_HOST_MODULE_ACCEPTANCE_FORCE_WAIT_MS',
+      FORCED_PROCESS_EXIT_MS,
+    ))
+  }
+  await reapCollectedProcessGroups(ownedProcessGroups)
+  if (!exit.exited) throw closedFailure('SMOKE_CHILD_REAP_FAILED')
+}
+const [stdoutBytes, stderrBytes] = await Promise.all([stdoutBytesPromise, stderrBytesPromise])
+const exitCode = exit.status
 
 try {
-  if (!existsSync(resultPath)) throw new Error(`Electron host module smoke produced no result (${exitCode})\n${stdout}\n${stderr}`)
-  const result = JSON.parse(readFileSync(resultPath, 'utf8')) as Record<string, unknown>
-  if (exitCode !== 0 || result.ok !== true) {
-    throw new Error(`Electron host module smoke failed (${exitCode}): ${JSON.stringify(result)}\n${stdout}\n${stderr}`)
+  if (watchdogTimedOut) {
+    throw closedFailure('SMOKE_CHILD_TIMEOUT', { status: exitCode, stdoutBytes, stderrBytes })
   }
-  if (result.packaged !== Boolean(packagedApp)) throw new Error(`Unexpected packaged state: ${JSON.stringify(result)}`)
+  if (!existsSync(resultPath)) {
+    throw closedFailure('SMOKE_RESULT_MISSING', { status: exitCode, stdoutBytes, stderrBytes })
+  }
+  const resultBuffer = readFileSync(resultPath)
+  let result: Record<string, unknown>
+  try {
+    result = JSON.parse(resultBuffer.toString('utf8')) as Record<string, unknown>
+  } catch {
+    throw closedFailure('SMOKE_RESULT_INVALID', {
+      status: exitCode,
+      resultBytes: resultBuffer.byteLength,
+      stdoutBytes,
+      stderrBytes,
+    })
+  }
+  if (exitCode !== 0 || result.ok !== true) {
+    throw closedFailure('SMOKE_CHILD_FAILED', {
+      status: exitCode,
+      resultBytes: resultBuffer.byteLength,
+      stdoutBytes,
+      stderrBytes,
+    })
+  }
+  if (result.packaged !== Boolean(packagedApp)) throw closedFailure('SMOKE_PACKAGED_STATE_INVALID')
   if (result.protocolFixture !== true
     || result.acceptanceScope !== 'deterministic-packaged-protocol-fixture-not-real-rc-or-paid-preview-acceptance'
     || result.scenario !== scenarioConfig.scenario
     || result.moduleId !== moduleId
     || result.moduleVersion !== version) {
-    throw new Error(`Electron smoke did not return closed protocol-fixture identity: ${JSON.stringify(result)}`)
+    throw closedFailure('SMOKE_FIXTURE_IDENTITY_INVALID')
   }
   const cleanup = result.cleanup as Record<string, unknown> | undefined
   const builtInAgent = result.builtInAgent as Record<string, unknown> | undefined
   const hostAgentRuntime = result.hostAgentRuntime as Record<string, unknown> | undefined
+  const processEvidence = result.processEvidence as Record<string, unknown> | undefined
+  const visibleTurns = builtInAgent?.visibleTurns as Array<Record<string, unknown>> | undefined
+  const expectedVisibleMarkers = [
+    'craft-before-module',
+    'craft-after-worker-recovery',
+    'craft-after-daemon-recovery',
+  ]
+  const visibleTurnsValid = builtInAgent?.visibleTurnCount === 3
+    && Array.isArray(visibleTurns) && visibleTurns.length === 3
+    && visibleTurns.every((turn, index) => (
+      turn.marker === expectedVisibleMarkers[index]
+      && turn.assistantCountBefore === index
+      && turn.assistantCountAfter === index + 1
+    ))
+    && Number.isSafeInteger(builtInAgent.hostMainProcessId) && (builtInAgent.hostMainProcessId as number) > 0
+    && Number.isSafeInteger(builtInAgent.hostWebContentsId) && (builtInAgent.hostWebContentsId as number) > 0
+    && Number.isSafeInteger(builtInAgent.hostRendererProcessId) && (builtInAgent.hostRendererProcessId as number) > 0
   if (result.preloadIsolated !== true || result.noOrphanWebContents !== true || result.builtInAgentIndependent !== true
-    || result.moduleCrashRestarted !== true || result.beforeQuitObserved !== true || result.repeatedBeforeQuitIdempotent !== true
+    || result.workerCrashRecovered !== true || result.moduleCrashRestarted !== true
+    || result.beforeQuitObserved !== true || result.repeatedBeforeQuitIdempotent !== true
     || cleanup?.coordinatorDrained !== true || cleanup.sessionFlushed !== true || cleanup.serverStopped !== true || cleanup.viewsDisposed !== true
     || cleanup.moduleAgentStopped !== true
-    || hostAgentRuntime?.deterministicMultiTurn !== true || hostAgentRuntime.crashGrantRotated !== true
-    || hostAgentRuntime.oldGrantRevoked !== true || hostAgentRuntime.stopGrantRevoked !== true
-    || builtInAgent?.deterministicTurn !== true || builtInAgent.serverHealthyBeforeModule !== true || builtInAgent.serverHealthyAfterModule !== true) {
-    throw new Error(`Electron host module smoke assertions failed: ${JSON.stringify(result)}`)
+    || hostAgentRuntime?.deterministicTurns !== true || hostAgentRuntime.crashGrantRotated !== true
+    || hostAgentRuntime.workerEpochRotated !== true || hostAgentRuntime.oldGrantRevoked !== true
+    || hostAgentRuntime.stopGrantRevoked !== true || hostAgentRuntime.zeroHiddenSessions !== true
+    || builtInAgent?.deterministicTurn !== true || !visibleTurnsValid
+    || builtInAgent.serverHealthyBeforeModule !== true || builtInAgent.serverHealthyAfterModule !== true) {
+    throw closedFailure('SMOKE_ASSERTIONS_FAILED')
   }
   if (hostAgentRuntime.contractVersion !== scenarioConfig.contractVersion) {
-    throw new Error(`Electron smoke used the wrong Host Agent contract: ${JSON.stringify(result)}`)
+    throw closedFailure('SMOKE_CONTRACT_VERSION_INVALID')
   }
   if (scenarioConfig.scenario === 'v2-open-design-rc'
     && (hostAgentRuntime.ordinaryJsonEventStreamCli !== true
@@ -191,14 +405,48 @@ try {
     // M1 #129 integration contract: main-process smoke must forward and verify
     // the strict fixture evidence. Never substitute the legacy multi-turn bit
     // for one-Turn/one-Session v2 proof.
-    throw new Error(`Electron v2 packaged protocol evidence is incomplete: ${JSON.stringify(result)}`)
+    throw closedFailure('SMOKE_V2_EVIDENCE_INCOMPLETE')
   }
-  if (existsSync(join(configRoot, '.server.lock'))) throw new Error('Electron before-quit left the embedded server lock behind')
-  const sessionPath = builtInAgent.sessionPath
-  if (typeof sessionPath !== 'string' || !existsSync(join(sessionPath, 'session.jsonl'))) {
-    throw new Error(`Electron before-quit did not flush the built-in Agent session: ${JSON.stringify(result)}`)
+  if (scenarioConfig.scenario === 'v1-compat' && hostAgentRuntime.deterministicMultiTurn !== true) {
+    throw closedFailure('SMOKE_V1_EVIDENCE_INCOMPLETE')
   }
-  console.log(`Electron host module coordinator smoke passed (${scenarioConfig.scenario}): ${JSON.stringify(result)}`)
+  const observedPids = processEvidence?.observedPids
+  const providerProcessGroups = processEvidence?.providerProcessGroups
+  const processRecords = processEvidence?.records
+  if (processEvidence?.checkWithinMs !== 10_000 || !Array.isArray(observedPids)
+    || observedPids.length === 0
+    || observedPids.some((pid) => !Number.isSafeInteger(pid) || pid <= 0)
+    || !Array.isArray(providerProcessGroups) || providerProcessGroups.length < 3
+    || providerProcessGroups.some((pgid) => !Number.isSafeInteger(pgid) || pgid <= 0)
+    || !Array.isArray(processRecords) || processRecords.length === 0
+    || processRecords.some((input) => {
+      const record = input as Record<string, unknown>
+      return !Number.isSafeInteger(record.pid) || (record.pid as number) <= 0
+        || !Number.isSafeInteger(record.ppid) || (record.ppid as number) <= 0
+        || !Number.isSafeInteger(record.pgid) || (record.pgid as number) <= 0
+        || !['host-descendant', 'module-provider-root', 'module-provider-descendant'].includes(String(record.role))
+        || typeof record.executable !== 'string' || record.executable.length === 0
+        || record.executable.includes('/') || record.executable.includes('\\')
+        || Object.keys(record).some((key) => !['pid', 'ppid', 'pgid', 'role', 'executable'].includes(key))
+    })
+    || processRecords.filter((input) => (
+      (input as Record<string, unknown>).role === 'module-provider-root'
+    )).length < 3) {
+    throw closedFailure('SMOKE_PROCESS_EVIDENCE_INVALID')
+  }
+  const remainingPids = await waitForProcessesToExit(observedPids as number[], 10_000)
+  if (remainingPids.length > 0) {
+    throw closedFailure('SMOKE_PROCESS_RESIDUE')
+  }
+  const remainingProcessGroups = await waitForProcessGroupsToExit(providerProcessGroups as number[], 10_000)
+  if (remainingProcessGroups.length > 0) {
+    throw closedFailure('SMOKE_PROCESS_GROUP_RESIDUE')
+  }
+  if (existsSync(join(configRoot, '.server.lock'))) throw closedFailure('SMOKE_SERVER_LOCK_RESIDUE')
+  if (builtInAgent.sessionPersistenceVerified !== true) {
+    throw closedFailure('SMOKE_SESSION_PERSISTENCE_INVALID')
+  }
+  console.log(`Electron host module coordinator smoke passed (${scenarioConfig.scenario})`)
 } finally {
   rmSync(temporary, { recursive: true, force: true })
 }

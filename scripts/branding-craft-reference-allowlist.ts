@@ -175,11 +175,17 @@ export const CRAFT_REFERENCE_ALLOWLIST: CraftReferenceCategory[] = [
       (path === 'CHANGELOG.md'
         && /Host-owned `simulator-host-agent`|OpenDesign v2.*(?:transient Craft Session|Craft Turn)/.test(line))
       || path === 'apps/electron/resources/host-agent/simulator-host-agent.mjs'
-      || /^apps\/electron\/src\/host-agent\/(?:__tests__\/(?:module-turn-lease|supervisor)\.test|module-turn-lease|supervisor|v1-compatibility-runtime|worker-entry)\.ts$/.test(path)
-      || /^apps\/electron\/src\/main\/module-agent-runtime(?:\.test)?\.ts$/.test(path)
+      || /^apps\/electron\/src\/host-agent\/(?:__tests__\/(?:module-turn-lease|supervisor)\.test|module-turn-lease|supervisor|v1-(?:compatibility-runtime|core-port-adapter)|worker-entry)\.ts$/.test(path)
+      || /^apps\/electron\/src\/main\/module-agent-(?:runtime|worker-recovery)(?:\.test)?\.ts$/.test(path)
       || /^(?:packages\/host-agent-contract\/(?:schema\/host-agent-v2\.schema\.json|src\/constants\.ts)|packages\/host-agent-run-core\/src\/run-core(?:\.test)?\.ts)$/.test(path)
       || path === 'packages/pi-agent-server/src/file-tool-path-input.ts'
-      || /^(?:packages\/server-core\/src\/(?:handlers\/session-manager-interface|sessions\/(?:module-agent-adapter|visible-craft-turn-gate(?:\.test)?|visible-craft-turn-priority\.test))|packages\/shared\/src\/agent\/(?:module-agent-tool-boundary|provider-process-reaper))\.ts$/.test(path),
+      || /^(?:packages\/server-core\/src\/(?:handlers\/session-manager-interface|sessions\/(?:module-agent-adapter|visible-craft-turn-gate(?:\.test)?|visible-craft-turn-priority\.test))|packages\/shared\/src\/agent\/(?:module-agent-tool-boundary|provider-process-reaper))\.ts$/.test(path)
+      || (path === 'apps/electron/src/main/host-module-coordinator-smoke.ts'
+        && [
+          'throw new Error(`Visible Craft Host identity changed during ${phase}`)',
+          'await smoke.sessionManager.sendMessage(session.id, `Visible Craft independence marker: ${marker}`)',
+          'throw new Error(`Visible Craft Turn did not complete exactly once for ${marker}`)',
+        ].includes(line.trim())),
   },
   {
     id: 'localized-open-design-craft-host-copy',

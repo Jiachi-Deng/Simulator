@@ -69,6 +69,21 @@ describe('remaining Craft references', () => {
       line: 'Welcome to Craft',
       value: 'Craft',
     })).toBeUndefined()
+
+    const smokePath = 'apps/electron/src/main/host-module-coordinator-smoke.ts'
+    for (const line of [
+      'throw new Error(`Visible Craft Host identity changed during ${phase}`)',
+      'await smoke.sessionManager.sendMessage(session.id, `Visible Craft independence marker: ${marker}`)',
+      'throw new Error(`Visible Craft Turn did not complete exactly once for ${marker}`)',
+    ]) {
+      expect(categoryForCraftReference({ path: smokePath, line, value: 'Craft' })?.id)
+        .toBe('m1-host-agent-craft-runtime-terminology')
+    }
+    expect(categoryForCraftReference({
+      path: smokePath,
+      line: 'Visible Craft acceptance copy for an unrelated fourth assertion',
+      value: 'Craft',
+    })).toBeUndefined()
   })
 
   test('current package metadata and desktop artifacts use Simulator ownership', () => {
