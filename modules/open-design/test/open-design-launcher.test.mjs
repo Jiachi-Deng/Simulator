@@ -69,6 +69,37 @@ test("bootstrap launches sealed sidecars, proxies HTTP/WebSocket, preserves data
   assert.equal((starts.match(/^web$/gm) ?? []).length, 2);
 });
 
+test("proxy preserves legitimate responses beyond the former 15 second inactivity boundary", { timeout: 25_000 }, async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const launcher = await startLauncher(fixture);
+  t.after(() => stopLauncher(launcher));
+
+  const startedAt = Date.now();
+  const proxied = await request(launcher.port, "/slow-response");
+
+  assert.ok(Date.now() - startedAt >= 15_000, "fixture must cross the former launcher inactivity timeout");
+  assert.equal(proxied.statusCode, 200);
+  assert.equal(proxied.body, "slow-proxied");
+  assert.equal(proxied.headers["x-from-fake"], "web");
+});
+
+test("proxy closes the upstream request when the downstream client disconnects", { timeout: 10_000 }, async (t) => {
+  const fixture = await createFixture();
+  t.after(() => rm(fixture.root, { recursive: true, force: true }));
+  const launcher = await startLauncher(fixture);
+  t.after(() => stopLauncher(launcher));
+  const readyMarker = path.join(fixture.dataRoot, "open-design", "downstream-abort-ready");
+  const marker = path.join(fixture.dataRoot, "open-design", "downstream-aborted");
+
+  const hanging = http.request({ host: "127.0.0.1", port: launcher.port, path: "/observe-downstream-abort" });
+  hanging.once("error", () => {});
+  hanging.end();
+  await waitForFile(readyMarker, 2_000, "fake upstream did not receive the hanging request");
+  hanging.destroy();
+  await waitForFile(marker, 2_000, "launcher left the upstream request open after the downstream disconnected");
+});
+
 test("web sidecar crash terminates daemon process group and closes the host endpoint", { timeout: 20_000 }, async (t) => {
   const fixture = await createFixture();
   t.after(() => rm(fixture.root, { recursive: true, force: true }));
@@ -251,6 +282,15 @@ async function waitForPortClosed(port) {
     await sleep(25);
   }
   throw new Error("host health endpoint remains open");
+}
+
+async function waitForFile(file, timeoutMs, message) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await stat(file).then(() => true, () => false)) return;
+    await sleep(25);
+  }
+  assert.fail(message);
 }
 
 function freePort() {

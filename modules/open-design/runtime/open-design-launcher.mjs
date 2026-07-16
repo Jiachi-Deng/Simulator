@@ -10,6 +10,7 @@ import { StringDecoder } from "node:string_decoder";
 const LOOPBACK = "127.0.0.1";
 const OUTPUT_LIMIT_BYTES = 1024 * 1024;
 const READY_TIMEOUT_MS = 30_000;
+const PROXY_CONNECT_TIMEOUT_MS = 15_000;
 // The host supervisor escalates after 2 seconds. Keep both the graceful and
 // forced child-process waits inside that outer budget so the launcher still
 // has time to remove its private run root before the host kills the group.
@@ -345,6 +346,7 @@ function proxyRequest(value, request, response) {
     response.end("bad request");
     return;
   }
+  let upstreamResponse;
   const outbound = http.request({
     host: LOOPBACK,
     port: value.webReservation.port,
@@ -353,6 +355,7 @@ function proxyRequest(value, request, response) {
     headers: proxyHeaders(value, request.headers),
     agent: false,
   }, (upstream) => {
+    upstreamResponse = upstream;
     if (isExternalLocation(upstream.headers.location)) {
       upstream.resume();
       response.writeHead(502, { "content-type": "text/plain", "content-length": "17" });
@@ -362,12 +365,21 @@ function proxyRequest(value, request, response) {
     response.writeHead(upstream.statusCode ?? 502, responseHeaders(upstream.headers));
     upstream.pipe(response);
   });
-  outbound.setTimeout(15_000, () => outbound.destroy(new Error("upstream timeout")));
+  boundLoopbackConnect(outbound);
   outbound.once("error", () => {
+    if (response.destroyed) return;
     if (!response.headersSent) {
       response.writeHead(502, { "content-type": "text/plain", "content-length": "15" });
       response.end("upstream failed");
     } else response.destroy();
+  });
+  const abortUpstream = () => {
+    upstreamResponse?.destroy();
+    outbound.destroy();
+  };
+  request.once("aborted", abortUpstream);
+  response.once("close", () => {
+    if (!response.writableEnded) abortUpstream();
   });
   let received = 0;
   request.on("data", (chunk) => {
@@ -375,6 +387,18 @@ function proxyRequest(value, request, response) {
     if (received > MAX_PROXY_BODY_BYTES) request.destroy(new Error("request body too large"));
   });
   request.pipe(outbound);
+}
+
+function boundLoopbackConnect(request) {
+  const timeout = setTimeout(() => request.destroy(new Error("upstream connect timeout")), PROXY_CONNECT_TIMEOUT_MS);
+  timeout.unref();
+  const connected = () => clearTimeout(timeout);
+  request.once("socket", (socket) => {
+    if (socket.connecting) socket.once("connect", connected);
+    else connected();
+  });
+  request.once("response", connected);
+  request.once("error", connected);
 }
 
 function proxyUpgrade(value, request, socket, head) {

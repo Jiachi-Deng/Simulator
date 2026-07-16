@@ -50,6 +50,20 @@ const server = http.createServer((request, response) => {
     response.end(`proxied:${request.method}`);
     return;
   }
+  if (request.url === "/slow-response") {
+    setTimeout(() => {
+      response.writeHead(200, { "content-type": "text/plain", "x-from-fake": app });
+      response.end("slow-proxied");
+    }, 15_500);
+    return;
+  }
+  if (request.url === "/observe-downstream-abort") {
+    writeFileSync(path.join(dataRoot, "downstream-abort-ready"), "ready\n");
+    response.once("close", () => {
+      writeFileSync(path.join(dataRoot, "downstream-aborted"), "closed\n");
+    });
+    return;
+  }
   if (request.url === "/pid") {
     response.writeHead(200, { "content-type": "application/json" });
     response.end(JSON.stringify({ pid: process.pid, descendantPid: descendant.pid }));
