@@ -1,0 +1,25 @@
+{
+  "name": "@simulator/host-agent-broker",
+  "version": "0.11.1",
+  "license": "Apache-2.0",
+  "description": "Loopback-only HTTP/SSE broker and MessagePort RPC client for Simulator Host Agent v2",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./message-port": "./src/message-port.ts"
+  },
+  "scripts": {
+    "test": "bun test src",
+    "typecheck": "tsc --noEmit",
+    "build": "bun build src/index.ts src/message-port.ts --outdir dist --target node --format esm --splitting"
+  },
+  "dependencies": {
+    "@simulator/host-agent-contract": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.8",
+    "typescript": "^5.8.2"
+  }
+}

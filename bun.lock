@@ -241,6 +241,17 @@
         "@modelcontextprotocol/sdk": ">=1.29.0",
       },
     },
+    "packages/host-agent-broker": {
+      "name": "@simulator/host-agent-broker",
+      "version": "0.11.1",
+      "dependencies": {
+        "@simulator/host-agent-contract": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^25.0.8",
+        "typescript": "^5.8.2",
+      },
+    },
     "packages/host-agent-contract": {
       "name": "@simulator/host-agent-contract",
       "version": "0.11.1",
@@ -251,6 +262,17 @@
     },
     "packages/host-agent-run-core": {
       "name": "@simulator/host-agent-run-core",
+      "version": "0.11.1",
+      "dependencies": {
+        "@simulator/host-agent-contract": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^25.0.8",
+        "typescript": "^5.8.2",
+      },
+    },
+    "packages/host-agent-shim": {
+      "name": "@simulator/host-agent-shim",
       "version": "0.11.1",
       "dependencies": {
         "@simulator/host-agent-contract": "workspace:*",
@@ -433,6 +455,8 @@
         "@craft-agent/core": "workspace:*",
         "@craft-agent/shared": "workspace:*",
         "@earendil-works/pi-ai": "0.80.6",
+        "@simulator/host-agent-contract": "workspace:*",
+        "@simulator/host-agent-run-core": "workspace:*",
         "@simulator/module-agent-gateway": "workspace:*",
         "jose": "^6.0.0",
         "sharp": "0.34.5",
@@ -1438,9 +1462,13 @@
 
     "@silvia-odwyer/photon-node": ["@silvia-odwyer/photon-node@0.3.4", "", {}, "sha512-bnly4BKB3KDTFxrUIcgCLbaeVVS8lrAkri1pEzskpmxu9MdfGQTy8b8EgcD83ywD3RPMsIulY8xJH5Awa+t9fA=="],
 
+    "@simulator/host-agent-broker": ["@simulator/host-agent-broker@workspace:packages/host-agent-broker"],
+
     "@simulator/host-agent-contract": ["@simulator/host-agent-contract@workspace:packages/host-agent-contract"],
 
     "@simulator/host-agent-run-core": ["@simulator/host-agent-run-core@workspace:packages/host-agent-run-core"],
+
+    "@simulator/host-agent-shim": ["@simulator/host-agent-shim@workspace:packages/host-agent-shim"],
 
     "@simulator/module-agent-gateway": ["@simulator/module-agent-gateway@workspace:packages/module-agent-gateway"],
 
