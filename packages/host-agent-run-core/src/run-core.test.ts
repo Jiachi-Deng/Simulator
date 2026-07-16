@@ -12,13 +12,25 @@ const flush = async () => {
   await new Promise<void>((resolve) => setTimeout(resolve, 0))
 }
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise
+  })
+  return { promise, resolve }
+}
+
 async function setup(overrides?: { maxReplayEvents?: number }) {
   const sessions = new InMemoryHostAgentRunSessionPort()
+  let canonicalizeBarrier: Promise<void> | undefined
   const core = new ModuleAgentRunCore({
     sessions,
     ids: new DeterministicHostAgentRunIdSource(),
     paths: {
-      async canonicalize(value) { return value },
+      async canonicalize(value) {
+        await canonicalizeBarrier
+        return value
+      },
       isEqualOrWithin(candidate, root) { return candidate === root || candidate.startsWith(`${root}/`) },
     },
     limits: {
@@ -38,7 +50,11 @@ async function setup(overrides?: { maxReplayEvents?: number }) {
     defaultWorkingDirectory: '/projects/default',
     expiresAt: Date.now() + 60_000,
   })
-  return { core, sessions }
+  return {
+    core,
+    sessions,
+    setCanonicalizeBarrier(value: Promise<void> | undefined) { canonicalizeBarrier = value },
+  }
 }
 
 const request = (prompt = 'Build the dashboard') => ({
@@ -66,6 +82,64 @@ describe('ModuleAgentRunCore', () => {
     await flush()
     expect(sessions.prompts).toEqual([{ sessionId: 'session-1', prompt: 'Build the dashboard' }])
     expect(core.getRun('grant-1', first.runHandle).state).toBe('running')
+  })
+
+  it('serializes concurrent idempotent creates into one Run and one Session', async () => {
+    const { core, sessions, setCanonicalizeBarrier } = await setup()
+    const gate = deferred()
+    setCanonicalizeBarrier(gate.promise)
+    const first = core.createRun({ grantId: 'grant-1', idempotencyKey: 'same-key', request: request() })
+    const duplicate = core.createRun({ grantId: 'grant-1', idempotencyKey: 'same-key', request: request() })
+    await flush()
+    gate.resolve()
+    const [firstRun, duplicateRun] = await Promise.all([first, duplicate])
+    expect(duplicateRun.runHandle).toBe(firstRun.runHandle)
+    expect(sessions.created).toHaveLength(1)
+  })
+
+  it('enforces one global Module Run across concurrent distinct creates', async () => {
+    const { core, sessions, setCanonicalizeBarrier } = await setup()
+    const gate = deferred()
+    setCanonicalizeBarrier(gate.promise)
+    const first = core.createRun({ grantId: 'grant-1', idempotencyKey: 'concurrent-1', request: request('one') })
+    const second = core.createRun({ grantId: 'grant-1', idempotencyKey: 'concurrent-2', request: request('two') })
+    await flush()
+    gate.resolve()
+    const results = await Promise.allSettled([first, second])
+    expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1)
+    expect(results.filter((result) => result.status === 'rejected')).toEqual([
+      expect.objectContaining({ reason: expect.objectContaining({ code: 'RUN_ACTIVE' }) }),
+    ])
+    expect(sessions.created).toHaveLength(1)
+  })
+
+  it('rechecks Craft priority after asynchronous path canonicalization', async () => {
+    const { core, sessions, setCanonicalizeBarrier } = await setup()
+    const gate = deferred()
+    setCanonicalizeBarrier(gate.promise)
+    const creating = core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'canonicalize-craft-race', request: request(),
+    })
+    await flush()
+    await core.beginCraftTurn()
+    gate.resolve()
+    await expect(creating).rejects.toMatchObject({ code: 'CRAFT_TURN_ACTIVE' })
+    expect(sessions.created).toHaveLength(0)
+    core.endCraftTurn()
+  })
+
+  it('rechecks grant revocation after asynchronous path canonicalization', async () => {
+    const { core, sessions, setCanonicalizeBarrier } = await setup()
+    const gate = deferred()
+    setCanonicalizeBarrier(gate.promise)
+    const creating = core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'canonicalize-disconnect-race', request: request(),
+    })
+    await flush()
+    await core.disconnectGrant('grant-1')
+    gate.resolve()
+    await expect(creating).rejects.toMatchObject({ code: 'UNAUTHORIZED' })
+    expect(sessions.created).toHaveLength(0)
   })
 
   it('rejects a reused idempotency key with a different canonical request', async () => {
@@ -195,6 +269,51 @@ describe('ModuleAgentRunCore', () => {
     expect(sessions.reaped).toEqual(['session-1'])
     expect(core.getRun('grant-1', run.runHandle)).toMatchObject({ state: 'closed' })
     expect(sessions.prompts).toHaveLength(1)
+  })
+
+  it('serializes Broker disconnect behind Session creation so no late Session escapes', async () => {
+    const { core, sessions } = await setup()
+    const enteredCreate = deferred()
+    const releaseCreate = deferred()
+    const createSession = sessions.createSession.bind(sessions)
+    sessions.createSession = async (input) => {
+      enteredCreate.resolve()
+      await releaseCreate.promise
+      return await createSession(input)
+    }
+
+    const creating = core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'turn-disconnect-create-race', request: request(),
+    })
+    await enteredCreate.promise
+    const disconnecting = core.disconnectGrant('grant-1')
+    releaseCreate.resolve()
+    const run = await creating
+    await disconnecting
+
+    expect(core.getRun('grant-1', run.runHandle).state).toBe('closed')
+    expect(sessions.reaped).toEqual(['session-1'])
+    expect(core.debugSnapshot()).toMatchObject({ activeRuns: 0, moduleSessions: 0 })
+  })
+
+  it('retains failed initialization ownership until an uncertain Session is reaped', async () => {
+    const { core, sessions } = await setup()
+    sessions.subscribe = () => { throw new Error('subscription unavailable') }
+    sessions.reapError = new Error('provider process still alive')
+
+    await expect(core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'turn-initialization-cleanup', request: request(),
+    })).rejects.toMatchObject({ code: 'CLEANUP_FAILED' })
+    expect(core.debugSnapshot()).toMatchObject({ activeRuns: 1, retainedRuns: 1, moduleSessions: 1 })
+    await expect(core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'turn-initialization-cleanup', request: request(),
+    })).rejects.toMatchObject({ code: 'CLEANUP_FAILED' })
+    expect(sessions.created).toHaveLength(1)
+
+    sessions.reapError = undefined
+    await core.disconnectGrant('grant-1')
+    expect(sessions.reaped).toEqual(['session-1'])
+    expect(core.debugSnapshot()).toMatchObject({ activeRuns: 0, moduleSessions: 0 })
   })
 
   it('does not retain a failed pre-session reservation as a phantom run', async () => {

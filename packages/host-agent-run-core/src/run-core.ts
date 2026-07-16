@@ -59,6 +59,7 @@ interface StoredRun {
   unsubscribeSession: () => void
   operationTail: Promise<void>
   initialization?: Promise<void>
+  initializationFailure?: HostAgentRunCoreError
   timeoutHandle?: unknown
   closing?: Promise<HostAgentRunSnapshot>
 }
@@ -105,6 +106,7 @@ export class ModuleAgentRunCore {
   readonly #limits: Readonly<HostAgentRunCoreLimits>
   readonly #grants = new Map<string, StoredGrant>()
   readonly #runs = new Map<string, StoredRun>()
+  #creationTail: Promise<void> = Promise.resolve()
   #craftTurnActive = false
 
   constructor(dependencies: HostAgentRunCoreDependencies) {
@@ -168,6 +170,10 @@ export class ModuleAgentRunCore {
   }
 
   async createRun(input: CreateHostAgentRunInput): Promise<HostAgentRunSnapshot> {
+    return await this.#serializeCreation(() => this.#createRunNow(input))
+  }
+
+  async #createRunNow(input: CreateHostAgentRunInput): Promise<HostAgentRunSnapshot> {
     const grant = this.#activeGrant(input.grantId)
     const request = parseCreateHostAgentRunRequest(input.request)
     const digests = createHostAgentIdempotencyDigests(input.idempotencyKey, request)
@@ -178,6 +184,12 @@ export class ModuleAgentRunCore {
         throw new HostAgentRunCoreError('IDEMPOTENCY_CONFLICT', 'Idempotency key is bound to another request')
       }
       if (existing.initialization) await existing.initialization
+      if (existing.initializationFailure) {
+        throw new HostAgentRunCoreError(
+          existing.initializationFailure.code,
+          existing.initializationFailure.message,
+        )
+      }
       return this.#snapshot(existing)
     }
     if (this.#craftTurnActive) {
@@ -189,6 +201,18 @@ export class ModuleAgentRunCore {
 
     const requestedWorkingDirectory = request.workingDirectory ?? grant.defaultWorkingDirectory
     const workingDirectory = await this.#deps.paths.canonicalize(requestedWorkingDirectory)
+    // Craft priority and grant revocation may change while canonicalization is
+    // waiting on the filesystem. Revalidate immediately before ownership is
+    // made visible so a late result cannot start Module work behind Craft.
+    if (this.#craftTurnActive) {
+      throw new HostAgentRunCoreError('CRAFT_TURN_ACTIVE', 'A visible Craft turn has priority')
+    }
+    if (this.#activeGrant(input.grantId) !== grant) {
+      throw new HostAgentRunCoreError('UNAUTHORIZED', 'Launch grant changed during run creation')
+    }
+    if (this.#activeRunCount() >= this.#limits.maxConcurrentRuns) {
+      throw new HostAgentRunCoreError('RUN_ACTIVE', 'Only one Module run may be active')
+    }
     if (!this.#deps.paths.isEqualOrWithin(workingDirectory, grant.authorizedWorkingRoot)) {
       throw new HostAgentRunCoreError('FORBIDDEN', 'Working directory is outside the launch grant')
     }
@@ -215,15 +239,32 @@ export class ModuleAgentRunCore {
     grant.runs.add(handle)
     grant.idempotency.set(digests.keyDigest, handle)
 
-    const initialization = this.#initializeRun(grant, run)
+    // Initialization participates in the same per-run serial queue as Broker
+    // disconnect, Craft preemption and shutdown. A disconnect can therefore
+    // never close an accepted shell and then lose a Session created afterward.
+    const initialization = this.#serialize(run, () => this.#initializeRun(grant, run))
     run.initialization = initialization
     try {
       await initialization
     } catch (error) {
-      this.#runs.delete(handle)
-      grant.runs.delete(handle)
-      if (grant.idempotency.get(digests.keyDigest) === handle) grant.idempotency.delete(digests.keyDigest)
-      throw error
+      const failure = error instanceof HostAgentRunCoreError
+        ? error
+        : new HostAgentRunCoreError('RUNTIME_UNAVAILABLE', 'Host could not initialize a transient Module session')
+      // If strict cleanup could not prove the Session gone, keep the Run and
+      // idempotency ownership for retryable shutdown cleanup. Never turn an
+      // uncertain Session into an untracked orphan or a fresh duplicate Run.
+      const safeToDiscard = !run.sessionId
+        && grant.active
+        && !this.#craftTurnActive
+        && run.state === 'accepted'
+      if (safeToDiscard) {
+        this.#runs.delete(handle)
+        grant.runs.delete(handle)
+        if (grant.idempotency.get(digests.keyDigest) === handle) grant.idempotency.delete(digests.keyDigest)
+      } else {
+        run.initializationFailure = failure
+      }
+      throw failure
     } finally {
       if (run.initialization === initialization) run.initialization = undefined
     }
@@ -417,20 +458,32 @@ export class ModuleAgentRunCore {
       && created.workingDirectory === run.workingDirectory
       && typeof created.sessionId === 'string'
       && created.sessionId.length > 0
+    if (typeof created.sessionId === 'string' && created.sessionId.length > 0) {
+      // Take cleanup ownership before validating any post-create field.
+      run.sessionId = created.sessionId
+    }
     if (!valid) {
-      if (typeof created.sessionId === 'string' && created.sessionId.length > 0) {
-        await this.#deps.sessions.disposeAndReap(created.sessionId).catch(() => undefined)
+      if (run.sessionId) {
+        try {
+          await this.#deps.sessions.disposeAndReap(run.sessionId)
+          run.sessionId = undefined
+        } catch {
+          throw new HostAgentRunCoreError('CLEANUP_FAILED', 'Rejected transient Module session could not be reaped')
+        }
       }
       throw new HostAgentRunCoreError('TOOL_BOUNDARY_UNAVAILABLE', 'Host created an invalid transient Module session')
     }
-    run.sessionId = created.sessionId
     try {
       run.unsubscribeSession = this.#deps.sessions.subscribe(created.sessionId, (event) => {
         void this.#serialize(run, () => this.#handleSessionEventNow(run, event)).catch(() => undefined)
       })
     } catch {
-      await this.#deps.sessions.disposeAndReap(created.sessionId).catch(() => undefined)
-      run.sessionId = undefined
+      try {
+        await this.#deps.sessions.disposeAndReap(created.sessionId)
+        run.sessionId = undefined
+      } catch {
+        throw new HostAgentRunCoreError('CLEANUP_FAILED', 'Unsubscribed transient Module session could not be reaped')
+      }
       throw new HostAgentRunCoreError('RUNTIME_UNAVAILABLE', 'Host could not subscribe to the transient Module session')
     }
     this.#emit(run, { type: 'run.accepted', data: {} })
@@ -588,6 +641,12 @@ export class ModuleAgentRunCore {
   #serialize<T>(run: StoredRun, operation: () => Promise<T> | T): Promise<T> {
     const result = run.operationTail.then(operation, operation)
     run.operationTail = result.then(() => undefined, () => undefined)
+    return result
+  }
+
+  #serializeCreation<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.#creationTail.then(operation, operation)
+    this.#creationTail = result.then(() => undefined, () => undefined)
     return result
   }
 
