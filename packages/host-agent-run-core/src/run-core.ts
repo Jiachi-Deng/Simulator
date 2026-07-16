@@ -503,7 +503,11 @@ export class ModuleAgentRunCore {
     }
     try {
       run.unsubscribeSession = this.#deps.sessions.subscribe(created.sessionId, (event) => {
-        void this.#serialize(run, () => this.#handleSessionEventNow(run, event)).catch(() => undefined)
+        const handling = this.#serialize(run, () => this.#handleSessionEventNow(run, event))
+        void handling.catch((error) => {
+          void this.#serialize(run, () => this.#failAfterSessionOperationNow(run, error, 'INTERNAL_ERROR'))
+            .catch(() => undefined)
+        })
       })
     } catch {
       try {
@@ -521,7 +525,12 @@ export class ModuleAgentRunCore {
   async #startRunNow(run: StoredRun): Promise<void> {
     if (run.state !== 'accepted' || !run.sessionId) return
     try {
+      if (await this.#closeBeforeProviderStartIfFenced(run)) return
       await this.#setStateNow(run, 'starting')
+      // Persisting the starting state is an await boundary. Craft priority or
+      // Broker ownership may change while that write is in flight; recheck at
+      // the last synchronous point before the provider can be invoked.
+      if (await this.#closeBeforeProviderStartIfFenced(run)) return
       await this.#deps.sessions.sendTurn(run.sessionId, run.request.prompt)
       if (!this.#runIsInState(run, 'starting')) return
       await this.#setStateNow(run, 'running')
@@ -529,6 +538,23 @@ export class ModuleAgentRunCore {
     } catch (error) {
       await this.#failAfterSessionOperationNow(run, error, 'RUNTIME_UNAVAILABLE')
     }
+  }
+
+  async #closeBeforeProviderStartIfFenced(run: StoredRun): Promise<boolean> {
+    const grant = this.#grants.get(run.grantId)
+    let terminal: HostAgentRunTerminalCommit | undefined
+    if (this.#craftTurnActive) {
+      terminal = { state: 'interrupted', reason: 'CRAFT_TURN_PREEMPTED' }
+    } else if (!grant || !grant.active || grant.expiresAt <= this.#clock.now()) {
+      terminal = { state: 'failed', code: 'BROKER_DISCONNECTED' }
+    }
+    if (!terminal) return false
+
+    await this.#commitTerminalWithRecoveryNow(run, terminal)
+    if (run.state !== 'closed') await this.#closeRunNow(run, terminal.state === 'interrupted'
+      ? terminal.reason
+      : 'BROKER_DISCONNECTED')
+    return true
   }
 
   async #handleSessionEventNow(run: StoredRun, event: HostAgentSessionEvent): Promise<void> {
@@ -587,15 +613,34 @@ export class ModuleAgentRunCore {
   async #commitTerminalNow(run: StoredRun, commit: HostAgentRunTerminalCommit): Promise<boolean> {
     if (isHostAgentTerminalRunState(run.state) || run.state === 'closing' || run.state === 'closed') return false
     if (!isHostAgentRunTransition(run.state, commit.state)) return false
+    let terminalEvent: HostAgentEvent
+    if (commit.state === 'completed') {
+      try {
+        terminalEvent = this.#prepareEvent(run, {
+          type: 'turn.completed',
+          data: commit.finalText === undefined ? {} : { finalText: commit.finalText },
+        })
+      } catch (error) {
+        if (commit.finalText === undefined) throw error
+        // Streamed deltas remain authoritative. A provider-supplied aggregate
+        // finalText that cannot fit the closed wire contract is omitted rather
+        // than persisting completed and then discovering no terminal can emit.
+        terminalEvent = this.#prepareEvent(run, { type: 'turn.completed', data: {} })
+      }
+    } else if (commit.state === 'failed') {
+      terminalEvent = this.#prepareEvent(run, {
+        type: 'turn.failed',
+        data: { code: commit.code, retryable: terminalRetryability(commit) },
+      })
+    } else {
+      terminalEvent = this.#prepareEvent(run, {
+        type: 'turn.interrupted',
+        data: { reason: commit.reason, retryable: terminalRetryability(commit) },
+      })
+    }
     await this.#setStateNow(run, commit.state)
     this.#clearRunTimeout(run)
-    if (commit.state === 'completed') {
-      this.#emit(run, { type: 'turn.completed', data: commit.finalText === undefined ? {} : { finalText: commit.finalText } })
-    } else if (commit.state === 'failed') {
-      this.#emit(run, { type: 'turn.failed', data: { code: commit.code, retryable: terminalRetryability(commit) } })
-    } else {
-      this.#emit(run, { type: 'turn.interrupted', data: { reason: commit.reason, retryable: terminalRetryability(commit) } })
-    }
+    this.#publishPreparedEvent(run, terminalEvent)
     return true
   }
 
@@ -707,7 +752,11 @@ export class ModuleAgentRunCore {
   }
 
   #emit(run: StoredRun, body: Pick<HostAgentEvent, 'type' | 'data'>): HostAgentEvent {
-    const event = parseHostAgentEvent({
+    return this.#publishPreparedEvent(run, this.#prepareEvent(run, body))
+  }
+
+  #prepareEvent(run: StoredRun, body: Pick<HostAgentEvent, 'type' | 'data'>): HostAgentEvent {
+    return parseHostAgentEvent({
       contractVersion: HOST_AGENT_CONTRACT_VERSION,
       eventId: String(run.nextSequence),
       sequence: run.nextSequence,
@@ -715,6 +764,13 @@ export class ModuleAgentRunCore {
       occurredAt: this.#clock.now(),
       ...body,
     })
+  }
+
+  #publishPreparedEvent(run: StoredRun, event: HostAgentEvent): HostAgentEvent {
+    if (event.sequence !== run.nextSequence || event.eventId !== String(run.nextSequence)
+      || event.runHandle !== run.handle) {
+      throw new HostAgentRunCoreError('INTERNAL_ERROR', 'Prepared Host Agent event lost its serialization slot')
+    }
     run.nextSequence += 1
     run.replay.append(event)
     for (const listener of run.listeners) this.#safeNotify(listener, event)

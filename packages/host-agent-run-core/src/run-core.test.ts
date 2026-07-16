@@ -185,6 +185,59 @@ describe('ModuleAgentRunCore', () => {
     expect(core.debugSnapshot()).toMatchObject({ activeRuns: 1, moduleSessions: 0 })
   })
 
+  it('reaps a Session that arrives after the Craft initialization deadline without starting its provider', async () => {
+    const { core, sessions } = await setup({ maxCraftPreemptionMs: 20 })
+    const enteredCreate = deferred()
+    const releaseCreate = deferred()
+    const createSession = sessions.createSession.bind(sessions)
+    sessions.createSession = async (input) => {
+      enteredCreate.resolve()
+      await releaseCreate.promise
+      return await createSession(input)
+    }
+
+    const creating = core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'late-init-craft-race', request: request(),
+    })
+    await enteredCreate.promise
+    await expect(core.beginCraftTurn()).rejects.toMatchObject({ code: 'CLEANUP_FAILED' })
+    releaseCreate.resolve()
+    const run = await creating
+    await flush()
+
+    expect(sessions.prompts).toHaveLength(0)
+    expect(sessions.reaped).toEqual(['session-1'])
+    expect(core.getRun('grant-1', run.runHandle).state).toBe('closed')
+    expect(core.debugSnapshot()).toMatchObject({ activeRuns: 0, moduleSessions: 0 })
+  })
+
+  it('rechecks Craft priority after persisting starting and before provider invocation', async () => {
+    const { core, sessions } = await setup()
+    const enteredStarting = deferred()
+    const releaseStarting = deferred()
+    const updateRunState = sessions.updateRunState.bind(sessions)
+    sessions.updateRunState = async (sessionId, state) => {
+      if (state === 'starting') {
+        enteredStarting.resolve()
+        await releaseStarting.promise
+      }
+      await updateRunState(sessionId, state)
+    }
+
+    const run = await core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'starting-craft-race', request: request(),
+    })
+    await enteredStarting.promise
+    const admittingCraft = core.beginCraftTurn()
+    releaseStarting.resolve()
+    await admittingCraft
+    await flush()
+
+    expect(sessions.prompts).toHaveLength(0)
+    expect(sessions.reaped).toEqual(['session-1'])
+    expect(core.getRun('grant-1', run.runHandle).state).toBe('closed')
+  })
+
   it('rechecks grant revocation after asynchronous path canonicalization', async () => {
     const { core, sessions, setCanonicalizeBarrier } = await setup()
     const gate = deferred()
@@ -280,6 +333,43 @@ describe('ModuleAgentRunCore', () => {
     expect(events.filter((event) => event.type === 'turn.failed')).toHaveLength(1)
     expect(events.at(-1)?.type).toBe('run.closed')
     expect(core.debugSnapshot()).toMatchObject({ activeRuns: 0, moduleSessions: 0 })
+  })
+
+  it('prevalidates an oversized provider finalText and emits one legal completion terminal', async () => {
+    const { core, sessions } = await setup()
+    const run = await core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'oversized-terminal', request: request(),
+    })
+    const events: HostAgentEvent[] = []
+    core.subscribe('grant-1', run.runHandle, undefined, (event) => events.push(event))
+    await flush()
+
+    sessions.emit('session-1', { type: 'turn.completed', finalText: 'x'.repeat(300 * 1024) })
+    await flush()
+
+    expect(core.getRun('grant-1', run.runHandle).state).toBe('completed')
+    const terminal = events.filter((event) => event.type.startsWith('turn.') && event.type !== 'turn.started')
+    expect(terminal).toEqual([expect.objectContaining({ type: 'turn.completed', data: {} })])
+    await expect(core.closeRun('grant-1', run.runHandle)).resolves.toMatchObject({ state: 'closed' })
+    expect(core.debugSnapshot()).toMatchObject({ activeRuns: 0, moduleSessions: 0 })
+  })
+
+  it('fails and reaps instead of stranding a Run on an oversized nonterminal provider event', async () => {
+    const { core, sessions } = await setup()
+    const run = await core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'oversized-delta', request: request(),
+    })
+    const events: HostAgentEvent[] = []
+    core.subscribe('grant-1', run.runHandle, undefined, (event) => events.push(event))
+    await flush()
+
+    sessions.emit('session-1', { type: 'message.delta', delta: 'x'.repeat(65 * 1024) })
+    await flush()
+
+    expect(core.getRun('grant-1', run.runHandle).state).toBe('closed')
+    expect(events.filter((event) => event.type === 'turn.failed')).toHaveLength(1)
+    expect(events.at(-1)?.type).toBe('run.closed')
+    expect(sessions.reaped).toEqual(['session-1'])
   })
 
   it('fails stale replay explicitly instead of fabricating continuity', async () => {
