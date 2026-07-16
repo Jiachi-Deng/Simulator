@@ -90,6 +90,8 @@ export interface HostAgentRunGrantSpec {
 export interface HostAgentRunCoreLimits {
   maxReplayEvents: number
   maxReplayBytes: number
+  /** Aggregate payload budget for every terminal/closing/closed retained Run. */
+  maxRetainedTerminalReplayBytes: number
   maxSubscribersPerGrant: number
   maxConcurrentRuns: number
   maxRunDurationMs: number
@@ -116,6 +118,12 @@ export interface HostAgentRunCoreSnapshot {
   activeGrants: number
   activeRuns: number
   retainedRuns: number
+  retainedReplayBytes: number
+  retainedTerminalReplayBytes: number
+  replayUnavailableRuns: number
+  retainedRequestPayloads: number
+  /** Runs whose Session ownership or strict reap is not yet proven closed. */
+  cleanupDebtRuns: number
   moduleSessions: number
   subscribers: number
 }
@@ -142,6 +150,7 @@ export type HostAgentRunCoreErrorCode =
   | 'RATE_LIMITED'
   | 'CRAFT_TURN_ACTIVE'
   | 'RUNTIME_UNAVAILABLE'
+  | 'RUN_TIMEOUT'
   | 'TOOL_BOUNDARY_UNAVAILABLE'
   | 'CLEANUP_FAILED'
   | 'INTERNAL_ERROR'

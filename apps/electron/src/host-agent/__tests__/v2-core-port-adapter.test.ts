@@ -4,7 +4,7 @@ import {
   MessagePortHostAgentBrokerCoreClient,
   type HostAgentMessagePortLike,
 } from '@simulator/host-agent-broker/message-port'
-import type { HostAgentEvent, HostAgentRunSnapshot } from '@simulator/host-agent-contract'
+import { HOST_AGENT_LIMITS, type HostAgentEvent, type HostAgentRunSnapshot } from '@simulator/host-agent-contract'
 import type { ModuleAgentRunCore } from '@simulator/host-agent-run-core'
 import { V2CorePortAdapter } from '../v2-core-port-adapter'
 
@@ -92,7 +92,7 @@ function event(sequence: number, delta: string): HostAgentEvent {
   }
 }
 
-function completedEvent(sequence: number): HostAgentEvent {
+function completedEvent(sequence: number, finalText?: string): HostAgentEvent {
   return {
     contractVersion: 2,
     eventId: String(sequence),
@@ -100,7 +100,7 @@ function completedEvent(sequence: number): HostAgentEvent {
     runHandle,
     occurredAt: sequence,
     type: 'turn.completed',
-    data: {},
+    data: finalText === undefined ? {} : { finalText },
   }
 }
 
@@ -225,6 +225,52 @@ describe('V2CorePortAdapter', () => {
     expect(received.map((value) => value.sequence)).toEqual(Array.from({ length: 41 }, (_, index) => index + 1))
     expect(received.at(-1)?.type).toBe('turn.completed')
 
+    await subscription.unsubscribe()
+    await adapter.disconnect()
+  })
+
+  it('delivers a legal large completion on business credit while cancel and close retain control credit', async () => {
+    const [hostPort, workerPort] = portPair()
+    let liveListener: ((value: HostAgentEvent) => void) | undefined
+    const closedSnapshot: HostAgentRunSnapshot = {
+      ...snapshot,
+      state: 'closed',
+      updatedAt: 4,
+      terminalAt: 3,
+      closedAt: 4,
+    }
+    const core = {
+      subscribe(...args: unknown[]) {
+        liveListener = args[3] as (value: HostAgentEvent) => void
+        return { replayed: 0, unsubscribe: () => undefined }
+      },
+      async cancelRun() { return snapshot },
+      async closeRun() { return closedSnapshot },
+      async disconnectGrant() {},
+    } as unknown as ModuleAgentRunCore
+    const adapter = new V2CorePortAdapter({ core, grantId: 'grant_fixture', port: hostPort })
+    const channel = new MessagePortByteCreditChannel(workerPort)
+    const client = new MessagePortHostAgentBrokerCoreClient(channel)
+    const received: HostAgentEvent[] = []
+    const subscription = await client.subscribeRun(runHandle, undefined, (value) => received.push(value))
+
+    // Hold Host-bound credit ACKs so the large completion remains charged to
+    // the business lane while cancel/close responses exercise terminal credit.
+    workerPort.holdCreditAcks = true
+    const largeCompletion = completedEvent(1, 'x'.repeat(240 * 1024))
+    const encodedCompletionBytes = new TextEncoder().encode(JSON.stringify(largeCompletion)).byteLength
+    expect(encodedCompletionBytes).toBeGreaterThan(HOST_AGENT_LIMITS.terminalControlReserveBytes)
+    expect(encodedCompletionBytes).toBeLessThanOrEqual(HOST_AGENT_LIMITS.maxEventBytes)
+    liveListener?.(largeCompletion)
+    const deadline = Date.now() + 2_000
+    while (received.length === 0 && Date.now() < deadline) await Bun.sleep(1)
+    expect(received).toEqual([largeCompletion])
+    expect(workerPort.heldCreditAcks.length).toBeGreaterThan(0)
+
+    await expect(client.cancelRun(runHandle)).resolves.toEqual(snapshot)
+    await expect(client.closeRun(runHandle)).resolves.toEqual(closedSnapshot)
+
+    workerPort.releaseCreditAcks()
     await subscription.unsubscribe()
     await adapter.disconnect()
   })

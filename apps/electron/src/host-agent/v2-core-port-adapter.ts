@@ -33,6 +33,15 @@ const terminalEventTypes = new Set<HostAgentEvent['type']>([
 ])
 const eventEncoder = new TextEncoder()
 
+function subscriptionEventLane(event: HostAgentEvent): MessagePortCreditLane {
+  // finalText may legally make turn.completed much larger than the 64 KiB
+  // terminal control reserve. Carry that payload on the 2 MiB business lane;
+  // the reserve remains available for cancel/close responses and the small
+  // terminal/closed control events that finish strict cleanup.
+  if (event.type === 'turn.completed' && event.data.finalText !== undefined) return 'business'
+  return terminalEventTypes.has(event.type) ? 'terminal' : 'business'
+}
+
 interface QueuedSubscriptionEvent {
   event: HostAgentEvent
   bytes: number
@@ -324,7 +333,7 @@ export class V2CorePortAdapter {
         // One ordered pump per subscription is the sequencing authority. The
         // terminal lane supplies reserved capacity but never overtakes an
         // earlier business event from the same stream.
-        await this.#channel.send(message, terminalEventTypes.has(next.event.type) ? 'terminal' : 'business')
+        await this.#channel.send(message, subscriptionEventLane(next.event))
       }
     })()
     delivery.pumping = operation
