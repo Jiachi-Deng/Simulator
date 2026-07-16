@@ -24,10 +24,12 @@ import {
   currentPackagedPlatform,
   validatePackagedServerResources,
 } from "./packaged-server-resources";
+import { rebuildAndCopyHostAgentShim } from "../apps/electron/scripts/copy-assets";
 
 const ROOT_DIR = join(import.meta.dir, "..");
 const DIST_DIR = join(ROOT_DIR, "apps/electron/dist");
 const OUTPUT_FILE = join(DIST_DIR, "main.cjs");
+const HOST_AGENT_WORKER_OUTPUT = join(DIST_DIR, "resources/host-agent/worker.cjs");
 const INTERCEPTOR_SOURCE = join(ROOT_DIR, "packages/shared/src/unified-network-interceptor.ts");
 const INTERCEPTOR_OUTPUT = join(DIST_DIR, "interceptor.cjs");
 const SESSION_TOOLS_CORE_DIR = join(ROOT_DIR, "packages/session-tools-core");
@@ -327,6 +329,9 @@ async function main(): Promise<void> {
     mkdirSync(DIST_DIR, { recursive: true });
   }
 
+  console.log("🔐 Rebuilding Host Agent shim from current source...");
+  rebuildAndCopyHostAgentShim(ROOT_DIR);
+
   // Verify session tools core exists (shared utilities for session-scoped tools)
   verifySessionToolsCore();
 
@@ -399,21 +404,52 @@ async function main(): Promise<void> {
     process.exit(exitCode);
   }
 
+  console.log("🔨 Building isolated Host Agent worker...");
+  const workerProc = spawn({
+    cmd: [
+      "bun", "run", "esbuild",
+      "apps/electron/src/host-agent/worker-entry.ts",
+      "--bundle",
+      "--platform=node",
+      "--format=cjs",
+      "--outfile=apps/electron/dist/resources/host-agent/worker.cjs",
+      "--external:electron",
+    ],
+    cwd: ROOT_DIR,
+    stdout: "inherit",
+    stderr: "inherit",
+  });
+  const workerExitCode = await workerProc.exited;
+  if (workerExitCode !== 0) {
+    console.error("❌ Host Agent worker build failed with exit code", workerExitCode);
+    process.exit(workerExitCode);
+  }
+
   // Wait for file to stabilize
   console.log("⏳ Waiting for file to stabilize...");
-  const stable = await waitForFileStable(OUTPUT_FILE);
+  const [stable, workerStable] = await Promise.all([
+    waitForFileStable(OUTPUT_FILE),
+    waitForFileStable(HOST_AGENT_WORKER_OUTPUT),
+  ]);
 
-  if (!stable) {
+  if (!stable || !workerStable) {
     console.error("❌ Output file did not stabilize");
     process.exit(1);
   }
 
   // Verify the output
   console.log("🔍 Verifying build output...");
-  const verification = await verifyJsFile(OUTPUT_FILE);
+  const [verification, workerVerification] = await Promise.all([
+    verifyJsFile(OUTPUT_FILE),
+    verifyJsFile(HOST_AGENT_WORKER_OUTPUT),
+  ]);
 
   if (!verification.valid) {
     console.error("❌ Build verification failed:", verification.error);
+    process.exit(1);
+  }
+  if (!workerVerification.valid) {
+    console.error("❌ Host Agent worker verification failed:", workerVerification.error);
     process.exit(1);
   }
 

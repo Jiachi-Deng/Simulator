@@ -135,9 +135,10 @@ import {
 } from './open-design-official-channel'
 import { resolveHostModuleStorageRoot } from './host-module-storage-root'
 import {
-  createHostModuleAgentRuntime,
+  createIsolatedHostModuleAgentRuntime,
   type HostModuleAgentRuntime,
 } from './module-agent-runtime'
+import { resolveHostAgentWorkerEntry } from '../host-agent'
 import { OPEN_DESIGN_MODULE_ID } from '../shared/open-design-module-ipc'
 import { isModuleViewSmokeRequested, runModuleViewSmokeIfRequested } from './module-view-smoke'
 import {
@@ -1107,15 +1108,24 @@ app.whenReady().then(async () => {
           developmentBootstrapStatus: openDesignDevelopmentBootstrap.status,
         })
         if (!sessionManager) throw new Error('Session manager is unavailable for the Module Agent runtime')
-        hostModuleAgentRuntime = await createHostModuleAgentRuntime({
+        hostModuleAgentRuntime = await createIsolatedHostModuleAgentRuntime({
           storageRoot: moduleStorageRoot,
           sessions: sessionManager,
+          workerEntryPath: resolveHostAgentWorkerEntry(app.getAppPath()),
+          shimPath: join(app.getAppPath(), 'dist', 'resources', 'host-agent', 'simulator-host-agent.mjs'),
           resolveWorkspaceId: () => {
             const hostWindow = windowManager?.getLastActiveWindow()
             const activeWorkspaceId = hostWindow
               ? windowManager?.getWorkspaceForWindow(hostWindow.webContents.id) ?? undefined
               : undefined
             return activeWorkspaceId ?? sessionManager?.getWorkspaces()[0]?.id
+          },
+          onIsolationFailure: ({ protocol, phase, error }) => {
+            mainLog.error('Optional Module Host Agent path was isolated', {
+              protocol,
+              phase,
+              errorType: error instanceof Error ? error.name : typeof error,
+            })
           },
         })
         const stopOpenDesignDirectly = async (moduleId: ModuleId, reason: 'host-close' | 'view-failure') => {

@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, rmSync, readdirSync, statSync, cpSync } from 'fs
 import { join } from 'path';
 import type { BuildConfig } from './common';
 import { resolveBuildPolicy, writeBuildPolicy, type SimulatorBuildPolicy } from '../build-policy';
+import { copyElectronAssets, rebuildAndCopyHostAgentShim } from '../../apps/electron/scripts/copy-assets';
 
 /**
  * Verify SDK native binary is bundled in the packaged Windows app.
@@ -119,6 +120,7 @@ function buildMainProcess(config: BuildConfig): SimulatorBuildPolicy {
   const { rootDir } = config;
 
   console.log('  Building main process...');
+  rebuildAndCopyHostAgentShim(rootDir);
 
   const mainArgs = [
     'apps/electron/src/main/index.ts',
@@ -160,6 +162,10 @@ function buildMainProcess(config: BuildConfig): SimulatorBuildPolicy {
 
   // Use node to run esbuild directly
   run(`node ./node_modules/esbuild/bin/esbuild ${mainArgs.join(' ')}`, rootDir);
+  run(
+    'node ./node_modules/esbuild/bin/esbuild apps/electron/src/host-agent/worker-entry.ts --bundle --platform=node --format=cjs --outfile=apps/electron/dist/resources/host-agent/worker.cjs --external:electron',
+    rootDir,
+  );
   return buildPolicy;
 }
 
@@ -204,12 +210,11 @@ export async function buildElectronAppWindows(config: BuildConfig): Promise<void
 
   // Copy resources
   console.log('  Copying resources...');
-  const resourcesSrc = join(electronDir, 'resources');
   const resourcesDst = join(electronDir, 'dist', 'resources');
   if (existsSync(resourcesDst)) {
     rmSync(resourcesDst, { recursive: true, force: true });
   }
-  cpSync(resourcesSrc, resourcesDst, { recursive: true });
+  copyElectronAssets(rootDir);
   writeBuildPolicy(resourcesDst, buildPolicy);
 
   // Copy doc assets (matches electron:build:assets step used by Mac/Linux builds)
@@ -277,6 +282,7 @@ export async function packageWindows(config: BuildConfig): Promise<string> {
   if (existsSync(unpackedPath)) {
     console.log('Verifying SDK in packaged app...');
     verifyPackagedSDK(unpackedPath);
+    run(`bun scripts/validate-assets.ts --packaged-app ${JSON.stringify(unpackedPath)}`, electronDir);
   } else {
     console.warn('  win-unpacked not found, skipping SDK verification');
   }
