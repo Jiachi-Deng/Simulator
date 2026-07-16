@@ -173,6 +173,24 @@ export function resolveClaudeThinkingOptions(args: {
   };
 }
 
+/**
+ * Keep the SDK's established subprocess model for ordinary visible Host sessions.
+ * Only transient Module sessions receive the dedicated process-group spawner
+ * that lets the Host await and verify complete provider-tree cleanup.
+ *
+ * This small pure seam intentionally makes the isolation boundary testable
+ * without starting a real Claude query or requiring provider credentials.
+ */
+export function resolveClaudeProcessSpawnOverride(
+  session: { moduleAgentRun?: { transient?: boolean } } | undefined,
+  spawnModuleProcess: (options: SpawnOptions) => SpawnedProcess,
+  platform: NodeJS.Platform = process.platform,
+): Pick<Options, 'spawnClaudeCodeProcess'> {
+  return session?.moduleAgentRun?.transient === true && platform !== 'win32'
+    ? { spawnClaudeCodeProcess: spawnModuleProcess }
+    : {};
+}
+
 export interface ClaudeAgentConfig {
   workspace: Workspace;
   session?: Session;           // Current session (primary isolation boundary)
@@ -1166,9 +1184,10 @@ export class ClaudeAgent extends BaseAgent {
 
       const options: Options = {
         ...getDefaultOptions(this.config.envOverrides),
-        ...(this.config.session?.moduleAgentRun?.transient === true && process.platform !== 'win32'
-          ? { spawnClaudeCodeProcess: (spawnOptions: SpawnOptions) => this.spawnModuleClaudeProcess(spawnOptions) }
-          : {}),
+        ...resolveClaudeProcessSpawnOverride(
+          this.config.session,
+          (spawnOptions: SpawnOptions) => this.spawnModuleClaudeProcess(spawnOptions),
+        ),
         model: effectiveModel,
         // Capture stderr from SDK subprocess for error diagnostics
         // This helps identify why sessions fail with "process exited with code 1"
@@ -2877,6 +2896,12 @@ This is a branched conversation. All prior messages in this conversation are par
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     });
+    // SpawnedProcess exposes stdin/stdout but not stderr. The SDK therefore
+    // cannot drain this custom spawner's stderr pipe for us. Consume and drop
+    // it immediately: retaining or logging provider stderr can leak secrets,
+    // while leaving it unread can deadlock the provider on OS pipe backpressure.
+    child.stderr?.on('error', () => { /* Sanitized sink: never retain raw provider output. */ });
+    child.stderr?.resume();
     this.moduleProcessTrees.add(new ProviderProcessTree(child, { processGroup: true }));
     return child as unknown as SpawnedProcess;
   }
