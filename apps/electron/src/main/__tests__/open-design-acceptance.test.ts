@@ -855,29 +855,54 @@ describe('OpenDesign acceptance IPC', () => {
     ].sort())
     expect([...listeners.keys()]).toEqual([OPEN_DESIGN_ACCEPTANCE_CHANNELS.IS_AVAILABLE])
 
-    const sender = { mainFrame: {} }
-    const valid = { sender: 'host', senderFrame: undefined, returnValue: undefined } as any
-    valid.sender = sender
-    sender.mainFrame = valid.senderFrame = {}
-    // Match the controller's fixed Host sender for this IPC-specific harness.
+    const senderA = { mainFrame: {} }
+    const senderB = { mainFrame: {} }
+    const hostSenders = new Set<unknown>([senderA, senderB])
+    const mainFrameEvent = (sender: { mainFrame: object }) => {
+      const frame = {}
+      sender.mainFrame = frame
+      return { sender, senderFrame: frame, returnValue: undefined } as any
+    }
+    // Both windows are valid managed Hosts, but only the first main-frame probe owns acceptance.
     const ipcController = new OpenDesignAcceptanceController({
       bootstrap: readyBootstrap(),
       getRuntime: () => harness.runtime,
-      host: { isAllowedSender: (candidate) => candidate === sender },
+      host: { isAllowedSender: (candidate) => hostSenders.has(candidate) },
     })
     first.dispose()
     const registration = registerOpenDesignAcceptanceIpc(ipc, ipcController)
-    listeners.get(OPEN_DESIGN_ACCEPTANCE_CHANNELS.IS_AVAILABLE)?.(valid)
-    expect(valid.returnValue).toBe(true)
-    const foreign = { sender: {}, senderFrame: {}, returnValue: undefined }
-    listeners.get(OPEN_DESIGN_ACCEPTANCE_CHANNELS.IS_AVAILABLE)?.(foreign)
-    expect((foreign as any).returnValue).toBe(false)
+    const invalidSubframe = { sender: senderB, senderFrame: {}, returnValue: undefined } as any
+    listeners.get(OPEN_DESIGN_ACCEPTANCE_CHANNELS.IS_AVAILABLE)?.(invalidSubframe)
+    expect(invalidSubframe.returnValue).toBe(false)
+    const owner = mainFrameEvent(senderA)
+    listeners.get(OPEN_DESIGN_ACCEPTANCE_CHANNELS.IS_AVAILABLE)?.(owner)
+    expect(owner.returnValue).toBe(true)
+    const secondWindow = mainFrameEvent(senderB)
+    listeners.get(OPEN_DESIGN_ACCEPTANCE_CHANNELS.IS_AVAILABLE)?.(secondWindow)
+    expect(secondWindow.returnValue).toBe(false)
+    const ownerReload = mainFrameEvent(senderA)
+    listeners.get(OPEN_DESIGN_ACCEPTANCE_CHANNELS.IS_AVAILABLE)?.(ownerReload)
+    expect(ownerReload.returnValue).toBe(true)
 
     const getState = invokeHandlers.get(OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE)!
-    expect(await getState(valid)).toMatchObject({ activeVersion: '0.14.5' })
-    await expect(Promise.resolve().then(() => getState(valid, {}))).rejects.toThrow('do not accept input')
-    await expect(Promise.resolve().then(() => getState({ sender: {}, senderFrame: {} }))).rejects.toThrow('sender was rejected')
-    await expect(Promise.resolve().then(() => getState({ sender, senderFrame: {} }))).rejects.toThrow('sender was rejected')
+    expect(await getState(ownerReload)).toMatchObject({ activeVersion: '0.14.5' })
+    await expect(Promise.resolve().then(() => getState(ownerReload, {}))).rejects.toThrow('do not accept input')
+    for (const channel of [
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE,
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC,
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.ROLLBACK,
+    ]) {
+      await expect(Promise.resolve().then(() => invokeHandlers.get(channel)!(secondWindow))).rejects.toThrow('sender was rejected')
+    }
+    expect(harness.update).not.toHaveBeenCalled()
+    expect(harness.rollback).not.toHaveBeenCalled()
+
+    // Closing the owner never transfers ownership to another window.
+    hostSenders.delete(senderA)
+    const secondAfterOwnerClose = mainFrameEvent(senderB)
+    listeners.get(OPEN_DESIGN_ACCEPTANCE_CHANNELS.IS_AVAILABLE)?.(secondAfterOwnerClose)
+    expect(secondAfterOwnerClose.returnValue).toBe(false)
+    await expect(Promise.resolve().then(() => getState(ownerReload))).rejects.toThrow('sender was rejected')
 
     const replacement = registerOpenDesignAcceptanceIpc(ipc, ipcController)
     expect(invokeHandlers.size).toBe(3)

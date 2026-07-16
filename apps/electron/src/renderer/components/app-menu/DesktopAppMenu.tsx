@@ -151,6 +151,7 @@ function unavailableOpenDesignState(): OpenDesignModuleState {
 }
 
 const OPEN_DESIGN_STATE_RETRY_DELAY_MS = 250
+const OPEN_DESIGN_ACCEPTANCE_REFRESH_DELAY_MS = 500
 
 export async function loadOpenDesignStateWithRetry(
   module: Pick<OpenDesignModuleFacade, 'getState'>,
@@ -183,6 +184,28 @@ export async function loadOpenDesignAcceptanceStateWithRetry(
     if (shouldContinue()) await wait(OPEN_DESIGN_STATE_RETRY_DELAY_MS)
   }
   return undefined
+}
+
+export interface OpenDesignAcceptanceRefreshCoordinator {
+  refresh(): Promise<OpenDesignAcceptanceState | undefined>
+}
+
+/** Coalesces every menu refresh onto one getState request at a time. */
+export function createOpenDesignAcceptanceRefreshCoordinator(
+  acceptance: Pick<OpenDesignAcceptanceFacade, 'getState'>,
+): OpenDesignAcceptanceRefreshCoordinator {
+  let inFlight: Promise<OpenDesignAcceptanceState | undefined> | undefined
+  return Object.freeze({
+    refresh() {
+      if (inFlight) return inFlight
+      const request = acceptance.getState().catch(() => undefined)
+      inFlight = request
+      void request.finally(() => {
+        if (inFlight === request) inFlight = undefined
+      }).catch(() => undefined)
+      return request
+    },
+  })
 }
 
 const roleHandlers: Record<string, () => void> = {
@@ -301,7 +324,12 @@ export function DesktopAppMenu({
   const [openDesignCommand, setOpenDesignCommand] = useState<OpenDesignMenuCommand>()
   const [openDesignAcceptanceState, setOpenDesignAcceptanceState] = useState<OpenDesignAcceptanceState>()
   const [openDesignAcceptanceCommand, setOpenDesignAcceptanceCommand] = useState<OpenDesignAcceptanceAction>()
-  const openDesignCommandInFlight = useRef(false)
+  const openDesignControlInFlight = useRef(false)
+  const openDesignAcceptanceRefreshEpoch = useRef(0)
+  const openDesignAcceptanceRefresh = useRef<{
+    facade: OpenDesignAcceptanceFacade
+    coordinator: OpenDesignAcceptanceRefreshCoordinator
+  }>()
   const openDesignModule = isMac ? window.electronAPI.openDesignModule : undefined
   const openDesignAcceptance = isMac ? window.electronAPI.openDesignAcceptance : undefined
 
@@ -341,18 +369,45 @@ export function DesktopAppMenu({
   useEffect(() => {
     if (!isDebugMode || !openDesignAcceptance) {
       setOpenDesignAcceptanceState(undefined)
+      openDesignAcceptanceRefresh.current = undefined
       return
     }
+    const refreshEntry = openDesignAcceptanceRefresh.current?.facade === openDesignAcceptance
+      ? openDesignAcceptanceRefresh.current
+      : {
+          facade: openDesignAcceptance,
+          coordinator: createOpenDesignAcceptanceRefreshCoordinator(openDesignAcceptance),
+        }
+    openDesignAcceptanceRefresh.current = refreshEntry
     let active = true
-    void loadOpenDesignAcceptanceStateWithRetry(openDesignAcceptance, undefined, () => active)
-      .then((state) => { if (active) setOpenDesignAcceptanceState(state) })
-      .catch(() => { if (active) setOpenDesignAcceptanceState(undefined) })
-    return () => { active = false }
-  }, [isDebugMode, openDesignAcceptance])
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const refresh = async () => {
+      const requestEpoch = openDesignAcceptanceRefreshEpoch.current
+      const state = await refreshEntry.coordinator.refresh()
+      if (!active) return
+      if (requestEpoch === openDesignAcceptanceRefreshEpoch.current && !openDesignControlInFlight.current) {
+        if (state?.errorCode !== 'ACCEPTANCE_RUNTIME_UNAVAILABLE') {
+          setOpenDesignAcceptanceState(state)
+        }
+      }
+      if (!state) return
+      const delay = state.status === 'busy' || state.errorCode === 'ACCEPTANCE_RUNTIME_UNAVAILABLE'
+        ? OPEN_DESIGN_STATE_RETRY_DELAY_MS
+        : OPEN_DESIGN_ACCEPTANCE_REFRESH_DELAY_MS
+      timer = setTimeout(() => { void refresh() }, delay)
+    }
+    void refresh()
+    return () => {
+      active = false
+      if (timer) clearTimeout(timer)
+    }
+  }, [isDebugMode, openDesignAcceptance, openDesignState])
 
   const runOpenDesignCommand = async (command: OpenDesignMenuCommand) => {
-    if (!openDesignModule || openDesignCommandInFlight.current) return
-    openDesignCommandInFlight.current = true
+    if (!openDesignModule || openDesignControlInFlight.current
+      || openDesignAcceptanceState?.status === 'busy') return
+    openDesignControlInFlight.current = true
+    openDesignAcceptanceRefreshEpoch.current += 1
     setOpenDesignCommand(command)
     try {
       const state = await openDesignModule[command]()
@@ -360,19 +415,31 @@ export function DesktopAppMenu({
     } catch {
       setOpenDesignState(unavailableOpenDesignState())
     } finally {
-      openDesignCommandInFlight.current = false
+      openDesignAcceptanceRefreshEpoch.current += 1
+      openDesignControlInFlight.current = false
       setOpenDesignCommand(undefined)
     }
   }
 
   const runOpenDesignAcceptanceCommand = async (command: OpenDesignAcceptanceAction) => {
-    if (!openDesignAcceptance || openDesignAcceptanceCommand) return
+    if (!openDesignAcceptance || openDesignControlInFlight.current) return
+    const availability = getOpenDesignAcceptanceMenuAvailability(
+      openDesignAcceptanceState,
+      openDesignCommand !== undefined,
+      openDesignState,
+    )
+    if ((command === 'updateToRc' && !availability.updateEnabled)
+      || (command === 'rollback' && !availability.rollbackEnabled)) return
+    openDesignControlInFlight.current = true
+    openDesignAcceptanceRefreshEpoch.current += 1
     setOpenDesignAcceptanceCommand(command)
     try {
       setOpenDesignAcceptanceState(await openDesignAcceptance[command]())
     } catch {
       setOpenDesignAcceptanceState(undefined)
     } finally {
+      openDesignAcceptanceRefreshEpoch.current += 1
+      openDesignControlInFlight.current = false
       setOpenDesignAcceptanceCommand(undefined)
     }
   }
@@ -381,6 +448,11 @@ export function DesktopAppMenu({
     toggleFocusMode: onToggleFocusMode,
     toggleSidebar: onToggleSidebar,
   }
+  const openDesignCommandLocks = getOpenDesignDebugCommandLocks(
+    openDesignCommand,
+    openDesignAcceptanceCommand,
+    openDesignAcceptanceState,
+  )
 
   return (
     <DropdownMenu>
@@ -469,12 +541,13 @@ export function DesktopAppMenu({
           t,
           openDesignModule ? {
             state: openDesignState,
-            commandInFlight: openDesignCommand !== undefined,
+            commandInFlight: openDesignCommandLocks.moduleLocked,
             onCommand: runOpenDesignCommand,
           } : undefined,
           openDesignAcceptance ? {
             state: openDesignAcceptanceState,
-            commandInFlight: openDesignAcceptanceCommand !== undefined,
+            moduleState: openDesignState,
+            commandInFlight: openDesignCommandLocks.acceptanceLocked,
             onCommand: runOpenDesignAcceptanceCommand,
           } : undefined,
         )}
@@ -504,13 +577,28 @@ interface OpenDesignDebugMenuProps {
 
 interface OpenDesignAcceptanceMenuProps {
   readonly state: OpenDesignAcceptanceState | undefined
+  readonly moduleState: OpenDesignModuleState | undefined
   readonly commandInFlight: boolean
   readonly onCommand: (command: OpenDesignAcceptanceAction) => void
+}
+
+export function getOpenDesignDebugCommandLocks(
+  moduleCommand: OpenDesignMenuCommand | undefined,
+  acceptanceCommand: OpenDesignAcceptanceAction | undefined,
+  acceptanceState: OpenDesignAcceptanceState | undefined,
+): { readonly moduleLocked: boolean; readonly acceptanceLocked: boolean } {
+  return {
+    moduleLocked: moduleCommand !== undefined
+      || acceptanceCommand !== undefined
+      || acceptanceState?.status === 'busy',
+    acceptanceLocked: acceptanceCommand !== undefined || moduleCommand !== undefined,
+  }
 }
 
 export function getOpenDesignAcceptanceMenuAvailability(
   state: OpenDesignAcceptanceState | undefined,
   commandInFlight = false,
+  moduleState?: OpenDesignModuleState,
 ): { readonly updateEnabled: boolean; readonly rollbackEnabled: boolean } {
   if (!state || commandInFlight || state.status !== 'ready') {
     return { updateEnabled: false, rollbackEnabled: false }
@@ -523,7 +611,8 @@ export function getOpenDesignAcceptanceMenuAvailability(
   return {
     updateEnabled: baselineInstalled
       && state.activeVersion === '0.14.5' && state.lastKnownGoodVersion === null,
-    rollbackEnabled: rollbackInstalled && state.running && state.viewAttached && ((
+    rollbackEnabled: moduleState?.status === 'running'
+      && rollbackInstalled && state.running && state.viewAttached && ((
       state.activeVersion === '0.14.6-rc.1' && state.lastKnownGoodVersion === '0.14.5'
     ) || (
       state.activeVersion === '0.14.5' && state.lastKnownGoodVersion === '0.14.6-rc.1'
@@ -532,7 +621,11 @@ export function getOpenDesignAcceptanceMenuAvailability(
 }
 
 function renderOpenDesignAcceptanceMenuItems(props: OpenDesignAcceptanceMenuProps): React.ReactNode {
-  const availability = getOpenDesignAcceptanceMenuAvailability(props.state, props.commandInFlight)
+  const availability = getOpenDesignAcceptanceMenuAvailability(
+    props.state,
+    props.commandInFlight,
+    props.moduleState,
+  )
   const active = props.state?.activeVersion ?? 'none'
   const lkg = props.state?.lastKnownGoodVersion ?? 'none'
   return (

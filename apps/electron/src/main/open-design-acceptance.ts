@@ -424,14 +424,33 @@ export class OpenDesignAcceptanceController {
   #action?: OpenDesignAcceptanceAction
   #lastOperation?: ReturnType<typeof operationEvidence>
   #lastError?: string
+  #ownerClaimed = false
+  #ownerSender?: unknown
 
   constructor(options: OpenDesignAcceptanceControllerOptions) {
     this.#options = options
     this.#now = options.now ?? Date.now
   }
 
-  isAllowedSender(sender: unknown): boolean {
-    return this.#options.host.isAllowedSender(sender)
+  claimSender(sender: unknown): boolean {
+    if (this.#ownerClaimed) return this.#ownerSender === sender
+    try {
+      if (!this.#options.host.isAllowedSender(sender)) return false
+    } catch {
+      return false
+    }
+    this.#ownerSender = sender
+    this.#ownerClaimed = true
+    return true
+  }
+
+  isClaimedSender(sender: unknown): boolean {
+    if (!this.#ownerClaimed || this.#ownerSender !== sender) return false
+    try {
+      return this.#options.host.isAllowedSender(sender)
+    } catch {
+      return false
+    }
   }
 
   async getState(): Promise<OpenDesignAcceptanceState> {
@@ -639,10 +658,17 @@ export interface OpenDesignAcceptanceIpcRegistration {
 type AcceptanceIpc = Pick<IpcMain, 'handle' | 'removeHandler' | 'on' | 'removeListener'>
 const ipcRegistrations = new WeakMap<object, OpenDesignAcceptanceIpcRegistration>()
 
-function validSender(controller: OpenDesignAcceptanceController, event: IpcMainEvent | IpcMainInvokeEvent): boolean {
-  return controller.isAllowedSender(event.sender)
-    && !!event.senderFrame
+function validMainFrame(event: IpcMainEvent | IpcMainInvokeEvent): boolean {
+  return !!event.senderFrame
     && event.senderFrame === event.sender.mainFrame
+}
+
+function claimSender(controller: OpenDesignAcceptanceController, event: IpcMainEvent): boolean {
+  return validMainFrame(event) && controller.claimSender(event.sender)
+}
+
+function validSender(controller: OpenDesignAcceptanceController, event: IpcMainEvent | IpcMainInvokeEvent): boolean {
+  return validMainFrame(event) && controller.isClaimedSender(event.sender)
 }
 
 function assertInvocation(
@@ -667,7 +693,7 @@ export function registerOpenDesignAcceptanceIpc(
   const invokeChannels: string[] = []
   let disposed = false
   const available = (event: IpcMainEvent) => {
-    event.returnValue = controller ? validSender(controller, event) : false
+    event.returnValue = controller ? claimSender(controller, event) : false
   }
   const register = (
     readyController: OpenDesignAcceptanceController,

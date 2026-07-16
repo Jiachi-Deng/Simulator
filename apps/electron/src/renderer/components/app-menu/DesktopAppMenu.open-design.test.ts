@@ -10,6 +10,8 @@ mock.module('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }))
 mock.module('pdfjs-dist', () => ({ GlobalWorkerOptions: { workerSrc: '' }, getDocument: () => ({}) }))
 
 const {
+  createOpenDesignAcceptanceRefreshCoordinator,
+  getOpenDesignDebugCommandLocks,
   getOpenDesignAcceptanceMenuAvailability,
   getOpenDesignMenuPresentation,
   loadOpenDesignAcceptanceStateWithRetry,
@@ -157,7 +159,7 @@ describe('OpenDesign acceptance Debug menu', () => {
       state('0.14.6-rc.1', '0.14.5'),
       state('0.14.5', '0.14.6-rc.1'),
     ]) {
-      expect(getOpenDesignAcceptanceMenuAvailability(pair)).toEqual({
+      expect(getOpenDesignAcceptanceMenuAvailability(pair, false, { status: 'running' })).toEqual({
         updateEnabled: false,
         rollbackEnabled: true,
       })
@@ -175,11 +177,56 @@ describe('OpenDesign acceptance Debug menu', () => {
     expect(getOpenDesignAcceptanceMenuAvailability({
       ...state('0.14.6-rc.1', '0.14.5'),
       running: false,
-    })).toEqual({ updateEnabled: false, rollbackEnabled: false })
+    }, false, { status: 'running' })).toEqual({ updateEnabled: false, rollbackEnabled: false })
     expect(getOpenDesignAcceptanceMenuAvailability({
       ...state('0.14.6-rc.1', '0.14.5'),
       viewAttached: false,
-    })).toEqual({ updateEnabled: false, rollbackEnabled: false })
+    }, false, { status: 'running' })).toEqual({ updateEnabled: false, rollbackEnabled: false })
+  })
+
+  it('coalesces refreshes and disables stale rollback immediately after an ordinary stop state change', async () => {
+    let release: ((value: OpenDesignAcceptanceState) => void) | undefined
+    const getState = mock(() => new Promise<OpenDesignAcceptanceState>((resolve) => { release = resolve }))
+    const coordinator = createOpenDesignAcceptanceRefreshCoordinator({ getState })
+    const first = coordinator.refresh()
+    const second = coordinator.refresh()
+    expect(second).toBe(first)
+    expect(getState).toHaveBeenCalledTimes(1)
+    const rollbackState = state('0.14.6-rc.1', '0.14.5')
+    release?.(rollbackState)
+    expect(await first).toEqual(rollbackState)
+
+    getState.mockImplementationOnce(async () => rollbackState)
+    expect(await coordinator.refresh()).toEqual(rollbackState)
+    expect(getState).toHaveBeenCalledTimes(2)
+
+    expect(getOpenDesignAcceptanceMenuAvailability(
+      rollbackState,
+      false,
+      { status: 'running' },
+    ).rollbackEnabled).toBe(true)
+    const afterOrdinaryStop = getOpenDesignAcceptanceMenuAvailability(
+      rollbackState,
+      false,
+      { status: 'available' },
+    )
+    expect(afterOrdinaryStop.rollbackEnabled).toBe(false)
+    const rollback = mock(async () => rollbackState)
+    if (afterOrdinaryStop.rollbackEnabled) await rollback()
+    expect(rollback).not.toHaveBeenCalled()
+    expect(rollbackState.errorCode).toBeUndefined()
+  })
+
+  it('cross-disables ordinary and acceptance controls while either command surface is active', () => {
+    expect(getOpenDesignDebugCommandLocks(undefined, 'rollback', state(
+      '0.14.6-rc.1', '0.14.5', 'busy',
+    ))).toEqual({ moduleLocked: true, acceptanceLocked: true })
+    expect(getOpenDesignDebugCommandLocks('stop', undefined, state(
+      '0.14.6-rc.1', '0.14.5', 'ready',
+    ))).toEqual({ moduleLocked: true, acceptanceLocked: true })
+    expect(getOpenDesignDebugCommandLocks(undefined, undefined, state(
+      '0.14.6-rc.1', '0.14.5', 'busy',
+    ))).toEqual({ moduleLocked: true, acceptanceLocked: false })
   })
 
   it('waits for the lazily-created Host runtime without accepting other errors as startup lag', async () => {
