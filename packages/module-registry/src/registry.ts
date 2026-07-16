@@ -14,6 +14,7 @@ import {
   type InstalledModuleVersionSnapshot,
   type ModuleActivationState,
   type ModuleInstallCompatibility,
+  type ModuleRegistryOptions,
   type ModuleRegistryHost,
   type ModuleRegistryPersistence,
   type ModuleRegistrySnapshot,
@@ -95,7 +96,15 @@ function canonicalManifest(manifest: ModuleManifest): ModuleManifest {
     version: manifest.version,
     artifacts: [...manifest.artifacts]
       .sort((left, right) => compareText(left.platform, right.platform))
-      .map((artifact) => ({ ...artifact })),
+      .map((artifact) => ({
+        platform: artifact.platform,
+        entrypoint: artifact.entrypoint,
+        ...(artifact.auxiliaryExecutables === undefined
+          ? {}
+          : { auxiliaryExecutables: [...artifact.auxiliaryExecutables].sort(compareText) }),
+        url: artifact.url,
+        sha256: artifact.sha256,
+      })),
     capabilities: [...manifest.capabilities].sort(compareText),
   }) as ModuleManifest
 }
@@ -156,6 +165,7 @@ function compatibilityReasons(
   manifest: ModuleManifest,
   hostVersionRange: string,
   host: ModuleRegistryHost,
+  exceptionFingerprints: ReadonlySet<string>,
 ): RegistryDiagnostic[] {
   const reasons: RegistryDiagnostic[] = []
   if (!manifest.artifacts.some((artifact) => artifact.platform === host.platform)) {
@@ -166,7 +176,10 @@ function compatibilityReasons(
       manifest.version,
     ))
   }
-  if (!satisfies(host.version, hostVersionRange)) {
+  if (
+    !satisfies(host.version, hostVersionRange)
+    && !exceptionFingerprints.has(compatibilityExceptionFingerprint(manifest, hostVersionRange, host))
+  ) {
     reasons.push(diagnostic(
       'INCOMPATIBLE_HOST_VERSION',
       `Host version ${host.version} does not satisfy ${hostVersionRange}`,
@@ -175,6 +188,99 @@ function compatibilityReasons(
     ))
   }
   return sortedDiagnostics(reasons)
+}
+
+function compatibilityExceptionFingerprint(
+  manifest: ModuleManifest,
+  hostVersionRange: string,
+  host: ModuleRegistryHost,
+): string {
+  return JSON.stringify({
+    host: { version: host.version, platform: host.platform },
+    hostVersionRange,
+    manifest: canonicalManifest(manifest),
+  })
+}
+
+function compatibilityExceptionSlot(
+  manifest: ModuleManifest,
+  hostVersionRange: string,
+  host: ModuleRegistryHost,
+): string {
+  return JSON.stringify({
+    host: { version: host.version, platform: host.platform },
+    hostVersionRange,
+    moduleId: manifest.id,
+    moduleVersion: manifest.version,
+  })
+}
+
+function parseCompatibilityExceptionFingerprints(options: ModuleRegistryOptions): ReadonlySet<string> {
+  try {
+    const optionsRecord = ownDataRecord(options, 'module registry options')
+    if (Object.keys(optionsRecord).some((key) => key !== 'compatibilityExceptions')) {
+      throw new CorruptStateError('Module registry options fields are invalid')
+    }
+    const configured = optionsRecord.compatibilityExceptions
+    if (configured === undefined) return new Set()
+
+    const fingerprints = new Set<string>()
+    const slots = new Set<string>()
+    for (const [index, exceptionInput] of plainArray(
+      configured,
+      'module registry compatibility exceptions',
+    ).entries()) {
+      const exception = ownDataRecord(exceptionInput, `compatibility exception ${index}`)
+      exactFields(exception, ['host', 'hostVersionRange', 'manifest'], `compatibility exception ${index}`)
+
+      const hostRecord = ownDataRecord(exception.host, `compatibility exception ${index} host`)
+      exactFields(hostRecord, ['version', 'platform'], `compatibility exception ${index} host`)
+      if (typeof hostRecord.version !== 'string' || valid(hostRecord.version) !== hostRecord.version) {
+        throw new CorruptStateError(`Compatibility exception ${index} host version must be canonical Semantic Versioning`)
+      }
+      if (typeof hostRecord.platform !== 'string' || !PLATFORM_SET.has(hostRecord.platform)) {
+        throw new CorruptStateError(`Compatibility exception ${index} host platform is unsupported`)
+      }
+      const host: ModuleRegistryHost = {
+        version: hostRecord.version,
+        platform: hostRecord.platform as ModulePlatform,
+      }
+
+      if (typeof exception.hostVersionRange !== 'string') {
+        throw new CorruptStateError(`Compatibility exception ${index} host version range must be a string`)
+      }
+      const normalizedRange = validRange(exception.hostVersionRange)
+      if (!normalizedRange || normalizedRange !== exception.hostVersionRange) {
+        throw new CorruptStateError(`Compatibility exception ${index} host version range must be normalized`)
+      }
+      if (satisfies(host.version, normalizedRange)) {
+        throw new CorruptStateError(`Compatibility exception ${index} does not identify an incompatible host version`)
+      }
+
+      if (!isValidatedModuleManifest(exception.manifest)) {
+        throw new CorruptStateError(`Compatibility exception ${index} manifest must be validated`)
+      }
+      const manifest = canonicalManifest(exception.manifest)
+      if (!manifest.artifacts.some((artifact) => artifact.platform === host.platform)) {
+        throw new CorruptStateError(`Compatibility exception ${index} cannot suppress a platform incompatibility`)
+      }
+
+      const fingerprint = compatibilityExceptionFingerprint(manifest, normalizedRange, host)
+      if (fingerprints.has(fingerprint)) {
+        throw new CorruptStateError(`Compatibility exception ${index} is duplicated`)
+      }
+      const slot = compatibilityExceptionSlot(manifest, normalizedRange, host)
+      if (slots.has(slot)) {
+        throw new CorruptStateError(`Compatibility exception ${index} conflicts with another exact authority`)
+      }
+      fingerprints.add(fingerprint)
+      slots.add(slot)
+    }
+    return fingerprints
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'unknown compatibility exception error'
+    throw new TypeError(`Invalid module registry compatibility exception configuration: ${message}`)
+  }
 }
 
 function cloneState(source: Map<string, InstalledModuleRecord>): Map<string, InstalledModuleRecord> {
@@ -194,15 +300,21 @@ function cloneState(source: Map<string, InstalledModuleRecord>): Map<string, Ins
 export class ModuleRegistry {
   readonly host: ModuleRegistryHost
   private readonly persistence: ModuleRegistryPersistence
+  private readonly compatibilityExceptionFingerprints: ReadonlySet<string>
   private modules = new Map<string, InstalledModuleRecord>()
   private recoveryDiagnostics: readonly RegistryDiagnostic[] = freeze([])
   private persistenceRevision = ''
 
-  constructor(host: ModuleRegistryHost, persistence: ModuleRegistryPersistence = new InMemoryModuleRegistryPersistence()) {
+  constructor(
+    host: ModuleRegistryHost,
+    persistence: ModuleRegistryPersistence = new InMemoryModuleRegistryPersistence(),
+    options: ModuleRegistryOptions = {},
+  ) {
     if (valid(host.version) !== host.version) throw new TypeError('Registry host version must be canonical Semantic Versioning')
     if (!PLATFORM_SET.has(host.platform)) throw new TypeError('Registry host platform is unsupported')
     this.host = freeze({ version: host.version, platform: host.platform }) as ModuleRegistryHost
     this.persistence = persistence
+    this.compatibilityExceptionFingerprints = parseCompatibilityExceptionFingerprints(options)
     this.recover()
   }
 
@@ -217,7 +329,12 @@ export class ModuleRegistry {
         versions: [...module.versions.values()]
           .sort((left, right) => compareVersions(left.manifest.version, right.manifest.version))
           .map((record): InstalledModuleVersionSnapshot => {
-            const reasons = compatibilityReasons(record.manifest, record.hostVersionRange, this.host)
+            const reasons = compatibilityReasons(
+              record.manifest,
+              record.hostVersionRange,
+              this.host,
+              this.compatibilityExceptionFingerprints,
+            )
             return {
               version: record.manifest.version,
               manifest: canonicalManifest(record.manifest),
@@ -241,7 +358,12 @@ export class ModuleRegistry {
     const normalizedRange = this.normalizeHostRange(compatibility)
     if (typeof normalizedRange !== 'string') return this.failure(normalizedRange)
 
-    const incompatibilities = compatibilityReasons(manifest, normalizedRange, this.host)
+    const incompatibilities = compatibilityReasons(
+      manifest,
+      normalizedRange,
+      this.host,
+      this.compatibilityExceptionFingerprints,
+    )
     if (incompatibilities.length > 0) return this.failure(...incompatibilities)
 
     const existing = this.modules.get(manifest.id)?.versions.get(manifest.version)
@@ -515,7 +637,12 @@ export class ModuleRegistry {
     if (version === null) return null
     const record = module.versions.get(version)
     if (!record) throw new CorruptStateError('Persisted version reference is not installed')
-    if (compatibilityReasons(record.manifest, record.hostVersionRange, this.host).length === 0) return version
+    if (compatibilityReasons(
+      record.manifest,
+      record.hostVersionRange,
+      this.host,
+      this.compatibilityExceptionFingerprints,
+    ).length === 0) return version
     if (!hostChanged) throw new CorruptStateError('Persisted version reference is incompatible with its host')
     diagnostics.push(diagnostic(
       code,
@@ -564,7 +691,12 @@ export class ModuleRegistry {
     if (!record) {
       return { diagnostic: diagnostic('VERSION_NOT_FOUND', 'Module version is not installed', moduleId, version) }
     }
-    if (compatibilityReasons(record.manifest, record.hostVersionRange, this.host).length > 0) {
+    if (compatibilityReasons(
+      record.manifest,
+      record.hostVersionRange,
+      this.host,
+      this.compatibilityExceptionFingerprints,
+    ).length > 0) {
       return { diagnostic: diagnostic('VERSION_INCOMPATIBLE', 'Module version is incompatible with this host', moduleId, version) }
     }
     return { module, record }
@@ -581,7 +713,12 @@ export class ModuleRegistry {
       return diagnostic('VERSION_NOT_FOUND', `${field} transition target is not an installed remaining version`, module.id, target)
     }
     const record = module.versions.get(target)!
-    if (compatibilityReasons(record.manifest, record.hostVersionRange, this.host).length > 0) {
+    if (compatibilityReasons(
+      record.manifest,
+      record.hostVersionRange,
+      this.host,
+      this.compatibilityExceptionFingerprints,
+    ).length > 0) {
       return diagnostic('VERSION_INCOMPATIBLE', `${field} transition target is incompatible`, module.id, target)
     }
     return undefined

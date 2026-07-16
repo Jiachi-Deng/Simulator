@@ -11,6 +11,21 @@ export interface ModuleInstallCompatibility {
   readonly hostVersionRange: string
 }
 
+/**
+ * A build-owned, exact exception for one otherwise host-version-incompatible
+ * manifest. The registry validates and canonicalizes every field at
+ * construction; callers must pass a manifest returned by parseModuleManifest.
+ */
+export interface ModuleRegistryCompatibilityException {
+  readonly host: ModuleRegistryHost
+  readonly hostVersionRange: string
+  readonly manifest: ModuleManifest
+}
+
+export interface ModuleRegistryOptions {
+  readonly compatibilityExceptions?: readonly ModuleRegistryCompatibilityException[]
+}
+
 export type ModuleCompatibility = 'compatible' | 'incompatible'
 
 export type RegistryDiagnosticCode =
