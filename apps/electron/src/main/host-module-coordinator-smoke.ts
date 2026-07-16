@@ -501,6 +501,10 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
   pendingResultPath = resultPath
   const watchdog = new AuthoritativeSmokeWatchdogState()
   const smokeOwnedProcessGroups = new Set<number>()
+  // Stable numeric diagnostics only. The wrapper may disclose this phase
+  // without exposing exception text, paths, prompts, credentials, or process
+  // command lines from the packaged acceptance child.
+  let failurePhase = 10
   const timeout = setTimeout(() => {
     watchdog.markTimedOut()
     pendingResult = {
@@ -518,6 +522,7 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
 
   try {
     const providerAddress = await listen(provider)
+    failurePhase = 20
     const connectionSlug = 'simulator-smoke-provider'
     if (!addLlmConnection({
       slug: connectionSlug,
@@ -534,6 +539,7 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
     if (!setDefaultLlmConnection(connectionSlug)) throw new Error('Could not select deterministic built-in Agent provider')
 
     await smoke.sessionManager.waitForInit()
+    failurePhase = 30
     const workspace = getWorkspaces()[0]
     if (!workspace) throw new Error('Built-in runtime did not initialize a workspace')
     const session = await smoke.sessionManager.createSession(workspace.id, {
@@ -589,6 +595,7 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
     }
 
     const initialCraftTurn = await runVisibleCraftTurn('craft-before-module')
+    failurePhase = 40
     await smoke.sessionManager.renameSession(session.id, 'Built-in Agent remains healthy')
     await smoke.sessionManager.setSessionStatus(session.id, 'in-progress')
     await smoke.sessionManager.flushSession(session.id)
@@ -621,6 +628,7 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
     if (!smoke.runtime.registry.markLastKnownGood(manifest.id, manifest.version).ok) throw new Error('Could not mark smoke module last-known-good')
 
     const started = await smoke.runtime.coordinator.start({ operationId: 'electron-product-smoke-start', moduleId: manifest.id })
+    failurePhase = 50
     if (!started.ok) throw new Error(started.error ?? 'Coordinator start failed')
     const firstView = smoke.manager.list()[0]
     if (!firstView || smoke.manager.list().length !== 1 || firstView.state !== 'ready' || !firstView.attached) {
@@ -675,6 +683,7 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
       return journey
     }
 
+    failurePhase = 60
     const firstJourney = await fetchJourney(daemon.endpoint)
     terminalSessionOffset = assertJourneySessionPattern(terminalSessionIds, terminalSessionOffset, contractVersion)
     for (const pid of firstJourney.processIds) observedProcessIds.add(pid)
@@ -688,6 +697,7 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
       throw new Error(`First v2 journey did not retain exactly two tombstones: ${JSON.stringify(firstGatewaySnapshot)}`)
     }
     const firstWorker = firstCleanJourney.worker
+    failurePhase = 70
     observedProcessIds.add(firstWorker.pid)
     const firstObsoleteBearer = readBearerTokenInMemory(firstJourney.tokenFile)
 
@@ -695,6 +705,7 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
     // terminal; recovery must rotate the daemon launch lease without touching
     // the primary Host process or automatically replaying any Turn.
     process.kill(firstWorker.pid, 'SIGKILL')
+    failurePhase = 80
     await waitFor(() => !existsSync(firstJourney.tokenFile), 'Worker-crash launch token revocation')
     await waitFor(() => {
       const current = smoke.runtime.daemon.get(manifest.id)
@@ -713,6 +724,7 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
     const workerRecoveredDaemon = smoke.runtime.daemon.get(manifest.id)
     if (!workerRecoveredDaemon?.endpoint || !workerRecoveredDaemon.pid) throw new Error('Worker-recovered daemon endpoint disappeared')
     observedProcessIds.add(workerRecoveredDaemon.pid)
+    failurePhase = 90
     const secondJourney = await fetchJourney(workerRecoveredDaemon.endpoint)
     terminalSessionOffset = assertJourneySessionPattern(terminalSessionIds, terminalSessionOffset, contractVersion)
     if (secondJourney.tokenFile === firstJourney.tokenFile) throw new Error('Worker recovery reused a revoked launch token path')
@@ -736,10 +748,12 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
     )
     const workerRecoveryCraftTurn = await runVisibleCraftTurn('craft-after-worker-recovery')
     const secondObsoleteBearer = readBearerTokenInMemory(secondJourney.tokenFile)
+    failurePhase = 100
 
     // Separately crash the optional Module daemon. Its manager owns this
     // recovery and must prepare another revocable launch without Host impact.
     process.kill(workerRecoveredDaemon.pid, 'SIGKILL')
+    failurePhase = 110
     await waitFor(() => !existsSync(secondJourney.tokenFile), 'daemon-crash launch token revocation')
     await waitFor(() => {
       const current = smoke.runtime.daemon.get(manifest.id)
@@ -754,6 +768,7 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
     const daemonRecovered = smoke.runtime.daemon.get(manifest.id)
     if (!daemonRecovered?.endpoint || !daemonRecovered.pid) throw new Error('Restarted daemon endpoint disappeared')
     observedProcessIds.add(daemonRecovered.pid)
+    failurePhase = 120
     const thirdJourney = await fetchJourney(daemonRecovered.endpoint)
     terminalSessionOffset = assertJourneySessionPattern(terminalSessionIds, terminalSessionOffset, contractVersion)
     if (new Set([firstJourney.tokenFile, secondJourney.tokenFile, thirdJourney.tokenFile]).size !== 3) {
@@ -780,6 +795,7 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
       secondObsoleteBearer,
     )
     const daemonRecoveryCraftTurn = await runVisibleCraftTurn('craft-after-daemon-recovery')
+    failurePhase = 130
     if (moduleProviderGroups.size < 3) {
       throw new Error(`Module journeys exposed only ${moduleProviderGroups.size} dedicated provider process groups`)
     }
@@ -796,6 +812,7 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
     )
 
     const stopped = await smoke.runtime.coordinator.stop({ operationId: 'electron-product-smoke-stop', moduleId: manifest.id })
+    failurePhase = 140
     if (!stopped.ok) throw new Error(stopped.error ?? 'Coordinator stop failed')
     await waitFor(() => !existsSync(thirdJourney.tokenFile), 'final launch token revocation')
     const stoppedGatewaySnapshot = await smoke.moduleAgentRuntime.refreshDebugSnapshot()
@@ -810,6 +827,7 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
     const sessionPersistenceVerified = existsSync(join(sessionPath, 'session.jsonl'))
     if (!sessionPersistenceVerified) throw new Error('Built-in Agent Session persistence was not flushed')
     watchdog.assertMayCommitSuccess()
+    failurePhase = 150
     pendingResult = {
       ok: true,
       packaged: app.isPackaged,
@@ -875,6 +893,7 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
         ok: false,
         packaged: app.isPackaged,
         errorCode: 'SMOKE_FAILED',
+        failurePhase,
         smokeOwnedProcessGroups: [...smokeOwnedProcessGroups],
       }
     }

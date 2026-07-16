@@ -1,4 +1,5 @@
 const SMOKE_INTERNAL_ERROR = 'SMOKE_INTERNAL_ERROR'
+const SAFE_SMOKE_PHASES = new Set(Array.from({ length: 15 }, (_, index) => (index + 1) * 10))
 
 const SAFE_ARGUMENT_FAILURES = new Set([
   'Unknown argument',
@@ -35,6 +36,7 @@ export const SAFE_WRAPPER_FAILURE_CODES = new Set([
 
 export const SAFE_WRAPPER_DETAIL_KEYS = new Set([
   'status',
+  'phase',
   'resultBytes',
   'stdoutBytes',
   'stderrBytes',
@@ -48,6 +50,7 @@ function isSafeDetail(detail: string, seenKeys: Set<string>): boolean {
   const value = Number(valueText)
   if (!SAFE_WRAPPER_DETAIL_KEYS.has(key) || seenKeys.has(key)) return false
   if (!Number.isSafeInteger(value) || String(value) !== valueText) return false
+  if (key === 'phase' && !SAFE_SMOKE_PHASES.has(value)) return false
   seenKeys.add(key)
   return true
 }

@@ -350,6 +350,7 @@ try {
   if (exitCode !== 0 || result.ok !== true) {
     throw closedFailure('SMOKE_CHILD_FAILED', {
       status: exitCode,
+      phase: Number.isSafeInteger(result.failurePhase) ? result.failurePhase as number : undefined,
       resultBytes: resultBuffer.byteLength,
       stdoutBytes,
       stderrBytes,

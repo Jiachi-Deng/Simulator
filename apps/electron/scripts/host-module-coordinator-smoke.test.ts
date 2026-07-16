@@ -58,12 +58,15 @@ function processOrGroupExists(pid: number): boolean {
 
 describe('Electron packaged Host Agent smoke scenarios', () => {
   it('publishes only fixed wrapper codes and byte/status detail keys', () => {
-    const known = new Error('SMOKE_CHILD_FAILED status=64 resultBytes=12 stdoutBytes=3 stderrBytes=9')
+    const known = new Error('SMOKE_CHILD_FAILED status=64 phase=90 resultBytes=12 stdoutBytes=3 stderrBytes=9')
     expect(publicWrapperFailure(known)).toBe(known.message)
 
     expect(publicWrapperFailure(new Error('RAW_SECRET_MARKER'))).toBe('SMOKE_INTERNAL_ERROR')
     expect(publicWrapperFailure(new Error('SMOKE_CHILD_FAILED internalToken=123'))).toBe('SMOKE_INTERNAL_ERROR')
     expect(publicWrapperFailure(new Error('SMOKE_CHILD_FAILED INTERNAL_TOKEN=123'))).toBe('SMOKE_INTERNAL_ERROR')
+    expect(publicWrapperFailure(new Error('SMOKE_CHILD_FAILED phase=worker-recovery'))).toBe('SMOKE_INTERNAL_ERROR')
+    expect(publicWrapperFailure(new Error('SMOKE_CHILD_FAILED phase=91'))).toBe('SMOKE_INTERNAL_ERROR')
+    expect(publicWrapperFailure(new Error('SMOKE_CHILD_FAILED phase=90 phase=90'))).toBe('SMOKE_INTERNAL_ERROR')
   })
 
   it('rejects missing, unknown, invalid, and duplicate scenario arguments before setup', async () => {
