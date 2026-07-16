@@ -1,4 +1,4 @@
-name: OpenDesign Official Release
+name: OpenDesign Release
 
 on:
   schedule:
@@ -6,15 +6,45 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Initial publication is manual; refresh may also be run manually.
+        description: Initial publication is manual; only the current stable release may be refreshed.
         required: true
         default: refresh
         type: choice
         options:
           - refresh
           - initial
+      release_track:
+        description: RC publication is isolated from the stable official channel; stable requires separate protected approval.
+        required: true
+        default: prerelease
+        type: choice
+        options:
+          - prerelease
+          - stable
+      module_version:
+        description: Exact module version. RC is 0.14.6-rc.1; stable promotion is 0.14.6.
+        required: true
+        default: 0.14.6-rc.1
+        type: string
+      release_tag:
+        description: Exact tag; must equal open-design-v plus module_version.
+        required: true
+        default: open-design-v0.14.6-rc.1
+        type: string
       source_run_id:
         description: Successful origin/main run containing the fixed initial-input artifact; required only for initial.
+        required: false
+        type: string
+      acceptance_run_id:
+        description: Stable only. Successful fixed-SHA OpenDesign RC acceptance evidence run.
+        required: false
+        type: string
+      rollback_gate_run_id:
+        description: Stable only. Successful fixed-SHA acceptance rollback gate run bound to the same evidence.
+        required: false
+        type: string
+      stable_channel_confirmation:
+        description: Stable only. Enter PROMOTE_OPEN_DESIGN_0_14_6 for publication or REFRESH_OPEN_DESIGN_0_14_5 for the current stable refresh.
         required: false
         type: string
 
@@ -23,7 +53,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: open-design-official-release-v0.14.5
+  group: open-design-release-transaction
   cancel-in-progress: false
 
 env:
@@ -43,19 +73,44 @@ jobs:
     if: >-
       github.repository == 'Jiachi-Deng/Simulator' &&
       github.ref == 'refs/heads/main' &&
-      vars.OPEN_DESIGN_RELEASE_ENABLED == 'true' &&
       github.event_name == 'workflow_dispatch' &&
-      inputs.operation == 'initial'
+      inputs.operation == 'initial' &&
+      ((inputs.release_track == 'prerelease' && vars.OPEN_DESIGN_PRERELEASE_ENABLED == 'true') ||
+       (inputs.release_track == 'stable' && vars.OPEN_DESIGN_RELEASE_ENABLED == 'true' &&
+        vars.OPEN_DESIGN_STABLE_CHANNEL_ENABLED == 'true'))
     runs-on: macos-15
     timeout-minutes: 45
     environment:
-      name: open-design-production
-      url: https://github.com/Jiachi-Deng/Simulator/releases/tag/open-design-v0.14.5
+      name: ${{ inputs.release_track == 'stable' && 'open-design-production-stable' || 'open-design-prerelease' }}
+      url: https://github.com/Jiachi-Deng/Simulator/releases/tag/${{ inputs.release_tag }}
     env:
+      RELEASE_TRACK: ${{ inputs.release_track }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      MODULE_VERSION: ${{ inputs.module_version }}
+      ARCHIVE_ASSET: org.simulator.open-design-${{ inputs.module_version }}-darwin-arm64.tar.gz
+      CATALOG_ASSET: org.simulator.open-design-${{ inputs.module_version }}-catalog-v2.json
+      ENVELOPE_ASSET: org.simulator.open-design-${{ inputs.module_version }}-catalog-v2-envelope.json
+      CONFIG_ASSET: open-design-official-channel.json
+      METADATA_ASSET: org.simulator.open-design-${{ inputs.module_version }}-release-metadata.json
+      STABLE_CHANNEL_CONFIRMATION: ${{ inputs.stable_channel_confirmation }}
+      ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}
+      ROLLBACK_GATE_RUN_ID: ${{ inputs.rollback_gate_run_id }}
       KEY_ID: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ID }}
       KEY_ACTIVE_FROM: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ACTIVE_FROM }}
       KEY_ACTIVE_UNTIL: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ACTIVE_UNTIL }}
-      HOST_VERSION_RANGE: ${{ vars.OPEN_DESIGN_HOST_VERSION_RANGE }}
+      HOST_VERSION_RANGE: ">=0.12.0"
+      LKG_RELEASE_TAG: open-design-v0.14.5
+      LKG_MODULE_VERSION: 0.14.5
+      LKG_ARCHIVE_ASSET: org.simulator.open-design-0.14.5-darwin-arm64.tar.gz
+      LKG_CATALOG_ASSET: org.simulator.open-design-0.14.5-catalog-v2.json
+      LKG_ENVELOPE_ASSET: org.simulator.open-design-0.14.5-catalog-v2-envelope.json
+      LKG_METADATA_ASSET: org.simulator.open-design-0.14.5-release-metadata.json
+      RC_RELEASE_TAG: open-design-v0.14.6-rc.1
+      RC_MODULE_VERSION: 0.14.6-rc.1
+      RC_ARCHIVE_ASSET: org.simulator.open-design-0.14.6-rc.1-darwin-arm64.tar.gz
+      RC_CATALOG_ASSET: org.simulator.open-design-0.14.6-rc.1-catalog-v2.json
+      RC_ENVELOPE_ASSET: org.simulator.open-design-0.14.6-rc.1-catalog-v2-envelope.json
+      RC_METADATA_ASSET: org.simulator.open-design-0.14.6-rc.1-release-metadata.json
 
     steps:
       - name: Checkout fixed main source
@@ -87,7 +142,25 @@ jobs:
           test -n "$KEY_ID"
           test -n "$KEY_ACTIVE_FROM"
           test -n "$KEY_ACTIVE_UNTIL"
-          test -n "$HOST_VERSION_RANGE"
+          test "$HOST_VERSION_RANGE" = ">=0.12.0"
+          test "$RELEASE_TAG" = "open-design-v$MODULE_VERSION"
+          case "$RELEASE_TRACK" in
+            prerelease)
+              test "$MODULE_VERSION" = "0.14.6-rc.1"
+              test "$RELEASE_TAG" = "open-design-v0.14.6-rc.1"
+              test -z "$STABLE_CHANNEL_CONFIRMATION"
+              test -z "$ACCEPTANCE_RUN_ID"
+              test -z "$ROLLBACK_GATE_RUN_ID"
+              ;;
+            stable)
+              test "$MODULE_VERSION" = "0.14.6"
+              test "$RELEASE_TAG" = "open-design-v0.14.6"
+              test "$STABLE_CHANNEL_CONFIRMATION" = "PROMOTE_OPEN_DESIGN_0_14_6"
+              [[ "$ACCEPTANCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              [[ "$ROLLBACK_GATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+              ;;
+            *) exit 1 ;;
+          esac
 
       - name: Install exact publisher dependencies
         run: |
@@ -148,23 +221,328 @@ jobs:
           printf 'INITIAL_INPUT=%s\nINITIAL_OUTPUT=%s\nPUBLIC_KEY_FILE=%s\n' \
             "$input" "$work/output" "$work/release-public.pem" >> "$GITHUB_ENV"
 
-      - name: Create bounded initial catalog window
+      - name: Download exact current 0.14.5 trust baseline
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          umask 077
+          baseline_state=$(gh release view "$LKG_RELEASE_TAG" \
+            --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --json tagName,isDraft,isPrerelease,assets)
+          test "$(jq -r .tagName <<<"$baseline_state")" = "$LKG_RELEASE_TAG"
+          test "$(jq -r .isDraft <<<"$baseline_state")" = false
+          test "$(jq -r .isPrerelease <<<"$baseline_state")" = false
+          expected=$(printf '%s\n' \
+            "$LKG_ARCHIVE_ASSET" \
+            "$LKG_CATALOG_ASSET" \
+            "$LKG_ENVELOPE_ASSET" \
+            "$CONFIG_ASSET" \
+            "$LKG_METADATA_ASSET" | LC_ALL=C sort)
+          actual=$(jq -r '.assets[].name' <<<"$baseline_state" | LC_ALL=C sort)
+          test "$actual" = "$expected"
+
+          baseline="$RUNNER_TEMP/open-design-initial/prior/lkg"
+          mkdir -m 700 -p "$baseline"
+          gh release download "$LKG_RELEASE_TAG" \
+            --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --dir "$baseline"
+          test "$(find "$baseline" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 5
+          for asset in \
+            "$LKG_ARCHIVE_ASSET" \
+            "$LKG_CATALOG_ASSET" \
+            "$LKG_ENVELOPE_ASSET" \
+            "$CONFIG_ASSET" \
+            "$LKG_METADATA_ASSET"; do
+            test -f "$baseline/$asset"
+            chmod 600 "$baseline/$asset"
+          done
+          printf 'BASELINE_BUNDLE=%s\n' "$baseline" >> "$GITHUB_ENV"
+
+      - name: Validate stable acceptance, rollback, and RC closure
+        if: ${{ env.RELEASE_TRACK == 'stable' }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          evidence_root="$RUNNER_TEMP/open-design-initial/stable-evidence"
+          acceptance="$evidence_root/acceptance"
+          rollback="$evidence_root/rollback"
+          rc="$evidence_root/rc"
+          mkdir -m 700 -p "$acceptance" "$rollback" "$rc"
+
+          acceptance_run=$(gh api "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/runs/$ACCEPTANCE_RUN_ID")
+          test "$(jq -r .conclusion <<<"$acceptance_run")" = success
+          test "$(jq -r .head_branch <<<"$acceptance_run")" = main
+          test "$(jq -r .head_sha <<<"$acceptance_run")" = "$GITHUB_SHA"
+          test "$(jq -r .repository.full_name <<<"$acceptance_run")" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
+          test "$(jq -r .path <<<"$acceptance_run")" = ".github/workflows/open-design-rc-acceptance.yml"
+          test "$(jq -r .event <<<"$acceptance_run")" = workflow_dispatch
+          gh run download "$ACCEPTANCE_RUN_ID" \
+            --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --name open-design-rc-acceptance-evidence \
+            --dir "$acceptance"
+          test "$(find "$acceptance" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 2
+          test -f "$acceptance/open-design-rc-acceptance-evidence.json"
+          test -f "$acceptance/SHA256SUMS"
+          test "$(wc -l < "$acceptance/SHA256SUMS" | tr -d ' ')" = 1
+          grep -Eq '^[0-9a-f]{64}  open-design-rc-acceptance-evidence\.json$' "$acceptance/SHA256SUMS"
+          (cd "$acceptance" && shasum -a 256 -c SHA256SUMS)
+          acceptance_json="$acceptance/open-design-rc-acceptance-evidence.json"
+          jq -e --arg repository "$RELEASE_OWNER/$RELEASE_REPOSITORY" --arg sha "$GITHUB_SHA" '
+            keys == ["blackoutTasksPassed","headSha","hostVersion","newStackConsecutivePassed","oldStackTasksPassed","paidTurns","previewHumanPasses","rcArchiveAsset","rcArchiveSha256","rcCatalogIssuedAt","rcCatalogSequence","rcExtractedManifestSha256","rcTag","rcVersion","repository","requiredCiPassed","rollbackExercisePassed","schemaVersion"] and
+            .schemaVersion == 1 and .repository == $repository and .headSha == $sha and
+            .hostVersion == "0.12.0" and .rcVersion == "0.14.6-rc.1" and
+            .rcTag == "open-design-v0.14.6-rc.1" and
+            .rcArchiveAsset == "org.simulator.open-design-0.14.6-rc.1-darwin-arm64.tar.gz" and
+            (.rcArchiveSha256 | test("^[0-9a-f]{64}$")) and
+            (.rcCatalogSequence | type == "number" and . >= 1 and . <= 9007199254740991 and floor == .) and
+            (.rcCatalogIssuedAt | type == "string" and test("^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$")) and
+            (.rcExtractedManifestSha256 | test("^[0-9a-f]{64}$")) and
+            .oldStackTasksPassed == 20 and .newStackConsecutivePassed == 20 and
+            .blackoutTasksPassed == 20 and .previewHumanPasses == 20 and .paidTurns == 40 and
+            .rollbackExercisePassed == true and .requiredCiPassed == true
+          ' "$acceptance_json" >/dev/null
+          accepted_rc_sha=$(jq -r .rcArchiveSha256 "$acceptance_json")
+          accepted_rc_sequence=$(jq -r .rcCatalogSequence "$acceptance_json")
+          accepted_rc_issued_at=$(jq -r .rcCatalogIssuedAt "$acceptance_json")
+
+          rollback_run=$(gh api "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/runs/$ROLLBACK_GATE_RUN_ID")
+          test "$(jq -r .conclusion <<<"$rollback_run")" = success
+          test "$(jq -r .head_branch <<<"$rollback_run")" = main
+          test "$(jq -r .head_sha <<<"$rollback_run")" = "$GITHUB_SHA"
+          test "$(jq -r .repository.full_name <<<"$rollback_run")" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
+          test "$(jq -r .path <<<"$rollback_run")" = ".github/workflows/open-design-acceptance-rollback.yml"
+          test "$(jq -r .event <<<"$rollback_run")" = workflow_dispatch
+          gh run download "$ROLLBACK_GATE_RUN_ID" \
+            --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --name open-design-rollback-gate-evidence \
+            --dir "$rollback"
+          test "$(find "$rollback" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 2
+          test -f "$rollback/open-design-rollback-gate-evidence.json"
+          test -f "$rollback/SHA256SUMS"
+          test "$(wc -l < "$rollback/SHA256SUMS" | tr -d ' ')" = 1
+          grep -Eq '^[0-9a-f]{64}  open-design-rollback-gate-evidence\.json$' "$rollback/SHA256SUMS"
+          (cd "$rollback" && shasum -a 256 -c SHA256SUMS)
+          jq -e --arg repository "$RELEASE_OWNER/$RELEASE_REPOSITORY" --arg sha "$GITHUB_SHA" \
+            --argjson acceptanceRunId "$ACCEPTANCE_RUN_ID" --arg archiveSha "$accepted_rc_sha" \
+            --argjson rcCatalogSequence "$accepted_rc_sequence" --arg rcCatalogIssuedAt "$accepted_rc_issued_at" '
+            keys == ["acceptanceRunId","headSha","lkgTag","rcArchiveSha256","rcCatalogIssuedAt","rcCatalogSequence","rcTag","repository","schemaVersion","validatedAt"] and
+            .schemaVersion == 1 and .repository == $repository and .headSha == $sha and
+            .acceptanceRunId == $acceptanceRunId and .rcTag == "open-design-v0.14.6-rc.1" and
+            .lkgTag == "open-design-v0.14.5" and .rcArchiveSha256 == $archiveSha and
+            .rcCatalogSequence == $rcCatalogSequence and .rcCatalogIssuedAt == $rcCatalogIssuedAt and
+            (.validatedAt | fromdateiso8601 | type == "number")
+          ' "$rollback/open-design-rollback-gate-evidence.json" >/dev/null
+
+          rc_state=$(gh release view "$RC_RELEASE_TAG" \
+            --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --json tagName,isDraft,isPrerelease,targetCommitish,assets)
+          test "$(jq -r .tagName <<<"$rc_state")" = "$RC_RELEASE_TAG"
+          test "$(jq -r .isDraft <<<"$rc_state")" = false
+          test "$(jq -r .isPrerelease <<<"$rc_state")" = true
+          test "$(jq -r .targetCommitish <<<"$rc_state")" = "$GITHUB_SHA"
+          expected_rc=$(printf '%s\n' \
+            "$RC_ARCHIVE_ASSET" \
+            "$RC_CATALOG_ASSET" \
+            "$RC_ENVELOPE_ASSET" \
+            "$RC_METADATA_ASSET" | LC_ALL=C sort)
+          actual_rc=$(jq -r '.assets[].name' <<<"$rc_state" | LC_ALL=C sort)
+          test "$actual_rc" = "$expected_rc"
+          gh release download "$RC_RELEASE_TAG" \
+            --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --dir "$rc"
+          test "$(find "$rc" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 4
+          for asset in "$RC_ARCHIVE_ASSET" "$RC_CATALOG_ASSET" "$RC_ENVELOPE_ASSET" "$RC_METADATA_ASSET"; do
+            test -f "$rc/$asset"
+            chmod 600 "$rc/$asset"
+          done
+          test "$(shasum -a 256 "$rc/$RC_ARCHIVE_ASSET" | awk '{print $1}')" = "$accepted_rc_sha"
+          printf 'ACCEPTED_RC_ARCHIVE_SHA256=%s\nACCEPTED_RC_CATALOG_SEQUENCE=%s\nACCEPTED_RC_CATALOG_ISSUED_AT=%s\nRC_PUBLIC_BUNDLE=%s\n' \
+            "$accepted_rc_sha" "$accepted_rc_sequence" "$accepted_rc_issued_at" "$rc" >> "$GITHUB_ENV"
+
+      - name: Authenticate prior state, dry-run, and build signed initial assets
+        shell: bash
+        env:
+          OPEN_DESIGN_RELEASE_PRIVATE_KEY: ${{ secrets.OPEN_DESIGN_RELEASE_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          set +x
+          umask 077
+          test -n "$OPEN_DESIGN_RELEASE_PRIVATE_KEY"
+
+          # Derive the public authority before trusting any release state or
+          # signing the candidate. The private key never leaves this step.
           node --input-type=module <<'NODE'
-          import { appendFileSync } from "node:fs";
-          const issuedAtMs = Date.now();
-          const issuedAt = new Date(issuedAtMs).toISOString();
-          const expiresAt = new Date(issuedAtMs + 20 * 60 * 60 * 1000).toISOString();
-          appendFileSync(process.env.GITHUB_ENV, `CATALOG_SEQUENCE=1\nCATALOG_ISSUED_AT=${issuedAt}\nCATALOG_EXPIRES_AT=${expiresAt}\nVERIFICATION_TIME_MS=${issuedAtMs + 1000}\n`);
+          import { createPrivateKey, createPublicKey } from "node:crypto";
+          import { writeFileSync } from "node:fs";
+          const privateKey = createPrivateKey({ key: process.env.OPEN_DESIGN_RELEASE_PRIVATE_KEY, format: "pem" });
+          const publicKey = createPublicKey(privateKey).export({ format: "pem", type: "spki" });
+          writeFileSync(process.env.PUBLIC_KEY_FILE, publicKey, { mode: 0o600, flag: "wx" });
           NODE
 
-      - name: Dry-run initial production package
-        shell: bash
-        run: |
-          set -euo pipefail
+          state_root="$RUNNER_TEMP/open-design-initial/state"
+          mkdir -m 700 "$state_root"
+
+          read_catalog_candidate() {
+            local catalog_path=$1
+            local output_path=$2
+            CATALOG_PATH="$catalog_path" CANDIDATE_OUTPUT="$output_path" node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from "node:fs";
+          const catalog = JSON.parse(readFileSync(process.env.CATALOG_PATH, "utf8"));
+          const sequence = catalog?.sequence;
+          const issuedAt = catalog?.issuedAt;
+          const issuedAtMs = Date.parse(issuedAt);
+          if (!Number.isSafeInteger(sequence) || sequence < 1) throw new Error("Catalog sequence is not a positive safe integer");
+          if (typeof issuedAt !== "string" || !Number.isFinite(issuedAtMs) || new Date(issuedAtMs).toISOString() !== issuedAt) {
+            throw new Error("Catalog issuedAt is not canonical ISO-8601");
+          }
+          writeFileSync(process.env.CANDIDATE_OUTPUT,
+            `CANDIDATE_SEQUENCE=${sequence}\nCANDIDATE_ISSUED_AT=${issuedAt}\nCANDIDATE_VERIFICATION_TIME_MS=${issuedAtMs + 1000}\n`,
+            { mode: 0o600, flag: "wx" });
+          NODE
+          }
+
+          baseline_candidate="$state_root/baseline-candidate.env"
+          read_catalog_candidate "$BASELINE_BUNDLE/$LKG_CATALOG_ASSET" "$baseline_candidate"
+          # The candidate file contains only validated decimal/ISO values.
+          source "$baseline_candidate"
           node modules/open-design/package/production-cli.mjs \
+            --module-version "$LKG_MODULE_VERSION" \
+            --verify \
+            --bundle-root "$BASELINE_BUNDLE" \
+            --release-tag "$LKG_RELEASE_TAG" \
+            --key-id "$KEY_ID" \
+            --key-active-from "$KEY_ACTIVE_FROM" \
+            --key-active-until "$KEY_ACTIVE_UNTIL" \
+            --public-key-file "$PUBLIC_KEY_FILE" \
+            --previous-sequence 0 \
+            --verification-time "$CANDIDATE_VERIFICATION_TIME_MS" > "$state_root/baseline-verify.json"
+          jq -e --argjson sequence "$CANDIDATE_SEQUENCE" --arg issuedAt "$CANDIDATE_ISSUED_AT" '
+            .ok == true and
+            .version == "0.14.5" and
+            .catalogState.highestSequence == $sequence and
+            .catalogState.latestIssuedAt == $issuedAt
+          ' "$state_root/baseline-verify.json" >/dev/null
+          BASELINE_SEQUENCE=$CANDIDATE_SEQUENCE
+          BASELINE_ISSUED_AT=$CANDIDATE_ISSUED_AT
+          export BASELINE_SEQUENCE BASELINE_ISSUED_AT
+
+          if [[ "$RELEASE_TRACK" = stable ]]; then
+            rc_verify="$RUNNER_TEMP/open-design-initial/stable-evidence/rc-verify"
+            mkdir -m 700 "$rc_verify"
+            for asset in "$RC_ARCHIVE_ASSET" "$RC_CATALOG_ASSET" "$RC_ENVELOPE_ASSET" "$RC_METADATA_ASSET"; do
+              cp "$RC_PUBLIC_BUNDLE/$asset" "$rc_verify/$asset"
+              chmod 600 "$rc_verify/$asset"
+            done
+            RC_VERIFY_BUNDLE="$rc_verify" node --input-type=module <<'NODE'
+          import { createPublicKey } from "node:crypto";
+          import { readFileSync, writeFileSync } from "node:fs";
+          import { join } from "node:path";
+          import { encodeCanonicalCatalog } from "@simulator/module-release-trust";
+          const publicJwk = createPublicKey(readFileSync(process.env.PUBLIC_KEY_FILE)).export({ format: "jwk" });
+          if (publicJwk.kty !== "OKP" || publicJwk.crv !== "Ed25519" || typeof publicJwk.x !== "string") {
+            throw new Error("Derived public key is not Ed25519");
+          }
+          const official = {
+            schemaVersion: 1,
+            moduleId: "org.simulator.open-design",
+            version: process.env.RC_MODULE_VERSION,
+            platform: "darwin-arm64",
+            catalogUrl: `https://github.com/${process.env.RELEASE_OWNER}/${process.env.RELEASE_REPOSITORY}/releases/download/${process.env.RC_RELEASE_TAG}/${process.env.RC_ENVELOPE_ASSET}`,
+            githubRelease: {
+              owner: process.env.RELEASE_OWNER,
+              repository: process.env.RELEASE_REPOSITORY,
+              tag: process.env.RC_RELEASE_TAG,
+            },
+            trustedKeys: [{
+              keyId: process.env.KEY_ID,
+              publicKey: Buffer.from(publicJwk.x, "base64url").toString("base64"),
+              activeFrom: process.env.KEY_ACTIVE_FROM,
+              activeUntil: process.env.KEY_ACTIVE_UNTIL,
+            }],
+          };
+          writeFileSync(join(process.env.RC_VERIFY_BUNDLE, "open-design-official-channel.json"), encodeCanonicalCatalog(official), {
+            mode: 0o600,
+            flag: "wx",
+          });
+          NODE
+
+            rc_candidate="$state_root/rc-candidate.env"
+            read_catalog_candidate "$rc_verify/$RC_CATALOG_ASSET" "$rc_candidate"
+            unset CANDIDATE_SEQUENCE CANDIDATE_ISSUED_AT CANDIDATE_VERIFICATION_TIME_MS
+            source "$rc_candidate"
+            node modules/open-design/package/production-cli.mjs \
+              --module-version "$RC_MODULE_VERSION" \
+              --verify \
+              --bundle-root "$rc_verify" \
+              --release-tag "$RC_RELEASE_TAG" \
+              --key-id "$KEY_ID" \
+              --key-active-from "$KEY_ACTIVE_FROM" \
+              --key-active-until "$KEY_ACTIVE_UNTIL" \
+              --public-key-file "$PUBLIC_KEY_FILE" \
+              --previous-sequence 0 \
+              --verification-time "$CANDIDATE_VERIFICATION_TIME_MS" > "$state_root/rc-verify.json"
+            jq -e \
+              --argjson sequence "$ACCEPTED_RC_CATALOG_SEQUENCE" \
+              --arg issuedAt "$ACCEPTED_RC_CATALOG_ISSUED_AT" \
+              --arg archiveSha "$ACCEPTED_RC_ARCHIVE_SHA256" \
+              --arg extractedSha "$(jq -r .rcExtractedManifestSha256 "$RUNNER_TEMP/open-design-initial/stable-evidence/acceptance/open-design-rc-acceptance-evidence.json")" '
+              .ok == true and
+              .version == "0.14.6-rc.1" and
+              .catalogState.highestSequence == $sequence and
+              .catalogState.latestIssuedAt == $issuedAt and
+              .archiveSha256 == $archiveSha and
+              .extractedManifestSha256 == $extractedSha
+            ' "$state_root/rc-verify.json" >/dev/null
+            test "$CANDIDATE_SEQUENCE" = "$ACCEPTED_RC_CATALOG_SEQUENCE"
+            test "$CANDIDATE_ISSUED_AT" = "$ACCEPTED_RC_CATALOG_ISSUED_AT"
+            RC_SEQUENCE=$CANDIDATE_SEQUENCE
+            RC_ISSUED_AT=$CANDIDATE_ISSUED_AT
+            export RC_SEQUENCE RC_ISSUED_AT
+          fi
+
+          derived_state="$state_root/derived-state.env"
+          DERIVED_STATE_OUTPUT="$derived_state" node --input-type=module <<'NODE'
+          import { writeFileSync } from "node:fs";
+          const parseSequence = (value, label) => {
+            if (!/^(?:0|[1-9][0-9]*)$/.test(value ?? "")) throw new Error(`${label} is not decimal`);
+            const sequence = Number(value);
+            if (!Number.isSafeInteger(sequence) || sequence < 1) throw new Error(`${label} is not a positive safe integer`);
+            return sequence;
+          };
+          const parseTimestamp = (value, label) => {
+            const milliseconds = Date.parse(value ?? "");
+            if (!Number.isFinite(milliseconds) || new Date(milliseconds).toISOString() !== value) throw new Error(`${label} is not canonical`);
+            return milliseconds;
+          };
+          const sequences = [parseSequence(process.env.BASELINE_SEQUENCE, "baseline sequence")];
+          const issuedAtValues = [parseTimestamp(process.env.BASELINE_ISSUED_AT, "baseline issuedAt")];
+          if (process.env.RELEASE_TRACK === "stable") {
+            sequences.push(parseSequence(process.env.RC_SEQUENCE, "RC sequence"));
+            issuedAtValues.push(parseTimestamp(process.env.RC_ISSUED_AT, "RC issuedAt"));
+          } else if (process.env.RELEASE_TRACK !== "prerelease") {
+            throw new Error("Unknown release track");
+          }
+          const priorSequence = Math.max(...sequences);
+          if (priorSequence >= Number.MAX_SAFE_INTEGER) throw new Error("Catalog sequence exhausted");
+          const priorIssuedAtMs = Math.max(...issuedAtValues);
+          const issuedAtMs = Math.max(Date.now(), priorIssuedAtMs + 1000);
+          const sequence = priorSequence + 1;
+          const issuedAt = new Date(issuedAtMs).toISOString();
+          const expiresAt = new Date(issuedAtMs + 20 * 60 * 60 * 1000).toISOString();
+          writeFileSync(process.env.DERIVED_STATE_OUTPUT,
+            `PRIOR_SEQUENCE=${priorSequence}\nPRIOR_ISSUED_AT=${new Date(priorIssuedAtMs).toISOString()}\nCATALOG_SEQUENCE=${sequence}\nCATALOG_ISSUED_AT=${issuedAt}\nCATALOG_EXPIRES_AT=${expiresAt}\nVERIFICATION_TIME_MS=${issuedAtMs + 1000}\n`,
+            { mode: 0o600, flag: "wx" });
+          NODE
+          source "$derived_state"
+          cat "$derived_state" >> "$GITHUB_ENV"
+
+          node modules/open-design/package/production-cli.mjs \
+            --module-version "$MODULE_VERSION" \
             --dry-run \
             --staging-root "$INITIAL_INPUT/staging" \
             --node-bin "$INITIAL_INPUT/node/bin/node" \
@@ -177,18 +555,12 @@ jobs:
             --key-id "$KEY_ID" \
             --key-active-from "$KEY_ACTIVE_FROM" \
             --key-active-until "$KEY_ACTIVE_UNTIL" \
+            --previous-sequence "$PRIOR_SEQUENCE" \
+            --previous-issued-at "$PRIOR_ISSUED_AT" \
             --verification-time "$VERIFICATION_TIME_MS" > "$RUNNER_TEMP/open-design-initial-dry-run.json"
 
-      - name: Build signed initial assets and derive public verification key
-        shell: bash
-        env:
-          OPEN_DESIGN_RELEASE_PRIVATE_KEY: ${{ secrets.OPEN_DESIGN_RELEASE_PRIVATE_KEY }}
-        run: |
-          set -euo pipefail
-          set +x
-          umask 077
-          test -n "$OPEN_DESIGN_RELEASE_PRIVATE_KEY"
           node modules/open-design/package/production-cli.mjs \
+            --module-version "$MODULE_VERSION" \
             --staging-root "$INITIAL_INPUT/staging" \
             --node-bin "$INITIAL_INPUT/node/bin/node" \
             --node-license "$INITIAL_INPUT/node/LICENSE" \
@@ -201,21 +573,17 @@ jobs:
             --key-id "$KEY_ID" \
             --key-active-from "$KEY_ACTIVE_FROM" \
             --key-active-until "$KEY_ACTIVE_UNTIL" \
+            --previous-sequence "$PRIOR_SEQUENCE" \
+            --previous-issued-at "$PRIOR_ISSUED_AT" \
             --verification-time "$VERIFICATION_TIME_MS" \
             --private-key-env OPEN_DESIGN_RELEASE_PRIVATE_KEY > "$RUNNER_TEMP/open-design-initial-build.json"
-          node --input-type=module <<'NODE'
-          import { createPrivateKey, createPublicKey } from "node:crypto";
-          import { writeFileSync } from "node:fs";
-          const privateKey = createPrivateKey({ key: process.env.OPEN_DESIGN_RELEASE_PRIVATE_KEY, format: "pem" });
-          const publicKey = createPublicKey(privateKey).export({ format: "pem", type: "spki" });
-          writeFileSync(process.env.PUBLIC_KEY_FILE, publicKey, { mode: 0o600, flag: "wx" });
-          NODE
 
       - name: Verify initial bundle before publication
         shell: bash
         run: |
           set -euo pipefail
           node modules/open-design/package/production-cli.mjs \
+            --module-version "$MODULE_VERSION" \
             --verify \
             --bundle-root "$INITIAL_OUTPUT" \
             --release-tag "$RELEASE_TAG" \
@@ -223,10 +591,20 @@ jobs:
             --key-active-from "$KEY_ACTIVE_FROM" \
             --key-active-until "$KEY_ACTIVE_UNTIL" \
             --public-key-file "$PUBLIC_KEY_FILE" \
+            --previous-sequence "$PRIOR_SEQUENCE" \
+            --previous-issued-at "$PRIOR_ISSUED_AT" \
             --verification-time "$VERIFICATION_TIME_MS" > "$RUNNER_TEMP/open-design-initial-verify.json"
+          jq -e --argjson sequence "$CATALOG_SEQUENCE" --arg issuedAt "$CATALOG_ISSUED_AT" '
+            .ok == true and
+            .catalogState.highestSequence == $sequence and
+            .catalogState.latestIssuedAt == $issuedAt
+          ' "$RUNNER_TEMP/open-design-initial-verify.json" >/dev/null
           expected=$(printf '%s\n' "$ARCHIVE_ASSET" "$CATALOG_ASSET" "$ENVELOPE_ASSET" "$CONFIG_ASSET" "$METADATA_ASSET" | LC_ALL=C sort)
           actual=$(find "$INITIAL_OUTPUT" -maxdepth 1 -type f -exec basename {} \; | LC_ALL=C sort)
           test "$actual" = "$expected"
+          if [[ "$RELEASE_TRACK" = stable ]]; then
+            test "$(shasum -a 256 "$INITIAL_OUTPUT/$ARCHIVE_ASSET" | awk '{print $1}')" = "$ACCEPTED_RC_ARCHIVE_SHA256"
+          fi
 
       - name: Publish fixed-tag release through a draft transaction
         shell: bash
@@ -252,28 +630,53 @@ jobs:
             exit "$status"
           }
           trap cleanup EXIT
+          release_flags=(--draft)
+          publish_assets=(
+            "$INITIAL_OUTPUT/$ARCHIVE_ASSET"
+            "$INITIAL_OUTPUT/$CATALOG_ASSET"
+            "$INITIAL_OUTPUT/$ENVELOPE_ASSET"
+            "$INITIAL_OUTPUT/$METADATA_ASSET"
+          )
+          if [[ "$RELEASE_TRACK" = prerelease ]]; then
+            release_flags+=(--prerelease)
+          else
+            publish_assets+=("$INITIAL_OUTPUT/$CONFIG_ASSET")
+          fi
           gh release create "$RELEASE_TAG" \
             --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "OpenDesign v$MODULE_VERSION" \
-            --notes "Simulator OpenDesign official module assets." \
-            --draft \
-            "$INITIAL_OUTPUT/$ARCHIVE_ASSET" \
-            "$INITIAL_OUTPUT/$CATALOG_ASSET" \
-            "$INITIAL_OUTPUT/$ENVELOPE_ASSET" \
-            "$INITIAL_OUTPUT/$CONFIG_ASSET" \
-            "$INITIAL_OUTPUT/$METADATA_ASSET"
+            --notes "Simulator OpenDesign $RELEASE_TRACK module assets." \
+            "${release_flags[@]}" \
+            "${publish_assets[@]}"
 
-          expected=$(printf '%s\n' "$ARCHIVE_ASSET" "$CATALOG_ASSET" "$ENVELOPE_ASSET" "$CONFIG_ASSET" "$METADATA_ASSET" | LC_ALL=C sort)
-          actual=$(gh release view "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --json assets --jq '.assets[].name' | LC_ALL=C sort)
+          expected_assets=("$ARCHIVE_ASSET" "$CATALOG_ASSET" "$ENVELOPE_ASSET" "$METADATA_ASSET")
+          [[ "$RELEASE_TRACK" = prerelease ]] || expected_assets+=("$CONFIG_ASSET")
+          expected=$(printf '%s\n' "${expected_assets[@]}" | LC_ALL=C sort)
+          release_state=$(gh release view "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --json tagName,isDraft,isPrerelease,assets)
+          test "$(jq -r .tagName <<<"$release_state")" = "$RELEASE_TAG"
+          test "$(jq -r .isDraft <<<"$release_state")" = true
+          if [[ "$RELEASE_TRACK" = prerelease ]]; then
+            test "$(jq -r .isPrerelease <<<"$release_state")" = true
+          else
+            test "$(jq -r .isPrerelease <<<"$release_state")" = false
+          fi
+          actual=$(jq -r '.assets[].name' <<<"$release_state" | LC_ALL=C sort)
           test "$actual" = "$expected"
           remote="$RUNNER_TEMP/open-design-initial-remote"
           mkdir -m 700 "$remote"
           gh release download "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --dir "$remote"
-          for asset in "$ARCHIVE_ASSET" "$CATALOG_ASSET" "$ENVELOPE_ASSET" "$CONFIG_ASSET" "$METADATA_ASSET"; do
+          for asset in "${expected_assets[@]}"; do
             cmp "$INITIAL_OUTPUT/$asset" "$remote/$asset"
           done
           gh release edit "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --draft=false
+          published_state=$(gh release view "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --json isDraft,isPrerelease)
+          test "$(jq -r .isDraft <<<"$published_state")" = false
+          if [[ "$RELEASE_TRACK" = prerelease ]]; then
+            test "$(jq -r .isPrerelease <<<"$published_state")" = true
+          else
+            test "$(jq -r .isPrerelease <<<"$published_state")" = false
+          fi
           cleanup_required=0
           trap - EXIT
 
@@ -293,13 +696,17 @@ jobs:
       github.ref == 'refs/heads/main' &&
       vars.OPEN_DESIGN_RELEASE_ENABLED == 'true' &&
       (github.event_name == 'schedule' ||
-       (github.event_name == 'workflow_dispatch' && inputs.operation == 'refresh'))
+       (github.event_name == 'workflow_dispatch' && inputs.operation == 'refresh' &&
+        inputs.release_track == 'stable'))
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment:
       name: open-design-production
       url: https://github.com/Jiachi-Deng/Simulator/releases/tag/open-design-v0.14.5
     env:
+      DISPATCH_MODULE_VERSION: ${{ inputs.module_version }}
+      DISPATCH_RELEASE_TAG: ${{ inputs.release_tag }}
+      STABLE_CHANNEL_CONFIRMATION: ${{ inputs.stable_channel_confirmation }}
       KEY_ID: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ID }}
       KEY_ACTIVE_FROM: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ACTIVE_FROM }}
       KEY_ACTIVE_UNTIL: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ACTIVE_UNTIL }}
@@ -333,6 +740,11 @@ jobs:
           test -n "$KEY_ID"
           test -n "$KEY_ACTIVE_FROM"
           test -n "$KEY_ACTIVE_UNTIL"
+          if [[ "$GITHUB_EVENT_NAME" = workflow_dispatch ]]; then
+            test "$DISPATCH_MODULE_VERSION" = "$MODULE_VERSION"
+            test "$DISPATCH_RELEASE_TAG" = "$RELEASE_TAG"
+            test "$STABLE_CHANNEL_CONFIRMATION" = "REFRESH_OPEN_DESIGN_0_14_5"
+          fi
 
       - name: Install exact publisher dependencies
         run: |
@@ -380,6 +792,7 @@ jobs:
         run: |
           set -euo pipefail
           node modules/open-design/package/production-cli.mjs \
+            --module-version "$MODULE_VERSION" \
             --refresh \
             --dry-run \
             --bundle-root "$SOURCE_BUNDLE" \
@@ -404,6 +817,7 @@ jobs:
           umask 077
           test -n "$OPEN_DESIGN_RELEASE_PRIVATE_KEY"
           node modules/open-design/package/production-cli.mjs \
+            --module-version "$MODULE_VERSION" \
             --refresh \
             --bundle-root "$SOURCE_BUNDLE" \
             --output "$REFRESH_OUTPUT" \
@@ -441,6 +855,7 @@ jobs:
           cp "$REFRESH_OUTPUT/$METADATA_ASSET" "$VERIFY_BUNDLE/$METADATA_ASSET"
           chmod 600 "$VERIFY_BUNDLE"/*
           node modules/open-design/package/production-cli.mjs \
+            --module-version "$MODULE_VERSION" \
             --verify \
             --bundle-root "$VERIFY_BUNDLE" \
             --release-tag "$RELEASE_TAG" \
@@ -543,6 +958,7 @@ jobs:
           cmp "$SOURCE_BUNDLE/$ARCHIVE_ASSET" "$remote/$ARCHIVE_ASSET"
           cmp "$SOURCE_BUNDLE/$CONFIG_ASSET" "$remote/$CONFIG_ASSET"
           node modules/open-design/package/production-cli.mjs \
+            --module-version "$MODULE_VERSION" \
             --verify \
             --bundle-root "$remote" \
             --release-tag "$RELEASE_TAG" \

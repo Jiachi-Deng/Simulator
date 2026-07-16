@@ -9,13 +9,16 @@ const producerPath = join(root, ".github/workflows/open-design-production-input.
 const workflowPath = join(root, ".github/workflows/open-design-release.yml")
 const documentationPath = join(root, ".github/workflows/open-design-release.md")
 const staticValidationPath = join(root, ".github/workflows/release-static-validation.yml")
+const rollbackPath = join(root, ".github/workflows/open-design-acceptance-rollback.yml")
 const producerSource = readFileSync(producerPath, "utf8")
 const source = readFileSync(workflowPath, "utf8")
 const documentation = readFileSync(documentationPath, "utf8")
 const staticValidation = readFileSync(staticValidationPath, "utf8")
+const rollbackSource = readFileSync(rollbackPath, "utf8")
 const producer = Bun.YAML.parse(producerSource) as Record<string, any>
 const workflow = Bun.YAML.parse(source) as Record<string, any>
 const staticWorkflow = Bun.YAML.parse(staticValidation) as Record<string, any>
+const rollbackWorkflow = Bun.YAML.parse(rollbackSource) as Record<string, any>
 
 function step(jobName: "initial" | "refresh", name: string): Record<string, any> {
   const found = workflow.jobs[jobName].steps.find((candidate: Record<string, any>) => candidate.name === name)
@@ -29,11 +32,19 @@ function staticStep(name: string): Record<string, any> {
   return found
 }
 
+function deriveCatalogState(priors: Array<{ sequence: number; issuedAt: string }>, nowMs: number) {
+  if (priors.length === 0) throw new TypeError("at least one authenticated prior state is required")
+  const sequence = Math.max(...priors.map((prior) => prior.sequence)) + 1
+  const priorIssuedAtMs = Math.max(...priors.map((prior) => Date.parse(prior.issuedAt)))
+  const issuedAtMs = Math.max(nowMs, priorIssuedAtMs + 1000)
+  return { sequence, issuedAt: new Date(issuedAtMs).toISOString() }
+}
+
 describe("OpenDesign official release workflow", () => {
   test("has fixed authority, protected writes, and serialized initial/refresh entrypoints", () => {
     expect(workflow.permissions).toEqual({ actions: "read", contents: "write" })
     expect(workflow.concurrency).toEqual({
-      group: "open-design-official-release-v0.14.5",
+      group: "open-design-release-transaction",
       "cancel-in-progress": false,
     })
     expect(workflow.env.RELEASE_OWNER).toBe("Jiachi-Deng")
@@ -41,11 +52,14 @@ describe("OpenDesign official release workflow", () => {
     expect(workflow.env.RELEASE_TAG).toBe("open-design-v0.14.5")
     expect(workflow.on.schedule).toEqual([{ cron: "23 */12 * * *" }])
     expect(workflow.on.workflow_dispatch.inputs.operation.options).toEqual(["refresh", "initial"])
-    expect(workflow.jobs.initial.environment.name).toBe("open-design-production")
+    expect(workflow.on.workflow_dispatch.inputs.release_track.options).toEqual(["prerelease", "stable"])
+    expect(workflow.jobs.initial.environment.name).toContain("open-design-production-stable")
+    expect(workflow.jobs.initial.environment.name).toContain("open-design-prerelease")
     expect(workflow.jobs.refresh.environment.name).toBe("open-design-production")
     expect(workflow.jobs.initial.if).toContain("github.repository == 'Jiachi-Deng/Simulator'")
     expect(workflow.jobs.refresh.if).toContain("github.repository == 'Jiachi-Deng/Simulator'")
-    expect(workflow.jobs.initial.if).toContain("vars.OPEN_DESIGN_RELEASE_ENABLED == 'true'")
+    expect(workflow.jobs.initial.if).toContain("vars.OPEN_DESIGN_PRERELEASE_ENABLED == 'true'")
+    expect(workflow.jobs.initial.if).toContain("vars.OPEN_DESIGN_STABLE_CHANNEL_ENABLED == 'true'")
     expect(workflow.jobs.refresh.if).toContain("vars.OPEN_DESIGN_RELEASE_ENABLED == 'true'")
     expect(workflow.jobs.initial.if).toContain("inputs.operation == 'initial'")
     expect(workflow.jobs.refresh.if).toContain("github.event_name == 'schedule'")
@@ -91,7 +105,7 @@ describe("OpenDesign official release workflow", () => {
     expect(actionReferences.every((reference) => /@[0-9a-f]{40}$/.test(reference))).toBe(true)
   })
 
-  test("exposes the private key only as a signing-step environment secret", () => {
+  test("exposes the private key only to one signing or verification step per job", () => {
     const secretExpression = "${{ secrets.OPEN_DESIGN_RELEASE_PRIVATE_KEY }}"
     expect(source.match(/\$\{\{ secrets\.OPEN_DESIGN_RELEASE_PRIVATE_KEY \}\}/g)).toHaveLength(2)
     expect(source).not.toContain("--private-key-file")
@@ -162,7 +176,9 @@ describe("OpenDesign official release workflow", () => {
 
   test("validates before initial draft publication and removes a failed draft/tag", () => {
     const initial = source.slice(source.indexOf("  initial:"), source.indexOf("  refresh:"))
-    expect(initial.indexOf("Dry-run initial production package")).toBeLessThan(initial.indexOf("Build signed initial assets"))
+    const authenticatedBuild = step("initial", "Authenticate prior state, dry-run, and build signed initial assets").run
+    expect(authenticatedBuild.indexOf("--dry-run")).toBeLessThan(authenticatedBuild.indexOf("--private-key-env OPEN_DESIGN_RELEASE_PRIVATE_KEY"))
+    expect(initial.indexOf("Authenticate prior state, dry-run, and build signed initial assets")).toBeLessThan(initial.indexOf("Verify initial bundle before publication"))
     expect(initial.indexOf("Verify initial bundle before publication")).toBeLessThan(initial.indexOf("Publish fixed-tag release"))
     expect(initial).toContain(".head_branch")
     expect(initial).toContain(".head_sha")
@@ -172,6 +188,72 @@ describe("OpenDesign official release workflow", () => {
     expect(initial).toContain("--cleanup-tag --yes")
     expect(initial).toContain("cmp \"$INITIAL_OUTPUT/$asset\" \"$remote/$asset\"")
     expect(initial).toContain("--draft=false")
+  })
+
+  test("authenticates the exact nonzero 0.14.5 high-water mark before deriving RC state", () => {
+    const download = step("initial", "Download exact current 0.14.5 trust baseline").run
+    expect(download).toContain('test "$(jq -r .isDraft <<<"$baseline_state")" = false')
+    expect(download).toContain('test "$(jq -r .isPrerelease <<<"$baseline_state")" = false')
+    expect(download).toContain('test "$(find "$baseline" -maxdepth 1 -type f | wc -l | tr -d \' \')" = 5')
+    for (const variable of [
+      "LKG_ARCHIVE_ASSET",
+      "LKG_CATALOG_ASSET",
+      "LKG_ENVELOPE_ASSET",
+      "CONFIG_ASSET",
+      "LKG_METADATA_ASSET",
+    ]) {
+      expect(download).toContain(`"$${variable}"`)
+      expect(download).toContain('test -f "$baseline/$asset"')
+    }
+
+    const build = step("initial", "Authenticate prior state, dry-run, and build signed initial assets").run
+    const baselineVerify = build.indexOf('> "$state_root/baseline-verify.json"')
+    expect(baselineVerify).toBeGreaterThan(0)
+    expect(baselineVerify).toBeLessThan(build.indexOf("--dry-run"))
+    expect(build).toContain('--bundle-root "$BASELINE_BUNDLE"')
+    expect(build).toContain('--module-version "$LKG_MODULE_VERSION"')
+    expect(build).toContain('.catalogState.highestSequence == $sequence')
+    expect(build).toContain('.catalogState.latestIssuedAt == $issuedAt')
+    expect(build).toContain("const priorSequence = Math.max(...sequences);")
+    expect(build).toContain("const sequence = priorSequence + 1;")
+    expect(build.match(/--previous-sequence "\$PRIOR_SEQUENCE"/g)).toHaveLength(2)
+    expect(build.match(/--previous-issued-at "\$PRIOR_ISSUED_AT"/g)).toHaveLength(2)
+    const verify = step("initial", "Verify initial bundle before publication").run
+    expect(verify).toContain('--previous-sequence "$PRIOR_SEQUENCE"')
+    expect(verify).toContain('--previous-issued-at "$PRIOR_ISSUED_AT"')
+
+    const state = deriveCatalogState([{ sequence: 41, issuedAt: "2026-07-16T10:00:00.000Z" }], Date.parse("2026-07-16T09:00:00.000Z"))
+    expect(state).toEqual({ sequence: 42, issuedAt: "2026-07-16T10:00:01.000Z" })
+    const stableState = deriveCatalogState([
+      { sequence: 44, issuedAt: "2026-07-16T10:00:00.000Z" },
+      { sequence: 42, issuedAt: "2026-07-16T12:00:00.000Z" },
+    ], Date.parse("2026-07-16T11:00:00.000Z"))
+    expect(stableState).toEqual({ sequence: 45, issuedAt: "2026-07-16T12:00:01.000Z" })
+    const wallClockState = deriveCatalogState([
+      { sequence: 45, issuedAt: "2026-07-16T12:00:00.000Z" },
+    ], Date.parse("2026-07-16T13:00:00.000Z"))
+    expect(wallClockState).toEqual({ sequence: 46, issuedAt: "2026-07-16T13:00:00.000Z" })
+  })
+
+  test("fails closed on missing or tampered baseline and RC release assets", () => {
+    const baseline = step("initial", "Download exact current 0.14.5 trust baseline").run
+    expect(baseline).toContain('test "$actual" = "$expected"')
+    expect(baseline).toContain('test -f "$baseline/$asset"')
+    expect(baseline).not.toContain("|| true")
+
+    const stable = step("initial", "Validate stable acceptance, rollback, and RC closure").run
+    expect(stable).toContain('test "$actual_rc" = "$expected_rc"')
+    expect(stable).toContain('test "$(find "$rc" -maxdepth 1 -type f | wc -l | tr -d \' \')" = 4')
+    expect(stable).toContain('test -f "$rc/$asset"')
+    expect(stable).not.toContain("|| true")
+
+    const authenticatedBuild = step("initial", "Authenticate prior state, dry-run, and build signed initial assets").run
+    expect(authenticatedBuild).toContain('--bundle-root "$BASELINE_BUNDLE"')
+    expect(authenticatedBuild).toContain('--bundle-root "$rc_verify"')
+    expect(authenticatedBuild).toContain('import { encodeCanonicalCatalog } from "@simulator/module-release-trust";')
+    expect(authenticatedBuild).toContain('flag: "wx"')
+    expect(authenticatedBuild.indexOf('baseline-verify.json')).toBeLessThan(authenticatedBuild.indexOf("--dry-run"))
+    expect(authenticatedBuild.indexOf('rc-verify.json')).toBeLessThan(authenticatedBuild.indexOf("--dry-run"))
   })
 
   test("refreshes only three assets behind a draft rollback transaction", () => {
@@ -199,6 +281,9 @@ describe("OpenDesign official release workflow", () => {
     expect(prose).toContain("initial input")
     expect(prose).toContain("Release draft for manual recovery")
     expect(prose).toContain("No real publication should be attempted")
+    expect(prose).toContain("current 0.14.5 sequence + 1")
+    expect(prose).toContain("max(current 0.14.5 sequence, accepted RC sequence) + 1")
+    expect(prose).toContain("all four public RC assets")
     expect(documentation).not.toContain("BEGIN PRIVATE KEY")
   })
 
@@ -211,9 +296,32 @@ describe("OpenDesign official release workflow", () => {
     expect(staticValidation.indexOf("Setup Node")).toBeLessThan(staticValidation.indexOf("Install exact OpenDesign publisher dependencies"))
     expect(staticValidation.indexOf("Install exact OpenDesign publisher dependencies")).toBeLessThan(staticValidation.indexOf("Run release unit tests"))
     expect(staticValidation).toContain(".github/workflows/open-design-release.yml")
+    expect(staticValidation).toContain(".github/workflows/open-design-acceptance-rollback.yml")
     expect(staticValidation).toContain(".github/workflows/open-design-production-input.yml")
     expect(staticValidation).toContain(".github/workflows/open-design-release.md")
     expect(staticValidation).toContain("scripts/release/*.test.ts")
     expect(staticValidation).toContain("YAML.safe_load(File.read")
+  })
+
+  test("keeps every embedded release bash block and Node heredoc syntactically valid", () => {
+    for (const [workflowName, parsed] of [
+      ["release", workflow],
+      ["rollback", rollbackWorkflow],
+    ] as const) {
+      for (const [jobName, job] of Object.entries(parsed.jobs as Record<string, any>)) {
+        for (const candidate of job.steps as Array<Record<string, any>>) {
+          if (candidate.shell !== "bash" || typeof candidate.run !== "string") continue
+          const bash = spawnSync("bash", ["-n"], { input: candidate.run, encoding: "utf8" })
+          expect(bash.status, `${workflowName}/${jobName}/${candidate.name}: ${bash.stderr}`).toBe(0)
+          for (const match of candidate.run.matchAll(/node --input-type=module <<'NODE'\n([\s\S]*?)\nNODE(?:\n|$)/g)) {
+            const node = spawnSync("node", ["--check", "--input-type=module", "-"], {
+              input: match[1],
+              encoding: "utf8",
+            })
+            expect(node.status, `${workflowName}/${jobName}/${candidate.name}: ${node.stderr}`).toBe(0)
+          }
+        }
+      }
+    }
   })
 })

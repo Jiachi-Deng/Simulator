@@ -1,0 +1,176 @@
+name: OpenDesign Acceptance Rollback Gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      debug_enabled:
+        description: Debug-only gate. Must be explicitly enabled.
+        required: true
+        default: false
+        type: boolean
+      acceptance_approved:
+        description: Acceptance-only gate. Set only after the RC rollback exercise is approved.
+        required: true
+        default: false
+        type: boolean
+      acceptance_run_id:
+        description: Successful main-branch acceptance evidence run.
+        required: true
+        type: string
+      rollback_confirmation:
+        description: Enter ROLLBACK_OPEN_DESIGN_ACCEPTANCE_TO_0_14_5.
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: open-design-acceptance-rollback-gate
+  cancel-in-progress: false
+
+jobs:
+  validate-rollback-request:
+    name: Validate Coordinator rollback handoff
+    if: >-
+      github.repository == 'Jiachi-Deng/Simulator' &&
+      github.ref == 'refs/heads/main' &&
+      inputs.debug_enabled == true &&
+      inputs.acceptance_approved == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: open-design-acceptance-rollback
+    env:
+      RELEASE_OWNER: Jiachi-Deng
+      RELEASE_REPOSITORY: Simulator
+      FROM_TAG: open-design-v0.14.6-rc.1
+      TO_TAG: open-design-v0.14.5
+      ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}
+      EXPECTED_ACCEPTANCE_WORKFLOW: .github/workflows/open-design-rc-acceptance.yml
+      EXPECTED_SHA: ${{ github.sha }}
+      ROLLBACK_CONFIRMATION: ${{ inputs.rollback_confirmation }}
+    steps:
+      - name: Validate double-gated rollback evidence
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$ROLLBACK_CONFIRMATION" = "ROLLBACK_OPEN_DESIGN_ACCEPTANCE_TO_0_14_5"
+          [[ "$ACCEPTANCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+
+          run_json=$(gh api "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/runs/$ACCEPTANCE_RUN_ID")
+          test "$(jq -r .conclusion <<<"$run_json")" = success
+          test "$(jq -r .head_branch <<<"$run_json")" = main
+          test "$(jq -r .head_sha <<<"$run_json")" = "$EXPECTED_SHA"
+          test "$(jq -r .repository.full_name <<<"$run_json")" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
+          test "$(jq -r .path <<<"$run_json")" = "$EXPECTED_ACCEPTANCE_WORKFLOW"
+          test "$(jq -r .event <<<"$run_json")" = workflow_dispatch
+
+          evidence_root="$RUNNER_TEMP/open-design-rollback-gate-evidence"
+          acceptance="$evidence_root/acceptance"
+          output="$evidence_root/output"
+          rc_download="$evidence_root/rc"
+          mkdir -m 700 -p "$acceptance" "$output" "$rc_download"
+          gh run download "$ACCEPTANCE_RUN_ID" \
+            --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --name open-design-rc-acceptance-evidence \
+            --dir "$acceptance"
+          test "$(find "$acceptance" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 2
+          test -f "$acceptance/open-design-rc-acceptance-evidence.json"
+          test -f "$acceptance/SHA256SUMS"
+          grep -Eq '^[0-9a-f]{64}  open-design-rc-acceptance-evidence\.json$' "$acceptance/SHA256SUMS"
+          (cd "$acceptance" && shasum -a 256 -c SHA256SUMS)
+          acceptance_json="$acceptance/open-design-rc-acceptance-evidence.json"
+          jq -e --arg repository "$RELEASE_OWNER/$RELEASE_REPOSITORY" --arg sha "$EXPECTED_SHA" '
+            keys == ["blackoutTasksPassed","headSha","hostVersion","newStackConsecutivePassed","oldStackTasksPassed","paidTurns","previewHumanPasses","rcArchiveAsset","rcArchiveSha256","rcCatalogIssuedAt","rcCatalogSequence","rcExtractedManifestSha256","rcTag","rcVersion","repository","requiredCiPassed","rollbackExercisePassed","schemaVersion"] and
+            .schemaVersion == 1 and .repository == $repository and .headSha == $sha and
+            .hostVersion == "0.12.0" and .rcVersion == "0.14.6-rc.1" and
+            .rcTag == "open-design-v0.14.6-rc.1" and
+            .rcArchiveAsset == "org.simulator.open-design-0.14.6-rc.1-darwin-arm64.tar.gz" and
+            (.rcArchiveSha256 | test("^[0-9a-f]{64}$")) and
+            (.rcCatalogSequence | type == "number" and . >= 1 and . <= 9007199254740991 and floor == .) and
+            (.rcCatalogIssuedAt | type == "string" and test("^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$")) and
+            (.rcExtractedManifestSha256 | test("^[0-9a-f]{64}$")) and
+            .oldStackTasksPassed == 20 and .newStackConsecutivePassed == 20 and
+            .blackoutTasksPassed == 20 and .previewHumanPasses == 20 and .paidTurns == 40 and
+            .rollbackExercisePassed == true and .requiredCiPassed == true
+          ' "$acceptance_json" >/dev/null
+          rc_archive_sha=$(jq -r .rcArchiveSha256 "$acceptance_json")
+          rc_catalog_sequence=$(jq -r .rcCatalogSequence "$acceptance_json")
+          rc_catalog_issued_at=$(jq -r .rcCatalogIssuedAt "$acceptance_json")
+
+          from_json=$(gh release view "$FROM_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --json tagName,isDraft,isPrerelease,assets)
+          test "$(jq -r .tagName <<<"$from_json")" = "$FROM_TAG"
+          test "$(jq -r .isDraft <<<"$from_json")" = false
+          test "$(jq -r .isPrerelease <<<"$from_json")" = true
+          from_assets=$(jq -r '.assets[].name' <<<"$from_json" | LC_ALL=C sort)
+          expected_from=$(printf '%s\n' \
+            org.simulator.open-design-0.14.6-rc.1-darwin-arm64.tar.gz \
+            org.simulator.open-design-0.14.6-rc.1-catalog-v2-envelope.json \
+            org.simulator.open-design-0.14.6-rc.1-catalog-v2.json \
+            org.simulator.open-design-0.14.6-rc.1-release-metadata.json | LC_ALL=C sort)
+          test "$from_assets" = "$expected_from"
+          gh release download "$FROM_TAG" \
+            --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --pattern org.simulator.open-design-0.14.6-rc.1-darwin-arm64.tar.gz \
+            --dir "$rc_download"
+          test "$(shasum -a 256 "$rc_download/org.simulator.open-design-0.14.6-rc.1-darwin-arm64.tar.gz" | awk '{print $1}')" = "$rc_archive_sha"
+
+          to_json=$(gh release view "$TO_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --json tagName,isDraft,isPrerelease,assets)
+          test "$(jq -r .tagName <<<"$to_json")" = "$TO_TAG"
+          test "$(jq -r .isDraft <<<"$to_json")" = false
+          test "$(jq -r .isPrerelease <<<"$to_json")" = false
+          to_assets=$(jq -r '.assets[].name' <<<"$to_json" | LC_ALL=C sort)
+          expected_to=$(printf '%s\n' \
+            open-design-official-channel.json \
+            org.simulator.open-design-0.14.5-darwin-arm64.tar.gz \
+            org.simulator.open-design-0.14.5-catalog-v2-envelope.json \
+            org.simulator.open-design-0.14.5-catalog-v2.json \
+            org.simulator.open-design-0.14.5-release-metadata.json | LC_ALL=C sort)
+          test "$to_assets" = "$expected_to"
+
+          validated_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
+          jq -n --arg repository "$RELEASE_OWNER/$RELEASE_REPOSITORY" --arg headSha "$EXPECTED_SHA" \
+            --argjson acceptanceRunId "$ACCEPTANCE_RUN_ID" --arg rcArchiveSha256 "$rc_archive_sha" \
+            --argjson rcCatalogSequence "$rc_catalog_sequence" --arg rcCatalogIssuedAt "$rc_catalog_issued_at" \
+            --arg validatedAt "$validated_at" '{
+              schemaVersion: 1,
+              repository: $repository,
+              headSha: $headSha,
+              acceptanceRunId: $acceptanceRunId,
+              rcTag: "open-design-v0.14.6-rc.1",
+              rcArchiveSha256: $rcArchiveSha256,
+              rcCatalogSequence: $rcCatalogSequence,
+              rcCatalogIssuedAt: $rcCatalogIssuedAt,
+              lkgTag: "open-design-v0.14.5",
+              validatedAt: $validatedAt
+            }' > "$output/open-design-rollback-gate-evidence.json"
+          (cd "$output" && shasum -a 256 open-design-rollback-gate-evidence.json > SHA256SUMS)
+          (cd "$output" && shasum -a 256 -c SHA256SUMS)
+
+      - name: Upload immutable rollback gate evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: open-design-rollback-gate-evidence
+          path: ${{ runner.temp }}/open-design-rollback-gate-evidence/output/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          overwrite: false
+
+      - name: Record non-mutating Coordinator handoff
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          The debug and acceptance gates passed for OpenDesign RC rollback.
+
+          This workflow deliberately has read-only repository permissions and does not
+          change Releases, Catalogs, channels, or user-visible version selection. The
+          actual local rollback must reuse the existing Module Coordinator rollback
+          transaction and collect installed-app process/session evidence.
+          EOF
