@@ -133,6 +133,7 @@ import {
   type OpenDesignHostChannelBootstrap,
   type OpenDesignOfficialChannelBootstrap,
 } from './open-design-official-channel'
+import { loadOpenDesignCompatibilityAuthority } from './open-design-compatibility-authority'
 import { resolveHostModuleStorageRoot } from './host-module-storage-root'
 import {
   createIsolatedHostModuleAgentRuntime,
@@ -1105,6 +1106,19 @@ app.whenReady().then(async () => {
       const officialChannel = openDesignHostChannel.status === 'ready' && openDesignHostChannel.source === 'official'
         ? openDesignHostChannel.channel
         : undefined
+      const openDesignCompatibilityAuthority = await loadOpenDesignCompatibilityAuthority({
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        hostVersion: app.getVersion(),
+        platform: currentModulePlatform(),
+      })
+      if (app.isPackaged && openDesignCompatibilityAuthority.status === 'not-ready') {
+        // A missing or tampered rollback authority disables only the pinned
+        // 0.14.5 compatibility path. Craft and normally compatible modules stay available.
+        mainLog.warn('OpenDesign 0.14.5 compatibility authority is unavailable', {
+          errorCode: openDesignCompatibilityAuthority.errorCode,
+        })
+      }
       try {
         const moduleStorageRoot = resolveHostModuleStorageRoot({
           userDataRoot: app.getPath('userData'),
@@ -1172,6 +1186,9 @@ app.whenReady().then(async () => {
           moduleViewManager,
           hostWindow: () => windowManager?.getLastActiveWindow() ?? undefined,
           fetch: developmentBundle?.fetchAdapter,
+          registryCompatibilityExceptions: openDesignCompatibilityAuthority.status === 'ready'
+            ? [openDesignCompatibilityAuthority.compatibilityException]
+            : [],
           prepareModuleAgentLaunch: (context) => {
             const runtime = hostModuleAgentRuntime
             if (!runtime) throw new Error('Module Agent runtime is unavailable')

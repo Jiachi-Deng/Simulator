@@ -16,7 +16,7 @@ import {
   type ModuleDownloaderOptions,
 } from '@simulator/module-downloader'
 import { ModuleInstaller } from '@simulator/module-installer'
-import { ModuleRegistry } from '@simulator/module-registry'
+import { ModuleRegistry, type ModuleRegistryOptions } from '@simulator/module-registry'
 import { FilesystemModuleRegistryPersistence } from '@simulator/module-registry/filesystem'
 import {
   LoopbackHttpHealthAdapter,
@@ -44,6 +44,7 @@ export interface HostModuleCoordinatorOptions {
   readonly clock?: HostModuleClock
   readonly daemonEnvironment?: Readonly<Record<string, string>>
   readonly prepareModuleAgentLaunch?: PrepareModuleDaemonLaunch
+  readonly registryCompatibilityExceptions?: ModuleRegistryOptions['compatibilityExceptions']
 }
 
 export class HostModuleClock extends RealClock {
@@ -98,6 +99,7 @@ export function createHostModuleCoordinator(options: HostModuleCoordinatorOption
   const registry = new ModuleRegistry(
     { version: options.hostVersion, platform: options.platform },
     new FilesystemModuleRegistryPersistence(join(options.root, 'registry')),
+    { compatibilityExceptions: options.registryCompatibilityExceptions },
   )
   const daemon = new ModuleDaemonManager({
     process: new RealProcessAdapter(),
