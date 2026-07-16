@@ -34,6 +34,20 @@ export interface InternalCreateSessionOptions {
   moduleAgentRun?: ModuleAgentRunMetadata
 }
 
+/**
+ * Aggregate lifecycle signal for ordinary, user-visible Craft turns. Hidden
+ * sessions (including transient Module Agent sessions) never participate.
+ */
+export interface VisibleCraftTurnStateChange {
+  active: boolean
+  sessionId: string
+  activeSessionCount: number
+}
+
+export type VisibleCraftTurnStateListener = (
+  change: VisibleCraftTurnStateChange,
+) => void | Promise<void>
+
 export interface ISessionManager {
   // ---------------------------------------------------------------------------
   // Lifecycle
@@ -45,6 +59,11 @@ export interface ISessionManager {
   setEventSink(sink: EventSink): void
   /** Trusted, sanitized observer used by Module Agent Gateway adapters. */
   onModuleAgentRuntimeEvent(listener: (event: ModuleAgentPortEvent) => void): () => void
+  /**
+   * Host-only priority seam. The first visible Craft turn awaits the active
+   * transition before provider work starts; the last stop emits inactive.
+   */
+  onVisibleCraftTurnStateChange(listener: VisibleCraftTurnStateListener): () => void
   flushAllSessions(): Promise<void>
 
   // ---------------------------------------------------------------------------

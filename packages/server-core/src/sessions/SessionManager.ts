@@ -1,6 +1,6 @@
 import type { EventSink, RpcServer } from '@craft-agent/server-core/transport'
 import { CLIENT_BROWSER_INVOKE } from '@craft-agent/server-core/transport'
-import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput, InternalCreateSessionOptions } from '@craft-agent/server-core/handlers'
+import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput, InternalCreateSessionOptions, VisibleCraftTurnStateListener } from '@craft-agent/server-core/handlers'
 import { RemoteBrowserPaneManager } from './RemoteBrowserPaneManager'
 import { validateFilePath, getWorkspaceAllowedDirs } from '@craft-agent/server-core/handlers'
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '@craft-agent/server-core/runtime'
@@ -102,6 +102,7 @@ import { AutomationSystem, createPromptHistoryEntry, appendAutomationHistoryEntr
 import { buildBackendRuntimeSignature, buildRestartRequiredSignature, filterAttachmentsForModelInput } from './runtime-config'
 import type { ModuleAgentPortEvent } from '@simulator/module-agent-gateway'
 import { isHostAgentRunTransition, type HostAgentRunState } from '@simulator/host-agent-contract'
+import { VisibleCraftTurnGate } from './visible-craft-turn-gate'
 
 // Import from server-core domain utilities
 import { sanitizeForTitle, shouldActivateBrowserOverlay, normalizeBrowserToolName, rollbackFailedBranchCreation, releaseBrowserOwnershipOnForcedStop } from '@craft-agent/server-core/domain'
@@ -1311,6 +1312,7 @@ export class SessionManager implements ISessionManager {
       sessionRuntimeHooks.onSessionStarted()
     } else if (was && !processing) {
       sessionRuntimeHooks.onSessionStopped()
+      this.endVisibleCraftTurn(managed)
     }
   }
 
@@ -1338,6 +1340,15 @@ export class SessionManager implements ISessionManager {
   private browserHostByCanvas = new Map<string, string>()
   private eventSink: EventSink | null = null
   private moduleAgentRuntimeListeners = new Set<(event: ModuleAgentPortEvent) => void>()
+  private visibleCraftTurnGate = new VisibleCraftTurnGate({
+    onListenerError: (error, change) => {
+      sessionLog.error('Visible Craft turn priority listener failed; Craft remains available', {
+        active: change.active,
+        sessionId: change.sessionId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    },
+  })
 
   setEventSink(sink: EventSink): void {
     this.eventSink = sink
@@ -1351,6 +1362,25 @@ export class SessionManager implements ISessionManager {
   onModuleAgentRuntimeEvent(listener: (event: ModuleAgentPortEvent) => void): () => void {
     this.moduleAgentRuntimeListeners.add(listener)
     return () => this.moduleAgentRuntimeListeners.delete(listener)
+  }
+
+  onVisibleCraftTurnStateChange(listener: VisibleCraftTurnStateListener): () => void {
+    return this.visibleCraftTurnGate.subscribe(listener)
+  }
+
+  private isVisibleCraftTurn(managed: ManagedSession): boolean {
+    return managed.hidden !== true && managed.moduleAgentRun === undefined
+  }
+
+  private beginVisibleCraftTurn(managed: ManagedSession): Promise<void> {
+    return this.isVisibleCraftTurn(managed)
+      ? this.visibleCraftTurnGate.begin(managed.id)
+      : Promise.resolve()
+  }
+
+  private endVisibleCraftTurn(managed: ManagedSession): void {
+    if (!this.isVisibleCraftTurn(managed)) return
+    void this.visibleCraftTurnGate.end(managed.id)
   }
 
   setBrowserPaneManager(bpm: IBrowserPaneManager): void {
@@ -6059,6 +6089,10 @@ export class SessionManager implements ISessionManager {
     }
 
     managed.lastMessageAt = Date.now()
+    // Craft is the primary product surface. Before any visible provider work
+    // starts, allow the Host to interrupt and await an active Module turn.
+    // Hidden/transient sessions deliberately bypass this priority seam.
+    await this.beginVisibleCraftTurn(managed)
     this.setProcessing(managed, true)
     managed.streamingText = ''
     managed.processingGeneration++
@@ -9153,6 +9187,7 @@ export class SessionManager implements ISessionManager {
     this.pendingCredentialResolvers.clear()
     this.pendingPermissionRequests.clear()
     this.adminRememberApprovals.clear()
+    this.visibleCraftTurnGate.clear()
 
     // Clean up session-scoped tool callbacks for all sessions
     for (const sessionId of this.sessions.keys()) {
