@@ -271,6 +271,7 @@ else
     APP_ROOT="$ELECTRON_DIR/release/mac/Simulator.app"
 fi
 require_path "$APP_ROOT" "app bundle" "electron-builder did not create the expected app."
+bun "$ELECTRON_DIR/scripts/validate-assets.ts" --packaged-app "$APP_ROOT"
 bun "$ROOT_DIR/scripts/packaged-server-resources.ts" --app "$APP_ROOT"
 
 if [ "$UNSIGNED" = true ]; then

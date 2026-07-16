@@ -1,0 +1,590 @@
+{
+  "contractVersion": 2,
+  "canonicalRequest": {
+    "idempotencyKey": "fixture-run-0001",
+    "value": {
+      "workingDirectory": "/tmp/allowed/project",
+      "prompt": "Create a calm dashboard.\nUse the existing files.",
+      "contractVersion": 2
+    },
+    "canonicalJson": "{\"contractVersion\":2,\"prompt\":\"Create a calm dashboard.\\nUse the existing files.\",\"workingDirectory\":\"/tmp/allowed/project\"}",
+    "requestSha256": "134e5f4eadbce998e870393d12f7f8009fb9d2b38f68b81f79490e29ffa339fb",
+    "idempotencyKeySha256": "f1eed990c0fc4c044df333986677272d91883736830710bfb665f746bb595e74"
+  },
+  "valid": {
+    "createRunRequests": [
+      {
+        "contractVersion": 2,
+        "prompt": "Create a landing page."
+      },
+      {
+        "contractVersion": 2,
+        "prompt": "创建一个可访问的设置页面。",
+        "workingDirectory": "/tmp/allowed/project"
+      }
+    ],
+    "capabilitiesResponse": {
+      "contractVersion": 2,
+      "capability": "host-agent.run",
+      "features": {
+        "streaming": true,
+        "cancellation": true,
+        "reconnect": true,
+        "idempotency": true
+      },
+      "limits": {
+        "maxPromptBytes": 2097152,
+        "maxEventBytes": 262144,
+        "maxDeltaBytes": 65536,
+        "maxReplayEvents": 1024,
+        "maxReplayBytes": 8388608,
+        "maxSseSubscribers": 2,
+        "maxConcurrentRuns": 1,
+        "maxRunDurationMs": 1800000
+      }
+    },
+    "runSnapshots": [
+      {
+        "contractVersion": 2,
+        "runHandle": "run_0123456789abcdef0123456789abcdef",
+        "state": "accepted",
+        "createdAt": 1700000000000,
+        "updatedAt": 1700000000000
+      },
+      {
+        "contractVersion": 2,
+        "runHandle": "run_0123456789abcdef0123456789abcdef",
+        "state": "completed",
+        "createdAt": 1700000000000,
+        "updatedAt": 1700000000100,
+        "terminalAt": 1700000000100
+      },
+      {
+        "contractVersion": 2,
+        "runHandle": "run_0123456789abcdef0123456789abcdef",
+        "state": "closed",
+        "createdAt": 1700000000000,
+        "updatedAt": 1700000000200,
+        "terminalAt": 1700000000100,
+        "closedAt": 1700000000200
+      }
+    ],
+    "events": [
+      {
+        "contractVersion": 2,
+        "eventId": "1",
+        "sequence": 1,
+        "runHandle": "run_0123456789abcdef0123456789abcdef",
+        "occurredAt": 1700000000001,
+        "type": "run.accepted",
+        "data": {}
+      },
+      {
+        "contractVersion": 2,
+        "eventId": "2",
+        "sequence": 2,
+        "runHandle": "run_0123456789abcdef0123456789abcdef",
+        "occurredAt": 1700000000002,
+        "type": "turn.started",
+        "data": {}
+      },
+      {
+        "contractVersion": 2,
+        "eventId": "3",
+        "sequence": 3,
+        "runHandle": "run_0123456789abcdef0123456789abcdef",
+        "occurredAt": 1700000000003,
+        "type": "message.delta",
+        "data": {
+          "delta": "Hello"
+        }
+      },
+      {
+        "contractVersion": 2,
+        "eventId": "4",
+        "sequence": 4,
+        "runHandle": "run_0123456789abcdef0123456789abcdef",
+        "occurredAt": 1700000000004,
+        "type": "reasoning.delta",
+        "data": {
+          "delta": "Checking layout"
+        }
+      },
+      {
+        "contractVersion": 2,
+        "eventId": "5",
+        "sequence": 5,
+        "runHandle": "run_0123456789abcdef0123456789abcdef",
+        "occurredAt": 1700000000005,
+        "type": "activity",
+        "data": {
+          "phase": "started",
+          "kind": "tool",
+          "label": "Write file"
+        }
+      },
+      {
+        "contractVersion": 2,
+        "eventId": "6",
+        "sequence": 6,
+        "runHandle": "run_0123456789abcdef0123456789abcdef",
+        "occurredAt": 1700000000006,
+        "type": "presentation.item",
+        "data": {
+          "itemId": "preview.main",
+          "kind": "preview",
+          "title": "Main preview",
+          "uri": "http://127.0.0.1:4173/",
+          "mediaType": "text/html"
+        }
+      },
+      {
+        "contractVersion": 2,
+        "eventId": "7",
+        "sequence": 7,
+        "runHandle": "run_0123456789abcdef0123456789abcdef",
+        "occurredAt": 1700000000007,
+        "type": "turn.completed",
+        "data": {
+          "finalText": "Done"
+        }
+      },
+      {
+        "contractVersion": 2,
+        "eventId": "8",
+        "sequence": 8,
+        "runHandle": "run_0123456789abcdef0123456789abcdef",
+        "occurredAt": 1700000000008,
+        "type": "turn.failed",
+        "data": {
+          "code": "RUNTIME_UNAVAILABLE",
+          "retryable": true
+        }
+      },
+      {
+        "contractVersion": 2,
+        "eventId": "9",
+        "sequence": 9,
+        "runHandle": "run_0123456789abcdef0123456789abcdef",
+        "occurredAt": 1700000000009,
+        "type": "turn.interrupted",
+        "data": {
+          "reason": "CRAFT_TURN_PREEMPTED",
+          "retryable": true
+        }
+      },
+      {
+        "contractVersion": 2,
+        "eventId": "10",
+        "sequence": 10,
+        "runHandle": "run_0123456789abcdef0123456789abcdef",
+        "occurredAt": 1700000000010,
+        "type": "run.closed",
+        "data": {}
+      }
+    ],
+    "transcripts": {
+      "failedBeforeStart": [
+        {
+          "contractVersion": 2,
+          "eventId": "1",
+          "sequence": 1,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000001,
+          "type": "run.accepted",
+          "data": {}
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "2",
+          "sequence": 2,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000002,
+          "type": "turn.failed",
+          "data": {
+            "code": "RUNTIME_UNAVAILABLE",
+            "retryable": true
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "3",
+          "sequence": 3,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000003,
+          "type": "run.closed",
+          "data": {}
+        }
+      ],
+      "interruptedBeforeStart": [
+        {
+          "contractVersion": 2,
+          "eventId": "1",
+          "sequence": 1,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000001,
+          "type": "run.accepted",
+          "data": {}
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "2",
+          "sequence": 2,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000002,
+          "type": "turn.interrupted",
+          "data": {
+            "reason": "CLIENT_CANCELLED",
+            "retryable": false
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "3",
+          "sequence": 3,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000003,
+          "type": "run.closed",
+          "data": {}
+        }
+      ],
+      "completed": [
+        {
+          "contractVersion": 2,
+          "eventId": "1",
+          "sequence": 1,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000001,
+          "type": "run.accepted",
+          "data": {}
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "2",
+          "sequence": 2,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000002,
+          "type": "turn.started",
+          "data": {}
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "3",
+          "sequence": 3,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000003,
+          "type": "message.delta",
+          "data": {
+            "delta": "Hello"
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "4",
+          "sequence": 4,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000004,
+          "type": "message.delta",
+          "data": {
+            "delta": " world"
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "5",
+          "sequence": 5,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000005,
+          "type": "reasoning.delta",
+          "data": {
+            "delta": "Checking layout"
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "6",
+          "sequence": 6,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000006,
+          "type": "activity",
+          "data": {
+            "phase": "started",
+            "kind": "tool",
+            "label": "Write file"
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "7",
+          "sequence": 7,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000007,
+          "type": "presentation.item",
+          "data": {
+            "itemId": "preview.main",
+            "kind": "preview",
+            "title": "Main preview",
+            "uri": "http://127.0.0.1:4173/",
+            "mediaType": "text/html"
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "8",
+          "sequence": 8,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000008,
+          "type": "turn.completed",
+          "data": {
+            "finalText": "Hello world"
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "9",
+          "sequence": 9,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000009,
+          "type": "run.closed",
+          "data": {}
+        }
+      ],
+      "failed": [
+        {
+          "contractVersion": 2,
+          "eventId": "1",
+          "sequence": 1,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000001,
+          "type": "run.accepted",
+          "data": {}
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "2",
+          "sequence": 2,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000002,
+          "type": "turn.started",
+          "data": {}
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "3",
+          "sequence": 3,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000003,
+          "type": "turn.failed",
+          "data": {
+            "code": "RUNTIME_UNAVAILABLE",
+            "retryable": true
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "4",
+          "sequence": 4,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000004,
+          "type": "run.closed",
+          "data": {}
+        }
+      ],
+      "interrupted": [
+        {
+          "contractVersion": 2,
+          "eventId": "1",
+          "sequence": 1,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000001,
+          "type": "run.accepted",
+          "data": {}
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "2",
+          "sequence": 2,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000002,
+          "type": "turn.started",
+          "data": {}
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "3",
+          "sequence": 3,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000003,
+          "type": "turn.interrupted",
+          "data": {
+            "reason": "CRAFT_TURN_PREEMPTED",
+            "retryable": true
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "4",
+          "sequence": 4,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000004,
+          "type": "run.closed",
+          "data": {}
+        }
+      ]
+    },
+    "errorResponse": {
+      "contractVersion": 2,
+      "error": {
+        "code": "REPLAY_UNAVAILABLE",
+        "message": "The requested event replay is no longer available.",
+        "retryable": false
+      }
+    },
+    "headers": {
+      "idempotencyKey": "fixture-run-0001",
+      "lastEventId": "7"
+    }
+  },
+  "invalid": [
+    {
+      "name": "create-run-v1",
+      "parser": "createRunRequest",
+      "value": {
+        "contractVersion": 1,
+        "prompt": "Create"
+      }
+    },
+    {
+      "name": "create-run-unknown-provider",
+      "parser": "createRunRequest",
+      "value": {
+        "contractVersion": 2,
+        "prompt": "Create",
+        "provider": "claude"
+      }
+    },
+    {
+      "name": "create-run-whitespace-prompt",
+      "parser": "createRunRequest",
+      "value": {
+        "contractVersion": 2,
+        "prompt": " \n\t "
+      }
+    },
+    {
+      "name": "create-run-nul-prompt",
+      "parser": "createRunRequest",
+      "value": {
+        "contractVersion": 2,
+        "prompt": "Create\u0000file"
+      }
+    },
+    {
+      "name": "create-run-relative-directory",
+      "parser": "createRunRequest",
+      "value": {
+        "contractVersion": 2,
+        "prompt": "Create",
+        "workingDirectory": "project"
+      }
+    },
+    {
+      "name": "create-run-noncanonical-directory",
+      "parser": "createRunRequest",
+      "value": {
+        "contractVersion": 2,
+        "prompt": "Create",
+        "workingDirectory": "/tmp/../secret"
+      }
+    },
+    {
+      "name": "run-snapshot-invalid-handle",
+      "parser": "runSnapshot",
+      "value": {
+        "contractVersion": 2,
+        "runHandle": "run_NOT_CANONICAL",
+        "state": "accepted",
+        "createdAt": 1,
+        "updatedAt": 1
+      }
+    },
+    {
+      "name": "run-snapshot-terminal-without-time",
+      "parser": "runSnapshot",
+      "value": {
+        "contractVersion": 2,
+        "runHandle": "run_0123456789abcdef0123456789abcdef",
+        "state": "failed",
+        "createdAt": 1,
+        "updatedAt": 2
+      }
+    },
+    {
+      "name": "event-sequence-id-mismatch",
+      "parser": "event",
+      "value": {
+        "contractVersion": 2,
+        "eventId": "2",
+        "sequence": 3,
+        "runHandle": "run_0123456789abcdef0123456789abcdef",
+        "occurredAt": 1700000000003,
+        "type": "message.delta",
+        "data": {
+          "delta": "x"
+        }
+      }
+    },
+    {
+      "name": "event-unknown-field",
+      "parser": "event",
+      "value": {
+        "contractVersion": 2,
+        "eventId": "3",
+        "sequence": 3,
+        "runHandle": "run_0123456789abcdef0123456789abcdef",
+        "occurredAt": 1700000000003,
+        "type": "message.delta",
+        "data": {
+          "delta": "x"
+        },
+        "providerSessionId": "secret"
+      }
+    },
+    {
+      "name": "error-retryability-mismatch",
+      "parser": "errorResponse",
+      "value": {
+        "contractVersion": 2,
+        "error": {
+          "code": "REPLAY_UNAVAILABLE",
+          "message": "The requested event replay is no longer available.",
+          "retryable": true
+        }
+      }
+    },
+    {
+      "name": "last-event-id-leading-zero",
+      "parser": "lastEventId",
+      "value": "01"
+    },
+    {
+      "name": "idempotency-key-whitespace",
+      "parser": "idempotencyKey",
+      "value": "fixture key"
+    }
+  ],
+  "rawInvalidUtf8": [
+    {
+      "name": "overlong-slash",
+      "hex": "c0af"
+    },
+    {
+      "name": "utf8-bom",
+      "hex": "efbbbf7b7d"
+    },
+    {
+      "name": "truncated-four-byte-sequence",
+      "hex": "f09f92"
+    }
+  ]
+}

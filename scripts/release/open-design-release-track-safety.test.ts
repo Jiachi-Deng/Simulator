@@ -1,0 +1,140 @@
+import { describe, expect, test } from "bun:test"
+import { readFileSync } from "node:fs"
+import { join } from "node:path"
+
+const root = join(import.meta.dir, "../..")
+const path = join(root, ".github/workflows/open-design-release.yml")
+const source = readFileSync(path, "utf8")
+const workflow = Bun.YAML.parse(source) as Record<string, any>
+
+function step(jobName: string, name: string): Record<string, any> {
+  const found = workflow.jobs[jobName].steps.find((candidate: Record<string, any>) => candidate.name === name)
+  if (!found) throw new Error(`Missing ${jobName} step: ${name}`)
+  return found
+}
+
+describe("OpenDesign release-track safety", () => {
+  test("locks the public RC and stable identities to version-consistent tags", () => {
+    const inputs = workflow.on.workflow_dispatch.inputs
+    expect(inputs.release_track.options).toEqual(["prerelease", "stable"])
+    expect(inputs.release_track.default).toBe("prerelease")
+    expect(inputs.module_version.default).toBe("0.14.6-rc.1")
+    expect(inputs.release_tag.default).toBe("open-design-v0.14.6-rc.1")
+
+    const authority = step("initial", "Validate fixed release authority").run
+    expect(authority).toContain('test "$RELEASE_TAG" = "open-design-v$MODULE_VERSION"')
+    expect(authority).toContain('test "$MODULE_VERSION" = "0.14.6-rc.1"')
+    expect(authority).toContain('test "$RELEASE_TAG" = "open-design-v0.14.6-rc.1"')
+    expect(authority).toContain('test "$MODULE_VERSION" = "0.14.6"')
+    expect(authority).toContain('test "$RELEASE_TAG" = "open-design-v0.14.6"')
+  })
+
+  test("publishes RC as a GitHub prerelease without its stable-channel configuration", () => {
+    const publish = step("initial", "Publish fixed-tag release through a draft transaction").run
+    const prereleaseBranch = publish.slice(
+      publish.indexOf('if [[ "$RELEASE_TRACK" = prerelease ]]'),
+      publish.indexOf("else", publish.indexOf('if [[ "$RELEASE_TRACK" = prerelease ]]')),
+    )
+    const stableBranch = publish.slice(
+      publish.indexOf("else", publish.indexOf('if [[ "$RELEASE_TRACK" = prerelease ]]')),
+      publish.indexOf("fi", publish.indexOf('if [[ "$RELEASE_TRACK" = prerelease ]]')),
+    )
+    expect(prereleaseBranch).toContain("release_flags+=(--prerelease)")
+    expect(prereleaseBranch).not.toContain('publish_assets+=("$INITIAL_OUTPUT/$CONFIG_ASSET")')
+    expect(stableBranch).toContain('publish_assets+=("$INITIAL_OUTPUT/$CONFIG_ASSET")')
+    expect(publish).toContain('[[ "$RELEASE_TRACK" = prerelease ]] || expected_assets+=("$CONFIG_ASSET")')
+    expect(publish).toContain('"${release_flags[@]}"')
+    expect(publish).toContain('"${publish_assets[@]}"')
+    expect(publish).toContain("--json tagName,isDraft,isPrerelease,assets")
+    expect(publish).toContain('test "$(jq -r .isPrerelease <<<"$release_state")" = true')
+    expect(publish).toContain('test "$(jq -r .isPrerelease <<<"$release_state")" = false')
+    expect(publish).not.toContain("gh release upload")
+    expect(publish).not.toContain("open-design-v0.14.5")
+  })
+
+  test("requires stable enablement, an exact confirmation, and the protected stable environment", () => {
+    const initial = workflow.jobs.initial
+    expect(initial.env.HOST_VERSION_RANGE).toBe(">=0.12.0")
+    expect(initial.if).toContain("inputs.release_track == 'stable'")
+    expect(initial.if).toContain("vars.OPEN_DESIGN_RELEASE_ENABLED == 'true'")
+    expect(initial.if).toContain("vars.OPEN_DESIGN_STABLE_CHANNEL_ENABLED == 'true'")
+    expect(initial.environment.name).toBe("${{ inputs.release_track == 'stable' && 'open-design-production-stable' || 'open-design-prerelease' }}")
+    const authority = step("initial", "Validate fixed release authority").run
+    expect(authority).toContain('test "$HOST_VERSION_RANGE" = ">=0.12.0"')
+    expect(authority).toContain('test "$STABLE_CHANNEL_CONFIRMATION" = "PROMOTE_OPEN_DESIGN_0_14_6"')
+    expect(authority).toContain('test -z "$STABLE_CHANNEL_CONFIRMATION"')
+  })
+
+  test("binds stable publication to the accepted RC bytes and rollback evidence", () => {
+    const inputs = workflow.on.workflow_dispatch.inputs
+    expect(inputs.acceptance_run_id.required).toBe(false)
+    expect(inputs.rollback_gate_run_id.required).toBe(false)
+    const authority = step("initial", "Validate fixed release authority").run
+    expect(authority).toContain('[[ "$ACCEPTANCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]')
+    expect(authority).toContain('[[ "$ROLLBACK_GATE_RUN_ID" =~ ^[1-9][0-9]*$ ]]')
+    expect(authority).toContain('test -z "$ACCEPTANCE_RUN_ID"')
+    expect(authority).toContain('test -z "$ROLLBACK_GATE_RUN_ID"')
+
+    const evidence = step("initial", "Validate stable acceptance, rollback, and RC closure")
+    expect(evidence.if).toBe("${{ env.RELEASE_TRACK == 'stable' }}")
+    expect(evidence.run).toContain(".github/workflows/open-design-rc-acceptance.yml")
+    expect(evidence.run).toContain(".github/workflows/open-design-acceptance-rollback.yml")
+    expect(evidence.run).toContain("open-design-rc-acceptance-evidence")
+    expect(evidence.run).toContain("open-design-rollback-gate-evidence")
+    expect(evidence.run).toContain(".oldStackTasksPassed == 20")
+    expect(evidence.run).toContain(".newStackConsecutivePassed == 20")
+    expect(evidence.run).toContain(".paidTurns == 40")
+    expect(evidence.run).toContain(".previewHumanPasses == 20")
+    expect(evidence.run).toContain("requiredCiPassed == true")
+    expect(evidence.run).toContain("ACCEPTED_RC_ARCHIVE_SHA256")
+    expect(evidence.run).toContain("rcCatalogSequence")
+    expect(evidence.run).toContain("rcCatalogIssuedAt")
+    expect(evidence.run).toContain("ACCEPTED_RC_CATALOG_SEQUENCE")
+    expect(evidence.run).toContain("ACCEPTED_RC_CATALOG_ISSUED_AT")
+    expect(evidence.run).toContain('test "$actual_rc" = "$expected_rc"')
+    const verify = step("initial", "Verify initial bundle before publication").run
+    expect(verify).toContain('shasum -a 256 "$INITIAL_OUTPUT/$ARCHIVE_ASSET"')
+    expect(verify).toContain('= "$ACCEPTED_RC_ARCHIVE_SHA256"')
+  })
+
+  test("derives RC and stable Catalog state strictly above authenticated predecessors", () => {
+    const initial = workflow.jobs.initial
+    expect(initial.env.LKG_RELEASE_TAG).toBe("open-design-v0.14.5")
+    expect(initial.env.RC_RELEASE_TAG).toBe("open-design-v0.14.6-rc.1")
+    const build = step("initial", "Authenticate prior state, dry-run, and build signed initial assets").run
+    expect(build).toContain("const priorSequence = Math.max(...sequences);")
+    expect(build).toContain("const priorIssuedAtMs = Math.max(...issuedAtValues);")
+    expect(build).toContain("const sequence = priorSequence + 1;")
+    expect(build).toContain("const issuedAtMs = Math.max(Date.now(), priorIssuedAtMs + 1000);")
+    expect(build).toContain('if (process.env.RELEASE_TRACK === "stable")')
+    expect(build).toContain("sequences.push(parseSequence(process.env.RC_SEQUENCE, \"RC sequence\"));")
+    expect(build).toContain("issuedAtValues.push(parseTimestamp(process.env.RC_ISSUED_AT, \"RC issuedAt\"));")
+    expect(build.match(/--previous-sequence "\$PRIOR_SEQUENCE"/g)).toHaveLength(2)
+    expect(build.match(/--previous-issued-at "\$PRIOR_ISSUED_AT"/g)).toHaveLength(2)
+    const verify = step("initial", "Verify initial bundle before publication").run
+    expect(verify).toContain('--previous-sequence "$PRIOR_SEQUENCE"')
+    expect(verify).toContain('--previous-issued-at "$PRIOR_ISSUED_AT"')
+  })
+
+  test("refreshes the newest existing release from the fixed stable support matrix", () => {
+    expect(workflow.env.RELEASE_TAG).toBeUndefined()
+    expect(workflow.env.MODULE_VERSION).toBeUndefined()
+    expect(workflow.jobs.refresh.environment.name).toBe("open-design-production")
+    expect(workflow.jobs.refresh.if).toContain("github.event_name == 'schedule'")
+    expect(workflow.jobs.refresh.if).toContain("inputs.operation == 'refresh'")
+    expect(workflow.jobs.refresh.if).toContain("inputs.release_track == 'stable'")
+    const resolver = step("refresh", "Resolve current supported stable release").run
+    expect(resolver).toContain('candidate_versions=("0.14.6" "0.14.5")')
+    expect(resolver.indexOf('"0.14.6"')).toBeLessThan(resolver.indexOf('"0.14.5"'))
+    expect(resolver).toContain('test "$(jq -r .isDraft <<<"$release_state")" = false')
+    expect(resolver).toContain('test "$(jq -r .isPrerelease <<<"$release_state")" = false')
+    expect(resolver).toContain('test "$actual" = "$expected"')
+    expect(resolver).toContain('test -n "$selected_version"')
+    const authority = step("refresh", "Validate fixed refresh authority").run
+    expect(authority).toContain('test "$DISPATCH_MODULE_VERSION" = "$MODULE_VERSION"')
+    expect(authority).toContain('test "$DISPATCH_RELEASE_TAG" = "$RELEASE_TAG"')
+    expect(authority).toContain('expected_confirmation="REFRESH_OPEN_DESIGN_${MODULE_VERSION//./_}"')
+    expect(authority).toContain('test "$STABLE_CHANNEL_CONFIRMATION" = "$expected_confirmation"')
+    expect(source.match(/--module-version "\$MODULE_VERSION"/g)).toHaveLength(7)
+  })
+})

@@ -17,6 +17,13 @@ wire envelope, `open-design-official-channel.json`, and release metadata. Upload
 those files to the exact tag named in the command; do not use a mutable
 `latest/download` URL.
 
+Build and verify require `--module-version`. The only accepted identities are
+`0.14.5`, `0.14.6-rc.1`, and `0.14.6`; each must use the exact tag
+`open-design-v<module-version>`. The `0.14.6-rc.1` and `0.14.6` catalogs must
+use `--host-version-range '>=0.12.0'`. Refresh defaults to the frozen `0.14.5`
+identity for compatibility, but automation should pass `--module-version`
+explicitly so filenames and verification cannot drift across releases.
+
 The generated Host configuration is a build input, not user data. Copy:
 
 ```text
@@ -49,6 +56,7 @@ pnpm --filter @simulator/open-design-artifact-policy package:production -- \
   --refresh \
   --bundle-root /absolute/path/to/verified-production-bundle \
   --output /absolute/path/to/new-refresh-assets \
+  --module-version 0.14.5 \
   --release-tag open-design-v0.14.5 \
   --catalog-sequence <next-sequence> \
   --catalog-issued-at <canonical-ISO-time> \

@@ -116,7 +116,7 @@
     },
     "apps/cli": {
       "name": "@craft-agent/cli",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "bin": {
         "craft-cli": "src/index.ts",
       },
@@ -132,7 +132,7 @@
     },
     "apps/electron": {
       "name": "@craft-agent/electron",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "@craft-agent/core": "workspace:*",
         "@craft-agent/messaging-gateway": "workspace:*",
@@ -189,7 +189,7 @@
     },
     "apps/viewer": {
       "name": "@craft-agent/viewer",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "@craft-agent/core": "workspace:*",
         "@craft-agent/ui": "workspace:*",
@@ -217,7 +217,7 @@
     },
     "apps/webui": {
       "name": "@craft-agent/webui",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "@craft-agent/shared": "workspace:*",
         "@craft-agent/ui": "workspace:*",
@@ -232,7 +232,7 @@
     },
     "packages/core": {
       "name": "@craft-agent/core",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "devDependencies": {
         "@types/uuid": "^11.0.0",
       },
@@ -241,9 +241,50 @@
         "@modelcontextprotocol/sdk": ">=1.29.0",
       },
     },
+    "packages/host-agent-broker": {
+      "name": "@simulator/host-agent-broker",
+      "version": "0.12.0",
+      "dependencies": {
+        "@simulator/host-agent-contract": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^25.0.8",
+        "typescript": "^5.8.2",
+      },
+    },
+    "packages/host-agent-contract": {
+      "name": "@simulator/host-agent-contract",
+      "version": "0.12.0",
+      "devDependencies": {
+        "@types/node": "^25.0.8",
+        "typescript": "^5.8.2",
+      },
+    },
+    "packages/host-agent-run-core": {
+      "name": "@simulator/host-agent-run-core",
+      "version": "0.12.0",
+      "dependencies": {
+        "@simulator/host-agent-contract": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^25.0.8",
+        "typescript": "^5.8.2",
+      },
+    },
+    "packages/host-agent-shim": {
+      "name": "@simulator/host-agent-shim",
+      "version": "0.12.0",
+      "dependencies": {
+        "@simulator/host-agent-contract": "workspace:*",
+      },
+      "devDependencies": {
+        "@types/node": "^25.0.8",
+        "typescript": "^5.8.2",
+      },
+    },
     "packages/messaging-gateway": {
       "name": "@craft-agent/messaging-gateway",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "@craft-agent/core": "workspace:*",
         "@craft-agent/messaging-whatsapp-worker": "workspace:*",
@@ -259,7 +300,7 @@
     },
     "packages/messaging-whatsapp-worker": {
       "name": "@craft-agent/messaging-whatsapp-worker",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "@whiskeysockets/baileys": "^6.7.0",
       },
@@ -270,7 +311,7 @@
     },
     "packages/module-agent-gateway": {
       "name": "@simulator/module-agent-gateway",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "devDependencies": {
         "@types/node": "^25.0.8",
         "typescript": "^5.8.2",
@@ -278,7 +319,7 @@
     },
     "packages/module-contract": {
       "name": "@simulator/module-contract",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "semver": "7.7.3",
       },
@@ -289,7 +330,7 @@
     },
     "packages/module-coordinator": {
       "name": "@simulator/module-coordinator",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "@simulator/module-contract": "workspace:*",
         "@simulator/module-daemon": "workspace:*",
@@ -305,7 +346,7 @@
     },
     "packages/module-daemon": {
       "name": "@simulator/module-daemon",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "@simulator/module-contract": "workspace:*",
         "koffi": "^3.1.1",
@@ -316,7 +357,7 @@
     },
     "packages/module-downloader": {
       "name": "@simulator/module-downloader",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "@simulator/module-contract": "workspace:*",
         "@simulator/module-release-trust": "workspace:*",
@@ -328,14 +369,14 @@
     },
     "packages/module-host-bridge": {
       "name": "@simulator/module-host-bridge",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "devDependencies": {
         "typescript": "^5.8.2",
       },
     },
     "packages/module-installer": {
       "name": "@simulator/module-installer",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "@simulator/module-contract": "workspace:*",
         "tar": "^7.5.20",
@@ -347,7 +388,7 @@
     },
     "packages/module-registry": {
       "name": "@simulator/module-registry",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "@simulator/module-contract": "workspace:*",
         "semver": "7.7.3",
@@ -360,7 +401,7 @@
     },
     "packages/module-release-trust": {
       "name": "@simulator/module-release-trust",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "@simulator/module-contract": "workspace:*",
       },
@@ -371,7 +412,7 @@
     },
     "packages/pi-agent-server": {
       "name": "@craft-agent/pi-agent-server",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "bin": {
         "pi-agent-server": "./dist/index.js",
       },
@@ -391,7 +432,7 @@
     },
     "packages/server": {
       "name": "@craft-agent/server",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "bin": {
         "craft-server": "src/index.ts",
       },
@@ -409,11 +450,13 @@
     },
     "packages/server-core": {
       "name": "@craft-agent/server-core",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "@craft-agent/core": "workspace:*",
         "@craft-agent/shared": "workspace:*",
         "@earendil-works/pi-ai": "0.80.6",
+        "@simulator/host-agent-contract": "workspace:*",
+        "@simulator/host-agent-run-core": "workspace:*",
         "@simulator/module-agent-gateway": "workspace:*",
         "jose": "^6.0.0",
         "sharp": "0.34.5",
@@ -426,7 +469,7 @@
     },
     "packages/session-mcp-server": {
       "name": "@craft-agent/session-mcp-server",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "bin": {
         "session-mcp-server": "./dist/index.js",
       },
@@ -442,7 +485,7 @@
     },
     "packages/session-tools-core": {
       "name": "@craft-agent/session-tools-core",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "beautiful-mermaid": "^1.1.3",
         "gray-matter": "^4.0.3",
@@ -455,7 +498,7 @@
     },
     "packages/shared": {
       "name": "@craft-agent/shared",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "@craft-agent/core": "workspace:*",
         "@craft-agent/session-tools-core": "workspace:*",
@@ -464,6 +507,7 @@
         "@earendil-works/pi-coding-agent": "0.80.6",
         "@isaacs/ttlcache": "^2.1.4",
         "@leeoniya/ufuzzy": "^1.0.19",
+        "@simulator/host-agent-contract": "workspace:*",
         "bash-parser": "^0.5.0",
         "croner": "^10.0.1",
         "date-fns": "^4.1.0",
@@ -486,7 +530,7 @@
     },
     "packages/ui": {
       "name": "@craft-agent/ui",
-      "version": "0.11.1",
+      "version": "0.12.0",
       "dependencies": {
         "@craft-agent/core": "workspace:*",
         "@craft-agent/shared": "workspace:*",
@@ -1417,6 +1461,14 @@
     "@shikijs/vscode-textmate": ["@shikijs/vscode-textmate@10.0.2", "", {}, "sha512-83yeghZ2xxin3Nj8z1NMd/NCuca+gsYXswywDy5bHvwlWL8tpTQmzGeUuHd9FC3E/SBEMvzJRwWEOz5gGes9Qg=="],
 
     "@silvia-odwyer/photon-node": ["@silvia-odwyer/photon-node@0.3.4", "", {}, "sha512-bnly4BKB3KDTFxrUIcgCLbaeVVS8lrAkri1pEzskpmxu9MdfGQTy8b8EgcD83ywD3RPMsIulY8xJH5Awa+t9fA=="],
+
+    "@simulator/host-agent-broker": ["@simulator/host-agent-broker@workspace:packages/host-agent-broker"],
+
+    "@simulator/host-agent-contract": ["@simulator/host-agent-contract@workspace:packages/host-agent-contract"],
+
+    "@simulator/host-agent-run-core": ["@simulator/host-agent-run-core@workspace:packages/host-agent-run-core"],
+
+    "@simulator/host-agent-shim": ["@simulator/host-agent-shim@workspace:packages/host-agent-shim"],
 
     "@simulator/module-agent-gateway": ["@simulator/module-agent-gateway@workspace:packages/module-agent-gateway"],
 

@@ -61,6 +61,8 @@ describe("minimal SPDX generator", () => {
     expect(first.relationships.some((item) => item.relationshipType === "BUILD_DEPENDENCY_OF")).toBe(true)
     expect(first.relationships.some((item) => item.relationshipType === "DEPENDS_ON")).toBe(false)
     expect(first.creationInfo.comment).toContain("app-inventory.jsonl parity check")
+    expect(first.creationInfo.comment).toContain("transport-stable")
+    expect(first.creationInfo.comment).toContain("allowlist of macOS code-signing validation-cache")
     expect(first.creationInfo.comment).toContain("not claimed runtime dependencies")
 
     const artifactPackage = first.packages.find((item) => item.SPDXID === "SPDXRef-Package-Simulator")

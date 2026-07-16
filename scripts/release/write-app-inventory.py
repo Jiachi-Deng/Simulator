@@ -14,6 +14,24 @@ from pathlib import Path
 from typing import Any
 
 
+# macOS materializes these code-signing validation caches on non-executable
+# resources after verification, while ZIP extraction intentionally does not
+# preserve them. They are not the signature itself: verify-macos-signatures.ts
+# strictly verifies both artifacts before inventory comparison. Keep every
+# other extended attribute exact, including these names on executable files.
+TRANSPORT_VOLATILE_XATTR_NAMES = frozenset({
+    "com.apple.cs.CodeDirectory",
+    "com.apple.cs.CodeRequirements",
+    "com.apple.cs.CodeRequirements-1",
+    "com.apple.cs.CodeSignature",
+})
+TRANSPORT_CANONICALIZATION_POLICY = "macos-dmg-zip-v1"
+
+
+def is_transport_stable_xattr(name: str) -> bool:
+    return name not in TRANSPORT_VOLATILE_XATTR_NAMES
+
+
 def file_digests(path: Path) -> tuple[str, str]:
     sha1 = hashlib.sha1()
     sha256 = hashlib.sha256()
@@ -75,11 +93,11 @@ def relative_path(root: Path, path: Path) -> str:
 
 def inventory_entry(root: Path, path: Path) -> dict[str, Any]:
     metadata = path.lstat()
-    mode = stat.S_IMODE(metadata.st_mode)
+    is_symlink = stat.S_ISLNK(metadata.st_mode)
     entry: dict[str, Any] = {
         "flags": getattr(metadata, "st_flags", 0),
         "gid": metadata.st_gid,
-        "mode": f"{mode:04o}",
+        "mode": f"{stat.S_IMODE(metadata.st_mode):04o}",
         "path": relative_path(root, path),
         "uid": metadata.st_uid,
         "xattrs": xattrs(path),
@@ -90,11 +108,27 @@ def inventory_entry(root: Path, path: Path) -> dict[str, Any]:
     elif stat.S_ISREG(metadata.st_mode):
         entry["sha1"], entry["sha256"] = file_digests(path)
         entry["type"] = "file"
-    elif stat.S_ISLNK(metadata.st_mode):
+    elif is_symlink:
         entry["target"] = os.readlink(path)
         entry["type"] = "symlink"
     else:
         raise RuntimeError(f"Unsupported app-bundle entry type: {path}")
+    return entry
+
+
+def canonical_entry(raw_entry: dict[str, Any]) -> dict[str, Any]:
+    entry = dict(raw_entry)
+    mode = int(raw_entry["mode"], 8)
+    may_have_transport_cache = raw_entry["type"] == "file" and mode & 0o111 == 0
+    if may_have_transport_cache:
+        entry["xattrs"] = [
+            attribute for attribute in raw_entry["xattrs"] if is_transport_stable_xattr(attribute["name"])
+        ]
+    if raw_entry["type"] == "symlink":
+        # Symlink permission bits have no access-control meaning on macOS and
+        # are materialized differently by HFS disk images and ZIP extraction.
+        # Preserve the target exactly while using one transport-neutral mode.
+        entry["mode"] = "0777"
     return entry
 
 
@@ -150,16 +184,33 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("app", type=Path)
     parser.add_argument("inventory", type=Path)
+    parser.add_argument(
+        "--transport-canonicalization-policy",
+        required=True,
+        choices=[TRANSPORT_CANONICALIZATION_POLICY],
+        help="Explicitly opt into transport-only normalization after both artifacts pass signature verification",
+    )
+    parser.add_argument("--raw-inventory", type=Path, metavar="PATH")
     parser.add_argument("--spdx-files", required=True, type=Path, metavar="PATH")
     parser.add_argument("--spdx-package-verification-code", required=True, type=Path, metavar="PATH")
     args = parser.parse_args()
 
     root = app_root(args.app)
-    entries = walk(root)
+    raw_entries = walk(root)
+    # This inventory is a cross-container parity view, not a signature verifier.
+    # The caller must strictly verify each artifact before opting into this policy.
+    entries = [canonical_entry(entry) for entry in raw_entries]
     args.inventory.write_text(
         "".join(json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n" for entry in entries),
         encoding="utf-8",
     )
+    if args.raw_inventory:
+        if args.raw_inventory.absolute() == args.inventory.absolute():
+            raise RuntimeError("Raw and canonical inventory paths must be different")
+        args.raw_inventory.write_text(
+            "".join(json.dumps(entry, sort_keys=True, separators=(",", ":")) + "\n" for entry in raw_entries),
+            encoding="utf-8",
+        )
     write_spdx_checksums(entries, args.spdx_files)
     write_spdx_package_verification_code(entries, args.spdx_package_verification_code)
     return 0

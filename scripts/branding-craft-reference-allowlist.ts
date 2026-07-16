@@ -169,6 +169,44 @@ export const CRAFT_REFERENCE_ALLOWLIST: CraftReferenceCategory[] = [
         && /Craft(?:'s full| workspace| created)/.test(line)),
   },
   {
+    id: 'm1-host-agent-craft-runtime-terminology',
+    reason: 'M1 Host Agent implementation, contract, generated Shim, and focused tests name the embedded Craft runtime only to define priority, lifecycle, and failure-isolation boundaries.',
+    matches: ({ path, line }) =>
+      (path === 'CHANGELOG.md'
+        && /Host-owned `simulator-host-agent`|OpenDesign v2.*(?:transient Craft Session|Craft Turn)/.test(line))
+      || path === 'apps/electron/resources/host-agent/simulator-host-agent.mjs'
+      || /^apps\/electron\/src\/host-agent\/(?:__tests__\/(?:module-turn-lease|supervisor)\.test|module-turn-lease|supervisor|v1-(?:compatibility-runtime|core-port-adapter)|worker-entry)\.ts$/.test(path)
+      || /^apps\/electron\/src\/main\/module-agent-(?:runtime|worker-recovery)(?:\.test)?\.ts$/.test(path)
+      || /^(?:packages\/host-agent-contract\/(?:schema\/host-agent-v2\.schema\.json|src\/constants\.ts)|packages\/host-agent-run-core\/src\/run-core(?:\.test)?\.ts)$/.test(path)
+      || path === 'packages/pi-agent-server/src/file-tool-path-input.ts'
+      || /^(?:packages\/server-core\/src\/(?:handlers\/session-manager-interface|sessions\/(?:module-agent-adapter|visible-craft-turn-gate(?:\.test)?|visible-craft-turn-priority\.test))|packages\/shared\/src\/agent\/(?:module-agent-tool-boundary|provider-process-reaper))\.ts$/.test(path)
+      || (path === 'apps/electron/src/main/host-module-coordinator-smoke.ts'
+        && [
+          'throw new Error(`Visible Craft Host identity changed during ${phase}`)',
+          'await smoke.sessionManager.sendMessage(session.id, `Visible Craft independence marker: ${marker}`)',
+          'throw new Error(`Visible Craft Turn did not complete exactly once for ${marker}`)',
+        ].includes(line.trim())),
+  },
+  {
+    id: 'm1-host-agent-architecture-craft-runtime-terminology',
+    reason: 'The M1 architecture document names the embedded Craft runtime only in the Host Agent data flow, ownership, priority, packaging-failure boundary, and clean-room provenance mapping.',
+    matches: ({ path, line }) =>
+      path === 'docs/module-architecture.md'
+      && [
+        /Host `0\.12\.0`.*Craft Workspace.*Module/,
+        /^\s*Craft SessionManager -> Claude\/Pi Runtime\s*$/,
+        /v1 compatibility.*Craft 主界面/,
+        /`SessionManager`.*Craft 主 Host/,
+        /`ModuleAgentRunCore`.*Craft Session/,
+        /hidden、transient Craft Session/,
+        /^### Craft priority 与失败结果$/,
+        /可见 Craft Turn.*Module (?:Run|Turn)/,
+        /OpenDesign view.*Craft 左侧栏.*关闭 Craft/,
+        /shim 从.*不能阻止 Craft/,
+        /Runtime session registry.*Craft `SessionManager` seam.*Craft Claude\/Pi/,
+      ].some((pattern) => pattern.test(line)),
+  },
+  {
     id: 'localized-open-design-craft-host-copy',
     reason: 'The Module Center intentionally names the still-visible Craft workspace and sidebar so users understand that OpenDesign runs inside, and can return to, the primary embedded Host surface.',
     matches: ({ path, line }) =>

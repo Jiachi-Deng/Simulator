@@ -63,7 +63,7 @@ export interface SessionBundle {
   /** Session data (header metadata + full message history) */
   session: {
     /** Session metadata (id, name, timestamps, config) */
-    header: SessionHeader
+    header: Omit<SessionHeader, 'moduleAgentRun'>
     /** Full message history */
     messages: StoredMessage[]
   }
@@ -122,10 +122,12 @@ export function serializeSession(
   if (!firstLine) return null
 
   // Strip server-internal fields that shouldn't travel with the bundle
-  const header: SessionHeader = {
-    ...JSON.parse(firstLine) as SessionHeader,
-    // workspaceRootPath will be set by the importing server
-  }
+  const rawHeader = JSON.parse(firstLine) as SessionHeader
+  // moduleAgentRun is a Host-local ownership and crash-recovery boundary. It
+  // must never cross a renderer/remote/export boundary or be imported as a
+  // portable user session.
+  const { moduleAgentRun: _moduleAgentRun, ...portableHeader } = rawHeader
+  const header = portableHeader as Omit<SessionHeader, 'moduleAgentRun'>
 
   return {
     version: 1,

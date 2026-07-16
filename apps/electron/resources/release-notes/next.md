@@ -4,12 +4,16 @@ This file accumulates release notes for the next unreleased version. PRs that ad
 
 ## Features
 
-- **OpenDesign now uses the Craft Host Runtime** — OpenDesign modules can run Agent turns through a launch-scoped, loopback-only Host gateway backed by the active Craft connection, with isolated sessions, bounded project-file tools, streaming and cancellation, grant rotation on restart, and cleanup on stop or quit. Simulator mode removes the OpenDesign Cloud/AMR sign-in path and fails closed instead of falling back to Vela, OpenCode, a private CLI, or the system `PATH`. Issue #110; commits `8c55d1e6`, `28551b3c`.
+- **OpenDesign now reuses the Craft Agent Runtime through a standard CLI contract** — OpenDesign `0.14.6` launches the Host-owned `simulator-host-agent` as an ordinary `json-event-stream` Runtime, with one transient Craft Session per Turn, no OpenDesign Cloud/AMR login, no external CLI setup, and no provider/model selector inside the Module. v1 compatibility for OpenDesign `0.14.5` remains available for rollback. Issue #129.
 
 ## Improvements
+
+- **Module failures are contained away from the primary Craft UI** — v1 and v2 Broker state now runs in separate Electron Utility Processes with independent tokens, epochs, limits and circuit breakers. Worker, Shim, protocol, traffic and update failures fail the affected Module Turn without requesting Craft to exit; Craft still owns the shared SessionManager/provider runtime, so this is an explicit process/protocol containment boundary rather than a claim of absolute physical isolation.
+- **Module Agent cleanup is strict and bounded** — visible Craft Turns preempt Module work, file tools require a canonical authorized boundary, Broker disconnects never replay writes, and terminal cleanup waits for provider, Session and child-process reap before a Run is closed.
 
 ## Bug Fixes
 
 - **OpenDesign production requests stay usable** — Simulator Host mode no longer sends the standalone `od-default` plugin ID when that plugin is not installed, and a visible OpenDesign workspace now renews its daemon lease so it cannot disappear after five minutes of active use.
+- **Lost create responses no longer duplicate Module work** — the v2 Broker retains unclaimed Run ownership long enough for the Shim to recover with the same idempotency key, then cancels and strictly closes abandoned Runs without inventing a successful terminal event.
 
 ## Breaking Changes

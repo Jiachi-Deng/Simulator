@@ -1,0 +1,785 @@
+import { afterEach, describe, expect, it } from 'bun:test'
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import { chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Readable, Writable } from 'node:stream'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import {
+  HOST_AGENT_CONTRACT_VERSION,
+  parseHostAgentEvent,
+  parseHostAgentRunSnapshot,
+  type HostAgentEvent,
+  type HostAgentRunState,
+} from '@simulator/host-agent-contract'
+import { runHostAgentShim } from './shim'
+
+const RUN = 'run_00000000000000000000000000000001'
+const TOKEN = 'fixture-token-0123456789-abcdefghijkl'
+const execFileAsync = promisify(execFile)
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../../..')
+const temporaryRoots: string[] = []
+const servers: Server[] = []
+
+afterEach(async () => {
+  await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve) => {
+    server.closeAllConnections()
+    server.close(() => resolve())
+  })))
+  await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+})
+
+class Capture extends Writable {
+  value = ''
+  override _write(chunk: Buffer | string, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    this.value += chunk.toString()
+    callback()
+  }
+}
+
+class BackpressuredCapture extends Writable {
+  value = ''
+  readonly blocked: Promise<void>
+  #notifyBlocked!: () => void
+  #release?: (error?: Error | null) => void
+  #released = false
+
+  constructor() {
+    super({ highWaterMark: 1 })
+    this.blocked = new Promise<void>((resolve) => { this.#notifyBlocked = resolve })
+  }
+
+  override _write(chunk: Buffer | string, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
+    this.value += chunk.toString()
+    if (this.#released) {
+      callback()
+      return
+    }
+    this.#release = callback
+    this.#notifyBlocked()
+  }
+
+  release(): void {
+    this.#released = true
+    const callback = this.#release
+    this.#release = undefined
+    callback?.()
+  }
+}
+
+function snapshot(state: HostAgentRunState) {
+  const terminal = ['completed', 'failed', 'interrupted', 'closing', 'closed'].includes(state)
+  return parseHostAgentRunSnapshot({
+    contractVersion: HOST_AGENT_CONTRACT_VERSION,
+    runHandle: RUN,
+    state,
+    createdAt: 1,
+    updatedAt: state === 'closed' ? 3 : terminal ? 2 : 1,
+    ...(terminal ? { terminalAt: 2 } : {}),
+    ...(state === 'closed' ? { closedAt: 3 } : {}),
+  })
+}
+
+function event(sequence: number, type: HostAgentEvent['type'], data: HostAgentEvent['data']): HostAgentEvent {
+  return parseHostAgentEvent({
+    contractVersion: HOST_AGENT_CONTRACT_VERSION,
+    eventId: String(sequence),
+    sequence,
+    runHandle: RUN,
+    occurredAt: sequence,
+    type,
+    data,
+  })
+}
+
+const accepted = event(1, 'run.accepted', {})
+const started = event(2, 'turn.started', {})
+const delta = event(3, 'message.delta', { delta: 'hello' })
+const completed = event(4, 'turn.completed', { finalText: 'hello' })
+const closed = event(5, 'run.closed', {})
+const failedBeforeStart = event(2, 'turn.failed', { code: 'RUNTIME_UNAVAILABLE', retryable: true })
+const closedBeforeStart = event(3, 'run.closed', {})
+
+async function fixtureFiles(mode = 0o600) {
+  const root = await mkdtemp(join(tmpdir(), 'host-agent-shim-'))
+  temporaryRoots.push(root)
+  const entryPath = join(root, 'simulator-host-agent.mjs')
+  const tokenPath = join(root, 'grant.token')
+  await writeFile(entryPath, '#!/usr/bin/env node\n', { mode: 0o755 })
+  await writeFile(tokenPath, `${TOKEN}\n`, { mode })
+  await chmod(tokenPath, mode)
+  return { root, entryPath, tokenPath }
+}
+
+async function packagedExecutableFixture(sourceArtifact: string): Promise<string> {
+  const root = await mkdtemp(join(tmpdir(), 'host-agent-shim-packaged-'))
+  temporaryRoots.push(root)
+  const artifactDirectory = join(root, 'app', 'dist', 'resources', 'host-agent')
+  const bundledRuntimeDirectory = join(root, 'app', 'vendor', 'bun')
+  const artifact = join(artifactDirectory, 'simulator-host-agent.mjs')
+  const bundledRuntime = join(bundledRuntimeDirectory, 'bun')
+  await mkdir(artifactDirectory, { recursive: true })
+  await mkdir(bundledRuntimeDirectory, { recursive: true })
+  await writeFile(artifact, await readFile(sourceArtifact), { mode: 0o755 })
+  await chmod(artifact, 0o755)
+  await symlink(process.execPath, bundledRuntime)
+  return artifact
+}
+
+async function listen(
+  handler: (request: IncomingMessage, response: ServerResponse) => void,
+): Promise<{ server: Server; url: string }> {
+  const server = createServer(handler)
+  servers.push(server)
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  if (!address || typeof address === 'string') throw new Error('fixture did not bind')
+  return { server, url: `http://127.0.0.1:${address.port}` }
+}
+
+function writeSse(response: ServerResponse, item: HostAgentEvent): void {
+  response.write(`id: ${item.eventId}\nevent: host-agent.event\ndata: ${JSON.stringify(item)}\n\n`)
+}
+
+function json(response: ServerResponse, value: unknown): void {
+  const body = JSON.stringify(value)
+  response.writeHead(200, { 'content-type': 'application/json', 'content-length': Buffer.byteLength(body) })
+  response.end(body)
+}
+
+describe('Host Agent shim', () => {
+  it('ships a zero-argument executable that works in a clean packaged layout and under Bun', async () => {
+    const sourceArtifact = join(repositoryRoot, 'apps/electron/resources/host-agent/simulator-host-agent.mjs')
+    const bunResult = await execFileAsync(process.execPath, [sourceArtifact, '--version'], {
+      env: {},
+      timeout: 5_000,
+    })
+    expect((process.versions as NodeJS.ProcessVersions & { bun?: string }).bun).toBeTruthy()
+    expect(bunResult.stdout).toBe('simulator-host-agent 2\n')
+    expect(bunResult.stderr).toBe('')
+
+    if (process.platform !== 'win32') {
+      const artifact = await packagedExecutableFixture(sourceArtifact)
+      const directResult = await execFileAsync(artifact, ['--version'], {
+        env: { PATH: '' },
+        timeout: 5_000,
+      })
+      expect(directResult.stdout).toBe('simulator-host-agent 2\n')
+      expect(directResult.stderr).toBe('')
+
+      let shimFailure: (Error & { code?: number | string; stdout?: string; stderr?: string }) | undefined
+      try {
+        await execFileAsync(artifact, ['--not-a-runtime-argument'], {
+          env: { PATH: '' },
+          timeout: 5_000,
+        })
+      } catch (error) {
+        shimFailure = error as Error & { code?: number | string; stdout?: string; stderr?: string }
+      }
+      expect(shimFailure?.code).toBe(2)
+      expect(shimFailure?.stdout).toBe('')
+      expect(shimFailure?.stderr).toBe('[simulator-host-agent] INVALID_ARGUMENTS\n')
+    }
+  })
+
+  it('fails closed with only a public diagnostic when the relative bundled Bun is absent', async () => {
+    if (process.platform === 'win32') return
+    const artifact = join(repositoryRoot, 'apps/electron/resources/host-agent/simulator-host-agent.mjs')
+    const root = await mkdtemp(join(tmpdir(), 'host-agent-shim-missing-runtime-'))
+    temporaryRoots.push(root)
+    const isolatedDirectory = join(root, 'app', 'dist', 'resources', 'host-agent')
+    const isolatedArtifact = join(isolatedDirectory, 'simulator-host-agent.mjs')
+    await mkdir(isolatedDirectory, { recursive: true })
+    await writeFile(isolatedArtifact, await readFile(artifact), { mode: 0o755 })
+    await chmod(isolatedArtifact, 0o755)
+
+    let failure: (Error & { code?: number | string; stdout?: string; stderr?: string }) | undefined
+    try {
+      await execFileAsync(isolatedArtifact, ['--version'], { env: { PATH: '' }, timeout: 5_000 })
+    } catch (error) {
+      failure = error as Error & { code?: number | string; stdout?: string; stderr?: string }
+    }
+    expect(failure?.code).toBe(127)
+    expect(failure?.stdout).toBe('')
+    expect(failure?.stderr).toBe('[simulator-host-agent] RUNTIME_UNAVAILABLE\n')
+  })
+
+  it('fails closed without path or parser leakage when the bundled runtime is corrupt or the wrong format', async () => {
+    if (process.platform === 'win32') return
+    const artifact = join(repositoryRoot, 'apps/electron/resources/host-agent/simulator-host-agent.mjs')
+
+    for (const [name, runtimeBytes] of [
+      ['wrong-format', 'this executable README is not Bun\n'],
+      [
+        'corrupt-runtime',
+        "#!/bin/sh\nprintf '%s\\n' \"RAW_RUNTIME_FAILURE:$0\" >&2\nexit 64\n",
+      ],
+    ] as const) {
+      const root = await mkdtemp(join(tmpdir(), `host-agent-shim-${name}-`))
+      temporaryRoots.push(root)
+      const isolatedDirectory = join(root, 'app', 'dist', 'resources', 'host-agent')
+      const isolatedArtifact = join(isolatedDirectory, 'simulator-host-agent.mjs')
+      const bundledRuntime = join(root, 'app', 'vendor', 'bun', 'bun')
+      await mkdir(isolatedDirectory, { recursive: true })
+      await mkdir(dirname(bundledRuntime), { recursive: true })
+      await writeFile(isolatedArtifact, await readFile(artifact), { mode: 0o755 })
+      await writeFile(bundledRuntime, runtimeBytes, { mode: 0o755 })
+      await chmod(isolatedArtifact, 0o755)
+      await chmod(bundledRuntime, 0o755)
+
+      let failure: (Error & { code?: number | string; stdout?: string; stderr?: string }) | undefined
+      try {
+        await execFileAsync(isolatedArtifact, ['--version'], { env: { PATH: '' }, timeout: 5_000 })
+      } catch (error) {
+        failure = error as Error & { code?: number | string; stdout?: string; stderr?: string }
+      }
+      expect(failure?.code).toBe(127)
+      expect(failure?.stdout).toBe('')
+      expect(failure?.stderr).toBe('[simulator-host-agent] RUNTIME_UNAVAILABLE\n')
+      expect(failure?.stderr).not.toContain(root)
+      expect(failure?.stderr).not.toContain('RAW_RUNTIME_FAILURE')
+      expect(failure?.stderr).not.toContain('syntax error')
+    }
+  })
+
+  it('streams only canonical JSONL and waits for strict DELETE/run.closed', async () => {
+    const files = await fixtureFiles()
+    const requests: Array<{ method: string; path: string; authorization?: string; key?: string; body: string }> = []
+    let stream: ServerResponse | undefined
+    const { url } = await listen((request, response) => {
+      const chunks: Buffer[] = []
+      request.on('data', (chunk: Buffer | string) => chunks.push(Buffer.from(chunk)))
+      request.on('end', () => {
+        requests.push({
+          method: request.method ?? '',
+          path: request.url ?? '',
+          authorization: request.headers.authorization,
+          key: request.headers['idempotency-key'] as string | undefined,
+          body: Buffer.concat(chunks).toString('utf8'),
+        })
+        if (request.method === 'POST' && request.url === '/v2/runs') {
+          json(response, snapshot('accepted'))
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}/events`) {
+          stream = response
+          response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+          response.flushHeaders()
+          writeSse(response, accepted)
+          response.write(': heartbeat\n\n')
+          writeSse(response, started)
+          writeSse(response, delta)
+          writeSse(response, completed)
+        } else if (request.method === 'DELETE' && request.url === `/v2/runs/${RUN}`) {
+          writeSse(stream!, closed)
+          stream!.end()
+          json(response, snapshot('closed'))
+        } else {
+          response.writeHead(404).end()
+        }
+      })
+    })
+    const stdout = new Capture()
+    const stderr = new Capture()
+    const code = await runHostAgentShim({
+      argv: [],
+      entryPath: files.entryPath,
+      cwd: files.root,
+      env: {
+        SIMULATOR_HOST_AGENT_URL: url,
+        SIMULATOR_HOST_AGENT_TOKEN_FILE: files.tokenPath,
+        SIMULATOR_HOST_AGENT_SHIM_PATH: files.entryPath,
+        SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',
+      },
+      stdin: Readable.from(['exact prompt']),
+      stdout,
+      stderr,
+      signal: new AbortController().signal,
+    })
+
+    expect(code).toBe(0)
+    expect(stdout.value.trim().split('\n').map((line) => parseHostAgentEvent(JSON.parse(line))))
+      .toEqual([accepted, started, delta, completed, closed])
+    expect(stdout.value).not.toContain('heartbeat')
+    expect(stderr.value).toBe('')
+    expect(requests.map((item) => `${item.method} ${item.path}`)).toEqual([
+      'POST /v2/runs',
+      `GET /v2/runs/${RUN}/events`,
+      `DELETE /v2/runs/${RUN}`,
+    ])
+    expect(new Set(requests.map((item) => item.authorization))).toEqual(new Set([`Bearer ${TOKEN}`]))
+    expect(requests[0]?.key).toMatch(/^shim-[0-9a-f]{48}$/)
+    expect(JSON.parse(requests[0]!.body)).toEqual({
+      contractVersion: 2,
+      prompt: 'exact prompt',
+      workingDirectory: files.root,
+    })
+  })
+
+  it('reconnects the same Run with Last-Event-ID and never duplicates stdout', async () => {
+    const files = await fixtureFiles()
+    let eventRequest = 0
+    const eventRequestCursors: Array<string | undefined> = []
+    let stream: ServerResponse | undefined
+    const { url } = await listen((request, response) => {
+      if (request.method === 'GET' && request.url === `/v2/runs/${RUN}/events`) {
+        eventRequestCursors.push(request.headers['last-event-id'] as string | undefined)
+      }
+      request.resume()
+      request.on('end', () => {
+        if (request.method === 'POST' && request.url === '/v2/runs') {
+          json(response, snapshot('accepted'))
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}/events`) {
+          eventRequest += 1
+          response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+          response.flushHeaders()
+          if (eventRequest === 1) {
+            writeSse(response, accepted)
+            writeSse(response, started)
+            writeSse(response, delta)
+            response.end()
+          } else {
+            stream = response
+            writeSse(response, completed)
+          }
+        } else if (request.method === 'DELETE' && request.url === `/v2/runs/${RUN}`) {
+          writeSse(stream!, closed)
+          stream!.end()
+          json(response, snapshot('closed'))
+        } else response.writeHead(404).end()
+      })
+    })
+    const stdout = new Capture()
+    const stderr = new Capture()
+    const code = await runHostAgentShim({
+      argv: [], entryPath: files.entryPath, cwd: files.root,
+      env: {
+        SIMULATOR_HOST_AGENT_URL: url,
+        SIMULATOR_HOST_AGENT_TOKEN_FILE: files.tokenPath,
+        SIMULATOR_HOST_AGENT_SHIM_PATH: files.entryPath,
+        SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',
+      },
+      stdin: Readable.from(['prompt']), stdout, stderr,
+      signal: new AbortController().signal,
+    })
+    expect(code).toBe(0)
+    expect(eventRequestCursors).toEqual([undefined, '3'])
+    expect(stdout.value.trim().split('\n').map((line) => JSON.parse(line).sequence)).toEqual([1, 2, 3, 4, 5])
+    expect(stderr.value).toBe('')
+  })
+
+  it('renews the claimed-client lease during a quiet running Turn', async () => {
+    const files = await fixtureFiles()
+    let stream: ServerResponse | undefined
+    let heartbeatRequests = 0
+    const { url } = await listen((request, response) => {
+      request.resume()
+      request.on('end', () => {
+        if (request.method === 'POST' && request.url === '/v2/runs') {
+          json(response, snapshot('accepted'))
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}/events`) {
+          stream = response
+          response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+          response.flushHeaders()
+          writeSse(response, accepted)
+          writeSse(response, started)
+          writeSse(response, delta)
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}`) {
+          heartbeatRequests += 1
+          json(response, snapshot('running'))
+          if (heartbeatRequests === 1) writeSse(stream!, completed)
+        } else if (request.method === 'DELETE' && request.url === `/v2/runs/${RUN}`) {
+          writeSse(stream!, closed)
+          stream!.end()
+          json(response, snapshot('closed'))
+        } else response.writeHead(404).end()
+      })
+    })
+    const stdout = new Capture()
+    const stderr = new Capture()
+    const code = await runHostAgentShim({
+      argv: [], entryPath: files.entryPath, cwd: files.root,
+      env: {
+        SIMULATOR_HOST_AGENT_URL: url,
+        SIMULATOR_HOST_AGENT_TOKEN_FILE: files.tokenPath,
+        SIMULATOR_HOST_AGENT_SHIM_PATH: files.entryPath,
+        SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',
+      },
+      stdin: Readable.from(['quiet turn']), stdout, stderr,
+      signal: new AbortController().signal,
+      clientLeaseHeartbeatIntervalMs: 10,
+    })
+    expect(code).toBe(0)
+    expect(heartbeatRequests).toBeGreaterThanOrEqual(1)
+    expect(stdout.value.trim().split('\n').map((line) => JSON.parse(line).type)).toEqual([
+      'run.accepted', 'turn.started', 'message.delta', 'turn.completed', 'run.closed',
+    ])
+    expect(stderr.value).toBe('')
+  })
+
+  it('exits and strictly closes on terminal status even when stdout never drains', async () => {
+    const files = await fixtureFiles()
+    let stream: ServerResponse | undefined
+    let heartbeatRequests = 0
+    let cancelRequests = 0
+    let closeRequests = 0
+    const { url } = await listen((request, response) => {
+      request.resume()
+      request.on('end', () => {
+        if (request.method === 'POST' && request.url === '/v2/runs') {
+          json(response, snapshot('accepted'))
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}/events`) {
+          stream = response
+          response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+          response.flushHeaders()
+          writeSse(response, accepted)
+          writeSse(response, started)
+          writeSse(response, delta)
+          writeSse(response, completed)
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}`) {
+          heartbeatRequests += 1
+          json(response, snapshot('completed'))
+        } else if (request.method === 'POST' && request.url === `/v2/runs/${RUN}/cancel`) {
+          cancelRequests += 1
+          json(response, snapshot('completed'))
+        } else if (request.method === 'DELETE' && request.url === `/v2/runs/${RUN}`) {
+          closeRequests += 1
+          stream?.end()
+          json(response, snapshot('closed'))
+        } else response.writeHead(404).end()
+      })
+    })
+    const stdout = new BackpressuredCapture()
+    const stderr = new Capture()
+    const running = runHostAgentShim({
+      argv: [], entryPath: files.entryPath, cwd: files.root,
+      env: {
+        SIMULATOR_HOST_AGENT_URL: url,
+        SIMULATOR_HOST_AGENT_TOKEN_FILE: files.tokenPath,
+        SIMULATOR_HOST_AGENT_SHIM_PATH: files.entryPath,
+        SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',
+      },
+      stdin: Readable.from(['terminal while stdout is unread']), stdout, stderr,
+      signal: new AbortController().signal,
+      clientLeaseHeartbeatIntervalMs: 10,
+    })
+
+    await stdout.blocked
+    for (let attempt = 0; attempt < 100 && heartbeatRequests === 0; attempt += 1) await Bun.sleep(2)
+    expect(heartbeatRequests).toBe(1)
+    await Bun.sleep(40)
+    expect(heartbeatRequests).toBe(1)
+
+    const result = await Promise.race([
+      running,
+      Bun.sleep(500).then(() => 'timeout' as const),
+    ])
+    expect(result).toBe(1)
+    expect(cancelRequests).toBe(1)
+    expect(closeRequests).toBe(1)
+    expect(stdout.destroyed).toBe(true)
+    expect(stdout.value).toContain('run.accepted')
+    expect(stdout.value).not.toContain('turn.completed')
+    expect(stdout.value).not.toContain('run.closed')
+    expect(stderr.value).toBe('[simulator-host-agent] CLEANUP_FAILED\n')
+  })
+
+  it('treats running-Turn stdout failure as fatal without cursor reconnect or lease leakage', async () => {
+    const files = await fixtureFiles()
+    const streams = new Set<ServerResponse>()
+    let eventRequests = 0
+    let statusRequests = 0
+    let cancelRequests = 0
+    let closeRequests = 0
+    const { url } = await listen((request, response) => {
+      request.resume()
+      request.on('end', () => {
+        if (request.method === 'POST' && request.url === '/v2/runs') {
+          json(response, snapshot('accepted'))
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}/events`) {
+          eventRequests += 1
+          streams.add(response)
+          response.once('close', () => streams.delete(response))
+          response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+          response.flushHeaders()
+          writeSse(response, accepted)
+          writeSse(response, started)
+          writeSse(response, delta)
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}`) {
+          statusRequests += 1
+          json(response, snapshot('running'))
+        } else if (request.method === 'POST' && request.url === `/v2/runs/${RUN}/cancel`) {
+          cancelRequests += 1
+          json(response, snapshot('interrupted'))
+        } else if (request.method === 'DELETE' && request.url === `/v2/runs/${RUN}`) {
+          closeRequests += 1
+          for (const active of streams) active.end()
+          json(response, snapshot('closed'))
+        } else response.writeHead(404).end()
+      })
+    })
+    const stdout = new BackpressuredCapture()
+    const stderr = new Capture()
+    const running = runHostAgentShim({
+      argv: [], entryPath: files.entryPath, cwd: files.root,
+      env: {
+        SIMULATOR_HOST_AGENT_URL: url,
+        SIMULATOR_HOST_AGENT_TOKEN_FILE: files.tokenPath,
+        SIMULATOR_HOST_AGENT_SHIM_PATH: files.entryPath,
+        SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',
+      },
+      stdin: Readable.from(['running turn with unread stdout']), stdout, stderr,
+      signal: new AbortController().signal,
+      clientLeaseHeartbeatIntervalMs: 10,
+      stdoutDrainTimeoutMs: 25,
+    })
+
+    await stdout.blocked
+    const result = await Promise.race([
+      running,
+      Bun.sleep(500).then(() => 'timeout' as const),
+    ])
+    expect(result).toBe(1)
+    expect(eventRequests).toBe(1)
+    expect(cancelRequests).toBe(1)
+    expect(closeRequests).toBe(1)
+    expect(stdout.destroyed).toBe(true)
+    expect(stderr.value).toBe('[simulator-host-agent] RUNTIME_UNAVAILABLE\n')
+    expect(statusRequests).toBeGreaterThan(0)
+    const statusRequestsAtExit = statusRequests
+    await Bun.sleep(40)
+    expect(statusRequests).toBe(statusRequestsAtExit)
+  })
+
+  it('recovers a lost create response with the same idempotency key without duplicating work', async () => {
+    const files = await fixtureFiles()
+    const keys: string[] = []
+    const durableWrites = new Set<string>()
+    let createRequests = 0
+    let stream: ServerResponse | undefined
+    const { url } = await listen((request, response) => {
+      request.resume()
+      request.on('end', () => {
+        if (request.method === 'POST' && request.url === '/v2/runs') {
+          createRequests += 1
+          const key = request.headers['idempotency-key'] as string
+          keys.push(key)
+          durableWrites.add(key)
+          if (createRequests === 1) {
+            // The Host accepted and durably created the Run, but no response
+            // bytes reached the Shim. Its retry must use the exact same key.
+            response.destroy()
+          } else {
+            json(response, snapshot('accepted'))
+          }
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}/events`) {
+          stream = response
+          response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+          response.flushHeaders()
+          writeSse(response, accepted)
+          writeSse(response, started)
+          writeSse(response, delta)
+          writeSse(response, completed)
+        } else if (request.method === 'DELETE' && request.url === `/v2/runs/${RUN}`) {
+          writeSse(stream!, closed)
+          stream!.end()
+          json(response, snapshot('closed'))
+        } else response.writeHead(404).end()
+      })
+    })
+    const stdout = new Capture()
+    const stderr = new Capture()
+    const code = await runHostAgentShim({
+      argv: [], entryPath: files.entryPath, cwd: files.root,
+      env: {
+        SIMULATOR_HOST_AGENT_URL: url,
+        SIMULATOR_HOST_AGENT_TOKEN_FILE: files.tokenPath,
+        SIMULATOR_HOST_AGENT_SHIM_PATH: files.entryPath,
+        SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',
+      },
+      stdin: Readable.from(['one durable write']), stdout, stderr,
+      signal: new AbortController().signal,
+    })
+
+    expect(code).toBe(0)
+    expect(createRequests).toBe(2)
+    expect(keys[0]).toMatch(/^shim-[0-9a-f]{48}$/)
+    expect(new Set(keys).size).toBe(1)
+    expect(durableWrites.size).toBe(1)
+    const events = stdout.value.trim().split('\n').map((line) => parseHostAgentEvent(JSON.parse(line)))
+    expect(events.filter((item) => item.type === 'turn.completed')).toHaveLength(1)
+    expect(events.filter((item) => item.type === 'run.closed')).toHaveLength(1)
+    expect(stderr.value).toBe('')
+  })
+
+  it('accepts an explicit pre-provider failure without inventing turn.started', async () => {
+    const files = await fixtureFiles()
+    let stream: ServerResponse | undefined
+    const { url } = await listen((request, response) => {
+      request.resume()
+      request.on('end', () => {
+        if (request.method === 'POST' && request.url === '/v2/runs') {
+          json(response, snapshot('accepted'))
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}/events`) {
+          stream = response
+          response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+          response.flushHeaders()
+          writeSse(response, accepted)
+          writeSse(response, failedBeforeStart)
+        } else if (request.method === 'DELETE' && request.url === `/v2/runs/${RUN}`) {
+          writeSse(stream!, closedBeforeStart)
+          stream!.end()
+          json(response, snapshot('closed'))
+        } else {
+          response.writeHead(404).end()
+        }
+      })
+    })
+    const stdout = new Capture()
+    const stderr = new Capture()
+    const code = await runHostAgentShim({
+      argv: [], entryPath: files.entryPath, cwd: files.root,
+      env: {
+        SIMULATOR_HOST_AGENT_URL: url,
+        SIMULATOR_HOST_AGENT_TOKEN_FILE: files.tokenPath,
+        SIMULATOR_HOST_AGENT_SHIM_PATH: files.entryPath,
+        SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',
+      },
+      stdin: Readable.from(['prompt']), stdout, stderr,
+      signal: new AbortController().signal,
+    })
+    expect(code).toBe(1)
+    expect(stdout.value.trim().split('\n').map((line) => JSON.parse(line).type)).toEqual([
+      'run.accepted', 'turn.failed', 'run.closed',
+    ])
+    expect(stderr.value).toBe('')
+  })
+
+  it('fails within a deadline and withholds success when terminal cleanup never closes', async () => {
+    const files = await fixtureFiles()
+    let heartbeat: ReturnType<typeof setInterval> | undefined
+    const { url } = await listen((request, response) => {
+      request.resume()
+      request.on('end', () => {
+        if (request.method === 'POST' && request.url === '/v2/runs') {
+          json(response, snapshot('accepted'))
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}/events`) {
+          response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+          response.flushHeaders()
+          writeSse(response, accepted)
+          writeSse(response, started)
+          writeSse(response, delta)
+          writeSse(response, completed)
+          heartbeat = setInterval(() => response.write(': heartbeat\n\n'), 5)
+          response.once('close', () => {
+            if (heartbeat) clearInterval(heartbeat)
+          })
+        } else if (request.method === 'DELETE' && request.url === `/v2/runs/${RUN}`) {
+          // Keep the response open. The SSE heartbeat must not keep the Shim
+          // alive past its terminal cleanup deadline.
+        } else {
+          response.writeHead(404).end()
+        }
+      })
+    })
+    const stdout = new Capture()
+    const stderr = new Capture()
+    const startedAt = Date.now()
+    const code = await runHostAgentShim({
+      argv: [], entryPath: files.entryPath, cwd: files.root,
+      env: {
+        SIMULATOR_HOST_AGENT_URL: url,
+        SIMULATOR_HOST_AGENT_TOKEN_FILE: files.tokenPath,
+        SIMULATOR_HOST_AGENT_SHIM_PATH: files.entryPath,
+        SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',
+      },
+      stdin: Readable.from(['prompt']), stdout, stderr,
+      signal: new AbortController().signal,
+      terminalCloseTimeoutMs: 50,
+    })
+    if (heartbeat) clearInterval(heartbeat)
+    expect(code).toBe(1)
+    expect(Date.now() - startedAt).toBeLessThan(1_000)
+    expect(stdout.value).toContain('run.accepted')
+    expect(stdout.value).toContain('turn.started')
+    expect(stdout.value).not.toContain('turn.completed')
+    expect(stdout.value).not.toContain('run.closed')
+    expect(stderr.value).toBe('[simulator-host-agent] CLEANUP_FAILED\n')
+  })
+
+  it('cancels and strictly closes on SIGTERM without fabricating success', async () => {
+    const files = await fixtureFiles()
+    const calls: string[] = []
+    let connected!: () => void
+    const connectedPromise = new Promise<void>((resolve) => { connected = resolve })
+    const { url } = await listen((request, response) => {
+      request.resume()
+      request.on('end', () => {
+        calls.push(`${request.method} ${request.url}`)
+        if (request.method === 'POST' && request.url === '/v2/runs') json(response, snapshot('accepted'))
+        else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}/events`) {
+          response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+          response.flushHeaders()
+          writeSse(response, accepted)
+          writeSse(response, started)
+          connected()
+        } else if (request.method === 'POST' && request.url === `/v2/runs/${RUN}/cancel`) {
+          json(response, snapshot('interrupted'))
+        } else if (request.method === 'DELETE' && request.url === `/v2/runs/${RUN}`) {
+          json(response, snapshot('closed'))
+        } else response.writeHead(404).end()
+      })
+    })
+    const controller = new AbortController()
+    const stdout = new Capture()
+    const stderr = new Capture()
+    const running = runHostAgentShim({
+      argv: [], entryPath: files.entryPath, cwd: files.root,
+      env: {
+        SIMULATOR_HOST_AGENT_URL: url,
+        SIMULATOR_HOST_AGENT_TOKEN_FILE: files.tokenPath,
+        SIMULATOR_HOST_AGENT_SHIM_PATH: files.entryPath,
+        SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',
+      },
+      stdin: Readable.from(['prompt']), stdout, stderr, signal: controller.signal,
+    })
+    await connectedPromise
+    controller.abort()
+    expect(await running).toBe(143)
+    expect(calls).toContain(`POST /v2/runs/${RUN}/cancel`)
+    expect(calls).toContain(`DELETE /v2/runs/${RUN}`)
+    expect(stdout.value).not.toContain('turn.completed')
+    expect(stderr.value).toBe('[simulator-host-agent] CANCELLED\n')
+    expect(stderr.value).not.toContain(TOKEN)
+    expect(stderr.value).not.toContain('prompt')
+  })
+
+  it('fails before network access when the token file is not owner-only', async () => {
+    const files = await fixtureFiles(0o644)
+    let fetched = false
+    const stdout = new Capture()
+    const stderr = new Capture()
+    const code = await runHostAgentShim({
+      argv: [], entryPath: files.entryPath, cwd: files.root,
+      env: {
+        SIMULATOR_HOST_AGENT_URL: 'http://127.0.0.1:31337',
+        SIMULATOR_HOST_AGENT_TOKEN_FILE: files.tokenPath,
+        SIMULATOR_HOST_AGENT_SHIM_PATH: files.entryPath,
+        SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',
+      },
+      stdin: Readable.from(['private prompt']), stdout, stderr,
+      signal: new AbortController().signal,
+      fetch: (async () => { fetched = true; throw new Error('must not fetch') }) as unknown as typeof fetch,
+    })
+    expect(code).toBe(1)
+    expect(fetched).toBe(false)
+    expect(stdout.value).toBe('')
+    expect(stderr.value).toBe('[simulator-host-agent] INVALID_TOKEN_FILE\n')
+    expect(stderr.value).not.toContain(files.tokenPath)
+    expect(stderr.value).not.toContain('private prompt')
+  })
+})

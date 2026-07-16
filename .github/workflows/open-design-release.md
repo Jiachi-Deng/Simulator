@@ -1,40 +1,57 @@
-# OpenDesign official release workflow
+# OpenDesign release workflow
 
-The `open-design-release.yml` workflow is intentionally inert until the
-`open-design-production` GitHub Environment is configured. This repository does
-not contain or generate the production signing key.
+The `open-design-release.yml` workflow separates public prerelease publication
+from stable official-channel mutation. This repository does not contain or
+generate the production signing key.
 
-It is also gated by the repository variable
-`OPEN_DESIGN_RELEASE_ENABLED=true`. An absent variable or any value other than
-the exact lowercase string `true` leaves both manual publication and scheduled
-refresh jobs skipped. Set it only after the Environment and initial input have
-been independently reviewed.
+RC publication requires `OPEN_DESIGN_PRERELEASE_ENABLED=true` and the protected
+`open-design-prerelease` Environment. Stable publication requires both
+`OPEN_DESIGN_RELEASE_ENABLED=true` and
+`OPEN_DESIGN_STABLE_CHANNEL_ENABLED=true`, the exact confirmation input, and
+the separately protected `open-design-production-stable` Environment. The
+existing 0.14.5 scheduled refresh remains in `open-design-production` and does
+not follow RC inputs. An absent variable or any value other than the exact
+lowercase string `true` leaves the corresponding path skipped.
 
 ## Required environment configuration
 
-Configure the following GitHub Environment secret and variables:
+Configure the following GitHub Environment secret and variables in each
+Environment that is intentionally enabled:
 
 - Secret `OPEN_DESIGN_RELEASE_PRIVATE_KEY`: an externally provisioned Ed25519
-  PKCS#8 PEM. The workflow injects it only into the signing step through an
-  environment variable. It is never used as an argument, written to an
-  artifact, or printed.
+  PKCS#8 PEM. Each job injects it into exactly one signing/verification step
+  through an environment variable. The initial job first derives the public
+  verification key in that step, authenticates all predecessor release state,
+  and only then signs the candidate. The secret is never used as an argument,
+  written to an artifact, or printed.
 - Variable `OPEN_DESIGN_RELEASE_KEY_ID`: the key ID embedded in the signed
   official-channel configuration.
 - Variables `OPEN_DESIGN_RELEASE_KEY_ACTIVE_FROM` and
   `OPEN_DESIGN_RELEASE_KEY_ACTIVE_UNTIL`: canonical ISO-8601 key boundaries.
-- Variable `OPEN_DESIGN_HOST_VERSION_RANGE`: required only by the one-time
-  initial publication.
+- Initial RC/stable publication fixes the signed Host compatibility range to
+  `>=0.12.0`; it is not configurable through repository or Environment
+  variables.
 
-Protect the environment according to the repository release policy. The fixed
-authority is `Jiachi-Deng/Simulator`, tag `open-design-v0.14.5`; neither manual
-inputs nor repository variables can redirect it.
+Protect every Environment according to the repository release policy. Required
+reviewers must be configured for `open-design-production-stable` and
+`open-design-acceptance-rollback`; naming an Environment in YAML does not by
+itself configure reviewer protection.
+
+The fixed repository authority is `Jiachi-Deng/Simulator`. Initial publication
+accepts only these version-consistent identities:
+
+- prerelease: version `0.14.6-rc.1`, tag `open-design-v0.14.6-rc.1`;
+- stable: version `0.14.6`, tag `open-design-v0.14.6`.
+
+Stable publication additionally requires the exact confirmation
+`PROMOTE_OPEN_DESIGN_0_14_6`. Manual inputs cannot redirect either identity.
 
 ## Production input workflow
 
 `open-design-production-input.yml` is the non-signing producer for initial
-publication. It runs after relevant changes reach `main`, and it may also be
-manually dispatched from `main`. It has only `contents: read`, receives no
-production secret, and cannot create or mutate a GitHub Release.
+publication. It runs after relevant changes reach `main`. It has only
+`contents: read`, receives no production secret, and cannot create or mutate a
+GitHub Release.
 
 On a macOS arm64 runner it binds itself to the exact Simulator SHA, clones the
 fixed upstream tag and commit, and downloads the fixed Node 24.18.0 and pnpm
@@ -55,9 +72,10 @@ repository, and from the fixed producer workflow path.
 ## Manual initial publication
 
 First complete the production-input workflow on the current `main` SHA. Then
-dispatch the release workflow from `main` with `operation=initial` and that
-producer `source_run_id`. The successful producer run must contain one artifact
-named `open-design-production-input` with exactly:
+dispatch the release workflow from `main` with `operation=initial`, an explicit
+`release_track`, its locked version/tag, and that producer `source_run_id`. The
+successful initial input run must contain one artifact named
+`open-design-production-input` with exactly:
 
 ```text
 open-design-production-input.tar.gz
@@ -71,8 +89,54 @@ would otherwise discard. It must contain
 `open-design-production-input/node/LICENSE`. The release workflow verifies the
 run identity, checksum, archive paths, absence of links, public-rights gate,
 dry-run, signing, and an independent installation round trip before creating a
-draft Release. The draft is published only after all five downloaded remote
-assets match; failure removes the draft and tag.
+draft Release. Failure removes the draft and tag.
+
+Before either RC or stable signing, the transaction downloads the current
+non-draft, non-prerelease 0.14.5 Release and requires its exact five-asset file
+set. Inside the secret-bearing step it derives the Ed25519 public key and passes
+that exact bundle through the production verifier. This authenticates the raw
+Catalog, envelope signature, official-channel identity, release metadata,
+archive hash, extracted-tree hash, and installer round trip. Missing, extra, or
+tampered baseline assets fail before the candidate dry-run or signing operation.
+
+The RC Catalog starts from that authenticated high-water mark: its sequence is
+exactly `current 0.14.5 sequence + 1`, and its `issuedAt` is the later of the
+current clock and `0.14.5 issuedAt + 1 second`. The authenticated predecessor
+sequence and issuance time are supplied to the initial dry-run, build, and
+post-build verifier; an initial sequence of `1` is no longer permitted once an
+installed channel history exists.
+
+For `release_track=prerelease`, the workflow publishes the RC with GitHub's
+prerelease flag and exactly four public assets: archive, Catalog, envelope, and
+release metadata. It deliberately does not upload
+`open-design-official-channel.json`, does not refresh the 0.14.5 Release, and
+does not mutate the stable Catalog/channel. For `release_track=stable`, the
+fifth official-channel configuration asset is included only after the stable
+Environment approval and exact confirmation have both passed. Stable also
+requires successful `acceptance_run_id` and `rollback_gate_run_id` values from
+the same exact `main` SHA. The fixed acceptance evidence must prove 20 old-stack
+tasks, a 20-task new-stack consecutive pass, 20 blackout/Preview checks, 40
+paid Turns, Required CI, and the update/rollback exercise. The rollback gate
+downloads and binds that immutable evidence to the RC archive SHA-256 and the
+authenticated RC Catalog `sequence` and canonical `issuedAt`.
+
+For stable promotion, all four public RC assets are required exactly. Because
+the prerelease deliberately omits `open-design-official-channel.json`, the
+publisher reconstructs that file only in a private temporary verification tree
+from the fixed tag and the public key derived in the secret-bearing step. The
+normal production verifier then checks the complete RC Catalog/archive/metadata
+closure. Its authenticated Catalog state must exactly equal the sequence and
+issuance time recorded by both acceptance and rollback evidence. The stable
+Catalog sequence is `max(current 0.14.5 sequence, accepted RC sequence) + 1`;
+its `issuedAt` is the later of the current clock and one second after the later
+authenticated predecessor issuance time.
+
+Stable is rebuilt only from the sealed production input for that same SHA. The
+OpenDesign archive is version-independent; after rebuilding 0.14.6 the workflow
+requires its SHA-256 to equal the accepted 0.14.6-rc.1 archive byte-for-byte.
+Only the separately signed Catalog, release metadata, filenames, and stable
+channel configuration may change. A different runtime closure cannot be
+promoted.
 
 The publisher runs with Node 24.18.0 and installs two independent locked
 dependency closures before loading the production CLI: the root Bun workspace
@@ -86,9 +150,21 @@ write permission only inside that subtree immediately before deleting it.
 ## Scheduled and manual refresh
 
 The refresh job runs every 12 hours on Linux and may also be manually
-dispatched. It downloads the five fixed-tag assets, advances the signed Catalog
-state, runs refresh dry-run, signs through the Environment secret, reconstructs
-the full bundle, and verifies it before any GitHub mutation.
+dispatched only with `release_track=stable`, the exact existing version/tag, and
+`REFRESH_OPEN_DESIGN_<current version with underscores>`. A fixed newest-first
+support matrix contains stable `0.14.6` followed by the `0.14.5` rollback
+baseline. The job selects the first tag that already exists as a non-draft,
+non-prerelease Release with exactly the five expected version-bound assets. It
+therefore refreshes `0.14.5` before stable promotion and automatically begins
+refreshing `0.14.6` after promotion, without a post-release source or SHA edit.
+It downloads the selected five fixed-tag assets,
+advances the signed Catalog state, runs refresh dry-run, signs through the
+Environment secret, reconstructs the full bundle, and verifies it before any
+GitHub mutation. A present-but-draft, prerelease, or asset-incomplete candidate
+fails closed instead of silently falling back.
+Initial and refresh jobs share one non-cancelling concurrency group, so the
+authenticated selected stable snapshot cannot race this workflow's scheduled refresh
+transaction.
 
 Only the raw Catalog, envelope, and release metadata are replaceable. New
 assets are uploaded under temporary names first. The Release is then made draft
@@ -97,6 +173,34 @@ and official-channel configuration are downloaded again and compared before
 the Release is republished. A pre-verification failure rolls the old assets back
 before republishing; a failure after the new transaction is verified leaves the
 Release draft for manual recovery rather than exposing a partial public state.
+
+## Debug and acceptance rollback gate
+
+`open-design-acceptance-rollback.yml` is a manual, read-only authorization and
+evidence seam. It runs only when both `debug_enabled` and
+`acceptance_approved` are true, the exact rollback confirmation is supplied,
+and the protected `open-design-acceptance-rollback` Environment is approved.
+It verifies the successful acceptance run, the four-asset 0.14.6 RC
+prerelease, and the 0.14.5 non-prerelease LKG.
+
+The evidence run must come from the fixed workflow path
+`.github/workflows/open-design-rc-acceptance.yml`, use `workflow_dispatch`, and
+match the gate's exact `main` SHA. That acceptance workflow is not introduced by
+this release-only change, so the gate intentionally remains fail-closed until
+the packaged-app acceptance harness owns that path.
+
+After validation the rollback gate uploads a checksum-protected, non-mutating
+evidence artifact containing the acceptance run ID, exact SHA, RC archive hash,
+RC Catalog sequence/issuedAt, and LKG/RC tags. The stable publisher independently
+downloads both evidence artifacts and all four public RC assets; it does not
+trust a manual hash or trust-state input.
+
+The workflow intentionally cannot edit Releases, Catalogs, channels, or expose
+a normal-user version selector. The actual installed-app exercise must reuse
+the existing Module Coordinator rollback transaction. Wiring that local
+Coordinator call into a packaged debug/acceptance harness crosses this workflow
+scope and remains a runtime integration task; this gate must not be described
+as a completed rollback by itself.
 
 No real publication should be attempted until the production key, Environment,
 repository enable variable, public redistribution evidence, and a successful

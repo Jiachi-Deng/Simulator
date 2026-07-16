@@ -30,7 +30,9 @@ import {
   OPEN_DESIGN_PRODUCTION_ENVELOPE_FILENAME,
   OPEN_DESIGN_PRODUCTION_METADATA_FILENAME,
   OPEN_DESIGN_PRODUCTION_VERSION,
+  OPEN_DESIGN_PRODUCTION_VERSIONS,
   OPEN_DESIGN_REFRESH_FILE_NAMES,
+  openDesignProductionFileNames,
   refreshOpenDesignProductionCatalog,
   verifyOpenDesignProductionBundle,
 } from "../package/production-package.mjs";
@@ -39,6 +41,8 @@ const execFileAsync = promisify(execFile);
 const productionCli = fileURLToPath(new URL("../package/production-cli.mjs", import.meta.url));
 const supported = process.platform === "darwin" && process.arch === "arm64";
 const RELEASE_TAG = "open-design-v0.14.5";
+const RC_VERSION = "0.14.6-rc.1";
+const RC_RELEASE_TAG = `open-design-v${RC_VERSION}`;
 const ISSUED_AT = "2026-07-15T00:00:00.000Z";
 const EXPIRES_AT = "2026-07-15T12:00:00.000Z";
 const VERIFY_AT = Date.parse(ISSUED_AT) + 1_000;
@@ -116,6 +120,7 @@ test("production package emits deterministic Catalog v2, exact-tag metadata, and
   const cliVerification = await execFileAsync(process.execPath, [
     cli,
     "--bundle-root", first.output,
+    "--module-version", OPEN_DESIGN_PRODUCTION_VERSION,
     "--release-tag", RELEASE_TAG,
     "--key-id", KEY_ID,
     "--key-active-from", KEY_ACTIVE_FROM,
@@ -126,6 +131,81 @@ test("production package emits deterministic Catalog v2, exact-tag metadata, and
     "--verify",
   ]);
   assert.deepEqual(JSON.parse(cliVerification.stdout), await verifyBundle(first.output, fixture));
+});
+
+test("RC production identity parameterizes every asset and rejects version/tag/Host drift", { skip: !supported, timeout: 180_000 }, async (t) => {
+  const fixture = await createFixture(t);
+  assert.deepEqual([...OPEN_DESIGN_PRODUCTION_VERSIONS], ["0.14.5", "0.14.6-rc.1", "0.14.6"]);
+  const files = openDesignProductionFileNames(RC_VERSION);
+  assert.match(openDesignProductionFileNames("0.14.6").archive, /0\.14\.6-darwin-arm64\.tar\.gz$/);
+  const output = path.join(fixture.root, "production-rc");
+  const options = {
+    ...commonOptions(fixture),
+    moduleVersion: RC_VERSION,
+    releaseTag: RC_RELEASE_TAG,
+    hostVersionRange: ">=0.12.0",
+    output,
+    privateKeyFile: fixture.privateKeyFile,
+  };
+  const result = await buildOpenDesignProductionPackageForTest(options, fixture.fixtureDigests);
+  const actualNames = await import("node:fs/promises").then(({ readdir }) => readdir(result.output));
+  assert.deepEqual(actualNames.sort(), [...files.production].sort());
+  assert.equal(path.basename(result.archivePath), files.archive);
+  assert.equal(path.basename(result.catalogPath), files.catalog);
+  assert.equal(path.basename(result.envelopePath), files.envelope);
+  assert.equal(path.basename(result.metadataPath), files.metadata);
+
+  const catalog = JSON.parse(await readFile(result.catalogPath, "utf8"));
+  assert.equal(catalog.releases[0].manifest.version, RC_VERSION);
+  assert.equal(catalog.releases[0].manifest.artifacts[0].url, `https://github.com/Jiachi-Deng/Simulator/releases/download/${RC_RELEASE_TAG}/${files.archive}`);
+  const official = JSON.parse(await readFile(result.officialChannelPath, "utf8"));
+  assert.equal(official.version, RC_VERSION);
+  assert.equal(official.catalogUrl, `https://github.com/Jiachi-Deng/Simulator/releases/download/${RC_RELEASE_TAG}/${files.envelope}`);
+  assert.equal((await verifyOpenDesignProductionBundle({
+    bundleRoot: result.output,
+    moduleVersion: RC_VERSION,
+    releaseTag: RC_RELEASE_TAG,
+    trustedKey: trustedKey(fixture),
+    priorTrustState: { highestSequence: 0 },
+    verificationTimeMs: VERIFY_AT,
+  })).version, RC_VERSION);
+  const refreshPlan = await dryRunOpenDesignCatalogRefresh({
+    bundleRoot: result.output,
+    moduleVersion: RC_VERSION,
+    releaseTag: RC_RELEASE_TAG,
+    catalogSequence: 2,
+    catalogIssuedAt: REFRESH_ISSUED_AT,
+    catalogExpiresAt: REFRESH_EXPIRES_AT,
+    keyId: KEY_ID,
+    keyActiveFrom: KEY_ACTIVE_FROM,
+    keyActiveUntil: KEY_ACTIVE_UNTIL,
+    priorTrustState: { highestSequence: 1, latestIssuedAt: ISSUED_AT },
+    verificationTimeMs: Date.parse(REFRESH_ISSUED_AT) + 1_000,
+  });
+  assert.equal(refreshPlan.version, RC_VERSION);
+  assert.deepEqual(refreshPlan.plannedFiles, files.refresh);
+
+  await assert.rejects(
+    dryRunOpenDesignProductionPackageForTest({ ...options, output: undefined, moduleVersion: "0.14.7", releaseTag: "open-design-v0.14.7", privateKeyFile: undefined }, fixture.fixtureDigests),
+    (error) => error.code === "PACKAGE_MODULE_VERSION_INVALID",
+  );
+  await assert.rejects(
+    dryRunOpenDesignProductionPackageForTest({ ...options, output: undefined, releaseTag: "open-design-v0.14.6", privateKeyFile: undefined }, fixture.fixtureDigests),
+    (error) => error.code === "PACKAGE_RELEASE_TAG_INVALID",
+  );
+  await assert.rejects(
+    dryRunOpenDesignProductionPackageForTest({ ...options, output: undefined, hostVersionRange: ">=0.11.0", privateKeyFile: undefined }, fixture.fixtureDigests),
+    (error) => error.code === "PACKAGE_CATALOG_INVALID",
+  );
+  assert.throws(() => openDesignProductionFileNames("0.14.7"), (error) => error.code === "PACKAGE_MODULE_VERSION_INVALID");
+
+  await assert.rejects(execFileAsync(process.execPath, [
+    productionCli,
+    "--staging-root", fixture.stagingRoot,
+    "--node-bin", fixture.nodeBin,
+    "--node-license", fixture.nodeLicense,
+    "--dry-run",
+  ]), (error) => error.stderr.includes("PACKAGE_ARGUMENT_INVALID: required argument is missing: --module-version"));
 });
 
 test("production dry-run writes nothing and development staging fails closed", { skip: !supported, timeout: 120_000 }, async (t) => {

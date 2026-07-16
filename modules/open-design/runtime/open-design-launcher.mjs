@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { access, chmod, lstat, mkdir, mkdtemp, readFile, realpath, rm } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import path from "node:path";
@@ -103,9 +104,45 @@ async function readHostAgentLaunchGrant() {
     || tokenInfo.nlink !== 1
     || tokenInfo.uid !== currentUid()
     || (tokenInfo.mode & 0o777) !== 0o600
-    || (tokenInfo.size !== 64 && tokenInfo.size !== 65)
   ) throw new Error("invalid SIMULATOR_HOST_AGENT_TOKEN_FILE");
-  return Object.freeze({ url: url.origin, tokenFile });
+  const tokenBytes = await readFile(tokenFile);
+  if (tokenBytes.byteLength < 16 || tokenBytes.byteLength > 513) {
+    throw new Error("invalid SIMULATOR_HOST_AGENT_TOKEN_FILE");
+  }
+  let decodedToken;
+  try {
+    decodedToken = new TextDecoder("utf-8", { fatal: true }).decode(tokenBytes);
+  } catch {
+    throw new Error("invalid SIMULATOR_HOST_AGENT_TOKEN_FILE");
+  }
+  const token = decodedToken.endsWith("\n") ? decodedToken.slice(0, -1) : decodedToken;
+  if (
+    Buffer.byteLength(token, "utf8") < 16
+    || Buffer.byteLength(token, "utf8") > 512
+    || /[\u0000-\u0020\u007f]/u.test(token)
+  ) throw new Error("invalid SIMULATOR_HOST_AGENT_TOKEN_FILE");
+
+  const shimPath = requiredEnvironment("SIMULATOR_HOST_AGENT_SHIM_PATH", /^.{1,1024}$/);
+  if (!path.isAbsolute(shimPath) || path.resolve(shimPath) !== shimPath || shimPath.includes("\0")) {
+    throw new Error("invalid SIMULATOR_HOST_AGENT_SHIM_PATH");
+  }
+  const shimInfo = await lstat(shimPath).catch(() => null);
+  const trustedShimOwner = shimInfo && (shimInfo.uid === currentUid() || shimInfo.uid === 0);
+  if (
+    !shimInfo
+    || !shimInfo.isFile()
+    || shimInfo.isSymbolicLink()
+    || shimInfo.nlink !== 1
+    || !trustedShimOwner
+  ) throw new Error("invalid SIMULATOR_HOST_AGENT_SHIM_PATH");
+  const canonicalShimPath = await realpath(shimPath).catch(() => null);
+  if (canonicalShimPath !== shimPath) throw new Error("invalid SIMULATOR_HOST_AGENT_SHIM_PATH");
+  await access(canonicalShimPath, fsConstants.X_OK).catch(() => {
+    throw new Error("invalid SIMULATOR_HOST_AGENT_SHIM_PATH");
+  });
+
+  const contractVersion = requiredEnvironment("SIMULATOR_HOST_AGENT_CONTRACT_VERSION", /^2$/);
+  return Object.freeze({ url: url.origin, tokenFile, shimPath: canonicalShimPath, contractVersion });
 }
 
 async function canonicalDataRoot(value) {
@@ -231,6 +268,8 @@ async function launchSidecar(value, app, entry, port) {
     ...(app === "daemon" ? {
       SIMULATOR_HOST_AGENT_URL: value.hostAgent.url,
       SIMULATOR_HOST_AGENT_TOKEN_FILE: value.hostAgent.tokenFile,
+      SIMULATOR_HOST_AGENT_SHIM_PATH: value.hostAgent.shimPath,
+      SIMULATOR_HOST_AGENT_CONTRACT_VERSION: value.hostAgent.contractVersion,
     } : {}),
     ...(app === "web" ? { OD_WEB_STANDALONE_ROOT: value.standaloneRoot } : {}),
   });

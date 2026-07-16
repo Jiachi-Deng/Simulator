@@ -1,0 +1,21 @@
+{
+  "name": "@simulator/host-agent-shim",
+  "version": "0.12.0",
+  "license": "Apache-2.0",
+  "description": "Host-owned ordinary json-event-stream CLI shim for Simulator modules",
+  "type": "module",
+  "main": "src/shim.ts",
+  "types": "src/shim.ts",
+  "scripts": {
+    "test": "bun test src",
+    "typecheck": "tsc --noEmit",
+    "build": "bun run scripts/build.ts"
+  },
+  "dependencies": {
+    "@simulator/host-agent-contract": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.8",
+    "typescript": "^5.8.2"
+  }
+}

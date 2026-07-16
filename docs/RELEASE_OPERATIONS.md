@@ -66,7 +66,7 @@ Deferred risks and owner:
 
 ## Release Candidate 准备
 
-1. 版本必须是合法的 `MAJOR.MINOR.PATCH-rc.N`，并在所有 distributable workspace 中一致。
+1. 所有 distributable workspace 与 `bun.lock` 使用稳定 Host product version `MAJOR.MINOR.PATCH`；单独的 workflow input 使用与之匹配的 `MAJOR.MINOR.PATCH-rc.N`，不得把 RC label 写入 manifest。
 2. Release notes 必须对应精确 commit，包含已知限制、隐私/权限变化和回滚说明。
 3. 当前 Engineering RC 必须从受保护的 `origin/main` tip 构建；禁止从 release branch 或脏工作区发布。未来如需 release branch，必须先单独修改并 Review workflow、validator 与 Versioning Policy。
 4. 生成并验证 DMG/ZIP、`SHA256SUMS`、SPDX SBOM 和 provenance/attestation。
@@ -78,15 +78,16 @@ Deferred risks and owner:
 
 ```bash
 SOURCE_SHA=$(git rev-parse origin/main)
-VERSION=0.12.0-rc.1 # 必须先完成版本与 release notes 决策
+PRODUCT_VERSION=0.12.0
+RC_LABEL=0.12.0-rc.1 # 必须先完成版本、release notes 与发布审批
 gh workflow run engineering-rc.yml --repo Jiachi-Deng/Simulator \
-  -f version="$VERSION" \
+  -f rc_label="$RC_LABEL" \
   -f source_sha="$SOURCE_SHA"
 gh run list --repo Jiachi-Deng/Simulator --workflow engineering-rc.yml --limit 1
 gh run watch RUN_ID --repo Jiachi-Deng/Simulator --exit-status
 ```
 
-不得直接照抄示例版本发布；`scripts/release/engineering-rc.ts` 会拒绝版本、notes、tag、dirty tree 或非 `origin/main` source 不一致。
+不得在当前 Milestone branch 上直接触发。只有合并后的 `origin/main` 已通过 Required CI、Release skill 已把 `next.md` 归档为 `apps/electron/resources/release-notes/$PRODUCT_VERSION.md`、且产品负责人批准本次 Engineering RC 后才可运行。`scripts/release/engineering-rc.ts` 会拒绝 RC label 与 product version、notes、tag、dirty tree、`bun.lock` 或 `origin/main` source 不一致。
 
 ## Go/No-Go
 
@@ -100,7 +101,7 @@ gh run watch RUN_ID --repo Jiachi-Deng/Simulator --exit-status
 
 ## 发布后
 
-1. Engineering RC 从 GitHub Actions run 使用 `gh run download RUN_ID --name simulator-VERSION-macos-arm64-unsigned` 重新下载；稳定版存在后才从公开 GitHub Release 页面下载。不得复用本地 build 输出。
+1. Engineering RC 从 GitHub Actions run 使用 `gh run download RUN_ID --name simulator-$RC_LABEL-macos-arm64-unsigned` 重新下载；稳定版存在后才从公开 GitHub Release 页面下载。不得复用本地 build 输出。
 2. 重新计算 Checksum，验证签名、公证、架构和 SBOM。
 3. 在干净用户账户完成安装、首次启动、Built-in Agent 与 Module 基础 smoke。
 4. 检查公开构建没有意外嵌入 credential、DSN 或 production updater endpoint。

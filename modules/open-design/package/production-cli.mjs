@@ -10,6 +10,7 @@ import {
   buildOpenDesignProductionPackage,
   dryRunOpenDesignCatalogRefresh,
   dryRunOpenDesignProductionPackage,
+  OPEN_DESIGN_PRODUCTION_VERSION,
   refreshOpenDesignProductionCatalog,
   verifyOpenDesignProductionBundle,
 } from "./production-package.mjs";
@@ -20,6 +21,7 @@ const BUILD_VALUE_OPTIONS = new Set([
   "node-license",
   "output",
   "release-tag",
+  "module-version",
   "catalog-sequence",
   "catalog-issued-at",
   "catalog-expires-at",
@@ -36,6 +38,7 @@ const BUILD_VALUE_OPTIONS = new Set([
 const VERIFY_VALUE_OPTIONS = new Set([
   "bundle-root",
   "release-tag",
+  "module-version",
   "key-id",
   "key-active-from",
   "key-active-until",
@@ -48,6 +51,7 @@ const REFRESH_VALUE_OPTIONS = new Set([
   "bundle-root",
   "output",
   "release-tag",
+  "module-version",
   "catalog-sequence",
   "catalog-issued-at",
   "catalog-expires-at",
@@ -67,6 +71,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     const publicKey = await loadEd25519PublicKey(required(parsed.values, "public-key-file"));
     const result = await verifyOpenDesignProductionBundle({
       bundleRoot: required(parsed.values, "bundle-root"),
+      moduleVersion: required(parsed.values, "module-version"),
       releaseTag: required(parsed.values, "release-tag"),
       trustedKey: {
         keyId: required(parsed.values, "key-id"),
@@ -84,6 +89,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
   if (parsed.mode === "refresh") {
     const common = {
       bundleRoot: required(parsed.values, "bundle-root"),
+      moduleVersion: parsed.values["module-version"] ?? OPEN_DESIGN_PRODUCTION_VERSION,
       releaseTag: required(parsed.values, "release-tag"),
       catalogSequence: integer(required(parsed.values, "catalog-sequence"), "catalog-sequence", 1),
       catalogIssuedAt: required(parsed.values, "catalog-issued-at"),
@@ -114,6 +120,7 @@ export async function main(argv = process.argv.slice(2), env = process.env) {
     stagingRoot: required(parsed.values, "staging-root"),
     nodeBin: required(parsed.values, "node-bin"),
     nodeLicense: required(parsed.values, "node-license"),
+    moduleVersion: required(parsed.values, "module-version"),
     releaseTag: required(parsed.values, "release-tag"),
     catalogSequence: integer(required(parsed.values, "catalog-sequence"), "catalog-sequence", 1),
     catalogIssuedAt: required(parsed.values, "catalog-issued-at"),

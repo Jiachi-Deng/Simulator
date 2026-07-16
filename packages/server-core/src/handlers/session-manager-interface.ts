@@ -23,9 +23,30 @@ import type {
   UnreadSummary,
   ShareResult,
 } from '@craft-agent/shared/protocol'
-import type { SessionBundle, DispatchMode } from '@craft-agent/shared/sessions'
+import type { SessionBundle, DispatchMode, ModuleAgentRunMetadata } from '@craft-agent/shared/sessions'
 import type { EventSink } from '../transport'
 import type { ModuleAgentPortEvent } from '@simulator/module-agent-gateway'
+import type { HostAgentRunState } from '@simulator/host-agent-contract'
+
+/** Host-only creation controls. These fields are deliberately absent from the wire DTO. */
+export interface InternalCreateSessionOptions {
+  emitCreatedEvent?: boolean
+  moduleAgentRun?: ModuleAgentRunMetadata
+}
+
+/**
+ * Aggregate lifecycle signal for ordinary, user-visible Craft turns. Hidden
+ * sessions (including transient Module Agent sessions) never participate.
+ */
+export interface VisibleCraftTurnStateChange {
+  active: boolean
+  sessionId: string
+  activeSessionCount: number
+}
+
+export type VisibleCraftTurnStateListener = (
+  change: VisibleCraftTurnStateChange,
+) => void | Promise<void>
 
 export interface ISessionManager {
   // ---------------------------------------------------------------------------
@@ -38,6 +59,11 @@ export interface ISessionManager {
   setEventSink(sink: EventSink): void
   /** Trusted, sanitized observer used by Module Agent Gateway adapters. */
   onModuleAgentRuntimeEvent(listener: (event: ModuleAgentPortEvent) => void): () => void
+  /**
+   * Host-only priority seam. The first visible Craft turn awaits the active
+   * transition before provider work starts; the last stop emits inactive.
+   */
+  onVisibleCraftTurnStateChange(listener: VisibleCraftTurnStateListener): () => void
   flushAllSessions(): Promise<void>
 
   // ---------------------------------------------------------------------------
@@ -51,12 +77,25 @@ export interface ISessionManager {
   createSession(
     workspaceId: string,
     options?: CreateSessionOptions,
-    internal?: { emitCreatedEvent?: boolean },
+    internal?: InternalCreateSessionOptions,
   ): Promise<Session>
+  /**
+   * Host-only recovery seam for a transient Module Session whose durable
+   * creation may have completed before the caller received its response.
+   * `null` is authoritative absence; malformed, conflicting, or ambiguous
+   * ownership rejects so the caller keeps the Run reserved.
+   */
+  recoverModuleAgentSession(input: {
+    workspaceId: string
+    workingDirectory: string
+    ownership: ModuleAgentRunMetadata
+  }): Promise<Session | null>
   /** Resolved working directory of a live session (Tasks Conductor uses it so children inherit
    *  the orchestrator's cwd). */
   getSessionWorkingDirectory(sessionId: string): string | undefined
   deleteSession(sessionId: string): Promise<void>
+  /** Atomically advances Host-internal transient run ownership in the JSONL header. */
+  updateModuleAgentRunState(sessionId: string, state: HostAgentRunState): Promise<void>
 
   // ---------------------------------------------------------------------------
   // Session state
@@ -121,7 +160,16 @@ export interface ISessionManager {
     onAck?: (messageId: string) => void,
     rpcContext?: { callerClientId?: string },
   ): Promise<void>
+  /**
+   * Host-only v2 Module seam. Resolves once the provider iterator has accepted
+   * the turn, not when the long-running turn completes.
+   */
+  sendModuleAgentMessage(sessionId: string, message: string): Promise<void>
   cancelProcessing(sessionId: string, silent?: boolean): Promise<void>
+  /** Internal lifecycle seam used by the Module Agent adapter. */
+  awaitSessionStopped(sessionId: string, timeoutMs?: number): Promise<void>
+  /** Strict internal teardown used for transient Module Agent sessions. */
+  disposeSessionAndReap(sessionId: string, timeoutMs?: number): Promise<void>
   killShell(sessionId: string, shellId: string): Promise<{ success: boolean; error?: string }>
   getTaskOutput(taskId: string): Promise<string | null>
 

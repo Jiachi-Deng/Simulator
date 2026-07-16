@@ -1,6 +1,7 @@
-import { existsSync, readFileSync, readdirSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { join, relative } from "node:path"
 import { spawnSync } from "node:child_process"
+import { findVersionMismatches } from "../check-version"
 
 export interface RepositoryState {
   dirty: boolean
@@ -11,7 +12,7 @@ export interface RepositoryState {
 
 export interface ValidationInput {
   rootDir: string
-  version: string
+  rcLabel: string
   ref: string
   repository: RepositoryState
 }
@@ -26,14 +27,15 @@ export interface ValidationCheck {
 export interface ValidationResult {
   schemaVersion: 1
   ok: boolean
-  version: string
+  rcLabel: string
+  productVersion: string | null
   ref: string
   sourceSha: string
   mainSha: string
   checks: ValidationCheck[]
 }
 
-const RC_VERSION = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-rc\.([1-9]\d*)$/
+const RC_LABEL = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-rc\.([1-9]\d*)$/
 const RELEASE_NOTE_TEMPLATE_LINES = new Set([
   "# Pending Release Notes",
   "## Features",
@@ -41,20 +43,6 @@ const RELEASE_NOTE_TEMPLATE_LINES = new Set([
   "## Bug Fixes",
   "## Breaking Changes",
 ])
-
-function manifestPaths(rootDir: string): string[] {
-  const paths = [join(rootDir, "package.json")]
-  for (const parentName of ["apps", "packages"]) {
-    const parent = join(rootDir, parentName)
-    if (!existsSync(parent)) continue
-    for (const entry of readdirSync(parent, { withFileTypes: true })) {
-      if (!entry.isDirectory() || (parentName === "apps" && entry.name === "online-docs")) continue
-      const path = join(parent, entry.name, "package.json")
-      if (existsSync(path)) paths.push(path)
-    }
-  }
-  return paths.sort()
-}
 
 function noteContentLines(content: string): string[] {
   return content
@@ -83,12 +71,22 @@ function nextNotePayload(content: string): string[] {
   )
 }
 
+export function productVersionFromRcLabel(rcLabel: string): string | null {
+  const match = RC_LABEL.exec(rcLabel)
+  return match ? `${match[1]}.${match[2]}.${match[3]}` : null
+}
+
 export function validateEngineeringRc(input: ValidationInput): ValidationResult {
-  const { rootDir, version, ref, repository } = input
+  const { rootDir, rcLabel, ref, repository } = input
+  const productVersion = productVersionFromRcLabel(rcLabel)
   const checks: ValidationCheck[] = []
   const add = (check: ValidationCheck): void => void checks.push(check)
 
-  add({ id: "version.rc-semver", ok: RC_VERSION.test(version), message: "Version must be canonical SemVer X.Y.Z-rc.N." })
+  add({
+    id: "label.rc-semver",
+    ok: productVersion !== null,
+    message: "Engineering bundle label must be canonical SemVer X.Y.Z-rc.N.",
+  })
   add({ id: "repository.clean", ok: !repository.dirty, message: "Repository must be clean." })
   add({
     id: "repository.exact-main",
@@ -97,27 +95,34 @@ export function validateEngineeringRc(input: ValidationInput): ValidationResult 
     details: [`ref=${ref}`, `source=${repository.sourceSha}`, `main=${repository.mainSha}`],
   })
 
-  const mismatches: string[] = []
-  for (const path of manifestPaths(rootDir)) {
-    const manifest = JSON.parse(readFileSync(path, "utf8")) as { version?: string }
-    if (manifest.version !== version) {
-      mismatches.push(`${relative(rootDir, path)}: ${manifest.version ?? "<missing>"}`)
-    }
-  }
+  const rootManifestVersion = JSON.parse(readFileSync(join(rootDir, "package.json"), "utf8")) as { version?: string }
+  const mismatches = productVersion === null
+    ? ["invalid RC label"]
+    : [
+        ...(rootManifestVersion.version === productVersion
+          ? []
+          : [`package.json: ${rootManifestVersion.version ?? "<missing>"}`]),
+        ...findVersionMismatches(rootDir)
+          .map((mismatch) => `${relative(rootDir, mismatch.path)}: ${mismatch.actual}`),
+      ]
   add({
-    id: "manifests.version",
+    id: "manifests.product-version",
     ok: mismatches.length === 0,
-    message: "All distributable workspace manifests must match the RC version.",
+    message: "All distributable workspace manifests and bun.lock workspace entries must match the stable Host product version derived from the RC label.",
     ...(mismatches.length ? { details: mismatches } : {}),
   })
 
-  const notePath = join(rootDir, "apps/electron/resources/release-notes", `${version}.md`)
+  const notePath = join(
+    rootDir,
+    "apps/electron/resources/release-notes",
+    productVersion === null ? "<invalid-rc-label>.md" : `${productVersion}.md`,
+  )
   const noteContent = existsSync(notePath) ? readFileSync(notePath, "utf8") : ""
   const noteBullets = validReleaseNoteBullets(noteContent)
   add({
-    id: "release-note.versioned",
-    ok: hasExactVersionHeading(noteContent, version) && noteBullets.length > 0,
-    message: "The versioned release note must have a heading containing the exact version and at least one substantive Markdown bullet.",
+    id: "release-note.product-versioned",
+    ok: productVersion !== null && hasExactVersionHeading(noteContent, productVersion) && noteBullets.length > 0,
+    message: "The Host product release note must have a heading containing the exact product version and at least one substantive Markdown bullet.",
   })
 
   const nextPath = join(rootDir, "apps/electron/resources/release-notes/next.md")
@@ -129,7 +134,7 @@ export function validateEngineeringRc(input: ValidationInput): ValidationResult 
     ...(pending.length ? { details: pending } : {}),
   })
 
-  const conflictingTags = repository.tags.filter((tag) => tag === version || tag === `v${version}`).sort()
+  const conflictingTags = repository.tags.filter((tag) => tag === rcLabel || tag === `v${rcLabel}`).sort()
   add({
     id: "repository.tag-available",
     ok: conflictingTags.length === 0,
@@ -140,7 +145,8 @@ export function validateEngineeringRc(input: ValidationInput): ValidationResult 
   return {
     schemaVersion: 1,
     ok: checks.every((check) => check.ok),
-    version,
+    rcLabel,
+    productVersion,
     ref,
     sourceSha: repository.sourceSha,
     mainSha: repository.mainSha,
@@ -163,18 +169,18 @@ export function readRepositoryState(rootDir: string, ref: string): RepositorySta
   }
 }
 
-function parseArgs(args: string[]): { version: string; ref: string; rootDir: string } {
+function parseArgs(args: string[]): { rcLabel: string; ref: string; rootDir: string } {
   const values = new Map<string, string>()
   for (let index = 0; index < args.length; index += 2) {
     const key = args[index]
     const value = args[index + 1]
-    if (!key?.startsWith("--") || !value) throw new Error("Usage: engineering-rc.ts --version X.Y.Z-rc.N --ref SHA [--root DIR]")
+    if (!key?.startsWith("--") || !value) throw new Error("Usage: engineering-rc.ts --label X.Y.Z-rc.N --ref SHA [--root DIR]")
     values.set(key, value)
   }
-  const version = values.get("--version")
+  const rcLabel = values.get("--label")
   const ref = values.get("--ref")
-  if (!version || !ref) throw new Error("Both --version and --ref are required.")
-  return { version, ref, rootDir: values.get("--root") ?? join(import.meta.dir, "../..") }
+  if (!rcLabel || !ref) throw new Error("Both --label and --ref are required.")
+  return { rcLabel, ref, rootDir: values.get("--root") ?? join(import.meta.dir, "../..") }
 }
 
 if (import.meta.main) {

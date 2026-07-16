@@ -118,11 +118,16 @@ async function runHostAgentSmoke(): Promise<Record<string, unknown>> {
   }
 }
 
-const hostAgentSmoke = runHostAgentSmoke().catch((error) => ({
-  ok: false,
-  error: error instanceof Error ? error.message : String(error),
-  tokenFile: hostAgentTokenFile,
-}))
+let hostAgentSmoke: Promise<Record<string, unknown>> | undefined
+
+function getHostAgentSmoke(): Promise<Record<string, unknown>> {
+  hostAgentSmoke ??= runHostAgentSmoke().catch((error) => ({
+    ok: false,
+    error: error instanceof Error ? error.message : String(error),
+    tokenFile: hostAgentTokenFile,
+  }))
+  return hostAgentSmoke
+}
 
 const server = Bun.serve({
   hostname: host,
@@ -139,7 +144,7 @@ const server = Bun.serve({
       })
     }
     if (url.pathname === '/resource/data.txt') return new Response(Bun.file(join(moduleRoot, 'data.txt')))
-    if (url.pathname === '/host-agent-smoke') return Response.json(await hostAgentSmoke)
+    if (url.pathname === '/host-agent-smoke') return Response.json(await getHostAgentSmoke())
     if (url.pathname === '/crash') {
       setTimeout(() => process.exit(23), 5)
       return new Response('crashing')

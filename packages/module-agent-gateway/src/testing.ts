@@ -36,6 +36,7 @@ export class FakeModuleAgentSessionPort implements ModuleAgentSessionPort {
   readonly created: CreateHostModuleSessionInput[] = []
   readonly sent: Array<{ sessionId: string; prompt: string }> = []
   readonly cancelled: string[] = []
+  readonly awaitedStopped: string[] = []
   readonly deleted: string[] = []
   readonly #listeners = new Map<string, Set<(event: ModuleAgentPortEvent) => void>>()
   #nextSession = 1
@@ -63,7 +64,11 @@ export class FakeModuleAgentSessionPort implements ModuleAgentSessionPort {
     this.cancelled.push(sessionId)
   }
 
-  async deleteSession(sessionId: string): Promise<void> {
+  async awaitStopped(sessionId: string): Promise<void> {
+    this.awaitedStopped.push(sessionId)
+  }
+
+  async disposeAndReap(sessionId: string): Promise<void> {
     if (this.failDelete) throw new Error('delete failed')
     this.deleted.push(sessionId)
     this.#listeners.delete(sessionId)

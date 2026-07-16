@@ -21,7 +21,9 @@ describe("DMG packaging", () => {
   })
 
   test("verifies packaged Pi and session server resources before accepting the app", () => {
+    expect(script).toContain('bun "$ELECTRON_DIR/scripts/validate-assets.ts" --packaged-app "$APP_ROOT"')
     expect(script).toContain('bun "$ROOT_DIR/scripts/packaged-server-resources.ts" --app "$APP_ROOT"')
+    expect(script.indexOf('validate-assets.ts')).toBeLessThan(script.indexOf('packaged-server-resources.ts'))
     expect(script.indexOf('packaged-server-resources.ts')).toBeLessThan(script.indexOf('verify-public-build-privacy.ts'))
   })
 })

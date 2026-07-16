@@ -1,0 +1,28 @@
+{
+  "name": "@simulator/host-agent-contract",
+  "version": "0.12.0",
+  "license": "Apache-2.0",
+  "description": "Closed v2 wire contract shared by the Simulator Host Agent broker, worker, shim, and module parser",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./node": "./src/node.ts",
+    "./schema": "./src/schema.ts",
+    "./fixtures": "./src/fixtures.ts",
+    "./schema/host-agent-v2.schema.json": "./schema/host-agent-v2.schema.json",
+    "./fixtures/host-agent-v2-fixtures.json": "./fixtures/host-agent-v2-fixtures.json"
+  },
+  "scripts": {
+    "test": "bun test src",
+    "typecheck": "tsc --noEmit",
+    "generate:artifacts": "bun run scripts/generate-artifacts.ts",
+    "check:artifacts": "bun run scripts/generate-artifacts.ts --check",
+    "build": "bun run check:artifacts && bun build src/index.ts src/schema.ts src/fixtures.ts --outdir dist/browser --target browser --format esm --splitting && bun build src/node.ts --outfile dist/node.js --target node --format esm"
+  },
+  "devDependencies": {
+    "@types/node": "^25.0.8",
+    "typescript": "^5.8.2"
+  }
+}

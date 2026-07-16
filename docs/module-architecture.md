@@ -265,3 +265,76 @@ cd apps/electron && bun scripts/module-view-smoke.ts --app release/mac-arm64/Sim
 ```
 
 smoke 启动临时 loopback HTTP/WebSocket server 和隐藏 host window，通过真实 preload 完成双实例 `ready -> smoke-ping -> smoke-pong`。它验证 cookie 与 Cache Storage partition isolation、同 host/port local WebSocket 可用、另一 port WebSocket 在到达 server 前被拒绝、renderer crash 后 host hit testing 恢复，以及只有显式 recreate 才重新 attach；同时确认进程按预期运行于 source 或 packaged mode。
+
+## 第五切片：OpenDesign Host Agent Shim 与故障隔离
+
+Host `0.12.0` 不再要求 OpenDesign 自己持有 Cloud/AMR 凭据或连接外部 Agent CLI。OpenDesign daemon 把 Host-owned `simulator-host-agent.mjs` 当作普通 `json-event-stream` Runtime：每个 Turn 以空 argv 启动一个 shim，向 stdin 写入最终 prompt，只从 stdout 读取合法 JSONL。shim 不提供 resume、MCP、provider/model selector；stderr 只允许输出脱敏的稳定错误码。Claude/Pi provider 的选择仍由当前 Craft Workspace 的既有连接决定，Module 不接收 Workspace connection、model 或 credential。
+
+```text
+OpenDesign daemon
+    | ordinary json-event-stream process
+    v
+Host-owned simulator-host-agent.mjs
+    | owner-only token + loopback HTTP/SSE
+    v
+v2 Broker Utility Process -- credit-framed MessagePort -- ModuleAgentRunCore
+                                                        |
+v1 Compatibility Utility Process ----------------------+
+                                                        |
+                                                        v
+                                      narrow SessionPort
+                                                        |
+                                                        v
+                              Craft SessionManager -> Claude/Pi Runtime
+```
+
+### v1/v2 Worker failure domains
+
+v1 compatibility 与 v2 Broker 是两条独立的 Electron Utility Process lane；各自拥有 Worker、owner-only token file、不可复用的 epoch、资源计数、crash window 和 circuit breaker。Supervisor 不引用 Electron app lifecycle API，Worker 意外退出只使对应协议路径和当前 Module Turn 失败，不会调用 app quit，也不会关闭另一条协议路径。恢复控制器只旋转该 Module daemon 的 launch lease；如果无法证明 token、epoch 或 provider cleanup 已收口，就停止或熔断该 optional Module path，并保持 Craft 主界面和主生命周期可用。
+
+每条 Worker lane 的硬门包括 64 MiB JS heap、128 MiB RSS、10 秒 health interval，以及“5 分钟内 3 次 crash”后只打开该 lane 的 circuit breaker。v2 还限制单个 grant 最多 2 个 SSE subscriber、8 个 socket、4 个并发 HTTP request；全局最多 1 个 Module Run。body/prompt 上限 2 MiB，单事件 256 KiB，delta 64 KiB，replay 为 1024 个事件或 8 MiB，MessagePort 在途 credit 为 2 MiB，并另留 64 KiB terminal control capacity。Run 最长 30 分钟，SSE heartbeat 为 10 秒。
+
+这是一条可验证的故障隔离边界，不是“数学上绝对隔离”的承诺。`SessionManager` 与 Claude/Pi provider runtime 仍由 Craft 主 Host 所有并被 Module 的 narrow SessionPort 复用；本 Milestone 没有把 provider runtime 迁入独立物理进程。
+
+### v2 Run 与 transient Session ownership
+
+`ModuleAgentRunCore` 是 main process 中 v2 Run、幂等、terminal arbitration、replay 和 cleanup 的唯一 source of truth。Broker Worker 只验证并转发 `GET /v2/capabilities`、`POST /v2/runs`、Run 查询/SSE、cancel 和 `DELETE`；它不拥有 Craft Session 或最终状态。Worker 与 main process 之间使用 byte-credit MessagePort，避免无界事件队列。
+
+每个 v2 Turn 创建一个新的 hidden、transient Craft Session，不使用 Conversation Session Cache，也不恢复崩溃中的 Turn。最终的 `runHandle`、idempotency/request digest、Module ID、contract version 和 Worker epoch 在 Session 第一次持久化 header 时一起写入；启动时发现这类 Session 会先隔离，禁止 queued-message recovery，恢复安全边界后只清理、不自动续跑。Run 的 main-process 状态机为：
+
+```text
+accepted -> starting -> running -> completed | failed | interrupted
+                                      |
+                                      v
+                                   closing -> closed
+```
+
+`completed`、`failed`、`interrupted` 通过同一条 serialized operation tail 竞争，恰好一个 terminal 成为 winner。`Idempotency-Key` 与 canonical request digest 共同绑定 Run：相同 key/相同请求找回原 Run，相同 key/不同请求返回 conflict。事件以递增 ID 写入 bounded replay；`Last-Event-ID` 落在已丢失区间时返回 `REPLAY_UNAVAILABLE`，不得伪造成功。terminal/closed tombstone 至少保留 24 小时，并保留到 grant 到期与该窗口两者中的较晚时间。
+
+SessionPort 在关闭时先等待 provider query 停止，再由 `disposeAndReap` 收口 pool server、工具边界、持久化状态和后代进程。缺少 canonical 文件工具边界时，在 prompt 或 queued work 到达 provider 前 fail closed；Module Session 的文件工具只允许访问创建 Session 时绑定的 canonical project directory。本边界防御不可信模型的路径逃逸，但不声称防御同一 macOS 用户主动制造的 filesystem TOCTOU。
+
+### Craft priority 与失败结果
+
+可见 Craft Turn 拥有全局优先级。第一个可见 Craft Turn 开始前，main process 先阻止新 Module Run，并在有界期限内取消和回收当前 v1 或 v2 Module Turn；完成、取消竞争仍由 main process 只提交一个 terminal。如果回收超时，对应 Worker lane 会被 fence/circuit-open，Craft Turn 不等待 optional Module 无限清理。Craft Turn 结束后只允许用户显式重试 Module；Broker 断线、Worker crash 或 replay gap 均不会自动重放，以免重复执行已经发生的文件写入。
+
+OpenDesign view 的 hide、return 与 reopen 不会重建正在运行的 Module daemon/view；Craft 左侧栏仍可用，用户可以随时返回主工作区。Module view crash、daemon crash、Worker crash、token 轮换、更新或 rollback 的恢复路径均只操作 optional Module ownership；任何路径都不得用关闭 Craft 作为恢复手段。
+
+### Packaged resource 与 release channel
+
+shim 从 `packages/host-agent-shim` 的 TypeScript entrypoint 在 asset copy 时重新构建，不能把仓库内 tracked generated file 当作权威输入。构建门要求 source、`dist/resources` 与最终 `.app` 内 shim 的 SHA-256、size 和 mode 完全一致；shim 必须是非 symlink、非 hardlink、不可 group/world write 的 `0755` regular file。Utility Process Worker 同样要求 `dist` 与 packaged bytes 完全一致，mode 为 `0644`。Runtime 启动前再次验证 canonical absolute path、owner、link count、write bits 和 shim executable bit；任一缺失或 hash/identity drift 只阻止 Module 启动，不能阻止 Craft。
+
+协议按 OpenDesign 精确版本 fail closed：冻结的 `0.14.5` 是 v1 last-known-good 和 rollback 基线；`0.14.6-rc.1` 与 `0.14.6` 才选择 v2，且 signed Catalog 的 `hostVersionRange` 必须是 `>=0.12.0`。未知 OpenDesign 版本不会猜测协议。prerelease workflow 只能发布 RC 自身，不写 stable official-channel 配置；stable workflow 还需要独立 acceptance/rollback evidence 和显式发布批准。当前 `0.14.6-rc.1` 尚未公开发布，稳定 official channel 仍指向 `0.14.5`。
+
+### M1 clean-room provenance anchor
+
+M1 的行为参考固定为 `https://github.com/Jiachi-Deng/Proma.git` commit `eca88618691e86f02dc1fb3296dffe92e5605289`、tree `5d90fd91a2a21c953b5dda31ad65e79acc69736e`；该快照根许可证是 `AGPL-3.0`，相关 Host Agent commits 的 author/committer 记录另见项目 provenance 账本。行为分析者输出位于工作区外置 Vault 的 `research/M1-Proma-Host-Agent-行为规格与来源映射.md`，固定 SHA-256 为 `74fe958ad981efecbc3a72b1443c92ba95ab123a093d7518f1dbd98a6519d624`。实现角色只接收该抽象行为规格和 canonical fixtures，不读取 Proma 源码。
+
+| Proma 行为参考 | Simulator target | 导入方式 | 首要 Simulator commit |
+| --- | --- | --- | --- |
+| shared wire contract、bounded replay、Broker server | `packages/host-agent-contract`、`packages/host-agent-run-core`、`packages/host-agent-broker` | clean-room behavioral reimplementation；未复制 Proma DTO、validator、error text 或 fixture | `b185115ca5aa24db822b5248aaef4473ad7e4845`、`b8ec70ede7b2af107cbc8675433cae884a2dd19a`、`d47be3bcdc8760850facd7ef7306a69c21194cde` |
+| lifecycle grant、Host App coordinator、dormant Broker ownership | `apps/electron/src/host-agent/token-store.ts`、`supervisor.ts`、`module-turn-lease.ts` 与 v1/v2 Worker adapters | clean-room security-property adaptation；Simulator 使用独立 token/epoch/worker/circuit breaker | token-store/supervisor/adapters: `bfb4c043b4cfcff832ecb27d3122a8abad0cbaec`；module-turn-lease: `eaae2e60763d2464592baa3f9206f527fdf5f08e` |
+| Runtime session registry 与 executor | `packages/server-core/src/sessions/module-agent-adapter.ts`、transient Session tests、Craft `SessionManager` seam | provider-neutral clean-room rewrite；以 Craft Claude/Pi 取代 Proma Codex-only executor | `8a94980eb79e145994809b0d7a0b8b19a3abb9e3`、`57a205c0a3f014d68006a81de7b5ff108bbf186d` |
+| cross-repository Shim interop smoke | `packages/host-agent-shim` | 只复现黑盒 stdin/JSONL/cancel 行为；Shim 实现、bootstrap 和 tests 为 Simulator 原创 | `d47be3bcdc8760850facd7ef7306a69c21194cde` |
+| OpenDesign Host Runtime selection | `modules/open-design` ordinary `json-event-stream` patch、probe 与 provenance | 基于 pinned upstream OpenDesign 的 Simulator patch；不复制 Proma Adapter/cache 实现 | `34e4e4f95c26b00f0bb1f9f8b53097c95a0b8840` |
+
+独立工程 provenance 扫描比较了 147 个 M1 changed source 与 1,384 个 Proma tracked source：除短小标准协议片段外，没有 exact comment match 或实质 clone。该结果证明当前 clean-room 工程记录的一致性，不替代版权/雇佣关系或额外商业许可的法律意见，也不把 Proma 第三方资产纳入授权。

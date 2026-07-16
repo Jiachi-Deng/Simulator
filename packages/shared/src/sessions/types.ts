@@ -12,6 +12,7 @@
 import type { PermissionMode } from '../agent/mode-manager.ts';
 import type { ThinkingLevel } from '../agent/thinking-levels.ts';
 import type { StoredAttachment, MessageRole, ToolStatus, AuthRequestType, AuthStatus, CredentialInputMode, StoredMessage } from '@craft-agent/core/types';
+import type { ModuleAgentRunMetadata } from './module-agent-run.ts';
 
 /**
  * Session fields that persist to disk.
@@ -64,6 +65,8 @@ export const SESSION_PERSISTENT_FIELDS = [
   'taskNodeId',
   'taskNodeCount',
   'taskDraft',
+  // Host-internal transient Module Agent ownership (never exposed in DTOs/bundles)
+  'moduleAgentRun',
 ] as const;
 
 export type SessionPersistentField = typeof SESSION_PERSISTENT_FIELDS[number];
@@ -224,6 +227,8 @@ export interface SessionConfig {
   taskNodeCount?: number;
   /** Tasks Conductor: generate-time draft orchestrator. Hidden from the board until adopted (promoted) by createTask. */
   taskDraft?: boolean;
+  /** Host-internal transient Module Agent ownership. Never expose through public Session DTOs. */
+  moduleAgentRun?: ModuleAgentRunMetadata;
 }
 
 /**
@@ -331,6 +336,8 @@ export interface SessionHeader {
   taskNodeCount?: number;
   /** Tasks Conductor: generate-time draft orchestrator. Hidden from the board until adopted (promoted) by createTask. */
   taskDraft?: boolean;
+  /** Host-internal transient Module Agent ownership. Runtime readers must validate this field. */
+  moduleAgentRun?: ModuleAgentRunMetadata;
   // Pre-computed fields for fast list loading
   /** Number of messages in session */
   messageCount: number;
@@ -427,4 +434,6 @@ export interface SessionMetadata {
   taskNodeCount?: number;
   /** Tasks Conductor: generate-time draft orchestrator. Hidden from the board until adopted (promoted) by createTask. */
   taskDraft?: boolean;
+  /** Host-internal value. Disk input remains untrusted and must be runtime-validated before use. */
+  moduleAgentRun?: ModuleAgentRunMetadata;
 }

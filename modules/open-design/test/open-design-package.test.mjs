@@ -20,6 +20,7 @@ import {
   OPEN_DESIGN_AUXILIARY_EXECUTABLES,
   OPEN_DESIGN_ENTRYPOINT,
   OPEN_DESIGN_MODULE_ID,
+  OPEN_DESIGN_MIN_HOST_VERSION_RANGE,
   OPEN_DESIGN_MODULE_PLATFORM,
   OPEN_DESIGN_MODULE_VERSION,
 } from "../package/open-design-package.mjs";
@@ -80,7 +81,10 @@ test("development package is deterministic, signed, owner-only, and installer-ve
   assert.equal(descriptor.nonPromotable, true);
   assert.equal(descriptor.moduleId, OPEN_DESIGN_MODULE_ID);
   assert.deepEqual(descriptor.release, { platform: OPEN_DESIGN_MODULE_PLATFORM, version: OPEN_DESIGN_MODULE_VERSION });
-  assert.deepEqual(descriptor.install, { extractedManifestSha256: first.extractedManifestSha256, hostVersionRange: "*" });
+  assert.deepEqual(descriptor.install, {
+    extractedManifestSha256: first.extractedManifestSha256,
+    hostVersionRange: OPEN_DESIGN_MIN_HOST_VERSION_RANGE,
+  });
   assert.deepEqual(Object.keys(descriptor.resources).sort(), ["archive", "catalog"]);
   assert.equal(Object.hasOwn(descriptor, "manifest"), false);
   assert.equal(descriptor.trustedKey.developmentOnly, true);
@@ -101,7 +105,7 @@ test("development package is deterministic, signed, owner-only, and installer-ve
   assert.deepEqual(artifactMetadata.provenance.agentRuntime, {
     bundledAgentExecutables: [],
     kind: "simulator-host-runtime",
-    transport: "launch-scoped-loopback-grant-v1",
+    transport: "ordinary-json-event-stream-cli-v2",
     verification: "runtime-contract-and-fail-closed-integration-tests",
   });
 

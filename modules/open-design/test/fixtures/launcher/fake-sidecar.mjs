@@ -14,6 +14,8 @@ const runtimeRoot = process.env.OD_SIDECAR_BASE;
 const agentHome = process.env.OD_AGENT_HOME;
 const hostAgentUrl = process.env.SIMULATOR_HOST_AGENT_URL;
 const hostAgentTokenFile = process.env.SIMULATOR_HOST_AGENT_TOKEN_FILE;
+const hostAgentShimPath = process.env.SIMULATOR_HOST_AGENT_SHIM_PATH;
+const hostAgentContractVersion = process.env.SIMULATOR_HOST_AGENT_CONTRACT_VERSION;
 
 if (!(["daemon", "web"].includes(app))
   || !namespace
@@ -33,12 +35,25 @@ if (!(["daemon", "web"].includes(app))
   || process.env.OD_WEB_OUTPUT_MODE !== "standalone") process.exit(64);
 if ((app === "web" && !process.env.OD_WEB_STANDALONE_ROOT) || (app === "daemon" && process.env.OD_WEB_STANDALONE_ROOT)) process.exit(64);
 if (
-  (app === "daemon" && (hostAgentUrl !== "http://127.0.0.1:37654" || !hostAgentTokenFile))
-  || (app === "web" && (hostAgentUrl || hostAgentTokenFile))
+  (app === "daemon" && (
+    hostAgentUrl !== "http://127.0.0.1:37654"
+    || !hostAgentTokenFile
+    || !path.isAbsolute(hostAgentShimPath ?? "")
+    || hostAgentContractVersion !== "2"
+  ))
+  || (app === "web" && (hostAgentUrl || hostAgentTokenFile || hostAgentShimPath || hostAgentContractVersion))
 ) process.exit(64);
 
 mkdirSync(dataRoot, { recursive: true, mode: 0o700 });
 appendFileSync(path.join(dataRoot, "starts.log"), `${app}\n`);
+if (app === "daemon") {
+  writeFileSync(path.join(dataRoot, "daemon-host-agent.json"), JSON.stringify({
+    hostAgentUrl,
+    hostAgentTokenFile,
+    hostAgentShimPath,
+    hostAgentContractVersion,
+  }));
+}
 writeFileSync(path.join(dataRoot, `${app}-pid`), String(process.pid));
 const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
 descendant.unref();
@@ -71,7 +86,15 @@ const server = http.createServer((request, response) => {
   }
   if (request.url === "/runtime") {
     response.writeHead(200, { "content-type": "application/json" });
-    response.end(JSON.stringify({ agentHome, dataRoot, runtimeRoot, hostAgentUrl, hostAgentTokenFile }));
+    response.end(JSON.stringify({
+      agentHome,
+      dataRoot,
+      runtimeRoot,
+      hostAgentUrl,
+      hostAgentTokenFile,
+      hostAgentShimPath,
+      hostAgentContractVersion,
+    }));
     return;
   }
   if (request.url === "/request-headers") {

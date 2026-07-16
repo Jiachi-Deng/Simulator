@@ -4,10 +4,11 @@
  */
 
 import { spawn, type Subprocess } from "bun";
-import { existsSync, rmSync, cpSync, readFileSync, statSync, mkdirSync } from "fs";
+import { existsSync, rmSync, readFileSync, statSync, mkdirSync } from "fs";
 import { join, basename } from "path";
 import * as esbuild from "esbuild";
 import { downloadUv, type Platform, type Arch } from "./build/common";
+import { copyElectronAssets } from "../apps/electron/scripts/copy-assets";
 
 const ROOT_DIR = join(import.meta.dir, "..");
 const ELECTRON_DIR = join(ROOT_DIR, "apps/electron");
@@ -184,16 +185,6 @@ function cleanViteCache(): void {
   if (existsSync(viteCacheDir)) {
     rmSync(viteCacheDir, { recursive: true, force: true });
     console.log("🧹 Cleaned Vite cache");
-  }
-}
-
-// Copy resources to dist
-function copyResources(): void {
-  const srcDir = join(ELECTRON_DIR, "resources");
-  const destDir = join(ELECTRON_DIR, "dist/resources");
-  if (existsSync(srcDir)) {
-    cpSync(srcDir, destDir, { recursive: true, force: true });
-    console.log("📦 Copied resources to dist");
   }
 }
 
@@ -429,7 +420,7 @@ async function main(): Promise<void> {
 
   await ensureBundledUvForCurrentPlatform();
 
-  copyResources();
+  copyElectronAssets(ROOT_DIR);
 
   // Build MCP servers for Codex sessions
   await buildMcpServers();
@@ -449,21 +440,27 @@ async function main(): Promise<void> {
   console.log("🔨 Building main process...");
 
   const mainCjsPath = join(DIST_DIR, "main.cjs");
+  const hostAgentWorkerPath = join(DIST_DIR, "resources/host-agent/worker.cjs");
   const preloadCjsPath = join(DIST_DIR, "bootstrap-preload.cjs");
   const toolbarPreloadCjsPath = join(DIST_DIR, "browser-toolbar-preload.cjs");
 
   // Remove old build files to ensure fresh build
   if (existsSync(mainCjsPath)) rmSync(mainCjsPath);
+  if (existsSync(hostAgentWorkerPath)) rmSync(hostAgentWorkerPath);
   if (existsSync(preloadCjsPath)) rmSync(preloadCjsPath);
   if (existsSync(toolbarPreloadCjsPath)) rmSync(toolbarPreloadCjsPath);
 
   // Build main and preload entries in parallel
-  const [mainResult, preloadResult, toolbarPreloadResult] = await Promise.all([
+  const [mainResult, workerResult, preloadResult, toolbarPreloadResult] = await Promise.all([
     runEsbuild(
       "apps/electron/src/main/index.ts",
       "apps/electron/dist/main.cjs",
       oauthDefines,
       { alias: MAIN_PROCESS_ALIAS }
+    ),
+    runEsbuild(
+      "apps/electron/src/host-agent/worker-entry.ts",
+      "apps/electron/dist/resources/host-agent/worker.cjs"
     ),
     runEsbuild(
       "apps/electron/src/preload/bootstrap.ts",
@@ -480,6 +477,11 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  if (!workerResult.success) {
+    console.error("❌ Host Agent worker build failed:", workerResult.error);
+    process.exit(1);
+  }
+
   if (!preloadResult.success) {
     console.error("❌ Preload build failed:", preloadResult.error);
     process.exit(1);
@@ -492,27 +494,34 @@ async function main(): Promise<void> {
 
   // Wait for files to stabilize (filesystem flush)
   console.log("⏳ Waiting for build files to stabilize...");
-  const [mainStable, preloadStable, toolbarPreloadStable] = await Promise.all([
+  const [mainStable, workerStable, preloadStable, toolbarPreloadStable] = await Promise.all([
     waitForFileStable(mainCjsPath),
+    waitForFileStable(hostAgentWorkerPath),
     waitForFileStable(preloadCjsPath),
     waitForFileStable(toolbarPreloadCjsPath),
   ]);
 
-  if (!mainStable || !preloadStable || !toolbarPreloadStable) {
+  if (!mainStable || !workerStable || !preloadStable || !toolbarPreloadStable) {
     console.error("❌ Build files did not stabilize");
     process.exit(1);
   }
 
   // Verify the built files are valid JavaScript
   console.log("🔍 Verifying build output...");
-  const [mainValid, preloadValid, toolbarPreloadValid] = await Promise.all([
+  const [mainValid, workerValid, preloadValid, toolbarPreloadValid] = await Promise.all([
     verifyJsFile(mainCjsPath),
+    verifyJsFile(hostAgentWorkerPath),
     verifyJsFile(preloadCjsPath),
     verifyJsFile(toolbarPreloadCjsPath),
   ]);
 
   if (!mainValid.valid) {
     console.error("❌ main.cjs is invalid:", mainValid.error);
+    process.exit(1);
+  }
+
+  if (!workerValid.valid) {
+    console.error("❌ Host Agent worker is invalid:", workerValid.error);
     process.exit(1);
   }
 
@@ -563,7 +572,21 @@ async function main(): Promise<void> {
   esbuildContexts.push(mainContext);
   console.log("👀 Watching main process...");
 
-  // 3. Preload watcher (using esbuild watch API)
+  // 3. Host Agent Utility Process watcher (independent worker artifact)
+  const hostAgentWorkerContext = await esbuild.context({
+    entryPoints: [join(ROOT_DIR, "apps/electron/src/host-agent/worker-entry.ts")],
+    bundle: true,
+    platform: "node",
+    format: "cjs",
+    outfile: join(ROOT_DIR, "apps/electron/dist/resources/host-agent/worker.cjs"),
+    external: ["electron"],
+    logLevel: "info",
+  });
+  await hostAgentWorkerContext.watch();
+  esbuildContexts.push(hostAgentWorkerContext);
+  console.log("👀 Watching Host Agent worker...");
+
+  // 4. Preload watcher (using esbuild watch API)
   const preloadContext = await esbuild.context({
     entryPoints: [join(ROOT_DIR, "apps/electron/src/preload/bootstrap.ts")],
     bundle: true,
@@ -577,7 +600,7 @@ async function main(): Promise<void> {
   esbuildContexts.push(preloadContext);
   console.log("👀 Watching preload...");
 
-  // 4. Browser toolbar preload watcher (dedicated browser window bridge)
+  // 5. Browser toolbar preload watcher (dedicated browser window bridge)
   const toolbarPreloadContext = await esbuild.context({
     entryPoints: [join(ROOT_DIR, "apps/electron/src/preload/browser-toolbar.ts")],
     bundle: true,
@@ -591,7 +614,7 @@ async function main(): Promise<void> {
   esbuildContexts.push(toolbarPreloadContext);
   console.log("👀 Watching browser toolbar preload...");
 
-  // 5. Start Electron (build already verified)
+  // 6. Start Electron (build already verified)
   console.log("🚀 Starting Electron...\n");
 
   const electronProc = spawn({

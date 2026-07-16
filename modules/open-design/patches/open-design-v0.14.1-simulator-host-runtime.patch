@@ -1,5 +1,5 @@
 diff --git a/apps/daemon/src/routes/runs.ts b/apps/daemon/src/routes/runs.ts
-index fee4df05bd02d23b5cfa0b7c64be9da3dd7a3807..a7840ead9cf6f9f662e38bc184ef1933604dceb8 100644
+index fee4df0..a7840ea 100644
 --- a/apps/daemon/src/routes/runs.ts
 +++ b/apps/daemon/src/routes/runs.ts
 @@ -83,6 +83,10 @@ import {
@@ -40,7 +40,7 @@ index fee4df05bd02d23b5cfa0b7c64be9da3dd7a3807..a7840ead9cf6f9f662e38bc184ef1933
      if (!mediaExecution.ok) {
        return sendApiError(res, 400, 'BAD_REQUEST', mediaExecution.message);
 diff --git a/apps/daemon/src/routes/static-resource.ts b/apps/daemon/src/routes/static-resource.ts
-index 0459682890700a2bf5f2afc9938e91bbd4a18128..2bf8646a63a61c02e4721e997b105186ae606214 100644
+index 0459682..2bf8646 100644
 --- a/apps/daemon/src/routes/static-resource.ts
 +++ b/apps/daemon/src/routes/static-resource.ts
 @@ -28,6 +28,10 @@ import { listPromptTemplates, readPromptTemplate } from '../media/prompt-templat
@@ -79,7 +79,7 @@ index 0459682890700a2bf5f2afc9938e91bbd4a18128..2bf8646a63a61c02e4721e997b105186
      try {
        config = await readAppConfig(RUNTIME_DATA_DIR);
 diff --git a/apps/daemon/src/routes/vela.ts b/apps/daemon/src/routes/vela.ts
-index 07b8f1cc9d229138be744ae8ea833c0bda8ae76d..c7b0afeda8103feac8b020f55333ffd2a4eea629 100644
+index 07b8f1c..c7b0afe 100644
 --- a/apps/daemon/src/routes/vela.ts
 +++ b/apps/daemon/src/routes/vela.ts
 @@ -41,6 +41,7 @@ import {
@@ -100,24 +100,92 @@ index 07b8f1cc9d229138be744ae8ea833c0bda8ae76d..c7b0afeda8103feac8b020f55333ffd2
    const getPublicBaseUrl = deps.http.getPublicBaseUrl ?? ((req: Request) => {
 diff --git a/apps/daemon/src/runtimes/defs/simulator-host.ts b/apps/daemon/src/runtimes/defs/simulator-host.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..a90bb278f1558b87116b815a5c50ec69863850d6
+index 0000000..5a5e387
 --- /dev/null
 +++ b/apps/daemon/src/runtimes/defs/simulator-host.ts
-@@ -0,0 +1,12 @@
+@@ -0,0 +1,30 @@
 +import type { RuntimeAgentDef } from '../types.js';
++import {
++  SIMULATOR_HOST_AGENT_CONTRACT_VERSION,
++  simulatorHostAgentLaunchEnvironment,
++} from '../../simulator-host-agent.js';
++
++const hostEnvironment = simulatorHostAgentLaunchEnvironment() as Record<string, string>;
++const shimPath = hostEnvironment.SIMULATOR_HOST_AGENT_SHIM_PATH
++  ?? 'simulator-host-agent-unconfigured';
 +
 +export const simulatorHostAgentDef: RuntimeAgentDef = {
 +  id: 'simulator-host-runtime',
 +  name: 'Simulator Host Runtime',
-+  bin: process.execPath,
++  bin: shimPath,
 +  versionArgs: ['--version'],
 +  fallbackModels: [{ id: 'host-selected', label: 'Simulator current Workspace connection', default: true }],
 +  supportsCustomModel: false,
++  // The Host owns provider/model selection, tools, and the hidden Session.
++  // OpenDesign supplies only the composed prompt through UTF-8 stdin; every
++  // Turn starts one fresh shim process and receives one closed v2 JSONL stream.
 +  buildArgs: () => [],
-+  streamFormat: 'simulator-host-runtime',
++  promptViaStdin: true,
++  streamFormat: 'json-event-stream',
++  eventParser: 'simulator-host-v2',
++  env: {
++    ...hostEnvironment,
++    SIMULATOR_HOST_AGENT_CONTRACT_VERSION,
++  },
++  inactivityTimeoutMs: 31 * 60_000,
 +};
+diff --git a/apps/daemon/src/runtimes/json-event-stream.ts b/apps/daemon/src/runtimes/json-event-stream.ts
+index 74c0ce6..11eb287 100644
+--- a/apps/daemon/src/runtimes/json-event-stream.ts
++++ b/apps/daemon/src/runtimes/json-event-stream.ts
+@@ -1,3 +1,5 @@
++import { createSimulatorHostV2EventHandler } from './simulator-host-v2-event-stream.js';
++
+ type JsonObject = Record<string, unknown>;
+ type StreamEvent = Record<string, unknown>;
+ type StreamEventHandler = (event: StreamEvent) => void;
+@@ -818,6 +820,9 @@ function handleCodexEvent(obj: unknown, onEvent: StreamEventHandler, state: Pars
+ 
+ export function createJsonEventStreamHandler(kind: ParserKind, onEvent: StreamEventHandler) {
+   let buffer = '';
++  const simulatorHost = kind === 'simulator-host-v2'
++    ? createSimulatorHostV2EventHandler(onEvent)
++    : null;
+   const state: ParserState = {
+     cursorTextSoFar: '',
+     cursorTurnStart: 0,
+@@ -837,6 +842,10 @@ export function createJsonEventStreamHandler(kind: ParserKind, onEvent: StreamEv
+     try {
+       obj = JSON.parse(line);
+     } catch {
++      if (simulatorHost) {
++        simulatorHost.handleInvalidJson();
++        return;
++      }
+       onEvent({ type: 'raw', line });
+       return;
+     }
+@@ -846,6 +855,10 @@ export function createJsonEventStreamHandler(kind: ParserKind, onEvent: StreamEv
+     if (kind === 'kimi' && handleKimiEvent(obj, onEvent)) return;
+     if (kind === 'cursor-agent' && handleCursorEvent(obj, onEvent, state)) return;
+     if (kind === 'codex' && handleCodexEvent(obj, onEvent, state)) return;
++    if (simulatorHost) {
++      simulatorHost.handle(obj);
++      return;
++    }
+ 
+     onEvent({ type: 'raw', line });
+   }
+@@ -865,6 +878,7 @@ export function createJsonEventStreamHandler(kind: ParserKind, onEvent: StreamEv
+     const rem = buffer.trim();
+     buffer = '';
+     if (rem) handleLine(rem);
++    simulatorHost?.handleEnd();
+     flushPendingArtifactText(state, onEvent);
+   }
+ 
 diff --git a/apps/daemon/src/runtimes/registry.ts b/apps/daemon/src/runtimes/registry.ts
-index 8469e6246d7f9bb9f463ad50da8b4a0bfed4fb60..dcb5d1d87b72237028e0a75f5a608458a07c40d5 100644
+index 8469e62..dcb5d1d 100644
 --- a/apps/daemon/src/runtimes/registry.ts
 +++ b/apps/daemon/src/runtimes/registry.ts
 @@ -23,36 +23,42 @@ import { antigravityAgentDef } from './defs/antigravity.js';
@@ -199,57 +267,337 @@ index 8469e6246d7f9bb9f463ad50da8b4a0bfed4fb60..dcb5d1d87b72237028e0a75f5a608458
  ];
  
  const ids = new Set();
-diff --git a/apps/daemon/src/runtimes/runs.ts b/apps/daemon/src/runtimes/runs.ts
-index ce6b33acb0461d0448b8ad01735f95a0d01d4fec..fb2d24d1d802b2cccfe517720b1a40106127da8b 100644
---- a/apps/daemon/src/runtimes/runs.ts
-+++ b/apps/daemon/src/runtimes/runs.ts
-@@ -392,6 +392,16 @@ export function createChatRunService({
-     run.updatedAt = Date.now();
-     clearPendingRetryRestart(run);
-     closeRunStdin(run);
-+    if (typeof run.externalCancel === 'function') {
-+      try {
-+        await run.externalCancel();
-+      } catch {
-+        // The Host transport is fail-closed. Local cancellation still owns the
-+        // terminal state; the adapter's finally block attempts session close.
-+      }
-+      finish(run, 'canceled', null, 'SIGTERM');
-+      return statusBody(run);
+diff --git a/apps/daemon/src/runtimes/simulator-host-v2-event-stream.ts b/apps/daemon/src/runtimes/simulator-host-v2-event-stream.ts
+new file mode 100644
+index 0000000..ae98650
+--- /dev/null
++++ b/apps/daemon/src/runtimes/simulator-host-v2-event-stream.ts
+@@ -0,0 +1,291 @@
++// @ts-nocheck
++
++const MAX_EVENT_BYTES = 256 * 1024;
++const MAX_DELTA_BYTES = 64 * 1024;
++const MAX_ACTIVITY_LABEL_BYTES = 4096;
++const RUN_HANDLE = /^run_[0-9a-f]{32}$/u;
++const ITEM_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
++const MEDIA_TYPE = /^[A-Za-z0-9!#$&^_.+-]+\/[A-Za-z0-9!#$&^_.+-]+$/u;
++
++const EVENT_TYPES = new Set([
++  'run.accepted',
++  'turn.started',
++  'message.delta',
++  'reasoning.delta',
++  'activity',
++  'presentation.item',
++  'turn.completed',
++  'turn.failed',
++  'turn.interrupted',
++  'run.closed',
++]);
++
++const FAILURE_RETRYABILITY = Object.freeze({
++  RUNTIME_UNAVAILABLE: true,
++  TOOL_BOUNDARY_UNAVAILABLE: false,
++  RUN_TIMEOUT: true,
++  BROKER_DISCONNECTED: true,
++  INTERNAL_ERROR: false,
++});
++
++const INTERRUPTION_RETRYABILITY = Object.freeze({
++  CLIENT_CANCELLED: false,
++  CRAFT_TURN_PREEMPTED: true,
++  BROKER_DISCONNECTED: true,
++  RUN_TIMEOUT: true,
++  HOST_SHUTDOWN: true,
++});
++
++function isRecord(value) {
++  return value !== null && typeof value === 'object' && !Array.isArray(value);
++}
++
++function exactKeys(value, required, optional = []) {
++  if (!isRecord(value)) return false;
++  const allowed = new Set([...required, ...optional]);
++  return required.every((key) => Object.hasOwn(value, key))
++    && Object.keys(value).every((key) => allowed.has(key));
++}
++
++function utf8Bytes(value) {
++  return Buffer.byteLength(value, 'utf8');
++}
++
++function boundedString(value, { minBytes = 0, maxBytes, rejectNul = false }) {
++  if (typeof value !== 'string') return false;
++  const bytes = utf8Bytes(value);
++  return bytes >= minBytes
++    && bytes <= maxBytes
++    && (!rejectNul || !value.includes('\0'));
++}
++
++function terminalRetryability(code) {
++  if (Object.hasOwn(FAILURE_RETRYABILITY, code)) return FAILURE_RETRYABILITY[code];
++  if (Object.hasOwn(INTERRUPTION_RETRYABILITY, code)) return INTERRUPTION_RETRYABILITY[code];
++  return undefined;
++}
++
++// This is the narrow bridge used by the daemon's shared sendAgentEvent choke
++// point. It accepts only terminal errors produced by this strict parser and
++// returns the existing SSE error envelope without collapsing the Host's
++// canonical code/reason or retryability into AGENT_EXECUTION_FAILED.
++export function simulatorHostV2TerminalSsePayload(parserKind, event) {
++  if (
++    parserKind !== 'simulator-host-v2'
++    || !exactKeys(event, ['type', 'message', 'code', 'retryable'], ['raw'])
++    || event.type !== 'error'
++    || !boundedString(event.message, { minBytes: 1, maxBytes: MAX_EVENT_BYTES, rejectNul: true })
++  ) return null;
++  const retryable = terminalRetryability(event.code);
++  if (retryable === undefined || event.retryable !== retryable) return null;
++  if (event.raw !== undefined && !boundedString(event.raw, {
++    minBytes: 1,
++    maxBytes: MAX_EVENT_BYTES,
++    rejectNul: true,
++  })) return null;
++  return {
++    message: event.message,
++    error: {
++      code: event.code,
++      message: event.message,
++      retryable,
++      ...(event.raw === undefined ? {} : { details: { raw: event.raw } }),
++    },
++  };
++}
++
++export function simulatorHostV2AgentEventIsSubstantive(parserKind, event) {
++  return parserKind === 'simulator-host-v2'
++    && isRecord(event)
++    && event.type === 'status'
++    && event.simulatorHostV2Completion === 'presentation'
++    && isRecord(event.presentation);
++}
++
++export function createSimulatorHostV2EventHandler(onEvent) {
++  const state = {
++    runHandle: null,
++    lastSequence: 0,
++    phase: 'initial',
++    textSoFar: '',
++    textBytes: 0,
++    textOverflowed: false,
++    protocolFailed: false,
++  };
++
++  const protocolError = (message) => {
++    if (!state.protocolFailed) {
++      state.protocolFailed = true;
++      onEvent({
++        type: 'error',
++        message: `Simulator Host Runtime protocol error: ${message}`,
++      });
 +    }
-     if (!run.child) {
-       finish(run, 'canceled', null, 'SIGTERM');
-       return statusBody(run);
-@@ -435,6 +445,11 @@ export function createChatRunService({
-       run.updatedAt = Date.now();
-       clearPendingRetryRestart(run);
-       closeRunStdin(run);
-+      if (typeof run.externalCancel === 'function') {
-+        try { await run.externalCancel(); } catch { /* best-effort shutdown */ }
-+        finish(run, 'canceled', null, 'SIGTERM');
-+        return;
++    return true;
++  };
++
++  const validateEnvelope = (obj) => {
++    if (!exactKeys(obj, [
++      'contractVersion',
++      'eventId',
++      'sequence',
++      'runHandle',
++      'occurredAt',
++      'type',
++      'data',
++    ])) return 'event contains missing or unknown fields';
++    let encoded;
++    try {
++      encoded = JSON.stringify(obj);
++    } catch {
++      return 'event is not JSON serializable';
++    }
++    if (utf8Bytes(encoded) > MAX_EVENT_BYTES) return 'event exceeds the byte limit';
++    if (obj.contractVersion !== 2) return 'contractVersion must be 2';
++    if (!Number.isSafeInteger(obj.sequence) || obj.sequence < 1) return 'sequence is invalid';
++    if (obj.eventId !== String(obj.sequence)) return 'eventId does not match sequence';
++    if (obj.sequence !== state.lastSequence + 1) return 'event sequence is not contiguous';
++    if (typeof obj.runHandle !== 'string' || !RUN_HANDLE.test(obj.runHandle)) return 'runHandle is invalid';
++    if (state.runHandle !== null && state.runHandle !== obj.runHandle) return 'runHandle changed';
++    if (!Number.isSafeInteger(obj.occurredAt) || obj.occurredAt < 0) return 'occurredAt is invalid';
++    if (typeof obj.type !== 'string' || !EVENT_TYPES.has(obj.type)) return 'event type is invalid';
++    if (!isRecord(obj.data)) return 'event data is invalid';
++    return null;
++  };
++
++  const handle = (obj) => {
++    if (state.protocolFailed) return true;
++    if (!isRecord(obj)) return protocolError('JSONL frame must be an object');
++    const envelopeError = validateEnvelope(obj);
++    if (envelopeError) return protocolError(envelopeError);
++
++    const { type, data } = obj;
++    if (type === 'run.accepted') {
++      if (state.phase !== 'initial' || !exactKeys(data, [])) return protocolError('run.accepted is out of order');
++      state.phase = 'awaiting-started';
++      onEvent({ type: 'status', label: 'initializing' });
++    } else if (type === 'turn.started') {
++      if (state.phase !== 'awaiting-started' || !exactKeys(data, [])) return protocolError('turn.started is out of order');
++      state.phase = 'running';
++      onEvent({ type: 'status', label: 'running' });
++    } else if (type === 'message.delta') {
++      if (
++        state.phase !== 'running'
++        || !exactKeys(data, ['delta'])
++        || !boundedString(data.delta, { minBytes: 1, maxBytes: MAX_DELTA_BYTES, rejectNul: true })
++      ) return protocolError('message.delta is invalid or out of order');
++      if (!state.textOverflowed) {
++        const deltaBytes = utf8Bytes(data.delta);
++        if (state.textBytes + deltaBytes > MAX_EVENT_BYTES) {
++          state.textOverflowed = true;
++          state.textSoFar = '';
++          state.textBytes = 0;
++        } else {
++          state.textSoFar += data.delta;
++          state.textBytes += deltaBytes;
++        }
 +      }
-       if (run.acpSession?.abort) {
-         try {
-           run.acpSession.abort();
++      onEvent({ type: 'text_delta', delta: data.delta });
++    } else if (type === 'reasoning.delta') {
++      if (
++        state.phase !== 'running'
++        || !exactKeys(data, ['delta'])
++        || !boundedString(data.delta, { minBytes: 1, maxBytes: MAX_DELTA_BYTES, rejectNul: true })
++      ) return protocolError('reasoning.delta is invalid or out of order');
++      onEvent({ type: 'thinking_delta', delta: data.delta });
++    } else if (type === 'activity') {
++      if (
++        state.phase !== 'running'
++        || !exactKeys(data, ['phase', 'kind'], ['label'])
++        || !['started', 'finished'].includes(data.phase)
++        || !['runtime', 'tool'].includes(data.kind)
++        || (data.label !== undefined && !boundedString(data.label, {
++          minBytes: 1,
++          maxBytes: MAX_ACTIVITY_LABEL_BYTES,
++          rejectNul: true,
++        }))
++      ) return protocolError('activity is invalid or out of order');
++      onEvent({
++        type: 'status',
++        label: typeof data.label === 'string' ? data.label : `${data.kind} ${data.phase}`,
++      });
++    } else if (type === 'presentation.item') {
++      if (
++        state.phase !== 'running'
++        || !exactKeys(data, ['itemId', 'kind'], ['title', 'text', 'uri', 'mediaType'])
++        || typeof data.itemId !== 'string'
++        || !ITEM_ID.test(data.itemId)
++        || !['text', 'image', 'file', 'preview'].includes(data.kind)
++        || (data.title !== undefined && !boundedString(data.title, { minBytes: 1, maxBytes: 4096, rejectNul: true }))
++        || (data.text !== undefined && !boundedString(data.text, { minBytes: 1, maxBytes: MAX_EVENT_BYTES, rejectNul: true }))
++        || (data.uri !== undefined && !boundedString(data.uri, { minBytes: 1, maxBytes: 8192, rejectNul: true }))
++        || (data.mediaType !== undefined && !boundedString(data.mediaType, { minBytes: 1, maxBytes: 256, rejectNul: true }))
++        || (data.mediaType !== undefined && !MEDIA_TYPE.test(data.mediaType))
++      ) return protocolError('presentation.item is invalid or out of order');
++      onEvent({
++        type: 'status',
++        label: typeof data.title === 'string' ? data.title : `${data.kind}: ${data.itemId}`,
++        presentation: { ...data },
++        simulatorHostV2Completion: 'presentation',
++      });
++    } else if (type === 'turn.completed') {
++      if (
++        state.phase !== 'running'
++        || !exactKeys(data, [], ['finalText'])
++        || (data.finalText !== undefined && !boundedString(data.finalText, {
++          maxBytes: MAX_EVENT_BYTES,
++          rejectNul: true,
++        }))
++      ) return protocolError('turn.completed is invalid or out of order');
++      if (typeof data.finalText === 'string') {
++        if (state.textOverflowed) return protocolError('finalText cannot be verified after streamed text exceeds the byte limit');
++        if (!data.finalText.startsWith(state.textSoFar)) return protocolError('finalText disagrees with message deltas');
++        const suffix = data.finalText.slice(state.textSoFar.length);
++        if (suffix) onEvent({ type: 'text_delta', delta: suffix });
++        state.textSoFar = data.finalText;
++        state.textBytes = utf8Bytes(data.finalText);
++      }
++      state.phase = 'terminal';
++      onEvent({ type: 'status', label: 'completed' });
++    } else if (type === 'turn.failed') {
++      if (
++        !['awaiting-started', 'running'].includes(state.phase)
++        || !exactKeys(data, ['code', 'retryable'])
++        || !Object.hasOwn(FAILURE_RETRYABILITY, data.code)
++        || data.retryable !== FAILURE_RETRYABILITY[data.code]
++      ) return protocolError('turn.failed is invalid or out of order');
++      state.phase = 'terminal';
++      onEvent({
++        type: 'error',
++        message: `Simulator Host Runtime failed: ${data.code}`,
++        code: data.code,
++        retryable: data.retryable,
++        raw: JSON.stringify(obj),
++      });
++    } else if (type === 'turn.interrupted') {
++      if (
++        !['awaiting-started', 'running'].includes(state.phase)
++        || !exactKeys(data, ['reason', 'retryable'])
++        || !Object.hasOwn(INTERRUPTION_RETRYABILITY, data.reason)
++        || data.retryable !== INTERRUPTION_RETRYABILITY[data.reason]
++      ) return protocolError('turn.interrupted is invalid or out of order');
++      state.phase = 'terminal';
++      onEvent({
++        type: 'error',
++        message: `Simulator Host Runtime interrupted: ${data.reason}`,
++        code: data.reason,
++        retryable: data.retryable,
++        raw: JSON.stringify(obj),
++      });
++    } else if (type === 'run.closed') {
++      if (state.phase !== 'terminal' || !exactKeys(data, [])) return protocolError('run.closed is out of order');
++      state.phase = 'closed';
++      onEvent({ type: 'status', label: 'closed' });
++    }
++
++    state.runHandle ??= obj.runHandle;
++    state.lastSequence = obj.sequence;
++    return true;
++  };
++
++  return {
++    handle,
++    handleInvalidJson: () => protocolError('stdout line is not valid JSON'),
++    handleEnd: () => state.protocolFailed
++      || state.phase === 'closed'
++      || protocolError('stdout ended before run.closed'),
++  };
++}
 diff --git a/apps/daemon/src/server.ts b/apps/daemon/src/server.ts
-index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f67d12c9d 100644
+index d383bb8..786ad30 100644
 --- a/apps/daemon/src/server.ts
 +++ b/apps/daemon/src/server.ts
-@@ -355,6 +355,12 @@ import { importFigmaFromBytes } from './figma/figma-import.js';
+@@ -340,6 +340,10 @@ import {
+ import { narrowProjectCritiqueOverride } from './critique/spawn-inputs.js';
+ import { createCopilotStreamHandler } from './copilot-stream.js';
+ import { createJsonEventStreamHandler } from './runtimes/json-event-stream.js';
++import {
++  simulatorHostV2AgentEventIsSubstantive,
++  simulatorHostV2TerminalSsePayload,
++} from './runtimes/simulator-host-v2-event-stream.js';
+ import {
+   antigravityAuthGuidance,
+   antigravityQuotaGuidance,
+@@ -355,6 +359,10 @@ import { importFigmaFromBytes } from './figma/figma-import.js';
  import { renderDesignSystemPreview } from './design-systems/preview.js';
  import { renderDesignSystemShowcase } from './design-systems/showcase.js';
  import { createChatRunService } from './runtimes/runs.js';
 +import {
-+  disposeSimulatorHostAgentSessions,
 +  isSimulatorHostAgentMode,
-+  runSimulatorHostAgentTurn,
 +  SIMULATOR_HOST_AGENT_ID,
 +} from './simulator-host-agent.js';
  import {
    createRunLifecycleTracer,
    runLifecycleMarkersForStreamEvent,
-@@ -2870,7 +2876,7 @@ export async function startServer({
+@@ -2870,7 +2878,7 @@ export async function startServer({
      agents: agentDeps,
      validation: validationDeps,
    });
@@ -258,7 +606,7 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f
      db,
      http: httpDeps,
      paths: pathDeps,
-@@ -4020,6 +4026,15 @@ export async function startServer({
+@@ -4020,6 +4028,15 @@ export async function startServer({
      lifecycle.mark('chat_run_started');
      /** @type {Partial<ChatRequest> & { imagePaths?: string[] }} */
      chatBody = chatBody || {};
@@ -274,7 +622,7 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f
      const {
        agentId,
        message,
-@@ -4265,7 +4280,8 @@ export async function startServer({
+@@ -4265,7 +4282,8 @@ export async function startServer({
          };
        }
      }
@@ -284,7 +632,7 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f
        ? toolTokenRegistry.mint({
            runId,
            projectId,
-@@ -4295,7 +4311,9 @@ export async function startServer({
+@@ -4295,7 +4313,9 @@ export async function startServer({
          activeChatRunHandles.delete(sinkRunId);
        };
      }
@@ -295,27 +643,38 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f
      const commentHint = renderCommentAttachmentHint(safeCommentAttachments);
  
      // Resolve external MCP config + stored OAuth tokens up-front so the
-@@ -5177,6 +5195,19 @@ export async function startServer({
-       design.runs.finish(run, status, code, signal);
-       return false;
-     };
-+    if (def.id === SIMULATOR_HOST_AGENT_ID) {
-+      return runSimulatorHostAgentTurn({
-+        prompt: composed,
-+        continuationPrompt: [
-+          `# User request\n\n${composeChatUserRequestForAgent(message, currentPrompt, { skipTranscript: true })}${attachmentHint}${commentHint}`,
-+          promptImagePaths.length ? `\n\n${promptImagePaths.map((p) => `@${p}`).join(' ')}` : '',
-+        ].join(''),
-+        workingDirectory: effectiveCwd,
-+        run,
-+        send,
-+        finish: design.runs.finish,
-+      });
-+    }
-     const mcpServers = buildLiveArtifactsMcpServersForAgent(def, {
-       enabled: Boolean(toolTokenGrant?.token),
-       command: process.execPath,
-@@ -7583,9 +7614,11 @@ export async function startServer({
+@@ -6625,6 +6645,18 @@ export async function startServer({
+     }
+ 
+     const sendAgentEvent = (ev) => {
++      const simulatorHostTerminalPayload = simulatorHostV2TerminalSsePayload(
++        def.eventParser,
++        ev,
++      );
++      if (simulatorHostTerminalPayload) {
++        if (agentStreamError) return;
++        flushVisibleAgentStderr();
++        agentStreamError = simulatorHostTerminalPayload.message;
++        clearInactivityWatchdog();
++        send('error', simulatorHostTerminalPayload);
++        return;
++      }
+       if (ev?.type === 'error') {
+         if (agentStreamError) return;
+         flushVisibleAgentStderr();
+@@ -6693,7 +6725,10 @@ export async function startServer({
+         return;
+       }
+       noteFirstTokenFromAgentEvent(ev);
+-      if (ev?.type && SUBSTANTIVE_AGENT_EVENT_TYPES.has(ev.type)) {
++      if (
++        (ev?.type && SUBSTANTIVE_AGENT_EVENT_TYPES.has(ev.type))
++        || simulatorHostV2AgentEventIsSubstantive(def.eventParser, ev)
++      ) {
+         agentProducedOutput = true;
+       }
+       emitAgentEvent(ev);
+@@ -7583,9 +7618,11 @@ export async function startServer({
      // on the agent's final status (live artifact discovery, lastRun summary
      // metadata) lives inside the `completion` promise.
      const appConfig = await readAppConfig(RUNTIME_DATA_DIR);
@@ -330,7 +689,7 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f
      if (!agentId) {
        const agents = await detectAgents(appConfig.agentCliEnv ?? {}).catch(() => []);
        agentId = agents.find((agent) => agent.available)?.id ?? null;
-@@ -7754,8 +7787,10 @@ export async function startServer({
+@@ -7754,8 +7791,10 @@ export async function startServer({
    // and dispatches into the same chat runner used by manual runs.
    routineService.setRunHandler(async ({ routine, trigger, startedAt, runId }) => {
      const appConfig = await readAppConfig(RUNTIME_DATA_DIR);
@@ -343,775 +702,108 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f
      if (!agentId) {
        const agents = await detectAgents(appConfig.agentCliEnv ?? {}).catch(() => []);
        agentId = agents.find((agent) => agent.available)?.id ?? null;
-@@ -8205,6 +8240,7 @@ export async function startServer({
-       daemonShutdownStarted = true;
-       daemonShuttingDown = true;
-       await design.runs.shutdownActive({ graceMs: resolveChatRunShutdownGraceMs() });
-+      await disposeSimulatorHostAgentSessions().catch((error) => console.warn('[od] Host session cleanup failed', error));
-       await terminalService.shutdownActive();
-       await design.analytics.shutdown();
-     };
 diff --git a/apps/daemon/src/simulator-host-agent.ts b/apps/daemon/src/simulator-host-agent.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..824f30811716038405415bed67a107240d925deb
+index 0000000..b457d3d
 --- /dev/null
 +++ b/apps/daemon/src/simulator-host-agent.ts
-@@ -0,0 +1,753 @@
+@@ -0,0 +1,94 @@
 +// @ts-nocheck
 +
-+import { constants as fsConstants } from 'node:fs';
-+import { lstat, open } from 'node:fs/promises';
 +import path from 'node:path';
 +
 +export const SIMULATOR_HOST_AGENT_ID = 'simulator-host-runtime';
-+export const SIMULATOR_HOST_AGENT_EVENT = 'module-agent.event';
-+const CONTRACT_VERSION = 1;
-+const TOKEN_BYTES = 64;
-+const MAX_JSON_BYTES = 256 * 1024;
-+const MAX_SSE_BUFFER_BYTES = 2 * 1024 * 1024;
-+const MAX_PROMPT_BYTES = 2 * 1024 * 1024;
-+const REQUEST_TIMEOUT_MS = 30_000;
-+const STREAM_TIMEOUT_MS = 10 * 60_000;
++export const SIMULATOR_HOST_AGENT_CONTRACT_VERSION = '2';
++
++const HOST_ENVIRONMENT_KEYS = Object.freeze([
++  'SIMULATOR_HOST_AGENT_URL',
++  'SIMULATOR_HOST_AGENT_TOKEN_FILE',
++  'SIMULATOR_HOST_AGENT_SHIM_PATH',
++  'SIMULATOR_HOST_AGENT_CONTRACT_VERSION',
++]);
++
 +const hostLaunchEnvironment = Object.freeze({
 +  SIMULATOR_HOST_AGENT_URL: process.env.SIMULATOR_HOST_AGENT_URL,
 +  SIMULATOR_HOST_AGENT_TOKEN_FILE: process.env.SIMULATOR_HOST_AGENT_TOKEN_FILE,
++  SIMULATOR_HOST_AGENT_SHIM_PATH: process.env.SIMULATOR_HOST_AGENT_SHIM_PATH,
++  SIMULATOR_HOST_AGENT_CONTRACT_VERSION: process.env.SIMULATOR_HOST_AGENT_CONTRACT_VERSION,
 +});
-+delete process.env.SIMULATOR_HOST_AGENT_URL;
-+delete process.env.SIMULATOR_HOST_AGENT_TOKEN_FILE;
-+const cachedSessions = new Map();
-+const MAX_CACHED_SESSIONS = 4;
-+let cacheClock = 0;
-+let cacheAdmissionTail = Promise.resolve();
-+let cacheDisposal = null;
 +
-+const EVENT_TYPES = new Set([
-+  'session.ready',
-+  'turn.started',
-+  'message.delta',
-+  'message.completed',
-+  'activity',
-+  'turn.completed',
-+  'turn.failed',
-+  'turn.cancelled',
-+  'session.closed',
-+]);
++function nonEmpty(value) {
++  return typeof value === 'string' && value.trim().length > 0 && !value.includes('\0');
++}
 +
-+export class SimulatorHostAgentError extends Error {
-+  constructor(code, message) {
-+    super(message);
-+    this.name = 'SimulatorHostAgentError';
-+    this.code = code;
++function isCanonicalAbsolutePath(value) {
++  return nonEmpty(value) && path.isAbsolute(value) && path.resolve(value) === value;
++}
++
++function isLoopbackBaseUrl(value) {
++  if (!nonEmpty(value)) return false;
++  try {
++    const url = new URL(value);
++    return url.protocol === 'http:'
++      && (url.hostname === '127.0.0.1' || url.hostname === '[::1]')
++      && !url.username
++      && !url.password
++      && !url.search
++      && !url.hash
++      && url.pathname === '/';
++  } catch {
++    return false;
 +  }
 +}
 +
-+function fail(code, message) {
-+  throw new SimulatorHostAgentError(code, message);
++export function isSimulatorHostAgentMode(
++  env = hostLaunchEnvironment,
++) {
++  // A partial Host grant is still Host mode. Fail closed instead of exposing
++  // OpenDesign Cloud or a locally installed provider CLI as a fallback. An
++  // explicitly present empty value is partial configuration too.
++  return HOST_ENVIRONMENT_KEYS.some((key) => typeof env[key] === 'string');
 +}
 +
-+export function isSimulatorHostAgentMode(env = hostLaunchEnvironment) {
-+  return Boolean(env.SIMULATOR_HOST_AGENT_URL || env.SIMULATOR_HOST_AGENT_TOKEN_FILE);
++export function simulatorHostAgentConfigured(
++  env = hostLaunchEnvironment,
++) {
++  return isLoopbackBaseUrl(env.SIMULATOR_HOST_AGENT_URL)
++    && isCanonicalAbsolutePath(env.SIMULATOR_HOST_AGENT_TOKEN_FILE)
++    && isCanonicalAbsolutePath(env.SIMULATOR_HOST_AGENT_SHIM_PATH)
++    && env.SIMULATOR_HOST_AGENT_CONTRACT_VERSION === SIMULATOR_HOST_AGENT_CONTRACT_VERSION;
 +}
 +
-+export function simulatorHostAgentInfo(env = hostLaunchEnvironment) {
-+  const configured = Boolean(
-+    env.SIMULATOR_HOST_AGENT_URL?.trim()
-+    && env.SIMULATOR_HOST_AGENT_TOKEN_FILE?.trim(),
-+  );
++export function simulatorHostAgentLaunchEnvironment(
++  env = hostLaunchEnvironment,
++) {
++  if (!simulatorHostAgentConfigured(env)) return Object.freeze({});
++  return Object.freeze({
++    SIMULATOR_HOST_AGENT_URL: env.SIMULATOR_HOST_AGENT_URL,
++    SIMULATOR_HOST_AGENT_TOKEN_FILE: env.SIMULATOR_HOST_AGENT_TOKEN_FILE,
++    SIMULATOR_HOST_AGENT_SHIM_PATH: env.SIMULATOR_HOST_AGENT_SHIM_PATH,
++    SIMULATOR_HOST_AGENT_CONTRACT_VERSION: SIMULATOR_HOST_AGENT_CONTRACT_VERSION,
++  });
++}
++
++export function simulatorHostAgentInfo(
++  env = hostLaunchEnvironment,
++) {
++  const configured = simulatorHostAgentConfigured(env);
++  const shimPath = configured ? env.SIMULATOR_HOST_AGENT_SHIM_PATH : null;
 +  return {
 +    id: SIMULATOR_HOST_AGENT_ID,
 +    name: 'Simulator Host Runtime',
-+    bin: process.execPath,
++    bin: shimPath ?? 'simulator-host-agent-unconfigured',
 +    versionArgs: ['--version'],
 +    models: [{ id: 'host-selected', label: 'Simulator current Workspace connection', default: true }],
 +    modelsSource: 'live',
 +    available: configured,
-+    path: configured ? process.execPath : null,
-+    version: configured ? 'contract-v1' : null,
-+    streamFormat: 'simulator-host-runtime',
++    path: shimPath,
++    version: configured ? 'contract-v2' : null,
++    streamFormat: 'json-event-stream',
 +    supportsCustomModel: false,
 +  };
 +}
-+
-+function plainRecord(value) {
-+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
-+  const prototype = Object.getPrototypeOf(value);
-+  return prototype === Object.prototype || prototype === null ? value : null;
-+}
-+
-+function hasExactKeys(value, required, optional = []) {
-+  const record = plainRecord(value);
-+  if (!record) return false;
-+  const allowed = new Set([...required, ...optional]);
-+  const keys = Object.keys(record);
-+  return required.every((key) => Object.hasOwn(record, key))
-+    && keys.every((key) => allowed.has(key));
-+}
-+
-+function boundedString(value, maximum) {
-+  return typeof value === 'string' && value.length > 0 && value.length <= maximum;
-+}
-+
-+function validHandle(value) {
-+  return boundedString(value, 256) && /^[A-Za-z0-9._~-]+$/u.test(value);
-+}
-+
-+function parseBaseUrl(raw) {
-+  let url;
-+  try {
-+    url = new URL(raw);
-+  } catch {
-+    fail('CONFIGURATION_INVALID', 'Simulator Host Runtime configuration is invalid.');
-+  }
-+  if (
-+    url.protocol !== 'http:'
-+    || !['127.0.0.1', '[::1]'].includes(url.hostname)
-+    || url.username
-+    || url.password
-+    || url.search
-+    || url.hash
-+    || url.pathname !== '/'
-+  ) fail('CONFIGURATION_INVALID', 'Simulator Host Runtime configuration is invalid.');
-+  return new URL(url.origin);
-+}
-+
-+async function readTokenFile(filename) {
-+  if (typeof filename !== 'string' || !path.isAbsolute(filename) || path.resolve(filename) !== filename) {
-+    fail('CONFIGURATION_INVALID', 'Simulator Host Runtime configuration is invalid.');
-+  }
-+  let handle;
-+  try {
-+    const before = await lstat(filename);
-+    if (
-+      !before.isFile()
-+      || before.isSymbolicLink()
-+      || before.nlink !== 1
-+      || (before.size !== TOKEN_BYTES && before.size !== TOKEN_BYTES + 1)
-+      || (typeof process.getuid === 'function' && before.uid !== process.getuid())
-+      || (process.platform !== 'win32' && (before.mode & 0o777) !== 0o600)
-+    ) fail('AUTHENTICATION_INVALID', 'Simulator Host Runtime authentication is unavailable.');
-+    handle = await open(filename, fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0));
-+    const opened = await handle.stat();
-+    if (opened.dev !== before.dev || opened.ino !== before.ino || opened.size !== before.size) {
-+      fail('AUTHENTICATION_INVALID', 'Simulator Host Runtime authentication is unavailable.');
-+    }
-+    const bytes = Buffer.alloc(TOKEN_BYTES + 1);
-+    const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
-+    let tokenBytes = bytes.subarray(0, bytesRead);
-+    if (tokenBytes.length === TOKEN_BYTES + 1 && tokenBytes.at(-1) === 0x0a) {
-+      tokenBytes = tokenBytes.subarray(0, TOKEN_BYTES);
-+    }
-+    if (tokenBytes.length !== TOKEN_BYTES || !/^[0-9a-f]{64}$/u.test(tokenBytes.toString('ascii'))) {
-+      bytes.fill(0);
-+      fail('AUTHENTICATION_INVALID', 'Simulator Host Runtime authentication is unavailable.');
-+    }
-+    const token = tokenBytes.toString('ascii');
-+    bytes.fill(0);
-+    return token;
-+  } catch (error) {
-+    if (error instanceof SimulatorHostAgentError) throw error;
-+    fail('AUTHENTICATION_INVALID', 'Simulator Host Runtime authentication is unavailable.');
-+  } finally {
-+    await handle?.close().catch(() => undefined);
-+  }
-+}
-+
-+function requestSignal(timeoutMs, externalSignal) {
-+  const controller = new AbortController();
-+  let timedOut = false;
-+  const onAbort = () => controller.abort();
-+  if (externalSignal?.aborted) controller.abort();
-+  else externalSignal?.addEventListener('abort', onAbort, { once: true });
-+  const timer = setTimeout(() => {
-+    timedOut = true;
-+    controller.abort();
-+  }, timeoutMs);
-+  timer.unref?.();
-+  return {
-+    signal: controller.signal,
-+    timedOut: () => timedOut,
-+    cleanup: () => {
-+      clearTimeout(timer);
-+      externalSignal?.removeEventListener('abort', onAbort);
-+    },
-+  };
-+}
-+
-+async function readBoundedText(response, maximum) {
-+  if (!response.body) fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid response.');
-+  const reader = response.body.getReader();
-+  const chunks = [];
-+  let total = 0;
-+  try {
-+    while (true) {
-+      const next = await reader.read();
-+      if (next.done) break;
-+      total += next.value.byteLength;
-+      if (total > maximum) fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid response.');
-+      chunks.push(Buffer.from(next.value));
-+    }
-+  } finally {
-+    reader.releaseLock();
-+  }
-+  try {
-+    return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, total));
-+  } catch {
-+    fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid response.');
-+  }
-+}
-+
-+function parseJson(text) {
-+  try {
-+    return JSON.parse(text);
-+  } catch {
-+    fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid response.');
-+  }
-+}
-+
-+function validateCapabilities(value) {
-+  if (!hasExactKeys(value, ['contractVersion', 'capability', 'features', 'limits'])) return false;
-+  if (value.contractVersion !== CONTRACT_VERSION || value.capability !== 'host-agent.use') return false;
-+  if (!hasExactKeys(value.features, ['streaming', 'cancellation', 'multiTurn'])) return false;
-+  if (value.features.streaming !== true || value.features.cancellation !== true || value.features.multiTurn !== true) return false;
-+  if (!hasExactKeys(value.limits, ['maxPromptBytes', 'maxReplayEvents'])) return false;
-+  return Number.isSafeInteger(value.limits.maxPromptBytes)
-+    && value.limits.maxPromptBytes > 0
-+    && value.limits.maxPromptBytes <= MAX_PROMPT_BYTES
-+    && Number.isSafeInteger(value.limits.maxReplayEvents)
-+    && value.limits.maxReplayEvents > 0
-+    && value.limits.maxReplayEvents <= 10_000;
-+}
-+
-+function validateSession(value) {
-+  return hasExactKeys(value, ['contractVersion', 'sessionHandle', 'state'])
-+    && value.contractVersion === CONTRACT_VERSION
-+    && validHandle(value.sessionHandle)
-+    && value.state === 'idle';
-+}
-+
-+function validateTurn(value, sessionHandle) {
-+  return hasExactKeys(value, ['contractVersion', 'turnId', 'state'])
-+    && value.contractVersion === CONTRACT_VERSION
-+    && validHandle(value.turnId)
-+    && value.state === 'running'
-+    && validHandle(sessionHandle);
-+}
-+
-+function validateCancel(value) {
-+  return hasExactKeys(value, ['contractVersion', 'state'])
-+    && value.contractVersion === CONTRACT_VERSION
-+    && (value.state === 'cancelling' || value.state === 'idle');
-+}
-+
-+function validateEventData(type, data) {
-+  if (!plainRecord(data)) return false;
-+  if (['session.ready', 'turn.started', 'turn.cancelled', 'session.closed'].includes(type)) {
-+    return Object.keys(data).length === 0;
-+  }
-+  if (type === 'message.delta') return hasExactKeys(data, ['delta']) && boundedString(data.delta, 1024 * 1024);
-+  if (type === 'message.completed') return hasExactKeys(data, ['text']) && typeof data.text === 'string' && data.text.length <= MAX_PROMPT_BYTES;
-+  if (type === 'activity') {
-+    if (!hasExactKeys(data, [], ['phase', 'kind', 'label']) || Object.keys(data).length === 0) return false;
-+    return Object.values(data).every((value) => boundedString(value, 256));
-+  }
-+  if (type === 'turn.completed') {
-+    return hasExactKeys(data, [], ['text'])
-+      && (data.text === undefined || (typeof data.text === 'string' && data.text.length <= MAX_PROMPT_BYTES));
-+  }
-+  if (type === 'turn.failed') return hasExactKeys(data, ['code']) && boundedString(data.code, 128) && /^[A-Z0-9_]+$/u.test(data.code);
-+  return false;
-+}
-+
-+function validateEvent(value, expectedSession, expectedTurn, lastSequence) {
-+  if (!hasExactKeys(value, ['contractVersion', 'sequence', 'sessionHandle', 'type', 'occurredAt', 'data'], ['turnId'])) return false;
-+  if (
-+    value.contractVersion !== CONTRACT_VERSION
-+    || !Number.isSafeInteger(value.sequence)
-+    || value.sequence <= lastSequence
-+    || value.sessionHandle !== expectedSession
-+    || !EVENT_TYPES.has(value.type)
-+    || !Number.isSafeInteger(value.occurredAt)
-+    || value.occurredAt < 0
-+  ) return false;
-+  const sessionEvent = value.type === 'session.ready' || value.type === 'session.closed';
-+  if (sessionEvent ? value.turnId !== undefined : value.turnId !== expectedTurn) return false;
-+  return validateEventData(value.type, value.data);
-+}
-+
-+export class SimulatorHostAgentClient {
-+  constructor(baseUrl, token, fetchImpl = globalThis.fetch) {
-+    this.baseUrl = baseUrl;
-+    this.token = token;
-+    this.fetchImpl = fetchImpl;
-+  }
-+
-+  static async fromEnvironment(env = hostLaunchEnvironment, fetchImpl = globalThis.fetch) {
-+    if (typeof fetchImpl !== 'function') fail('CONFIGURATION_INVALID', 'Simulator Host Runtime configuration is invalid.');
-+    const baseUrl = parseBaseUrl(env.SIMULATOR_HOST_AGENT_URL);
-+    const token = await readTokenFile(env.SIMULATOR_HOST_AGENT_TOKEN_FILE);
-+    return new SimulatorHostAgentClient(baseUrl, token, fetchImpl);
-+  }
-+
-+  async request(method, pathname, body, { signal, expectNoContent = false } = {}) {
-+    const context = requestSignal(REQUEST_TIMEOUT_MS, signal);
-+    try {
-+      const response = await this.fetchImpl(new URL(pathname, this.baseUrl), {
-+        method,
-+        signal: context.signal,
-+        headers: {
-+          authorization: `Bearer ${this.token}`,
-+          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
-+        },
-+        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-+      });
-+      if (expectNoContent) {
-+        if (response.status !== 204) fail('HTTP_ERROR', 'Simulator Host Runtime rejected the request.');
-+        return undefined;
-+      }
-+      if (!response.ok || response.headers.get('content-type')?.split(';', 1)[0] !== 'application/json') {
-+        fail('HTTP_ERROR', 'Simulator Host Runtime rejected the request.');
-+      }
-+      return parseJson(await readBoundedText(response, MAX_JSON_BYTES));
-+    } catch (error) {
-+      if (error instanceof SimulatorHostAgentError) throw error;
-+      if (signal?.aborted) fail('REQUEST_ABORTED', 'Simulator Host Runtime request was cancelled.');
-+      fail(context.timedOut() ? 'REQUEST_TIMEOUT' : 'REQUEST_FAILED', 'Simulator Host Runtime is unavailable.');
-+    } finally {
-+      context.cleanup();
-+    }
-+  }
-+
-+  async capabilities(options) {
-+    const value = await this.request('GET', '/v1/capabilities', undefined, options);
-+    if (!validateCapabilities(value)) fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid response.');
-+    return value;
-+  }
-+
-+  async createSession(workingDirectory, options) {
-+    const body = {
-+      contractVersion: CONTRACT_VERSION,
-+      ...(workingDirectory ? { workingDirectory } : {}),
-+    };
-+    const value = await this.request('POST', '/v1/module-sessions', body, options);
-+    if (!validateSession(value)) fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid response.');
-+    return value;
-+  }
-+
-+  async createTurn(sessionHandle, prompt, options) {
-+    const value = await this.request(
-+      'POST',
-+      `/v1/module-sessions/${encodeURIComponent(sessionHandle)}/turns`,
-+      { contractVersion: CONTRACT_VERSION, prompt },
-+      options,
-+    );
-+    if (!validateTurn(value, sessionHandle)) fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid response.');
-+    return value;
-+  }
-+
-+  async cancel(sessionHandle, options) {
-+    const value = await this.request(
-+      'POST',
-+      `/v1/module-sessions/${encodeURIComponent(sessionHandle)}/cancel`,
-+      { contractVersion: CONTRACT_VERSION },
-+      options,
-+    );
-+    if (!validateCancel(value)) fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid response.');
-+    return value;
-+  }
-+
-+  async close(sessionHandle, options) {
-+    await this.request(
-+      'DELETE',
-+      `/v1/module-sessions/${encodeURIComponent(sessionHandle)}`,
-+      undefined,
-+      { ...options, expectNoContent: true },
-+    );
-+  }
-+
-+  async stream(sessionHandle, turnId, afterSequence, signal, onEvent) {
-+    const context = requestSignal(STREAM_TIMEOUT_MS, signal);
-+    let response;
-+    try {
-+      const url = new URL(`/v1/module-sessions/${encodeURIComponent(sessionHandle)}/events`, this.baseUrl);
-+      url.searchParams.set('afterSequence', String(afterSequence));
-+      response = await this.fetchImpl(url, {
-+        method: 'GET',
-+        signal: context.signal,
-+        headers: {
-+          accept: 'text/event-stream',
-+          authorization: `Bearer ${this.token}`,
-+        },
-+      });
-+      if (!response.ok || response.headers.get('content-type')?.split(';', 1)[0] !== 'text/event-stream' || !response.body) {
-+        fail('HTTP_ERROR', 'Simulator Host Runtime rejected the event stream.');
-+      }
-+      const reader = response.body.getReader();
-+      const decoder = new TextDecoder('utf-8', { fatal: true });
-+      let buffer = '';
-+      let lastSequence = afterSequence;
-+      let eventCount = 0;
-+      let stopped = false;
-+      try {
-+        while (!stopped) {
-+          const next = await reader.read();
-+          if (next.done) break;
-+          buffer += decoder.decode(next.value, { stream: true });
-+          if (Buffer.byteLength(buffer, 'utf8') > MAX_SSE_BUFFER_BYTES) {
-+            fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid event stream.');
-+          }
-+          while (buffer.includes('\n\n')) {
-+            const boundary = buffer.indexOf('\n\n');
-+            const frame = buffer.slice(0, boundary).replaceAll('\r\n', '\n');
-+            buffer = buffer.slice(boundary + 2);
-+            if (frame === ': keepalive') continue;
-+            const lines = frame.split('\n');
-+            if (lines.length !== 3 || lines[0] !== `event: ${SIMULATOR_HOST_AGENT_EVENT}` || !lines[1].startsWith('id: ') || !lines[2].startsWith('data: ')) {
-+              fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid event stream.');
-+            }
-+            const id = lines[1].slice(4);
-+            if (!/^(?:0|[1-9]\d*)$/u.test(id)) fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid event stream.');
-+            const event = parseJson(lines[2].slice(6));
-+            if (!validateEvent(event, sessionHandle, turnId, lastSequence) || String(event.sequence) !== id) {
-+              fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an invalid event stream.');
-+            }
-+            lastSequence = event.sequence;
-+            eventCount += 1;
-+            if (eventCount > 10_000) fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned too many events.');
-+            if (onEvent(event) === false) stopped = true;
-+          }
-+        }
-+        if (!stopped && (buffer.length > 0 || decoder.decode().length > 0)) {
-+          fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an incomplete event stream.');
-+        }
-+      } finally {
-+        if (stopped) await reader.cancel().catch(() => undefined);
-+        reader.releaseLock();
-+      }
-+      return { lastSequence, terminal: stopped };
-+    } catch (error) {
-+      if (error instanceof SimulatorHostAgentError) throw error;
-+      if (signal?.aborted) fail('REQUEST_ABORTED', 'Simulator Host Runtime request was cancelled.');
-+      fail(context.timedOut() ? 'REQUEST_TIMEOUT' : 'REQUEST_FAILED', 'Simulator Host Runtime is unavailable.');
-+    } finally {
-+      context.cleanup();
-+    }
-+  }
-+}
-+
-+function completedTextSuffix(completedText, currentMessageText) {
-+  if (!completedText.startsWith(currentMessageText)) {
-+    fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an inconsistent transcript.');
-+  }
-+  return completedText.slice(currentMessageText.length);
-+}
-+
-+function appendTranscriptDelta(streamedText, delta, send) {
-+  const next = streamedText + delta;
-+  if (next.length > MAX_PROMPT_BYTES) fail('PROTOCOL_INVALID', 'Simulator Host Runtime transcript exceeded the limit.');
-+  if (delta) send('agent', { type: 'text_delta', delta });
-+  return next;
-+}
-+
-+function withCacheAdmission(operation) {
-+  const admitted = cacheAdmissionTail.then(operation, operation);
-+  cacheAdmissionTail = admitted.then(() => undefined, () => undefined);
-+  return admitted;
-+}
-+
-+function cacheIdentityForRun(run) {
-+  const conversationId = typeof run?.conversationId === 'string' ? run.conversationId.trim() : '';
-+  const runId = typeof run?.id === 'string' ? run.id.trim() : '';
-+  if (conversationId) return `conversation:${conversationId}`;
-+  if (runId) return `run:${runId}`;
-+  fail('INPUT_INVALID', 'Simulator Host Runtime run identity is invalid.');
-+}
-+
-+function releaseCachedSession(record) {
-+  if (!record || record.closing || record.closeFailed) return;
-+  record.busy = false;
-+  record.lastUsed = ++cacheClock;
-+}
-+
-+async function closeCachedSession(record) {
-+  if (!record) return;
-+  if (record.closing) return record.closing;
-+  record.busy = true;
-+  const operation = (async () => {
-+    if (record.creating) {
-+      try {
-+        await record.creating;
-+      } catch {
-+        if (cachedSessions.get(record.cacheKey) === record) cachedSessions.delete(record.cacheKey);
-+        record.session = null;
-+        record.closeFailed = false;
-+        return;
-+      }
-+    }
-+    if (!record.session) {
-+      if (cachedSessions.get(record.cacheKey) === record) cachedSessions.delete(record.cacheKey);
-+      record.closeFailed = false;
-+      return;
-+    }
-+    try {
-+      await record.client.close(record.session.sessionHandle);
-+    } catch (error) {
-+      // Keep the opaque handle reachable and non-reusable. A later dispose or
-+      // LRU admission can retry the same DELETE instead of orphaning it.
-+      record.closeFailed = true;
-+      record.busy = false;
-+      throw error;
-+    }
-+    if (cachedSessions.get(record.cacheKey) === record) cachedSessions.delete(record.cacheKey);
-+    record.session = null;
-+    record.closeFailed = false;
-+    record.busy = false;
-+  })();
-+  record.closing = operation;
-+  try {
-+    await operation;
-+  } finally {
-+    if (record.closing === operation) record.closing = null;
-+  }
-+}
-+
-+async function acquireCachedSession(client, workingDirectory, run) {
-+  const identity = cacheIdentityForRun(run);
-+  const cacheKey = JSON.stringify([workingDirectory, identity]);
-+  return withCacheAdmission(async () => {
-+    if (cacheDisposal) fail('SESSION_UNAVAILABLE', 'Simulator Host Runtime session cache is shutting down.');
-+    let record = cachedSessions.get(cacheKey);
-+    if (record) {
-+      if (record.creating) await record.creating;
-+      if (!record.session || record.closing || record.closeFailed) {
-+        fail('SESSION_UNAVAILABLE', 'Simulator Host Runtime session is unavailable.');
-+      }
-+      if (record.busy) fail('SESSION_BUSY', 'Simulator Host Runtime session is already processing a turn.');
-+      record.busy = true;
-+      record.lastUsed = ++cacheClock;
-+      return record;
-+    }
-+
-+    while (cachedSessions.size >= MAX_CACHED_SESSIONS) {
-+      const candidate = [...cachedSessions.values()]
-+        .filter((entry) => !entry.busy && !entry.creating && !entry.closing)
-+        .sort((left, right) => left.lastUsed - right.lastUsed)[0];
-+      if (!candidate) fail('SESSION_LIMIT', 'Simulator Host Runtime session cache is full.');
-+      await closeCachedSession(candidate);
-+    }
-+    if (cacheDisposal) fail('SESSION_UNAVAILABLE', 'Simulator Host Runtime session cache is shutting down.');
-+
-+    record = {
-+      cacheKey,
-+      identity,
-+      workingDirectory,
-+      client,
-+      session: null,
-+      creating: null,
-+      closing: null,
-+      closeFailed: false,
-+      busy: true,
-+      completedTurns: 0,
-+      lastSequence: 0,
-+      lastUsed: ++cacheClock,
-+    };
-+    record.creating = client.createSession(workingDirectory)
-+      .then((session) => {
-+        record.session = session;
-+        return session;
-+      })
-+      .catch((error) => {
-+        if (cachedSessions.get(cacheKey) === record) cachedSessions.delete(cacheKey);
-+        throw error;
-+      })
-+      .finally(() => { record.creating = null; });
-+    cachedSessions.set(cacheKey, record);
-+    await record.creating;
-+    if (!record.session || record.closing || record.closeFailed || cacheDisposal) {
-+      fail('SESSION_UNAVAILABLE', 'Simulator Host Runtime session is unavailable.');
-+    }
-+    return record;
-+  });
-+}
-+
-+export async function disposeSimulatorHostAgentSessions() {
-+  if (cacheDisposal) return cacheDisposal;
-+  const operation = (async () => {
-+    let firstError;
-+    for (const record of [...cachedSessions.values()]) {
-+      try {
-+        await closeCachedSession(record);
-+      } catch (error) {
-+        firstError ??= error;
-+      }
-+    }
-+    if (firstError) throw firstError;
-+  })();
-+  cacheDisposal = operation;
-+  try {
-+    await operation;
-+  } finally {
-+    if (cacheDisposal === operation) cacheDisposal = null;
-+  }
-+}
-+
-+export async function runSimulatorHostAgentTurn({ prompt, continuationPrompt, workingDirectory, run, send, finish, env = hostLaunchEnvironment, fetchImpl = globalThis.fetch }) {
-+  if (
-+    typeof prompt !== 'string'
-+    || typeof continuationPrompt !== 'string'
-+    || Buffer.byteLength(prompt, 'utf8') > MAX_PROMPT_BYTES
-+    || Buffer.byteLength(continuationPrompt, 'utf8') > MAX_PROMPT_BYTES
-+  ) {
-+    fail('INPUT_INVALID', 'Simulator Host Runtime prompt is invalid.');
-+  }
-+  const client = await SimulatorHostAgentClient.fromEnvironment(env, fetchImpl);
-+  const lifecycleAbort = new AbortController();
-+  let sessionRecord;
-+  let sessionAcquisition;
-+  let session;
-+  let turn;
-+  let terminal = null;
-+  let cancelPromise = null;
-+  let streamedText = '';
-+  let currentMessageText = '';
-+  let lastCompletedMessageText = null;
-+  let lastSequence = 0;
-+
-+  const throwIfCancelled = () => {
-+    if (!run.cancelRequested && !lifecycleAbort.signal.aborted) return;
-+    lifecycleAbort.abort();
-+    fail('REQUEST_ABORTED', 'Simulator Host Runtime request was cancelled.');
-+  };
-+  const cancelHostSession = async () => {
-+    lifecycleAbort.abort();
-+    if (!sessionRecord && sessionAcquisition) {
-+      try { sessionRecord = await sessionAcquisition; } catch { return; }
-+    }
-+    session = sessionRecord?.session ?? session;
-+    if (!session || terminal) return;
-+    let cancelError;
-+    if (turn && !cancelPromise) cancelPromise = client.cancel(session.sessionHandle);
-+    if (cancelPromise) {
-+      try { await cancelPromise; } catch (error) { cancelError = error; }
-+    }
-+    await closeCachedSession(sessionRecord);
-+    if (cancelError) throw cancelError;
-+  };
-+
-+  // Install cancellation before the first Host request. This closes the race
-+  // where Open Design could mark a queued run canceled while capabilities,
-+  // session creation, or turn creation continued in the Host Runtime.
-+  run.externalCancel = cancelHostSession;
-+
-+  try {
-+    throwIfCancelled();
-+    const capabilities = await client.capabilities({ signal: lifecycleAbort.signal });
-+    throwIfCancelled();
-+    // Session creation intentionally keeps its own bounded request timeout.
-+    // Aborting after the Host accepts the request could otherwise strand an
-+    // opaque hidden session before this process receives its handle.
-+    sessionAcquisition = acquireCachedSession(client, workingDirectory, run);
-+    sessionRecord = await sessionAcquisition;
-+    session = sessionRecord.session;
-+    lastSequence = sessionRecord.lastSequence;
-+    throwIfCancelled();
-+    const turnPrompt = sessionRecord.completedTurns > 0 ? continuationPrompt : prompt;
-+    if (Buffer.byteLength(turnPrompt, 'utf8') > capabilities.limits.maxPromptBytes) {
-+      fail('INPUT_INVALID', 'Simulator Host Runtime prompt exceeds the Host limit.');
-+    }
-+    turn = await client.createTurn(session.sessionHandle, turnPrompt, { signal: lifecycleAbort.signal });
-+    throwIfCancelled();
-+    run.status = 'running';
-+    run.updatedAt = Date.now();
-+    send('start', {
-+      runId: run.id,
-+      agentId: SIMULATOR_HOST_AGENT_ID,
-+      bin: 'Simulator Host Runtime',
-+      streamFormat: 'simulator-host-runtime',
-+      projectId: run.projectId ?? null,
-+      cwd: workingDirectory,
-+      model: 'host-selected',
-+      reasoning: null,
-+      toolTokenExpiresAt: null,
-+    });
-+
-+    for (let reconnect = 0; reconnect < 2 && !terminal; reconnect += 1) {
-+      const result = await client.stream(
-+        session.sessionHandle,
-+        turn.turnId,
-+        lastSequence,
-+        lifecycleAbort.signal,
-+        (event) => {
-+          lastSequence = event.sequence;
-+          if (event.type === 'message.delta') {
-+            currentMessageText += event.data.delta;
-+            streamedText = appendTranscriptDelta(streamedText, event.data.delta, send);
-+          } else if (event.type === 'message.completed') {
-+            streamedText = appendTranscriptDelta(
-+              streamedText,
-+              completedTextSuffix(event.data.text, currentMessageText),
-+              send,
-+            );
-+            currentMessageText = '';
-+            lastCompletedMessageText = event.data.text;
-+          } else if (event.type === 'activity') {
-+            send('agent', { type: 'status', label: event.data.label ?? event.data.phase ?? event.data.kind });
-+          } else if (event.type === 'turn.completed') {
-+            if (typeof event.data.text === 'string') {
-+              if (currentMessageText || lastCompletedMessageText === null) {
-+                streamedText = appendTranscriptDelta(
-+                  streamedText,
-+                  completedTextSuffix(event.data.text, currentMessageText),
-+                  send,
-+                );
-+                currentMessageText = '';
-+                lastCompletedMessageText = event.data.text;
-+              } else if (event.data.text !== lastCompletedMessageText) {
-+                fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an inconsistent transcript.');
-+              }
-+            }
-+            terminal = 'succeeded';
-+            return false;
-+          } else if (event.type === 'turn.failed') {
-+            send('error', { error: { code: 'HOST_AGENT_TURN_FAILED', message: 'Simulator Host Runtime turn failed.', retryable: false, details: { hostCode: event.data.code } } });
-+            terminal = 'failed';
-+            return false;
-+          } else if (event.type === 'turn.cancelled') {
-+            terminal = 'canceled';
-+            return false;
-+          } else if (event.type === 'session.closed') {
-+            fail('PROTOCOL_INVALID', 'Simulator Host Runtime closed the session before the turn completed.');
-+          }
-+          return true;
-+        },
-+      );
-+      lastSequence = result.lastSequence;
-+      sessionRecord.lastSequence = lastSequence;
-+    }
-+    if (!terminal) fail('STREAM_ENDED', 'Simulator Host Runtime event stream ended unexpectedly.');
-+    if (run.cancelRequested || lifecycleAbort.signal.aborted) terminal = 'canceled';
-+    if (cancelPromise) await cancelPromise.catch(() => undefined);
-+    if (terminal === 'succeeded') {
-+      sessionRecord.completedTurns += 1;
-+    }
-+    else await closeCachedSession(sessionRecord).catch(() => undefined);
-+    if (terminal === 'succeeded') finish(run, 'succeeded', 0, null);
-+    else if (terminal === 'failed') finish(run, 'failed', 1, null);
-+    else finish(run, 'canceled', null, 'SIGTERM');
-+  } catch (error) {
-+    if (run.cancelRequested || lifecycleAbort.signal.aborted) return;
-+    throw error;
-+  } finally {
-+    run.externalCancel = null;
-+    lifecycleAbort.abort();
-+    if (run.cancelRequested && session && turn && !terminal && !cancelPromise) {
-+      cancelPromise = client.cancel(session.sessionHandle);
-+    }
-+    if (cancelPromise) await cancelPromise.catch(() => undefined);
-+    if (terminal !== 'succeeded' && sessionRecord) await closeCachedSession(sessionRecord).catch(() => undefined);
-+    else if (sessionRecord) releaseCachedSession(sessionRecord);
-+  }
-+}
 diff --git a/apps/web/next.config.ts b/apps/web/next.config.ts
-index 062b86a662dbf7c5491909972ead83fa3b5a17ee..9c9ecad2ba0ebee5e15099b0918c9678ff619359 100644
+index 062b86a..9c9ecad 100644
 --- a/apps/web/next.config.ts
 +++ b/apps/web/next.config.ts
 @@ -157,6 +157,10 @@ function configuredAllowedDevHosts(): string[] {
@@ -1134,7 +826,7 @@ index 062b86a662dbf7c5491909972ead83fa3b5a17ee..9c9ecad2ba0ebee5e15099b0918c9678
      : webOutputMode === 'standalone'
        ? {
 diff --git a/apps/web/src/App.tsx b/apps/web/src/App.tsx
-index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..6af814f96a34b1f362f3445c11dc30d6a4afe36c 100644
+index 65f55c1..9a36a0c 100644
 --- a/apps/web/src/App.tsx
 +++ b/apps/web/src/App.tsx
 @@ -65,9 +65,14 @@ import {
@@ -1402,7 +1094,7 @@ index 65f55c1db38df12a9e427c8fa125cd8e04bbf78c..6af814f96a34b1f362f3445c11dc30d6
        <div className="entry-shell entry-shell--no-header">
          <CenteredLoader label={t('entry.loadingWorkspace')} />
 diff --git a/apps/web/src/components/AvatarMenu.tsx b/apps/web/src/components/AvatarMenu.tsx
-index ab73af33a8487af489abd8df7a8815ca1f0aa444..86cbcd6b8abda745826de8827c1a5394e294ad92 100644
+index ab73af3..86cbcd6 100644
 --- a/apps/web/src/components/AvatarMenu.tsx
 +++ b/apps/web/src/components/AvatarMenu.tsx
 @@ -32,6 +32,10 @@ import {
@@ -1453,7 +1145,7 @@ index ab73af33a8487af489abd8df7a8815ca1f0aa444..86cbcd6b8abda745826de8827c1a5394
      <div className={`avatar-menu avatar-menu--${placement}`} ref={wrapRef}>
        <button
 diff --git a/apps/web/src/components/EntrySettingsMenu.tsx b/apps/web/src/components/EntrySettingsMenu.tsx
-index 47019924446d2a15d0c2c323357193a260a6ff89..ced196d11688a65297cc282e3ce057c1f7d6ba76 100644
+index 4701992..ced196d 100644
 --- a/apps/web/src/components/EntrySettingsMenu.tsx
 +++ b/apps/web/src/components/EntrySettingsMenu.tsx
 @@ -28,6 +28,7 @@ import { formatDiscordPresenceCount, useDiscordPresence } from './useDiscordPres
@@ -1510,7 +1202,7 @@ index 47019924446d2a15d0c2c323357193a260a6ff89..ced196d11688a65297cc282e3ce057c1
  
            <button
 diff --git a/apps/web/src/components/EntryShell.tsx b/apps/web/src/components/EntryShell.tsx
-index 19fe95db34ce35a4959c07a72f700c4199702878..5a1c898f4b6ac30a409a1a97b9e5bcc0be8cc1dc 100644
+index 19fe95d..5a1c898 100644
 --- a/apps/web/src/components/EntryShell.tsx
 +++ b/apps/web/src/components/EntryShell.tsx
 @@ -177,6 +177,7 @@ import {
@@ -1597,7 +1289,7 @@ index 19fe95db34ce35a4959c07a72f700c4199702878..5a1c898f4b6ac30a409a1a97b9e5bcc0
              {amrBalanceGateBlock ? (
                <AmrBalanceDialog
 diff --git a/apps/web/src/components/FileWorkspace.tsx b/apps/web/src/components/FileWorkspace.tsx
-index dc418554bd91136114645a7c4aa10a471b3a3353..1c4bec5d5a922d25722c07d6bc4ea397ff946f5d 100644
+index dc41855..1c4bec5 100644
 --- a/apps/web/src/components/FileWorkspace.tsx
 +++ b/apps/web/src/components/FileWorkspace.tsx
 @@ -117,6 +117,7 @@ import { QuestionsPanel } from './QuestionsPanel';
@@ -1689,7 +1381,7 @@ index dc418554bd91136114645a7c4aa10a471b3a3353..1c4bec5d5a922d25722c07d6bc4ea397
      createDocument: () => void createMarkdownDocument(),
      uploadDesignFiles: () => fileInputRef.current?.click(),
 diff --git a/apps/web/src/components/InlineModelSwitcher.tsx b/apps/web/src/components/InlineModelSwitcher.tsx
-index 000924396bb9314823363eba57f19341fd9a39ac..0671b7c129286068f794cf62f0cfc54daf51ec4c 100644
+index 0009243..0671b7c 100644
 --- a/apps/web/src/components/InlineModelSwitcher.tsx
 +++ b/apps/web/src/components/InlineModelSwitcher.tsx
 @@ -79,6 +79,10 @@ import {
@@ -1743,7 +1435,7 @@ index 000924396bb9314823363eba57f19341fd9a39ac..0671b7c129286068f794cf62f0cfc54d
      <div
        className={`inline-switcher${compact ? ' inline-switcher--compact' : ''}`}
 diff --git a/apps/web/src/components/ProjectView.tsx b/apps/web/src/components/ProjectView.tsx
-index 6f6b5afd109c32068a0f331955975bfc025c185d..ffd14fa5ca2927777d8ee8bd478b86a797403b1a 100644
+index 6f6b5af..ffd14fa 100644
 --- a/apps/web/src/components/ProjectView.tsx
 +++ b/apps/web/src/components/ProjectView.tsx
 @@ -261,6 +261,7 @@ import { effectiveAgentModelChoice } from './agentModelSelection';
@@ -1868,7 +1560,7 @@ index 6f6b5afd109c32068a0f331955975bfc025c185d..ffd14fa5ca2927777d8ee8bd478b86a7
                  config={config}
                  onThemeChange={handleThemeChange}
 diff --git a/apps/web/src/components/SettingsDialog.tsx b/apps/web/src/components/SettingsDialog.tsx
-index 2dc9d96c9e82e805e29fa4e675c4558291e94876..d2ae431a3f5246de047189b5aa66cde32995f7a7 100644
+index 2dc9d96..d2ae431 100644
 --- a/apps/web/src/components/SettingsDialog.tsx
 +++ b/apps/web/src/components/SettingsDialog.tsx
 @@ -189,6 +189,11 @@ import {
@@ -2044,7 +1736,7 @@ index 2dc9d96c9e82e805e29fa4e675c4558291e94876..d2ae431a3f5246de047189b5aa66cde3
                <div
                  className="seg-control"
 diff --git a/apps/web/src/index.css b/apps/web/src/index.css
-index 685f2defee0519c26003ad21670e465527639307..321df6601ff4780a42a33d6e4d8f82e11058080c 100644
+index 685f2de..321df66 100644
 --- a/apps/web/src/index.css
 +++ b/apps/web/src/index.css
 @@ -30,3 +30,4 @@
@@ -2053,7 +1745,7 @@ index 685f2defee0519c26003ad21670e465527639307..321df6601ff4780a42a33d6e4d8f82e1
  @import './styles/entrance.css';
 +@import './styles/simulator-host.css';
 diff --git a/apps/web/src/providers/daemon.ts b/apps/web/src/providers/daemon.ts
-index 5f5b9ed8fe4122db928827003dcef25c9c67867a..1ffd99983a5b18aa3b4acb7f9177de5e23a0bdec 100644
+index 5f5b9ed..1ffd999 100644
 --- a/apps/web/src/providers/daemon.ts
 +++ b/apps/web/src/providers/daemon.ts
 @@ -54,6 +54,7 @@ import {
@@ -2142,7 +1834,7 @@ index 5f5b9ed8fe4122db928827003dcef25c9c67867a..1ffd99983a5b18aa3b4acb7f9177de5e
      return { ok: false };
 diff --git a/apps/web/src/providers/simulator-host-mode.js b/apps/web/src/providers/simulator-host-mode.js
 new file mode 100644
-index 0000000000000000000000000000000000000000..81a92591d000b8bdd71471b2e41df7525a8c5550
+index 0000000..81a9259
 --- /dev/null
 +++ b/apps/web/src/providers/simulator-host-mode.js
 @@ -0,0 +1,54 @@
@@ -2202,7 +1894,7 @@ index 0000000000000000000000000000000000000000..81a92591d000b8bdd71471b2e41df752
 +}
 diff --git a/apps/web/src/styles/simulator-host.css b/apps/web/src/styles/simulator-host.css
 new file mode 100644
-index 0000000000000000000000000000000000000000..61e60d62f4c4f1e4a31af8c2511cf0a13ca94329
+index 0000000..61e60d6
 --- /dev/null
 +++ b/apps/web/src/styles/simulator-host.css
 @@ -0,0 +1,39 @@
@@ -2246,7 +1938,7 @@ index 0000000000000000000000000000000000000000..61e60d62f4c4f1e4a31af8c2511cf0a1
 +  display: none !important;
 +}
 diff --git a/package.json b/package.json
-index 7fddb1fc2a5e1d08df126728ae67dc870e6536fe..109f063cc82467ca1c89f87da40b10d05975c101 100644
+index 7fddb1f..109f063 100644
 --- a/package.json
 +++ b/package.json
 @@ -61,6 +61,7 @@

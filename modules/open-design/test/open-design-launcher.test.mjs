@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { chmod, copyFile, mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, mkdtemp, mkdir, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import http from "node:http";
 import net from "node:net";
 import os from "node:os";
@@ -46,6 +46,15 @@ test("bootstrap launches sealed sidecars, proxies HTTP/WebSocket, preserves data
   assert.equal(runtime.agentHome, path.join(fixture.dataRoot, "open-design", "home"));
   assert.equal(runtime.hostAgentUrl, undefined, "the browser-facing web sidecar must not receive the Host grant");
   assert.equal(runtime.hostAgentTokenFile, undefined, "the browser-facing web sidecar must not receive the Host token path");
+  assert.equal(runtime.hostAgentShimPath, undefined, "the browser-facing web sidecar must not receive the Host shim path");
+  assert.equal(runtime.hostAgentContractVersion, undefined, "the browser-facing web sidecar must not receive the Host contract version");
+  const daemonGrant = JSON.parse(await readFile(path.join(fixture.dataRoot, "open-design", "daemon-host-agent.json"), "utf8"));
+  assert.deepEqual(daemonGrant, {
+    hostAgentUrl: "http://127.0.0.1:37654",
+    hostAgentTokenFile: fixture.hostAgentTokenFile,
+    hostAgentShimPath: fixture.hostAgentShimPath,
+    hostAgentContractVersion: "2",
+  });
   if (process.platform !== "win32") {
     assert.match(runtime.runtimeRoot, /^\/tmp\/simulator-open-design-/);
   }
@@ -142,6 +151,49 @@ test("invalid host-owned environment fails closed without exposing the supplied 
   await assert.rejects(stat(path.join(secretDataRoot, "open-design")), { code: "ENOENT" });
 });
 
+test("partial or malformed Host Agent launch grants fail closed before Module state is created", { timeout: 30_000 }, async (t) => {
+  const cases = [
+    {
+      name: "missing shim path",
+      mutate: async (environment) => { delete environment.SIMULATOR_HOST_AGENT_SHIM_PATH; },
+    },
+    {
+      name: "wrong contract version",
+      mutate: async (environment) => { environment.SIMULATOR_HOST_AGENT_CONTRACT_VERSION = "1"; },
+    },
+    {
+      name: "symlinked shim",
+      mutate: async (environment, fixture) => {
+        const link = path.join(fixture.root, "host-agent-shim-link.mjs");
+        await symlink(fixture.hostAgentShimPath, link);
+        environment.SIMULATOR_HOST_AGENT_SHIM_PATH = link;
+      },
+    },
+    {
+      name: "token containing embedded whitespace",
+      mutate: async (_environment, fixture) => {
+        await writeFile(fixture.hostAgentTokenFile, `${"A".repeat(32)}\nB`, { mode: 0o600 });
+        await chmod(fixture.hostAgentTokenFile, 0o600);
+      },
+    },
+  ];
+
+  for (const scenario of cases) {
+    await t.test(scenario.name, async (subtest) => {
+      const fixture = await createFixture();
+      subtest.after(() => rm(fixture.root, { recursive: true, force: true }));
+      const environment = environmentFor(fixture, await freePort());
+      await scenario.mutate(environment, fixture);
+      const child = spawn(fixture.bootstrap, [], { env: environment, stdio: ["ignore", "pipe", "pipe"] });
+      const stderr = capture(child.stderr);
+      const { code } = await waitForExit(child);
+      assert.notEqual(code, 0);
+      assert.equal((await stderr).includes(fixture.root), false, "startup diagnostics must not expose Host paths");
+      await assert.rejects(stat(path.join(fixture.dataRoot, "open-design")), { code: "ENOENT" });
+    });
+  }
+});
+
 async function createFixture() {
   const root = await mkdtemp(path.join(os.tmpdir(), "open-design-launcher-"));
   const runtime = path.join(root, "runtime");
@@ -166,9 +218,15 @@ async function createFixture() {
   await mkdir(longDataParent, { recursive: true, mode: 0o700 });
   const dataRoot = await realpath(await mkdtemp(path.join(longDataParent, "data-")));
   const hostAgentTokenFile = path.join(root, "host-agent-token");
-  await writeFile(hostAgentTokenFile, "ab".repeat(32), { mode: 0o600 });
+  await writeFile(hostAgentTokenFile, "A".repeat(43), { mode: 0o600 });
   await chmod(hostAgentTokenFile, 0o600);
-  return { root, dataRoot, hostAgentTokenFile, bootstrap: path.join(runtime, "open-design-launcher") };
+  const hostAgentDirectory = path.join(root, "host-agent");
+  await mkdir(hostAgentDirectory, { recursive: true, mode: 0o700 });
+  const hostAgentShimCandidate = path.join(hostAgentDirectory, "simulator-host-agent.mjs");
+  await writeFile(hostAgentShimCandidate, "#!/usr/bin/env node\n", { mode: 0o700 });
+  await chmod(hostAgentShimCandidate, 0o700);
+  const hostAgentShimPath = await realpath(hostAgentShimCandidate);
+  return { root, dataRoot, hostAgentTokenFile, hostAgentShimPath, bootstrap: path.join(runtime, "open-design-launcher") };
 }
 
 async function startLauncher(fixture, { ipc = false } = {}) {
@@ -188,6 +246,8 @@ function environmentFor(fixture, port, overrides = {}) {
     SIMULATOR_MODULE_DATA_ROOT: fixture.dataRoot,
     SIMULATOR_HOST_AGENT_URL: "http://127.0.0.1:37654",
     SIMULATOR_HOST_AGENT_TOKEN_FILE: fixture.hostAgentTokenFile,
+    SIMULATOR_HOST_AGENT_SHIM_PATH: fixture.hostAgentShimPath,
+    SIMULATOR_HOST_AGENT_CONTRACT_VERSION: "2",
     ...overrides,
   };
 }

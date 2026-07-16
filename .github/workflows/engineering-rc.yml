@@ -3,8 +3,8 @@ name: Engineering RC Bundle
 on:
   workflow_dispatch:
     inputs:
-      version:
-        description: Canonical RC version (for example, 0.12.0-rc.1)
+      rc_label:
+        description: Immutable engineering bundle label (for example, 0.12.0-rc.1); Host product version remains 0.12.0
         required: true
         type: string
       source_sha:
@@ -19,7 +19,7 @@ permissions:
   artifact-metadata: write
 
 concurrency:
-  group: engineering-rc-${{ inputs.version }}-${{ inputs.source_sha }}
+  group: engineering-rc-${{ inputs.rc_label }}-${{ inputs.source_sha }}
   cancel-in-progress: false
 
 jobs:
@@ -29,7 +29,7 @@ jobs:
     timeout-minutes: 60
     env:
       GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      RC_VERSION: ${{ inputs.version }}
+      RC_LABEL: ${{ inputs.rc_label }}
       SOURCE_SHA: ${{ inputs.source_sha }}
       SIMULATOR_DISABLE_UPDATES: "1"
 
@@ -63,8 +63,12 @@ jobs:
           enable-cache: false
 
       - name: Validate RC contract
+        shell: bash
         run: |
-          bun scripts/release/engineering-rc.ts --version "$RC_VERSION" --ref "$SOURCE_SHA" > "$RUNNER_TEMP/engineering-rc-validation.json"
+          set -euo pipefail
+          bun scripts/release/engineering-rc.ts --label "$RC_LABEL" --ref "$SOURCE_SHA" > "$RUNNER_TEMP/engineering-rc-validation.json"
+          PRODUCT_VERSION=$(jq -er 'select(.ok == true) | .productVersion | select(type == "string" and length > 0)' "$RUNNER_TEMP/engineering-rc-validation.json")
+          printf 'PRODUCT_VERSION=%s\n' "$PRODUCT_VERSION" >> "$GITHUB_ENV"
           mv "$RUNNER_TEMP/engineering-rc-validation.json" engineering-rc-validation.json
 
       - name: Install dependencies
@@ -84,20 +88,34 @@ jobs:
           test "$(uname -m)" = "arm64"
           bun run electron:dist:unsigned:mac:arm64
 
+      - name: Stage clean owner-only verification input
+        shell: bash
+        run: |
+          set -euo pipefail
+          CLEAN_INPUT=$(mktemp -d "$RUNNER_TEMP/engineering-rc-input.XXXXXX")
+          chmod 700 "$CLEAN_INPUT"
+          bun scripts/release/stage-engineering-rc-input.ts apps/electron/release "$CLEAN_INPUT" > engineering-rc-input.json
+          printf 'ENGINEERING_RC_INPUT=%s\n' "$CLEAN_INPUT" >> "$GITHUB_ENV"
+
       - name: Verify unsigned artifacts and create bundle
         shell: bash
-        run: scripts/release/verify-and-bundle-macos.sh "$RC_VERSION" apps/electron/release engineering-rc-bundle
+        run: scripts/release/verify-and-bundle-macos.sh "$PRODUCT_VERSION" "$ENGINEERING_RC_INPUT" engineering-rc-bundle
 
       - name: Generate packaged-file SPDX SBOM
         shell: bash
         run: |
           set -euo pipefail
           CREATED=$(git show -s --format=%cI "$SOURCE_SHA")
-          bun scripts/release/generate-spdx.ts bun.lock engineering-rc-bundle/packaged-files.sha256 engineering-rc-bundle/package-verification-code.txt engineering-rc-bundle/sbom.spdx.json "$RC_VERSION" "$SOURCE_SHA" "$CREATED"
-          cp "apps/electron/resources/release-notes/$RC_VERSION.md" engineering-rc-bundle/RELEASE_NOTES.md
+          bun scripts/release/generate-spdx.ts bun.lock engineering-rc-bundle/packaged-files.sha256 engineering-rc-bundle/package-verification-code.txt engineering-rc-bundle/sbom.spdx.json "$PRODUCT_VERSION" "$SOURCE_SHA" "$CREATED"
+          cp "apps/electron/resources/release-notes/$PRODUCT_VERSION.md" engineering-rc-bundle/RELEASE_NOTES.md
           cp engineering-rc-validation.json engineering-rc-bundle/rc-validation.json
-          printf '{\n  "schemaVersion": 1,\n  "version": "%s",\n  "sourceSha": "%s",\n  "signed": false,\n  "channel": "engineering-rc"\n}\n' \
-            "$RC_VERSION" "$SOURCE_SHA" > engineering-rc-bundle/bundle-metadata.json
+          cp engineering-rc-input.json engineering-rc-bundle/verification-input.json
+          jq -n \
+            --arg rcLabel "$RC_LABEL" \
+            --arg productVersion "$PRODUCT_VERSION" \
+            --arg sourceSha "$SOURCE_SHA" \
+            '{schemaVersion: 1, rcLabel: $rcLabel, productVersion: $productVersion, sourceSha: $sourceSha, signed: false, channel: "engineering-rc"}' \
+            > engineering-rc-bundle/bundle-metadata.json
           bun scripts/release/verify-bundle-policy.ts engineering-rc-bundle
 
       - name: Attest DMG and ZIP with SPDX SBOM
@@ -135,7 +153,7 @@ jobs:
       - name: Upload engineering RC bundle
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: simulator-${{ inputs.version }}-macos-arm64-unsigned
+          name: simulator-${{ inputs.rc_label }}-macos-arm64-unsigned
           path: engineering-rc-bundle/
           if-no-files-found: error
           retention-days: 30

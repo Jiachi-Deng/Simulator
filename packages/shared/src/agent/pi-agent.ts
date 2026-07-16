@@ -42,6 +42,7 @@ import type { Workspace } from '../config/storage.ts';
 // Event adapter
 import { PiEventAdapter } from './backend/pi/event-adapter.ts';
 import { EventQueue } from './backend/event-queue.ts';
+import { ProviderProcessTree } from './provider-process-reaper.ts';
 
 // System prompt for Simulator context
 import { getSystemPrompt } from '../prompts/system.ts';
@@ -165,6 +166,7 @@ export class PiAgent extends BaseAgent {
 
   // Subprocess process handle
   private subprocess: ChildProcess | null = null;
+  private readonly subprocessTrees = new Set<ProviderProcessTree>();
   private readline: ReadlineInterface | null = null;
   private subprocessReady: Promise<void> | null = null;
   private subprocessReadyResolve: (() => void) | null = null;
@@ -483,9 +485,12 @@ export class PiAgent extends BaseAgent {
     const awsEnv = this.buildAwsEnv(piAuth, runtime);
 
     // Spawn the subprocess
+    const isolateModuleProcessTree = this.config.session?.moduleAgentRun?.transient === true
+      && process.platform !== 'win32';
     const child = spawn(nodePath, args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
+      detached: isolateModuleProcessTree,
       env: {
         ...process.env,
         ...getProxyEnvVars(),
@@ -499,6 +504,9 @@ export class PiAgent extends BaseAgent {
     });
 
     this.subprocess = child;
+    if (isolateModuleProcessTree) {
+      this.subprocessTrees.add(new ProviderProcessTree(child, { processGroup: true }));
+    }
 
     // Set up readline for JSONL parsing from stdout
     this.readline = createInterface({
@@ -2399,6 +2407,10 @@ export class PiAgent extends BaseAgent {
     this.debug('PiAgent disposed for restart');
   }
 
+  async disposeAndReap(): Promise<void> {
+    await this.disposeForRestart();
+  }
+
   /**
    * Reconnect by killing subprocess -- next chat() will spawn fresh.
    */
@@ -2413,6 +2425,22 @@ export class PiAgent extends BaseAgent {
    */
   private async killSubprocessGracefully(timeoutMs = 2_000): Promise<void> {
     const child = this.subprocess;
+    if (this.subprocessTrees.size > 0) {
+      try { this.send({ type: 'shutdown' }); } catch { /* stdin may already be closed */ }
+      await Promise.all([...this.subprocessTrees].map((tree) => tree.reap(timeoutMs, 1_000)));
+      this.subprocessTrees.clear();
+      if (this.readline) {
+        this.readline.close();
+        this.readline = null;
+      }
+      if (this.subprocess === child) this.subprocess = null;
+      this.subprocessReady = null;
+      this.subprocessReadyResolve = null;
+      this.callbackPort = 0;
+      this.preToolMetadataByCallId.clear();
+      this.adapter.resetOverflowState();
+      return;
+    }
     if (!child) {
       this.killSubprocess();
       return;
@@ -2484,7 +2512,11 @@ export class PiAgent extends BaseAgent {
       } catch {
         // stdin may already be closed
       }
-      this.subprocess.kill('SIGTERM');
+      if (this.subprocessTrees.size > 0) {
+        for (const tree of this.subprocessTrees) tree.signal('SIGTERM');
+      } else {
+        this.subprocess.kill('SIGTERM');
+      }
       this.subprocess = null;
     }
 
