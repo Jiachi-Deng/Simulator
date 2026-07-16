@@ -243,6 +243,67 @@ describe('Host Agent shim', () => {
     expect(stderr.value).toBe('')
   })
 
+  it('recovers a lost create response with the same idempotency key without duplicating work', async () => {
+    const files = await fixtureFiles()
+    const keys: string[] = []
+    const durableWrites = new Set<string>()
+    let createRequests = 0
+    let stream: ServerResponse | undefined
+    const { url } = await listen((request, response) => {
+      request.resume()
+      request.on('end', () => {
+        if (request.method === 'POST' && request.url === '/v2/runs') {
+          createRequests += 1
+          const key = request.headers['idempotency-key'] as string
+          keys.push(key)
+          durableWrites.add(key)
+          if (createRequests === 1) {
+            // The Host accepted and durably created the Run, but no response
+            // bytes reached the Shim. Its retry must use the exact same key.
+            response.destroy()
+          } else {
+            json(response, snapshot('accepted'))
+          }
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}/events`) {
+          stream = response
+          response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+          response.flushHeaders()
+          writeSse(response, accepted)
+          writeSse(response, started)
+          writeSse(response, delta)
+          writeSse(response, completed)
+        } else if (request.method === 'DELETE' && request.url === `/v2/runs/${RUN}`) {
+          writeSse(stream!, closed)
+          stream!.end()
+          json(response, snapshot('closed'))
+        } else response.writeHead(404).end()
+      })
+    })
+    const stdout = new Capture()
+    const stderr = new Capture()
+    const code = await runHostAgentShim({
+      argv: [], entryPath: files.entryPath, cwd: files.root,
+      env: {
+        SIMULATOR_HOST_AGENT_URL: url,
+        SIMULATOR_HOST_AGENT_TOKEN_FILE: files.tokenPath,
+        SIMULATOR_HOST_AGENT_SHIM_PATH: files.entryPath,
+        SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',
+      },
+      stdin: Readable.from(['one durable write']), stdout, stderr,
+      signal: new AbortController().signal,
+    })
+
+    expect(code).toBe(0)
+    expect(createRequests).toBe(2)
+    expect(keys[0]).toMatch(/^shim-[0-9a-f]{48}$/)
+    expect(new Set(keys).size).toBe(1)
+    expect(durableWrites.size).toBe(1)
+    const events = stdout.value.trim().split('\n').map((line) => parseHostAgentEvent(JSON.parse(line)))
+    expect(events.filter((item) => item.type === 'turn.completed')).toHaveLength(1)
+    expect(events.filter((item) => item.type === 'run.closed')).toHaveLength(1)
+    expect(stderr.value).toBe('')
+  })
+
   it('accepts an explicit pre-provider failure without inventing turn.started', async () => {
     const files = await fixtureFiles()
     let stream: ServerResponse | undefined

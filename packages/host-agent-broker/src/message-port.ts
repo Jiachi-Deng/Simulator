@@ -29,6 +29,7 @@ export interface HostAgentMessagePortLike {
   off?(event: 'message' | 'close' | 'messageerror', listener: (message?: unknown) => void): unknown
   removeListener?(event: 'message' | 'close' | 'messageerror', listener: (message?: unknown) => void): unknown
   start?(): void
+  close?(): void
 }
 
 export interface MessagePortByteCreditLimits {
@@ -237,9 +238,13 @@ export class MessagePortByteCreditChannel {
     }
     this.#disconnectListeners.clear()
     this.#messageListeners.clear()
+    // Detach before closing so implementations that synchronously emit close
+    // cannot recurse back into this channel. Closing the underlying endpoint
+    // is what makes the peer reject its pending RPCs instead of hanging.
     this.#removePortListener('message', this.#handleMessage)
     this.#removePortListener('close', this.#handleDisconnect)
     this.#removePortListener('messageerror', this.#handleDisconnect)
+    try { this.#port.close?.() } catch { /* Disconnect is already authoritative. */ }
   }
 
   #validateLimits(): void {

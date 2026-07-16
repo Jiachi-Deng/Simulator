@@ -48,6 +48,8 @@ class FakeCore implements HostAgentBrokerCoreClient {
   readonly listeners = new Set<(event: HostAgentEvent) => void>()
   replayFloor = 0
   getGate?: Promise<void>
+  subscribeGate?: Promise<void>
+  subscribeStarted?: () => void
   closeGate?: Promise<void>
   closeStarted = false
 
@@ -69,6 +71,8 @@ class FakeCore implements HostAgentBrokerCoreClient {
     afterSequence: number | undefined,
     listener: (event: HostAgentEvent) => void,
   ): Promise<HostAgentBrokerCoreSubscription> {
+    this.subscribeStarted?.()
+    await this.subscribeGate
     if (afterSequence !== undefined && afterSequence < this.replayFloor) {
       throw new HostAgentBrokerCoreClientError('REPLAY_UNAVAILABLE')
     }
@@ -94,6 +98,49 @@ class FakeCore implements HostAgentBrokerCoreClient {
   emit(item: HostAgentEvent): void {
     this.events.push(item)
     for (const listener of this.listeners) listener(item)
+  }
+}
+
+class OwnershipCore extends FakeCore {
+  createCalls = 0
+  fileWrites = 0
+  activeRuns = 0
+  moduleSessions = 0
+  cancelCalls = 0
+  closeCalls = 0
+  readonly terminals: string[] = []
+  createGate?: Promise<void>
+  createStarted?: () => void
+
+  override async createRun(key: string, request: CreateHostAgentRunRequest): Promise<HostAgentRunSnapshot> {
+    this.createCalls += 1
+    this.createStarted?.()
+    await this.createGate
+    const digest = JSON.stringify(request)
+    const existing = this.keyRequests.get(key)
+    if (existing !== undefined && existing !== digest) {
+      throw new HostAgentBrokerCoreClientError('IDEMPOTENCY_CONFLICT')
+    }
+    if (existing === undefined) {
+      this.keyRequests.set(key, digest)
+      this.fileWrites += 1
+      this.activeRuns = 1
+      this.moduleSessions = 1
+    }
+    return snapshot('accepted')
+  }
+
+  override async cancelRun(): Promise<HostAgentRunSnapshot> {
+    this.cancelCalls += 1
+    if (this.activeRuns > 0 && this.terminals.length === 0) this.terminals.push('interrupted')
+    return snapshot('interrupted')
+  }
+
+  override async closeRun(): Promise<HostAgentRunSnapshot> {
+    this.closeCalls += 1
+    this.activeRuns = 0
+    this.moduleSessions = 0
+    return snapshot('closed')
   }
 }
 
@@ -247,8 +294,12 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
     })
     expect(response.status).toBe(200)
     const reader = response.body!.getReader()
-    const { value } = await reader.read()
-    const text = new TextDecoder().decode(value)
+    let text = ''
+    while (!text.includes('id: 2\n')) {
+      const { value, done } = await reader.read()
+      if (done) break
+      text += new TextDecoder().decode(value)
+    }
     expect(text).not.toContain('id: 1\n')
     expect(text).toContain('id: 2\n')
     expect(text).toContain(`event: host-agent.event`)
@@ -355,6 +406,169 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
     socket.end()
     for (let count = 0; count < 50 && server.debugSnapshot().activeRequests > 0; count += 1) await Bun.sleep(2)
     expect(server.debugSnapshot().activeRequests).toBe(0)
+  })
+
+  test('abort before Host create leaves no Run, Session, write, or terminal', async () => {
+    const core = new OwnershipCore()
+    const { address, server } = await start(core, {
+      bodyTimeoutMs: 30,
+      ownershipClaimTimeoutMs: 30,
+    })
+    const socket = connect(address.port, address.host)
+    sockets.push(socket)
+    socket.on('error', () => undefined)
+    await new Promise<void>((resolve) => socket.once('connect', resolve))
+    socket.write([
+      'POST /v2/runs HTTP/1.1',
+      `Host: 127.0.0.1:${address.port}`,
+      `Authorization: Bearer ${TOKEN}`,
+      'Content-Type: application/json',
+      'Idempotency-Key: abort-before-create',
+      'Content-Length: 100',
+      '',
+      '{',
+    ].join('\r\n'))
+    socket.destroy()
+    await Bun.sleep(60)
+
+    expect(core.createCalls).toBe(0)
+    expect(core.fileWrites).toBe(0)
+    expect(core.activeRuns).toBe(0)
+    expect(core.moduleSessions).toBe(0)
+    expect(core.terminals).toEqual([])
+    expect(server.debugSnapshot().unclaimedRuns).toBe(0)
+  })
+
+  test('abort after Host create but before response delivery eventually cancels and closes ownership', async () => {
+    let releaseCreate!: () => void
+    let createStarted!: () => void
+    const core = new OwnershipCore()
+    core.createGate = new Promise<void>((resolve) => { releaseCreate = resolve })
+    const started = new Promise<void>((resolve) => { createStarted = resolve })
+    core.createStarted = createStarted
+    const { address, server } = await start(core, { ownershipClaimTimeoutMs: 30 })
+    const socket = connect(address.port, address.host)
+    sockets.push(socket)
+    socket.on('error', () => undefined)
+    await new Promise<void>((resolve) => socket.once('connect', resolve))
+    const body = JSON.stringify({ contractVersion: 2, prompt: 'write one fixture' })
+    socket.write([
+      'POST /v2/runs HTTP/1.1',
+      `Host: 127.0.0.1:${address.port}`,
+      `Authorization: Bearer ${TOKEN}`,
+      'Content-Type: application/json',
+      'Idempotency-Key: abort-after-create',
+      `Content-Length: ${Buffer.byteLength(body)}`,
+      '',
+      body,
+    ].join('\r\n'))
+    await started
+    socket.destroy()
+    releaseCreate()
+
+    for (let attempt = 0; attempt < 100 && core.fileWrites === 0; attempt += 1) await Bun.sleep(2)
+    for (let attempt = 0; attempt < 100 && core.activeRuns > 0; attempt += 1) await Bun.sleep(5)
+    expect(core.createCalls).toBe(1)
+    expect(core.fileWrites).toBe(1)
+    expect(core.cancelCalls).toBe(1)
+    expect(core.closeCalls).toBe(1)
+    expect(core.terminals).toEqual(['interrupted'])
+    expect(core.activeRuns).toBe(0)
+    expect(core.moduleSessions).toBe(0)
+    expect(server.debugSnapshot().unclaimedRuns).toBe(0)
+  })
+
+  test('lost response recovers the same key once and event-stream handoff prevents mistaken cleanup', async () => {
+    let releaseCreate!: () => void
+    let createStarted!: () => void
+    const core = new OwnershipCore()
+    core.createGate = new Promise<void>((resolve) => { releaseCreate = resolve })
+    const started = new Promise<void>((resolve) => { createStarted = resolve })
+    core.createStarted = createStarted
+    const { address, server } = await start(core, { ownershipClaimTimeoutMs: 80 })
+    const first = connect(address.port, address.host)
+    sockets.push(first)
+    first.on('error', () => undefined)
+    await new Promise<void>((resolve) => first.once('connect', resolve))
+    const requestBody = { contractVersion: 2, prompt: 'single durable write' }
+    const body = JSON.stringify(requestBody)
+    first.write([
+      'POST /v2/runs HTTP/1.1',
+      `Host: 127.0.0.1:${address.port}`,
+      `Authorization: Bearer ${TOKEN}`,
+      'Content-Type: application/json',
+      'Idempotency-Key: recover-same-key',
+      `Content-Length: ${Buffer.byteLength(body)}`,
+      '',
+      body,
+    ].join('\r\n'))
+    await started
+    first.destroy()
+    releaseCreate()
+    while (server.debugSnapshot().unclaimedRuns === 0) await Bun.sleep(2)
+
+    const recovered = await postRun(address.url, requestBody, 'recover-same-key')
+    expect(recovered.status).toBe(200)
+    expect(parseHostAgentRunSnapshot(await recovered.json()).runHandle).toBe(RUN)
+
+    const streamAbort = new AbortController()
+    const stream = await fetch(`${address.url}/v2/runs/${RUN}/events`, {
+      headers: headers(),
+      signal: streamAbort.signal,
+    })
+    expect(stream.status).toBe(200)
+    expect(server.debugSnapshot().unclaimedRuns).toBe(0)
+    streamAbort.abort()
+    await Bun.sleep(100)
+    expect(core.cancelCalls).toBe(0)
+    expect(core.closeCalls).toBe(0)
+    expect(core.activeRuns).toBe(1)
+    expect(core.moduleSessions).toBe(1)
+
+    expect((await fetch(`${address.url}/v2/runs/${RUN}/cancel`, {
+      method: 'POST', headers: headers(),
+    })).status).toBe(200)
+    expect((await fetch(`${address.url}/v2/runs/${RUN}`, {
+      method: 'DELETE', headers: headers(),
+    })).status).toBe(200)
+    expect(core.createCalls).toBe(2)
+    expect(core.keyRequests.size).toBe(1)
+    expect(core.fileWrites).toBe(1)
+    expect(core.terminals).toEqual(['interrupted'])
+    expect(core.activeRuns).toBe(0)
+    expect(core.moduleSessions).toBe(0)
+  })
+
+  test('client abort during a stalled event-stream claim cannot strand ownership', async () => {
+    let releaseSubscribe!: () => void
+    let subscribeStarted!: () => void
+    const core = new OwnershipCore()
+    core.subscribeGate = new Promise<void>((resolve) => { releaseSubscribe = resolve })
+    const started = new Promise<void>((resolve) => { subscribeStarted = resolve })
+    core.subscribeStarted = subscribeStarted
+    const { address, server } = await start(core, { ownershipClaimTimeoutMs: 30 })
+    expect((await postRun(address.url, {
+      contractVersion: 2,
+      prompt: 'bounded event-stream claim',
+    }, 'stalled-stream-claim')).status).toBe(200)
+
+    const controller = new AbortController()
+    const stream = fetch(`${address.url}/v2/runs/${RUN}/events`, {
+      headers: headers(),
+      signal: controller.signal,
+    }).catch((error: unknown) => error)
+    await started
+    controller.abort()
+    for (let attempt = 0; attempt < 100 && core.activeRuns > 0; attempt += 1) await Bun.sleep(5)
+    releaseSubscribe()
+    await stream
+
+    expect(core.cancelCalls).toBe(1)
+    expect(core.closeCalls).toBe(1)
+    expect(core.terminals).toEqual(['interrupted'])
+    expect(core.activeRuns).toBe(0)
+    expect(core.moduleSessions).toBe(0)
+    expect(server.debugSnapshot().unclaimedRuns).toBe(0)
   })
 
   test('fails a stalled partial body at the body timeout', async () => {

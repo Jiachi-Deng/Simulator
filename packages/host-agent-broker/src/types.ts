@@ -43,4 +43,6 @@ export interface HostAgentBrokerServerLimits {
   bodyTimeoutMs: number
   idleTimeoutMs: number
   maxSseBufferedBytes: number
+  /** Grace period for the client to prove it received a newly-created Run handle. */
+  ownershipClaimTimeoutMs: number
 }

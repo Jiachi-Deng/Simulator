@@ -15,8 +15,10 @@ class FakePort implements HostAgentMessagePortLike {
   readonly listeners = new Map<EventName, Set<(value?: unknown) => void>>()
   readonly sent: unknown[] = []
   peer?: FakePort
+  closed = false
 
   postMessage(message: unknown): void {
+    if (this.closed) throw new Error('port is closed')
     this.sent.push(structuredClone(message))
     if (this.peer) queueMicrotask(() => this.peer?.emit('message', structuredClone(message)))
   }
@@ -29,6 +31,18 @@ class FakePort implements HostAgentMessagePortLike {
 
   off(event: EventName, listener: (value?: unknown) => void): void { this.listeners.get(event)?.delete(listener) }
   start(): void {}
+  close(): void {
+    if (this.closed) return
+    this.closed = true
+    this.emit('close')
+    this.peer?.closeFromPeer()
+  }
+
+  private closeFromPeer(): void {
+    if (this.closed) return
+    this.closed = true
+    this.emit('close')
+  }
 
   emit(event: EventName, value?: unknown): void {
     for (const listener of this.listeners.get(event) ?? []) listener(value)
@@ -145,6 +159,21 @@ describe('MessagePortHostAgentBrokerCoreClient', () => {
     const pending = client.getRun('run_00000000000000000000000000000001')
     port.emit('close')
     await expect(pending).rejects.toBeInstanceOf(HostAgentBrokerDisconnectedError)
+  })
+
+  test('local disconnect closes the port and rejects a peer pending RPC', async () => {
+    const [hostPort, clientPort] = portPair()
+    const hostChannel = new MessagePortByteCreditChannel(hostPort)
+    const clientChannel = new MessagePortByteCreditChannel(clientPort)
+    const client = new MessagePortHostAgentBrokerCoreClient(clientChannel)
+    const pending = client.getRun('run_00000000000000000000000000000001')
+
+    hostChannel.disconnect()
+
+    await expect(pending).rejects.toBeInstanceOf(HostAgentBrokerDisconnectedError)
+    expect(hostPort.closed).toBe(true)
+    expect(clientPort.closed).toBe(true)
+    expect(clientChannel.disconnected).toBe(true)
   })
 
   test('malformed RPC output fails closed and rejects rather than hanging', async () => {
