@@ -71,11 +71,13 @@ Host mode 在 daemon config 和 `/api/agents` capability 完成前只显示 work
 
 Host launch 配置只通过 `SIMULATOR_HOST_AGENT_URL`、`SIMULATOR_HOST_AGENT_TOKEN_FILE`、`SIMULATOR_HOST_AGENT_SHIM_PATH` 与 `SIMULATOR_HOST_AGENT_CONTRACT_VERSION=2` 进入 daemon sidecar；只要任一 Host key 存在，缺少、为空或格式错误的其余项都会保持 Host mode 并 fail closed。URL 必须是 loopback `http:` base URL，两个文件路径必须是 canonical absolute path；token 文件的 owner-only、非 symlink 与内容检查由 Host-owned shim 执行。web sidecar 不接收这些变量。开发 bundle 以及 `0.14.6-rc.1`/`0.14.6` production catalog 的 `hostVersionRange` 固定为 `>=0.12.0`。patch 本身、二十三个 changed path 的 preimage/postimage、exact Node、ABI、pnpm executable 和 build input digest 全部固定，任一 drift 都会在 build 前停止。该实现为 Simulator 原创 clean-room code，不复制 Proma AGPL 实现。
 
-## Issue #87 当前 blocker
+## 当前发布状态与 M1 恢复点
 
-public distribution 仍不会在 rights pending 时发布。显式 `development-local-only` 路径只供 owner-only 本地验收，必须同时提供 CLI flag 与环境授权，并在 inventory/attestation 中永久标记 `nonPromotable: true`；public validator 会拒绝该 artifact。不能放宽 symlink policy 或重新引入任意扁平化。
+OpenDesign `0.14.5` 已作为冻结旧栈基线公开发布。最终保留的 `better-sqlite3`、`node-pty`（含 `spawn-helper`）和 `blake3-wasm` decisions 已有 exact package LICENSE、SHA-256、官方 source 与 packaged notice，状态为 `include/cleared`；被排除的 `sharp` / `@img` optimizer closure 不进入 Artifact。`fixtures/pinned-native-metadata.pending-review.darwin-arm64.json` 仍只是一项必须被 rights gate 拒绝的负向测试，不能代表 production decisions。
 
-六项 canonical native/WASM redistribution decisions 仍是 `review/pending`，包括 extensionless `node-pty` Mach-O helper 与 `blake3-wasm` Node.js WASM runtime；它们都没有 license/evidence clearance。即使 runtime smoke 后续通过，rights gate 仍必须 fail closed，直到独立法律/provenance 输入完成审核。
+`development-local-only` 路径仍只供 owner-only 本地验收，必须同时提供 CLI flag 与环境授权，并在 inventory/attestation 中永久标记 `nonPromotable: true`；public validator 会拒绝该 artifact。不能放宽 symlink policy、重新引入任意扁平化，或把本地 staging 冒充公开 RC。
+
+M1 当前发布恢复点是：保持 upstream commit `2225647726d5387bb24e9539fdb577958b6d88c6` 和既有 rights closure 不变，只迁移 Host Agent transport。OpenDesign `0.14.6-rc.1` 必须使用普通 `json-event-stream` Shim、`hostVersionRange >=0.12.0` 和 prerelease track；在确定性门、Level 3 Review 与产品负责人单独批准之前，不得发布 RC、修改稳定 official channel 或替换 `0.14.5` last-known-good。
 
 ## Loopback readiness
 
