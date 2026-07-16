@@ -313,6 +313,20 @@ export function createOpenDesignAcceptanceRuntimeGate(
   })
 }
 
+/** Product smoke owns its isolated Module lifecycle and must never open acceptance IPC runtime access. */
+export function completeOpenDesignAcceptanceRecovery(
+  runtimeGate: Pick<OpenDesignAcceptanceRuntimeGate, 'reset'>,
+  markRecovered: () => void,
+  hostModuleSmokeRequested: boolean,
+): boolean {
+  if (hostModuleSmokeRequested) {
+    runtimeGate.reset()
+    return false
+  }
+  markRecovered()
+  return true
+}
+
 export interface OpenDesignAcceptanceHostAdapter {
   isAllowedSender(sender: unknown): boolean
 }

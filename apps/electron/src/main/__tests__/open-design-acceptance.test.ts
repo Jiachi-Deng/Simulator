@@ -13,6 +13,7 @@ import {
   OPEN_DESIGN_ACCEPTANCE_ENV,
   OPEN_DESIGN_ACCEPTANCE_IDENTITY,
   OpenDesignAcceptanceController,
+  completeOpenDesignAcceptanceRecovery,
   createOpenDesignAcceptanceRuntimeGate,
   loadOpenDesignAcceptance,
   registerOpenDesignAcceptanceIpc,
@@ -567,6 +568,17 @@ describe('OpenDesign acceptance controller', () => {
     gate.close()
     completionAfterQuit()
     expect(gate.getRuntime()).toBeUndefined()
+
+    const smokeGate = createOpenDesignAcceptanceRuntimeGate(() => harness.runtime)
+    const smokeCompletion = smokeGate.beginRecovery()
+    expect(completeOpenDesignAcceptanceRecovery(smokeGate, smokeCompletion, true)).toBe(false)
+    smokeCompletion()
+    expect(smokeGate.getRuntime()).toBeUndefined()
+
+    const normalGate = createOpenDesignAcceptanceRuntimeGate(() => harness.runtime)
+    const normalCompletion = normalGate.beginRecovery()
+    expect(completeOpenDesignAcceptanceRecovery(normalGate, normalCompletion, false)).toBe(true)
+    expect(normalGate.getRuntime()).toBe(harness.runtime)
   })
 
   it('resolves the fixed signed public RC and binds exact evidence into the real update call', async () => {
@@ -916,7 +928,7 @@ describe('OpenDesign acceptance controller', () => {
     expect(harness.rollback).not.toHaveBeenCalled()
   })
 
-  it('rejects a second-window ordinary stop while acceptance owns the shared gate through postcondition', async () => {
+  it('rejects UI stop but guarantees lifecycle stop after acceptance releases its postcondition lease', async () => {
     const mutationGate = createOpenDesignMutationGate()
     const acceptance = controllerHarness('0.14.5', null, mutationGate)
     const ordinary = ordinaryControllerHarness(mutationGate)
@@ -940,10 +952,16 @@ describe('OpenDesign acceptance controller', () => {
     })
     expect(ordinary.stop).not.toHaveBeenCalled()
 
+    const lifecycleStop = ordinary.controller.stopForHostView()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(ordinary.stop).not.toHaveBeenCalled()
+
     postconditionBarrier.resolve(undefined)
     expect(await acceptanceFlight).toMatchObject({
       status: 'ready', activeVersion: '0.14.6-rc.1', lastKnownGoodVersion: '0.14.5',
     })
+    expect(await lifecycleStop).toMatchObject({ status: 'available', daemonState: 'stopped' })
+    expect(ordinary.stop).toHaveBeenCalledTimes(1)
     ordinary.controller.dispose()
   })
 

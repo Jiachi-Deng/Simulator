@@ -120,6 +120,7 @@ import {
   createOpenDesignModuleBrowserWindowAdapter,
   OpenDesignModuleController,
   registerOpenDesignModuleIpc,
+  stopOpenDesignModuleWithSafety,
   type OpenDesignModuleIpcRegistration,
 } from './open-design-module-controller'
 import {
@@ -137,6 +138,7 @@ import { loadOpenDesignCompatibilityAuthority } from './open-design-compatibilit
 import {
   OPEN_DESIGN_ACCEPTANCE_ENV,
   OpenDesignAcceptanceController,
+  completeOpenDesignAcceptanceRecovery,
   createOpenDesignAcceptanceRuntimeGate,
   loadOpenDesignAcceptance,
   registerOpenDesignAcceptanceIpc,
@@ -1194,7 +1196,7 @@ app.whenReady().then(async () => {
       }
 
       // Optional Module and acceptance bootstrap failures are contained before
-      // this point so they cannot prevent the primary Craft window from opening.
+      // this point so they cannot prevent the primary Host window from opening.
       await createInitialWindows()
       const developmentBundle = openDesignHostChannel.status === 'ready' && openDesignHostChannel.source === 'development'
         ? openDesignHostChannel.bundle
@@ -1210,11 +1212,12 @@ app.whenReady().then(async () => {
       })
       if (app.isPackaged && openDesignCompatibilityAuthority.status === 'not-ready') {
         // A missing or tampered rollback authority disables only the pinned
-        // 0.14.5 compatibility path. Craft and normally compatible modules stay available.
+        // 0.14.5 compatibility path. The primary Host and compatible modules stay available.
         mainLog.warn('OpenDesign 0.14.5 compatibility authority is unavailable', {
           errorCode: openDesignCompatibilityAuthority.errorCode,
         })
       }
+      const hostModuleSmokeRequested = isHostModuleCoordinatorSmokeRequested()
       try {
         const markOpenDesignCoordinatorRecovered = openDesignAcceptanceRuntimeGate.beginRecovery()
         const moduleStorageRoot = resolveHostModuleStorageRoot({
@@ -1227,6 +1230,7 @@ app.whenReady().then(async () => {
         moduleAgentWorkerRecovery = new ModuleAgentWorkerRecoveryController({
           moduleId: OPEN_DESIGN_MODULE_ID as ModuleId,
           getRuntime: () => hostModuleCoordinator,
+          mutationGate: openDesignMutationGate,
           isShuttingDown: () => moduleInfrastructureShuttingDown,
           protocolForVersion: (version) => selectHostAgentProtocolForModule({
             id: OPEN_DESIGN_MODULE_ID,
@@ -1264,13 +1268,12 @@ app.whenReady().then(async () => {
           onWorkerRecoveryNeeded: (request) => moduleAgentWorkerRecovery?.request(request),
         })
         const stopOpenDesignDirectly = async (moduleId: ModuleId, reason: 'host-close' | 'view-failure') => {
-          const runtime = hostModuleCoordinator
-          if (!runtime) throw new Error('OpenDesign coordinator is unavailable')
-          const result = await runtime.coordinator.stop({
+          await stopOpenDesignModuleWithSafety({
             moduleId,
             operationId: `open-design-${reason}-${Date.now().toString(36)}-${randomUUID()}`,
+            mutationGate: openDesignMutationGate,
+            getRuntime: () => hostModuleCoordinator ?? undefined,
           })
-          if (!result.ok) throw new Error('OpenDesign coordinator stop failed')
         }
         hostModuleCoordinator = createHostModuleCoordinator({
           root: moduleStorageRoot,
@@ -1310,11 +1313,20 @@ app.whenReady().then(async () => {
             mainLog.error('Module view failure cleanup failed', { moduleId })
           },
         })
-        await hostModuleCoordinator.coordinator.recover()
-        markOpenDesignCoordinatorRecovered()
+        const coordinatorRecoveryLease = await openDesignMutationGate.acquireSafety()
+        try {
+          await hostModuleCoordinator.coordinator.recover()
+        } finally {
+          coordinatorRecoveryLease.release()
+        }
+        completeOpenDesignAcceptanceRecovery(
+          openDesignAcceptanceRuntimeGate,
+          markOpenDesignCoordinatorRecovered,
+          hostModuleSmokeRequested,
+        )
       } catch (error) {
         openDesignAcceptanceRuntimeGate.reset()
-        if (isHostModuleCoordinatorSmokeRequested()) throw error
+        if (hostModuleSmokeRequested) throw error
         mainLog.error('Optional Module coordinator is unavailable', {
           errorType: error instanceof Error ? error.name : typeof error,
         })
@@ -1334,7 +1346,7 @@ app.whenReady().then(async () => {
         }
         hostModuleAgentRuntime = null
       }
-      if (isHostModuleCoordinatorSmokeRequested()) {
+      if (hostModuleSmokeRequested) {
         const hostWindow = windowManager?.getLastActiveWindow()
         const smokeRuntime = hostModuleCoordinator
         const smokeAgentRuntime = hostModuleAgentRuntime
@@ -1349,6 +1361,7 @@ app.whenReady().then(async () => {
           serverHost: embeddedServer.host,
           serverPort: embeddedServer.port,
           moduleAgentRuntime: smokeAgentRuntime,
+          mutationGate: openDesignMutationGate,
         })
         return
       }

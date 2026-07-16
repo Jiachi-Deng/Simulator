@@ -25,6 +25,7 @@ import {
   processGroupsAddedSince,
   type SanitizedMacosProcessTree,
 } from './host-module-process-evidence'
+import type { OpenDesignMutationGate } from './open-design-mutation-gate'
 
 const MANIFEST_PREFIX = '--host-module-smoke-manifest='
 const RESULT_PREFIX = '--host-module-smoke-result='
@@ -42,6 +43,7 @@ interface SmokeRuntime {
   readonly serverHost: string
   readonly serverPort: number
   readonly moduleAgentRuntime: IsolatedHostModuleAgentRuntime
+  readonly mutationGate: OpenDesignMutationGate
 }
 
 interface CleanupEvidence {
@@ -132,6 +134,18 @@ function waitFor(predicate: () => boolean, description: string, timeoutMs = 10_0
     }
     poll()
   })
+}
+
+async function runSafetyMutation<T>(
+  mutationGate: OpenDesignMutationGate,
+  mutation: () => Promise<T>,
+): Promise<T> {
+  const mutationLease = await mutationGate.acquireSafety()
+  try {
+    return await mutation()
+  } finally {
+    mutationLease.release()
+  }
 }
 
 function processGroupExists(pgid: number): boolean {
@@ -600,11 +614,15 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
       if (completed?.hidden === true) terminalSessionIds.push(event.sessionId)
     })
     let terminalSessionOffset = 0
-    if (!smoke.runtime.registry.install(manifest, { hostVersionRange: '*' }).ok) throw new Error('Could not register smoke module')
-    if (!smoke.runtime.registry.activate(manifest.id, manifest.version).ok) throw new Error('Could not activate smoke module')
-    if (!smoke.runtime.registry.markLastKnownGood(manifest.id, manifest.version).ok) throw new Error('Could not mark smoke module last-known-good')
-
-    const started = await smoke.runtime.coordinator.start({ operationId: 'electron-product-smoke-start', moduleId: manifest.id })
+    // Smoke never opens the acceptance runtime and returns before the ordinary
+    // controller is created. The safety boundary also serializes these direct
+    // fixture mutations with Worker recovery without holding across the crash drill.
+    const started = await runSafetyMutation(smoke.mutationGate, async () => {
+      if (!smoke.runtime.registry.install(manifest, { hostVersionRange: '*' }).ok) throw new Error('Could not register smoke module')
+      if (!smoke.runtime.registry.activate(manifest.id, manifest.version).ok) throw new Error('Could not activate smoke module')
+      if (!smoke.runtime.registry.markLastKnownGood(manifest.id, manifest.version).ok) throw new Error('Could not mark smoke module last-known-good')
+      return smoke.runtime.coordinator.start({ operationId: 'electron-product-smoke-start', moduleId: manifest.id })
+    })
     failurePhase = 50
     if (!started.ok) throw new Error(started.error ?? 'Coordinator start failed')
     const firstView = smoke.manager.list()[0]
@@ -810,7 +828,10 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
       && await canConnect(smoke.serverHost, smoke.serverPort),
     )
 
-    const stopped = await smoke.runtime.coordinator.stop({ operationId: 'electron-product-smoke-stop', moduleId: manifest.id })
+    const stopped = await runSafetyMutation(
+      smoke.mutationGate,
+      () => smoke.runtime.coordinator.stop({ operationId: 'electron-product-smoke-stop', moduleId: manifest.id }),
+    )
     failurePhase = 140
     if (!stopped.ok) throw new Error(stopped.error ?? 'Coordinator stop failed')
     await waitFor(() => !existsSync(thirdJourney.tokenFile), 'final launch token revocation')
