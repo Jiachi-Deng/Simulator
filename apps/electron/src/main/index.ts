@@ -136,8 +136,10 @@ import {
 import { resolveHostModuleStorageRoot } from './host-module-storage-root'
 import {
   createIsolatedHostModuleAgentRuntime,
-  type HostModuleAgentRuntime,
+  selectHostAgentProtocolForModule,
+  type IsolatedHostModuleAgentRuntime,
 } from './module-agent-runtime'
+import { ModuleAgentWorkerRecoveryController } from './module-agent-worker-recovery'
 import { resolveHostAgentWorkerEntry } from '../host-agent'
 import { OPEN_DESIGN_MODULE_ID } from '../shared/open-design-module-ipc'
 import { isModuleViewSmokeRequested, runModuleViewSmokeIfRequested } from './module-view-smoke'
@@ -254,7 +256,9 @@ let sessionManager: SessionManager | null = null
 let browserPaneManager: BrowserPaneManager | null = null
 let moduleViewManager: ModuleViewManager | null = null
 let hostModuleCoordinator: HostModuleCoordinatorRuntime | null = null
-let hostModuleAgentRuntime: HostModuleAgentRuntime | null = null
+let hostModuleAgentRuntime: IsolatedHostModuleAgentRuntime | null = null
+let moduleAgentWorkerRecovery: ModuleAgentWorkerRecoveryController | null = null
+let moduleInfrastructureShuttingDown = false
 let openDesignDevelopmentBootstrap: OpenDesignDevelopmentBootstrap = Object.freeze({ status: 'disabled' })
 let openDesignHostChannel: OpenDesignHostChannelBootstrap = Object.freeze({
   status: 'not-ready',
@@ -1108,6 +1112,25 @@ app.whenReady().then(async () => {
           developmentBootstrapStatus: openDesignDevelopmentBootstrap.status,
         })
         if (!sessionManager) throw new Error('Session manager is unavailable for the Module Agent runtime')
+        moduleInfrastructureShuttingDown = false
+        moduleAgentWorkerRecovery = new ModuleAgentWorkerRecoveryController({
+          moduleId: OPEN_DESIGN_MODULE_ID as ModuleId,
+          getRuntime: () => hostModuleCoordinator,
+          isShuttingDown: () => moduleInfrastructureShuttingDown,
+          protocolForVersion: (version) => selectHostAgentProtocolForModule({
+            id: OPEN_DESIGN_MODULE_ID,
+            version,
+          }),
+          onFailure: (phase, request, error) => {
+            mainLog.error('Optional Module Worker recovery was contained', {
+              phase,
+              protocol: request.protocol,
+              failure: request.failure,
+              circuitOpen: request.circuitOpen,
+              errorType: error instanceof Error ? error.name : typeof error,
+            })
+          },
+        })
         hostModuleAgentRuntime = await createIsolatedHostModuleAgentRuntime({
           storageRoot: moduleStorageRoot,
           sessions: sessionManager,
@@ -1127,6 +1150,7 @@ app.whenReady().then(async () => {
               errorType: error instanceof Error ? error.name : typeof error,
             })
           },
+          onWorkerRecoveryNeeded: (request) => moduleAgentWorkerRecovery?.request(request),
         })
         const stopOpenDesignDirectly = async (moduleId: ModuleId, reason: 'host-close' | 'view-failure') => {
           const runtime = hostModuleCoordinator
@@ -1178,6 +1202,9 @@ app.whenReady().then(async () => {
         mainLog.error('Optional Module coordinator is unavailable', {
           errorType: error instanceof Error ? error.name : typeof error,
         })
+        moduleAgentWorkerRecovery?.dispose()
+        await moduleAgentWorkerRecovery?.drain()
+        moduleAgentWorkerRecovery = null
         try {
           await hostModuleCoordinator?.dispose()
         } catch {
@@ -1387,6 +1414,10 @@ async function cleanupBeforeQuit(): Promise<void> {
   let moduleAgentStopped = false
   // Ensure Cmd+Q/app quit bypasses layered window close interception (Cmd+W behavior).
   windowManager?.setAppQuitting(true)
+  moduleInfrastructureShuttingDown = true
+  moduleAgentWorkerRecovery?.dispose()
+  await moduleAgentWorkerRecovery?.drain()
+  moduleAgentWorkerRecovery = null
 
   setOpenDesignModuleEscapeHandler(null)
   openDesignModuleIpc?.dispose()
