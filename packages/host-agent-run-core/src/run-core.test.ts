@@ -117,14 +117,48 @@ describe('ModuleAgentRunCore', () => {
   it('lets a visible Craft turn preempt and await the Module turn', async () => {
     const { core, sessions } = await setup()
     const run = await core.createRun({ grantId: 'grant-1', idempotencyKey: 'turn-preempt', request: request() })
+    const events: HostAgentEvent[] = []
+    core.subscribe('grant-1', run.runHandle, undefined, (event) => events.push(event))
     await flush()
     await core.beginCraftTurn()
     expect(sessions.cancelled).toEqual(['session-1'])
-    expect(core.getRun('grant-1', run.runHandle).state).toBe('interrupted')
+    expect(sessions.reaped).toEqual(['session-1'])
+    expect(core.getRun('grant-1', run.runHandle).state).toBe('closed')
+    expect(events.filter((event) => event.type === 'turn.interrupted')).toHaveLength(1)
+    expect(events.at(-1)?.type).toBe('run.closed')
+    expect(core.debugSnapshot()).toMatchObject({ activeRuns: 0, moduleSessions: 0 })
     await expect(core.createRun({
       grantId: 'grant-1', idempotencyKey: 'turn-blocked', request: request(),
     })).rejects.toMatchObject({ code: 'CRAFT_TURN_ACTIVE' })
     core.endCraftTurn()
+  })
+
+  it('strictly reaps when cooperative Craft preemption does not acknowledge stop', async () => {
+    const { core, sessions } = await setup()
+    const run = await core.createRun({ grantId: 'grant-1', idempotencyKey: 'turn-hard-preempt', request: request() })
+    await flush()
+    sessions.awaitStoppedError = new Error('provider did not acknowledge stop')
+
+    await expect(core.beginCraftTurn()).resolves.toBeUndefined()
+    expect(sessions.cancelled).toEqual(['session-1'])
+    expect(sessions.reaped).toEqual(['session-1'])
+    expect(core.getRun('grant-1', run.runHandle).state).toBe('closed')
+    expect(core.debugSnapshot().moduleSessions).toBe(0)
+  })
+
+  it('fails closed when neither cooperative nor strict Craft preemption can reap', async () => {
+    const { core, sessions } = await setup()
+    const run = await core.createRun({ grantId: 'grant-1', idempotencyKey: 'turn-stuck-preempt', request: request() })
+    await flush()
+    sessions.awaitStoppedError = new Error('provider did not acknowledge stop')
+    sessions.reapError = new Error('provider child still alive')
+
+    await expect(core.beginCraftTurn()).rejects.toMatchObject({ code: 'CLEANUP_FAILED' })
+    expect(core.getRun('grant-1', run.runHandle).state).toBe('running')
+    expect(core.debugSnapshot().moduleSessions).toBe(1)
+    await expect(core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'turn-must-stay-blocked', request: request(),
+    })).rejects.toMatchObject({ code: 'CRAFT_TURN_ACTIVE' })
   })
 
   it('makes DELETE idempotent and waits for strict Session reap', async () => {

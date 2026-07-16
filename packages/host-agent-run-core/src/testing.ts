@@ -29,6 +29,7 @@ export class InMemoryHostAgentRunSessionPort implements HostAgentRunSessionPort 
   createError?: Error
   updateError?: Error
   sendError?: Error
+  awaitStoppedError?: Error
   reapError?: Error
 
   async createSession(input: CreateHostAgentSessionInput): Promise<CreatedHostAgentSession> {
@@ -54,7 +55,9 @@ export class InMemoryHostAgentRunSessionPort implements HostAgentRunSessionPort 
   }
 
   async cancelTurn(sessionId: string): Promise<void> { this.cancelled.push(sessionId) }
-  async awaitStopped(): Promise<void> {}
+  async awaitStopped(): Promise<void> {
+    if (this.awaitStoppedError) throw this.awaitStoppedError
+  }
 
   async disposeAndReap(sessionId: string): Promise<void> {
     if (this.reapError) throw this.reapError

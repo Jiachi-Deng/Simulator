@@ -296,7 +296,34 @@ export class ModuleAgentRunCore {
     const active = [...this.#runs.values()].find((run) =>
       run.state === 'accepted' || run.state === 'starting' || run.state === 'running')
     if (!active) return
-    await this.#serialize(active, () => this.#interruptNow(active, 'CRAFT_TURN_PREEMPTED'))
+    await this.#serialize(active, async () => {
+      if (isHostAgentTerminalRunState(active.state) || active.state === 'closing' || active.state === 'closed') return
+
+      // Craft cannot share its provider with an unconfirmed Module turn. The
+      // cooperative path is attempted first; strict disposal is the fallback
+      // if the provider never acknowledges the stop. Either way, no provider
+      // work remains before this method resolves.
+      try {
+        await this.#deps.sessions.cancelTurn(active.sessionId!)
+        await this.#deps.sessions.awaitStopped(active.sessionId!)
+      } catch (stopError) {
+        try {
+          await this.#deps.sessions.disposeAndReap(active.sessionId!)
+          active.sessionId = undefined
+        } catch {
+          throw new HostAgentRunCoreError(
+            'CLEANUP_FAILED',
+            `Module provider could not be reaped before Craft admission: ${stopError instanceof Error ? stopError.message : 'stop failed'}`,
+          )
+        }
+      }
+
+      await this.#commitTerminalNow(active, {
+        state: 'interrupted',
+        reason: 'CRAFT_TURN_PREEMPTED',
+      })
+      await this.#closeRunNow(active, 'CRAFT_TURN_PREEMPTED')
+    })
   }
 
   endCraftTurn(): void { this.#craftTurnActive = false }
