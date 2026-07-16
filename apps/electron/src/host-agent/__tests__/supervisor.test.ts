@@ -35,6 +35,7 @@ class FakeHandle implements HostAgentWorkerHandle {
   throwOnSend = false
   throwOnTerminate = false
   emitReady = true
+  exitImmediatelyAfterReady = false
   readyGate?: Promise<void>
   bufferedExitCode: number | undefined
 
@@ -76,6 +77,7 @@ class FakeHandle implements HostAgentWorkerHandle {
               ? { address: { host: '127.0.0.1', port: 43123, url: 'http://127.0.0.1:43123' } }
               : {}),
           })
+          if (this.exitImmediatelyAfterReady) this.emitExit(73)
         })()
       })
     }
@@ -124,6 +126,7 @@ class FakeLauncher implements HostAgentWorkerLauncher {
 class FakeTokenStore implements HostAgentTokenStore {
   readonly files = new Map<string, { token: string; mode: number }>()
   readonly removed: string[] = []
+  removeGate?: Promise<void>
 
   async create(protocol: HostAgentProtocolPath, epoch: string, token: string): Promise<string> {
     const path = `/tokens/${protocol}-${epoch}.token`
@@ -132,6 +135,7 @@ class FakeTokenStore implements HostAgentTokenStore {
   }
 
   async remove(path: string): Promise<void> {
+    await this.removeGate
     this.files.delete(path)
     this.removed.push(path)
   }
@@ -254,6 +258,17 @@ describe('HostAgentWorkerSupervisor', () => {
     expect(supervisor.snapshot('v2').pid).toBeUndefined()
   })
 
+  it('never publishes a worker that exits synchronously after its ready message', async () => {
+    const { launcher, tokenStore, supervisor } = fixture({ startupTimeoutMs: 1_000 })
+    launcher.configureHandle = (handle) => { handle.exitImmediatelyAfterReady = true }
+
+    await expect(supervisor.start('v1')).rejects.toThrow('failed readiness')
+    expect(supervisor.connection('v1')).toBeUndefined()
+    expect(supervisor.rpcPort('v1')).toBeUndefined()
+    expect(supervisor.snapshot('v1').pid).toBeUndefined()
+    expect(tokenStore.files.size).toBe(0)
+  })
+
   it('starts v1 and v2 as independent ready workers with separate tokens, epochs, and limits', async () => {
     const { launcher, tokenStore, supervisor } = fixture()
     const result = await supervisor.startAll()
@@ -294,6 +309,30 @@ describe('HostAgentWorkerSupervisor', () => {
     expect(firstHandle.closed).toBe(true)
     expect(tokenStore.removed).toContain(firstTokenPath)
     expect(tokenStore.files.has(launcher.latest('v1').input.tokenFile)).toBe(true)
+  })
+
+  it('revokes a dead epoch immediately and waits for finalization before publishing its replacement', async () => {
+    const { launcher, tokenStore, supervisor } = fixture()
+    const first = await supervisor.start('v2')
+    const firstHandle = launcher.latest('v2')
+    let releaseRemoval!: () => void
+    tokenStore.removeGate = new Promise<void>((resolve) => { releaseRemoval = resolve })
+
+    firstHandle.emitExit(71)
+    expect(supervisor.connection('v2')).toBeUndefined()
+    expect(supervisor.rpcPort('v2')).toBeUndefined()
+
+    const replacement = supervisor.start('v2')
+    await Promise.resolve()
+    expect(launcher.launches).toHaveLength(1)
+    releaseRemoval()
+    const second = await replacement
+
+    expect(second.epoch).not.toBe(first.epoch)
+    expect(launcher.launches).toHaveLength(2)
+    expect(firstHandle.closed).toBe(true)
+    expect(supervisor.connection('v2')?.epoch).toBe(second.epoch)
+    expect(supervisor.rpcPort('v2')).toBe(launcher.latest('v2').rpcPort)
   })
 
   it('enforces the RSS gate without stopping the other worker', async () => {

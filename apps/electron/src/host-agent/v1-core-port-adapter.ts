@@ -6,7 +6,9 @@ import {
 import type {
   CreateHostModuleSessionInput,
   ModuleAgentGrantSpec,
+  ModuleAgentGatewaySnapshot,
   ModuleAgentPathAuthority,
+  ModuleAgentPortEvent,
   ModuleAgentSessionPort,
 } from '@simulator/module-agent-gateway'
 import {
@@ -62,6 +64,12 @@ function lexicallyWithin(candidate: string, root: string): boolean {
   return rel === '' || (!rel.startsWith('..') && !isAbsolute(rel))
 }
 
+function isTerminalTurnEvent(event: ModuleAgentPortEvent): boolean {
+  return event.type === 'turn.completed'
+    || event.type === 'turn.failed'
+    || event.type === 'turn.cancelled'
+}
+
 /** Main-process authority boundary used only by the v1 Compatibility worker. */
 export class V1CorePortAdapter {
   readonly #sessions: ModuleAgentSessionPort
@@ -69,6 +77,7 @@ export class V1CorePortAdapter {
   readonly #channel: MessagePortByteCreditChannel
   readonly #scopes = new Map<string, GrantScope>()
   readonly #ownedSessions = new Map<string, string>()
+  readonly #activeTurns = new Set<string>()
   readonly #subscriptions = new Map<string, () => void>()
   readonly #pendingWorkerCalls = new Map<string, PendingWorkerCall>()
   readonly #requestTimeoutMs: number
@@ -115,6 +124,21 @@ export class V1CorePortAdapter {
 
   unregisterGrantScope(scopeId: string): void { this.#scopes.delete(scopeId) }
 
+  /**
+   * Main-process lifecycle evidence. The worker-local HTTP snapshot can be
+   * lost with the Utility Process, so closure checks use the authority that
+   * actually owns grant scopes and Craft Sessions. A remote subscription is
+   * counted conservatively while the worker still holds a Session event seam.
+   */
+  debugSnapshot(): ModuleAgentGatewaySnapshot {
+    return {
+      activeGrants: this.#scopes.size,
+      activeSessions: this.#ownedSessions.size,
+      activeTurns: this.#activeTurns.size,
+      activeSubscribers: this.#subscriptions.size,
+    }
+  }
+
   async invokeWorker(method: V1WorkerRpcMethod, value: unknown): Promise<unknown> {
     if (this.#disconnected) throw new Error('v1 Compatibility worker disconnected')
     const requestId = `host_${this.#nextWorkerRequest++}`
@@ -155,6 +179,7 @@ export class V1CorePortAdapter {
       this.#subscriptions.clear()
     }
     if (this.#ownedSessions.size === 0) {
+      this.#activeTurns.clear()
       this.#scopes.clear()
       return
     }
@@ -164,6 +189,7 @@ export class V1CorePortAdapter {
       await this.#sessions.disposeAndReap(sessionId)
       if (this.#ownedSessions.get(remoteSessionId) === sessionId) {
         this.#ownedSessions.delete(remoteSessionId)
+        this.#activeTurns.delete(remoteSessionId)
       }
     })).then(() => { this.#scopes.clear() })
     this.#disconnectAttempt = attempt
@@ -266,6 +292,7 @@ export class V1CorePortAdapter {
       const id = subscriptionId(input.subscriptionId)
       if (this.#subscriptions.has(id)) throw new TypeError('Duplicate subscription')
       const unsubscribe = await this.#sessions.subscribe(sessionId, (event) => {
+        if (isTerminalTurnEvent(event)) this.#activeTurns.delete(remoteSessionId)
         void this.#channel.send({
           kind: 'module-agent.host.event',
           subscriptionId: id,
@@ -286,11 +313,24 @@ export class V1CorePortAdapter {
     const input = params(value, method === 'session.sendTurn' ? ['sessionId', 'prompt'] : ['sessionId'])
     const remoteSessionId = this.#remoteSessionId(input.sessionId)
     const sessionId = this.#ownedSession(remoteSessionId)
-    if (method === 'session.sendTurn') return await this.#sessions.sendTurn(sessionId, text(input.prompt, 'prompt'))
+    if (method === 'session.sendTurn') {
+      this.#activeTurns.add(remoteSessionId)
+      try {
+        return await this.#sessions.sendTurn(sessionId, text(input.prompt, 'prompt'))
+      } catch (error) {
+        this.#activeTurns.delete(remoteSessionId)
+        throw error
+      }
+    }
     if (method === 'session.cancelTurn') return await this.#sessions.cancelTurn(sessionId)
-    if (method === 'session.awaitStopped') return await this.#sessions.awaitStopped(sessionId)
+    if (method === 'session.awaitStopped') {
+      await this.#sessions.awaitStopped(sessionId)
+      this.#activeTurns.delete(remoteSessionId)
+      return
+    }
     await this.#sessions.disposeAndReap(sessionId)
     this.#ownedSessions.delete(remoteSessionId)
+    this.#activeTurns.delete(remoteSessionId)
     return null
   }
 

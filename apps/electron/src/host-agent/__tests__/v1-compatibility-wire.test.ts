@@ -92,6 +92,12 @@ describe('v1 Compatibility Utility wire', () => {
       port: hostPort,
     })
     await adapter.registerGrantScope('scope:fixture', spec)
+    expect(adapter.debugSnapshot()).toEqual({
+      activeGrants: 1,
+      activeSessions: 0,
+      activeTurns: 0,
+      activeSubscribers: 0,
+    })
     let workerDisconnected = 0
     const worker = await startV1CompatibilityWorker(workerPort, () => { workerDisconnected += 1 })
     const prepared = await adapter.invokeWorker('prepareLaunch', { spec, tokenDirectory }) as {
@@ -118,6 +124,18 @@ describe('v1 Compatibility Utility wire', () => {
     const session = await created.json() as { sessionHandle: string }
     expect(session.sessionHandle).toMatch(/^session_[0-9a-f]{32}$/)
     expect(sessions.created).toHaveLength(1)
+    expect(await adapter.invokeWorker('debugSnapshot', {})).toEqual({
+      activeGrants: 1,
+      activeSessions: 1,
+      activeTurns: 0,
+      activeSubscribers: 0,
+    })
+    expect(adapter.debugSnapshot()).toEqual({
+      activeGrants: 1,
+      activeSessions: 1,
+      activeTurns: 0,
+      activeSubscribers: 1,
+    })
 
     const turn = await fetch(`${worker.address.url}/v1/module-sessions/${session.sessionHandle}/turns`, {
       method: 'POST',
@@ -126,6 +144,8 @@ describe('v1 Compatibility Utility wire', () => {
     })
     expect(turn.status).toBe(202)
     expect(sessions.sent).toEqual([{ sessionId: 'raw-1', prompt: 'Create the fixture' }])
+    expect(await adapter.invokeWorker('debugSnapshot', {})).toMatchObject({ activeSessions: 1, activeTurns: 1 })
+    expect(adapter.debugSnapshot()).toMatchObject({ activeSessions: 1, activeTurns: 1 })
 
     const cancelled = await fetch(`${worker.address.url}/v1/module-sessions/${session.sessionHandle}/cancel`, {
       method: 'POST',
@@ -135,6 +155,7 @@ describe('v1 Compatibility Utility wire', () => {
     expect(cancelled.status).toBe(202)
     expect(sessions.cancelled).toEqual(['raw-1'])
     expect(sessions.awaitedStopped).toEqual([])
+    expect(await adapter.invokeWorker('debugSnapshot', {})).toMatchObject({ activeSessions: 1, activeTurns: 0 })
 
     const events = await fetch(`${worker.address.url}/v1/module-sessions/${session.sessionHandle}/events?afterSequence=0`, { headers })
     expect(events.status).toBe(200)
@@ -150,6 +171,7 @@ describe('v1 Compatibility Utility wire', () => {
     expect(transcript).toContain('"type":"session.ready"')
     expect(transcript).toContain('"type":"turn.started"')
     expect(transcript).toContain('"type":"turn.cancelled"')
+    expect(await adapter.invokeWorker('debugSnapshot', {})).toMatchObject({ activeSubscribers: 1 })
     await reader.cancel()
 
     const deleted = await fetch(`${worker.address.url}/v1/module-sessions/${session.sessionHandle}`, {
@@ -157,6 +179,7 @@ describe('v1 Compatibility Utility wire', () => {
     })
     expect(deleted.status).toBe(204)
     expect(sessions.deleted).toEqual(['raw-1'])
+    expect(adapter.debugSnapshot()).toMatchObject({ activeSessions: 0, activeTurns: 0, activeSubscribers: 0 })
 
     await adapter.invokeWorker('disposeLease', { leaseId: prepared.leaseId })
     expect(await adapter.invokeWorker('debugSnapshot', {})).toEqual({

@@ -227,12 +227,13 @@ export class HostAgentWorkerSupervisor {
 
   /** Dedicated credit-framed RPC port. Control/health messages never share it. */
   rpcPort(protocol: HostAgentProtocolPath): HostAgentMessagePortLike | undefined {
-    return this.#lane(protocol).runtime?.handle.rpcPort
+    const runtime = this.#lane(protocol).runtime
+    return runtime?.exitCode === undefined ? runtime?.handle.rpcPort : undefined
   }
 
   connection(protocol: HostAgentProtocolPath): HostAgentWorkerConnection | undefined {
     const runtime = this.#lane(protocol).runtime
-    if (!runtime?.address) return undefined
+    if (!runtime?.address || runtime.exitCode !== undefined) return undefined
     return Object.freeze({
       protocol,
       epoch: runtime.epoch,
@@ -256,6 +257,14 @@ export class HostAgentWorkerSupervisor {
 
   async #startLane(lane: LaneState, pendingStop: Promise<void> | undefined): Promise<HostAgentWorkerSnapshot> {
     if (pendingStop) await pendingStop
+    const exitedRuntime = lane.runtime?.exitCode === undefined ? undefined : lane.runtime
+    if (exitedRuntime) {
+      // onExit revokes connection/rpc authority synchronously, while token and
+      // channel cleanup may still be asynchronous. A concurrent launch waits
+      // for that exact epoch to finalize before it can allocate a replacement.
+      await exitedRuntime.finalizedPromise
+      return await this.#startLane(lane, undefined)
+    }
     const protocol = lane.protocol
     this.#pruneCrashes(lane)
     if (lane.status === 'circuit-open' && !lane.runtime && lane.crashes.length < this.#limits.crashThreshold) {
