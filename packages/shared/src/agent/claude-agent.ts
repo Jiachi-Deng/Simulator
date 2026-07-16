@@ -1,4 +1,5 @@
-import { query, createSdkMcpServer, tool, AbortError, type Query, type SDKMessage, type SDKUserMessage, type SDKAssistantMessageError, type Options } from '@anthropic-ai/claude-agent-sdk';
+import { query, createSdkMcpServer, tool, AbortError, type Query, type SDKMessage, type SDKUserMessage, type SDKAssistantMessageError, type Options, type SpawnOptions, type SpawnedProcess } from '@anthropic-ai/claude-agent-sdk';
+import { spawn } from 'node:child_process';
 import { getDefaultOptions, resetClaudeConfigCheck } from './options.ts';
 // Local type for SDK user message content blocks (text, image, document)
 // Replaces import from @anthropic-ai/sdk/resources — keeps SDK as agent-only dependency
@@ -93,6 +94,7 @@ import {
   extractSdkReportedBinaryPath,
   isSpawnEnoent as detectSpawnEnoent,
 } from './spawn-helpers.ts';
+import { ProviderProcessTree, returnProviderIteratorAndReap } from './provider-process-reaper.ts';
 
 // Re-export permission mode functions for application usage
 export {
@@ -470,6 +472,7 @@ export class ClaudeAgent extends BaseAgent {
   protected backendName = 'Claude';
   // Note: ClaudeAgentConfig is compatible with BackendConfig, so we use the inherited this.config
   private currentQuery: Query | null = null;
+  private readonly moduleProcessTrees = new Set<ProviderProcessTree>();
   private currentQueryAbortController: AbortController | null = null;
   private lastAbortReason: AbortReason | null = null;
   private sessionId: string | null = null;
@@ -538,7 +541,13 @@ export class ClaudeAgent extends BaseAgent {
     }
     debug(`[bg-lifecycle] teardownPersistentQuery (${reason})`, { sessionId: this.config.session?.id });
     try { this.persistentInput?.end(); } catch { /* already ended */ }
-    try { void this.persistentIterator?.return?.(undefined); } catch { /* best-effort */ }
+    try {
+      // The strict transient-session path awaits and reports the authoritative
+      // iterator return before destroy(). This secondary best-effort teardown
+      // must still consume an asynchronous rejection rather than emitting an
+      // unhandled-rejection after the process tree has already been reaped.
+      void Promise.resolve(this.persistentIterator?.return?.(undefined)).catch(() => {});
+    } catch { /* best-effort */ }
     try { this.persistentAbortController?.abort(); } catch { /* best-effort hard backstop */ }
     try { this.activeTurnChannel?.end(); } catch { /* best-effort */ }
     this.persistentInput = null;
@@ -1157,6 +1166,9 @@ export class ClaudeAgent extends BaseAgent {
 
       const options: Options = {
         ...getDefaultOptions(this.config.envOverrides),
+        ...(this.config.session?.moduleAgentRun?.transient === true && process.platform !== 'win32'
+          ? { spawnClaudeCodeProcess: (spawnOptions: SpawnOptions) => this.spawnModuleClaudeProcess(spawnOptions) }
+          : {}),
         model: effectiveModel,
         // Capture stderr from SDK subprocess for error diagnostics
         // This helps identify why sessions fail with "process exited with code 1"
@@ -2854,6 +2866,48 @@ This is a branched conversation. All prior messages in this conversation are par
    */
   async abort(reason?: string): Promise<void> {
     this.forceAbort();
+  }
+
+  private spawnModuleClaudeProcess(options: SpawnOptions): SpawnedProcess {
+    const child = spawn(options.command, options.args, {
+      cwd: options.cwd,
+      env: options.env,
+      signal: options.signal,
+      detached: true,
+      stdio: ['pipe', 'pipe', 'pipe'],
+      windowsHide: true,
+    });
+    this.moduleProcessTrees.add(new ProviderProcessTree(child, { processGroup: true }));
+    return child as unknown as SpawnedProcess;
+  }
+
+  async disposeForRestart(): Promise<void> {
+    const activeQuery = this.currentQuery;
+    const processTrees = [...this.moduleProcessTrees];
+    try { this.persistentInput?.end(); } catch { /* already closed */ }
+    try { this.activeTurnChannel?.end(); } catch { /* already closed */ }
+    try { activeQuery?.close(); } catch { /* strict process-group reap remains authoritative */ }
+    try { this.currentQueryAbortController?.abort(); } catch { /* already aborted */ }
+    try {
+      await returnProviderIteratorAndReap(
+        activeQuery ? () => activeQuery.return(undefined) : undefined,
+        processTrees,
+      );
+    } finally {
+      // Keep only live trees as explicit cleanup debt for a possible retry.
+      // Successfully acknowledged trees must not be reaped a second time even
+      // when the SDK iterator itself timed out or rejected.
+      for (const tree of processTrees) {
+        if (!tree.isAlive()) this.moduleProcessTrees.delete(tree);
+      }
+      this.currentQuery = null;
+      this.currentQueryAbortController = null;
+      this.destroy();
+    }
+  }
+
+  async disposeAndReap(): Promise<void> {
+    await this.disposeForRestart();
   }
 
   /**
