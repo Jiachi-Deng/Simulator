@@ -272,7 +272,7 @@ new file mode 100644
 index 0000000..ae98650
 --- /dev/null
 +++ b/apps/daemon/src/runtimes/simulator-host-v2-event-stream.ts
-@@ -0,0 +1,291 @@
+@@ -0,0 +1,298 @@
 +// @ts-nocheck
 +
 +const MAX_EVENT_BYTES = 256 * 1024;
