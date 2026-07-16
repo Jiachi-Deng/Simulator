@@ -26,7 +26,7 @@ Configure the following GitHub Environment secret and variables:
   initial publication.
 
 Protect the environment according to the repository release policy. The fixed
-authority is `Jiachi-Deng/Simulator`, tag `open-design-v0.14.4`; neither manual
+authority is `Jiachi-Deng/Simulator`, tag `open-design-v0.14.5`; neither manual
 inputs nor repository variables can redirect it.
 
 ## Production input workflow

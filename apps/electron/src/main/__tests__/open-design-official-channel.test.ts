@@ -14,15 +14,15 @@ import {
 import { OPEN_DESIGN_MODULE_ID } from '../../shared/open-design-module-ipc'
 
 const roots: string[] = []
-const CATALOG_URL = 'https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.4/open-design-catalog.json'
-const OFFICIAL_CATALOG_URL = 'https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.4/org.simulator.open-design-0.14.4-catalog-v2-envelope.json'
+const CATALOG_URL = 'https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.5/open-design-catalog.json'
+const OFFICIAL_CATALOG_URL = 'https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.5/org.simulator.open-design-0.14.5-catalog-v2-envelope.json'
 const OFFICIAL_RESOURCE_PATH = join(import.meta.dir, '..', '..', '..', 'resources', 'open-design-official-channel.json')
 const OFFICIAL_RESOURCE = {
   catalogUrl: OFFICIAL_CATALOG_URL,
   githubRelease: {
     owner: 'Jiachi-Deng',
     repository: 'Simulator',
-    tag: 'open-design-v0.14.4',
+    tag: 'open-design-v0.14.5',
   },
   moduleId: OPEN_DESIGN_MODULE_ID,
   platform: 'darwin-arm64',
@@ -33,7 +33,7 @@ const OFFICIAL_RESOURCE = {
     keyId: 'open-design-release-2026-01',
     publicKey: 'KvpR89GuQd670SZMZuuR+aK4FUIprxRlqE58K3twQZk=',
   }],
-  version: '0.14.4',
+  version: '0.14.5',
 }
 
 function publicKeyBase64(): string {
@@ -46,13 +46,13 @@ function config(overrides: Record<string, unknown> = {}) {
   return {
     schemaVersion: 1,
     moduleId: OPEN_DESIGN_MODULE_ID,
-    version: '0.14.4',
+    version: '0.14.5',
     platform: 'darwin-arm64',
     catalogUrl: CATALOG_URL,
     githubRelease: {
       owner: 'Jiachi-Deng',
       repository: 'Simulator',
-      tag: 'open-design-v0.14.4',
+      tag: 'open-design-v0.14.5',
     },
     trustedKeys: [{
       keyId: 'open-design-release-2026',
@@ -98,7 +98,7 @@ describe('loadOpenDesignOfficialChannel', () => {
         releaseRequest: {
           catalogUrl: OFFICIAL_CATALOG_URL,
           moduleId: OPEN_DESIGN_MODULE_ID,
-          version: '0.14.4',
+          version: '0.14.5',
         },
       },
     })
@@ -116,7 +116,7 @@ describe('loadOpenDesignOfficialChannel', () => {
     if (result.status !== 'ready') throw new Error('Expected official channel to be ready')
     expect(result.channel.releaseRequest.catalogUrl).toBe(CATALOG_URL)
     expect(String(result.channel.releaseRequest.moduleId)).toBe(OPEN_DESIGN_MODULE_ID)
-    expect(String(result.channel.releaseRequest.version)).toBe('0.14.4')
+    expect(String(result.channel.releaseRequest.version)).toBe('0.14.5')
     expect(result.channel.githubReleaseRedirectPolicy).toEqual({ owner: 'Jiachi-Deng', repository: 'Simulator' })
     expect(result.channel.trustedKeys).toHaveLength(1)
     expect(result.channel.trustedKeys[0]?.publicKey).toBeInstanceOf(Uint8Array)
@@ -153,12 +153,12 @@ describe('loadOpenDesignOfficialChannel', () => {
       { ...base, version: '0.14' },
       { ...base, platform: 'darwin-x64' },
       { ...base, catalogUrl: `${CATALOG_URL}?token=unsafe` },
-      { ...base, catalogUrl: 'https://github.com/attacker/Simulator/releases/download/open-design-v0.14.4/open-design-catalog.json' },
+      { ...base, catalogUrl: 'https://github.com/attacker/Simulator/releases/download/open-design-v0.14.5/open-design-catalog.json' },
       { ...base, catalogUrl: 'https://github.com/Jiachi-Deng/Simulator/releases/latest/download/open-design-catalog.json' },
-      { ...base, catalogUrl: 'https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.4%2F..%2Fevil/open-design-catalog.json' },
-      { ...base, githubRelease: { owner: 'attacker', repository: 'Simulator', tag: 'open-design-v0.14.4' } },
+      { ...base, catalogUrl: 'https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.5%2F..%2Fevil/open-design-catalog.json' },
+      { ...base, githubRelease: { owner: 'attacker', repository: 'Simulator', tag: 'open-design-v0.14.5' } },
       { ...base, githubRelease: { owner: 'Jiachi-Deng', repository: 'Simulator', tag: 'latest' } },
-      { ...base, githubRelease: { owner: 'Jiachi-Deng', repository: 'Simulator', tag: 'open-design-v0.14.4', extra: true } },
+      { ...base, githubRelease: { owner: 'Jiachi-Deng', repository: 'Simulator', tag: 'open-design-v0.14.5', extra: true } },
       { ...base, trustedKeys: [] },
       { ...base, trustedKeys: [{ keyId: 'release', publicKey: 'not-base64', activeFrom: '2026-07-01T00:00:00.000Z' }] },
       { ...base, trustedKeys: [{ keyId: 'release', publicKey: publicKeyBase64(), activeFrom: 'not-a-time' }] },

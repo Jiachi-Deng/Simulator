@@ -23,19 +23,19 @@ permissions:
   contents: write
 
 concurrency:
-  group: open-design-official-release-v0.14.4
+  group: open-design-official-release-v0.14.5
   cancel-in-progress: false
 
 env:
   RELEASE_OWNER: Jiachi-Deng
   RELEASE_REPOSITORY: Simulator
-  RELEASE_TAG: open-design-v0.14.4
-  MODULE_VERSION: 0.14.4
-  ARCHIVE_ASSET: org.simulator.open-design-0.14.4-darwin-arm64.tar.gz
-  CATALOG_ASSET: org.simulator.open-design-0.14.4-catalog-v2.json
-  ENVELOPE_ASSET: org.simulator.open-design-0.14.4-catalog-v2-envelope.json
+  RELEASE_TAG: open-design-v0.14.5
+  MODULE_VERSION: 0.14.5
+  ARCHIVE_ASSET: org.simulator.open-design-0.14.5-darwin-arm64.tar.gz
+  CATALOG_ASSET: org.simulator.open-design-0.14.5-catalog-v2.json
+  ENVELOPE_ASSET: org.simulator.open-design-0.14.5-catalog-v2-envelope.json
   CONFIG_ASSET: open-design-official-channel.json
-  METADATA_ASSET: org.simulator.open-design-0.14.4-release-metadata.json
+  METADATA_ASSET: org.simulator.open-design-0.14.5-release-metadata.json
 
 jobs:
   initial:
@@ -50,7 +50,7 @@ jobs:
     timeout-minutes: 45
     environment:
       name: open-design-production
-      url: https://github.com/Jiachi-Deng/Simulator/releases/tag/open-design-v0.14.4
+      url: https://github.com/Jiachi-Deng/Simulator/releases/tag/open-design-v0.14.5
     env:
       KEY_ID: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ID }}
       KEY_ACTIVE_FROM: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ACTIVE_FROM }}
@@ -298,7 +298,7 @@ jobs:
     timeout-minutes: 30
     environment:
       name: open-design-production
-      url: https://github.com/Jiachi-Deng/Simulator/releases/tag/open-design-v0.14.4
+      url: https://github.com/Jiachi-Deng/Simulator/releases/tag/open-design-v0.14.5
     env:
       KEY_ID: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ID }}
       KEY_ACTIVE_FROM: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ACTIVE_FROM }}
