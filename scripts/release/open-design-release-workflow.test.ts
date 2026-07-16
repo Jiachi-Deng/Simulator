@@ -33,12 +33,12 @@ describe("OpenDesign official release workflow", () => {
   test("has fixed authority, protected writes, and serialized initial/refresh entrypoints", () => {
     expect(workflow.permissions).toEqual({ actions: "read", contents: "write" })
     expect(workflow.concurrency).toEqual({
-      group: "open-design-official-release-v0.14.3",
+      group: "open-design-official-release-v0.14.4",
       "cancel-in-progress": false,
     })
     expect(workflow.env.RELEASE_OWNER).toBe("Jiachi-Deng")
     expect(workflow.env.RELEASE_REPOSITORY).toBe("Simulator")
-    expect(workflow.env.RELEASE_TAG).toBe("open-design-v0.14.3")
+    expect(workflow.env.RELEASE_TAG).toBe("open-design-v0.14.4")
     expect(workflow.on.schedule).toEqual([{ cron: "23 */12 * * *" }])
     expect(workflow.on.workflow_dispatch.inputs.operation.options).toEqual(["refresh", "initial"])
     expect(workflow.jobs.initial.environment.name).toBe("open-design-production")

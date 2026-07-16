@@ -353,10 +353,10 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f
      };
 diff --git a/apps/daemon/src/simulator-host-agent.ts b/apps/daemon/src/simulator-host-agent.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..13ff76eb0abe133ba273bbd5cdc9a28fe3365759
+index 0000000000000000000000000000000000000000..824f30811716038405415bed67a107240d925deb
 --- /dev/null
 +++ b/apps/daemon/src/simulator-host-agent.ts
-@@ -0,0 +1,730 @@
+@@ -0,0 +1,753 @@
 +// @ts-nocheck
 +
 +import { constants as fsConstants } from 'node:fs';
@@ -797,14 +797,18 @@ index 0000000000000000000000000000000000000000..13ff76eb0abe133ba273bbd5cdc9a28f
 +  }
 +}
 +
-+function appendCompletedText(completedText, streamedText, send) {
-+  if (completedText === streamedText) return streamedText;
-+  if (!completedText.startsWith(streamedText)) {
++function completedTextSuffix(completedText, currentMessageText) {
++  if (!completedText.startsWith(currentMessageText)) {
 +    fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an inconsistent transcript.');
 +  }
-+  const suffix = completedText.slice(streamedText.length);
-+  if (suffix) send('agent', { type: 'text_delta', delta: suffix });
-+  return completedText;
++  return completedText.slice(currentMessageText.length);
++}
++
++function appendTranscriptDelta(streamedText, delta, send) {
++  const next = streamedText + delta;
++  if (next.length > MAX_PROMPT_BYTES) fail('PROTOCOL_INVALID', 'Simulator Host Runtime transcript exceeded the limit.');
++  if (delta) send('agent', { type: 'text_delta', delta });
++  return next;
 +}
 +
 +function withCacheAdmission(operation) {
@@ -967,6 +971,8 @@ index 0000000000000000000000000000000000000000..13ff76eb0abe133ba273bbd5cdc9a28f
 +  let terminal = null;
 +  let cancelPromise = null;
 +  let streamedText = '';
++  let currentMessageText = '';
++  let lastCompletedMessageText = null;
 +  let lastSequence = 0;
 +
 +  const throwIfCancelled = () => {
@@ -1036,15 +1042,32 @@ index 0000000000000000000000000000000000000000..13ff76eb0abe133ba273bbd5cdc9a28f
 +        (event) => {
 +          lastSequence = event.sequence;
 +          if (event.type === 'message.delta') {
-+            streamedText += event.data.delta;
-+            if (streamedText.length > MAX_PROMPT_BYTES) fail('PROTOCOL_INVALID', 'Simulator Host Runtime transcript exceeded the limit.');
-+            send('agent', { type: 'text_delta', delta: event.data.delta });
++            currentMessageText += event.data.delta;
++            streamedText = appendTranscriptDelta(streamedText, event.data.delta, send);
 +          } else if (event.type === 'message.completed') {
-+            streamedText = appendCompletedText(event.data.text, streamedText, send);
++            streamedText = appendTranscriptDelta(
++              streamedText,
++              completedTextSuffix(event.data.text, currentMessageText),
++              send,
++            );
++            currentMessageText = '';
++            lastCompletedMessageText = event.data.text;
 +          } else if (event.type === 'activity') {
 +            send('agent', { type: 'status', label: event.data.label ?? event.data.phase ?? event.data.kind });
 +          } else if (event.type === 'turn.completed') {
-+            if (typeof event.data.text === 'string') streamedText = appendCompletedText(event.data.text, streamedText, send);
++            if (typeof event.data.text === 'string') {
++              if (currentMessageText || lastCompletedMessageText === null) {
++                streamedText = appendTranscriptDelta(
++                  streamedText,
++                  completedTextSuffix(event.data.text, currentMessageText),
++                  send,
++                );
++                currentMessageText = '';
++                lastCompletedMessageText = event.data.text;
++              } else if (event.data.text !== lastCompletedMessageText) {
++                fail('PROTOCOL_INVALID', 'Simulator Host Runtime returned an inconsistent transcript.');
++              }
++            }
 +            terminal = 'succeeded';
 +            return false;
 +          } else if (event.type === 'turn.failed') {
