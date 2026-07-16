@@ -188,6 +188,25 @@ export const CRAFT_REFERENCE_ALLOWLIST: CraftReferenceCategory[] = [
         ].includes(line.trim())),
   },
   {
+    id: 'm1-host-agent-architecture-craft-runtime-terminology',
+    reason: 'The M1 architecture document names the embedded Craft runtime only in the Host Agent data flow, ownership, priority, packaging-failure boundary, and clean-room provenance mapping.',
+    matches: ({ path, line }) =>
+      path === 'docs/module-architecture.md'
+      && [
+        /Host `0\.12\.0`.*Craft Workspace.*Module/,
+        /^\s*Craft SessionManager -> Claude\/Pi Runtime\s*$/,
+        /v1 compatibility.*Craft 主界面/,
+        /`SessionManager`.*Craft 主 Host/,
+        /`ModuleAgentRunCore`.*Craft Session/,
+        /hidden、transient Craft Session/,
+        /^### Craft priority 与失败结果$/,
+        /可见 Craft Turn.*Module (?:Run|Turn)/,
+        /OpenDesign view.*Craft 左侧栏.*关闭 Craft/,
+        /shim 从.*不能阻止 Craft/,
+        /Runtime session registry.*Craft `SessionManager` seam.*Craft Claude\/Pi/,
+      ].some((pattern) => pattern.test(line)),
+  },
+  {
     id: 'localized-open-design-craft-host-copy',
     reason: 'The Module Center intentionally names the still-visible Craft workspace and sidebar so users understand that OpenDesign runs inside, and can return to, the primary embedded Host surface.',
     matches: ({ path, line }) =>

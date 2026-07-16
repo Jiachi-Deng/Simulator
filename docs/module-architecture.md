@@ -324,3 +324,17 @@ OpenDesign view 的 hide、return 与 reopen 不会重建正在运行的 Module 
 shim 从 `packages/host-agent-shim` 的 TypeScript entrypoint 在 asset copy 时重新构建，不能把仓库内 tracked generated file 当作权威输入。构建门要求 source、`dist/resources` 与最终 `.app` 内 shim 的 SHA-256、size 和 mode 完全一致；shim 必须是非 symlink、非 hardlink、不可 group/world write 的 `0755` regular file。Utility Process Worker 同样要求 `dist` 与 packaged bytes 完全一致，mode 为 `0644`。Runtime 启动前再次验证 canonical absolute path、owner、link count、write bits 和 shim executable bit；任一缺失或 hash/identity drift 只阻止 Module 启动，不能阻止 Craft。
 
 协议按 OpenDesign 精确版本 fail closed：冻结的 `0.14.5` 是 v1 last-known-good 和 rollback 基线；`0.14.6-rc.1` 与 `0.14.6` 才选择 v2，且 signed Catalog 的 `hostVersionRange` 必须是 `>=0.12.0`。未知 OpenDesign 版本不会猜测协议。prerelease workflow 只能发布 RC 自身，不写 stable official-channel 配置；stable workflow 还需要独立 acceptance/rollback evidence 和显式发布批准。当前 `0.14.6-rc.1` 尚未公开发布，稳定 official channel 仍指向 `0.14.5`。
+
+### M1 clean-room provenance anchor
+
+M1 的行为参考固定为 `https://github.com/Jiachi-Deng/Proma.git` commit `eca88618691e86f02dc1fb3296dffe92e5605289`、tree `5d90fd91a2a21c953b5dda31ad65e79acc69736e`；该快照根许可证是 `AGPL-3.0`，相关 Host Agent commits 的 author/committer 记录另见项目 provenance 账本。行为分析者输出位于工作区外置 Vault 的 `research/M1-Proma-Host-Agent-行为规格与来源映射.md`，固定 SHA-256 为 `74fe958ad981efecbc3a72b1443c92ba95ab123a093d7518f1dbd98a6519d624`。实现角色只接收该抽象行为规格和 canonical fixtures，不读取 Proma 源码。
+
+| Proma 行为参考 | Simulator target | 导入方式 | 首要 Simulator commit |
+| --- | --- | --- | --- |
+| shared wire contract、bounded replay、Broker server | `packages/host-agent-contract`、`packages/host-agent-run-core`、`packages/host-agent-broker` | clean-room behavioral reimplementation；未复制 Proma DTO、validator、error text 或 fixture | `b185115ca5aa24db822b5248aaef4473ad7e4845`、`b8ec70ede7b2af107cbc8675433cae884a2dd19a`、`d47be3bcdc8760850facd7ef7306a69c21194cde` |
+| lifecycle grant、Host App coordinator、dormant Broker ownership | `apps/electron/src/host-agent/token-store.ts`、`supervisor.ts`、`module-turn-lease.ts` 与 v1/v2 Worker adapters | clean-room security-property adaptation；Simulator 使用独立 token/epoch/worker/circuit breaker | token-store/supervisor/adapters: `bfb4c043b4cfcff832ecb27d3122a8abad0cbaec`；module-turn-lease: `eaae2e60763d2464592baa3f9206f527fdf5f08e` |
+| Runtime session registry 与 executor | `packages/server-core/src/sessions/module-agent-adapter.ts`、transient Session tests、Craft `SessionManager` seam | provider-neutral clean-room rewrite；以 Craft Claude/Pi 取代 Proma Codex-only executor | `8a94980eb79e145994809b0d7a0b8b19a3abb9e3`、`57a205c0a3f014d68006a81de7b5ff108bbf186d` |
+| cross-repository Shim interop smoke | `packages/host-agent-shim` | 只复现黑盒 stdin/JSONL/cancel 行为；Shim 实现、bootstrap 和 tests 为 Simulator 原创 | `d47be3bcdc8760850facd7ef7306a69c21194cde` |
+| OpenDesign Host Runtime selection | `modules/open-design` ordinary `json-event-stream` patch、probe 与 provenance | 基于 pinned upstream OpenDesign 的 Simulator patch；不复制 Proma Adapter/cache 实现 | `34e4e4f95c26b00f0bb1f9f8b53097c95a0b8840` |
+
+独立工程 provenance 扫描比较了 147 个 M1 changed source 与 1,384 个 Proma tracked source：除短小标准协议片段外，没有 exact comment match 或实质 clone。该结果证明当前 clean-room 工程记录的一致性，不替代版权/雇佣关系或额外商业许可的法律意见，也不把 Proma 第三方资产纳入授权。

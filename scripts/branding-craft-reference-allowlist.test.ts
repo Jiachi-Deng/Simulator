@@ -84,6 +84,17 @@ describe('remaining Craft references', () => {
       line: 'Visible Craft acceptance copy for an unrelated fourth assertion',
       value: 'Craft',
     })).toBeUndefined()
+
+    expect(categoryForCraftReference({
+      path: 'docs/module-architecture.md',
+      line: '### Craft priority 与失败结果',
+      value: 'Craft',
+    })?.id).toBe('m1-host-agent-architecture-craft-runtime-terminology')
+    expect(categoryForCraftReference({
+      path: 'docs/module-architecture.md',
+      line: 'Welcome to Craft',
+      value: 'Craft',
+    })).toBeUndefined()
   })
 
   test('current package metadata and desktop artifacts use Simulator ownership', () => {
