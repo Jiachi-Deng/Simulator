@@ -22,7 +22,7 @@
   },
   "simulatorPatch": {
     "path": "patches/open-design-v0.14.1-simulator-host-runtime.patch",
-    "sha256": "9b39a76c408f32077f6af6f2a560d589c462288de07a438982c46dc90d28ae05",
+    "sha256": "006535ab876d16fbce7d302657bea49fcb6a9b020236eecbfc340fc0a2a21993",
     "preimageSha256": "4513a63d525931288a1874676c2a5be397680ff51aeff30acffaf878cae20a74",
     "postimageSha256": "74401e8c0550cedb17eadfac927fa4db384be277703520db9bbbe8e945bc7e1d",
     "changedPaths": [
@@ -57,7 +57,7 @@
       {"path": "apps/daemon/src/runtimes/defs/simulator-host.ts", "preimageSha256": null, "postimageSha256": "a0f4f0e21972d0fae741e565c298cd69b115b03c5907462e84ab7211752dee30"},
       {"path": "apps/daemon/src/runtimes/json-event-stream.ts", "preimageSha256": "19406774c97a5302c48164c4a2207674d3b79a0ebb75031df170082139657653", "postimageSha256": "7904556a1290e506a0ed860100d92eb2e2ea48bfa0248d58000ed87ca9e3d6b5"},
       {"path": "apps/daemon/src/runtimes/registry.ts", "preimageSha256": "6fd6b191cd60bf260885ff4a7307495e2925640b41f60da9d4abd009c6bb0636", "postimageSha256": "db7544ccb8f0171c9e28db453170532583bb9d5d8163725f0b18b123ab7a162d"},
-      {"path": "apps/daemon/src/runtimes/simulator-host-v2-event-stream.ts", "preimageSha256": null, "postimageSha256": "71ef97abd94b65762857035999bbfbe20a6bc6ca722df537cb28cc18d08a2e14"},
+      {"path": "apps/daemon/src/runtimes/simulator-host-v2-event-stream.ts", "preimageSha256": null, "postimageSha256": "10f1c826085816e6b44d621f6cfef57c4df983205ca92f789abe9e9998d7d352"},
       {"path": "apps/daemon/src/server.ts", "preimageSha256": "8660437481e611c900d579f578ba7186384c73d9e2affcf016bf5be249e8c4f0", "postimageSha256": "f3224f96ff2526f0fa4aa137ce68325b0c11e490bfb2fcd15ce2c6332356a8d8"},
       {"path": "apps/daemon/src/simulator-host-agent.ts", "preimageSha256": null, "postimageSha256": "dfe6f094cf426ef551042b6a3038ce54e5a227cc20c5191c098fc40399306192"},
       {"path": "apps/web/next.config.ts", "preimageSha256": "fe650d8b584313d110249088fd867ff57edfc09e7caad40f86ff961ca249e16b", "postimageSha256": "c208f942c34223d6488dd4ac9c2ff8ce30d165267599e6c0a1e6c8e494d25f46"},
@@ -95,7 +95,7 @@
     {"path": "pnpm-lock.yaml", "sha256": "5b0f471b76ffdcca7f427e5b3cc9eb88cb82f1a30c7ab8a41fb57d46306da80f"},
     {"path": "pnpm-workspace.yaml", "sha256": "7036cab2720e4e2db1e613bf0b7eb83075be2e60e1dd0ae683f2bca2483cc2ac"},
     {"path": "apps/web/next-env.d.ts", "sha256": "7ad303e40d4fddf44f156129e397511953a71481c5cfd86b1862649aaaf240cc"},
-    {"path": "patches/open-design-v0.14.1-simulator-host-runtime.patch", "sha256": "9b39a76c408f32077f6af6f2a560d589c462288de07a438982c46dc90d28ae05"}
+    {"path": "patches/open-design-v0.14.1-simulator-host-runtime.patch", "sha256": "006535ab876d16fbce7d302657bea49fcb6a9b020236eecbfc340fc0a2a21993"}
   ],
   "buildToolchainExpectations": {
     "node": "24.18.0",

@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 
 import { isAllowedPatchPath } from "../src/apply-simulator-patch.mjs";
 
@@ -15,18 +19,37 @@ const contractFixtures = JSON.parse(await readFile(
 ));
 const canonicalTranscripts = contractFixtures.valid.transcripts;
 const runHandle = `run_${"a".repeat(32)}`;
+const execFileAsync = promisify(execFile);
 
 test("pins the audited OpenDesign upstream commit", () => {
   assert.equal(provenance.source.commit, "2225647726d5387bb24e9539fdb577958b6d88c6");
   assert.equal(provenance.source.ref, "open-design-v0.14.1");
 });
 
-test("strict patch scope contains the v2 parser and no unrelated surface", () => {
+test("strict patch scope contains a complete git-applied v2 parser and no unrelated surface", async (t) => {
   const changedPaths = provenance.simulatorPatch.changedPaths;
   assert.equal(changedPaths.length, 23);
   assert.ok(changedPaths.every(isAllowedPatchPath));
   assert.ok(changedPaths.includes("apps/daemon/src/runtimes/simulator-host-v2-event-stream.ts"));
   assert.equal(changedPaths.includes("apps/daemon/src/runtimes/runs.ts"), false);
+
+  const root = await mkdtemp(path.join(os.tmpdir(), "simulator-host-v2-git-apply-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const sourcePath = "apps/daemon/src/runtimes/simulator-host-v2-event-stream.ts";
+  const patchPath = path.join(root, "simulator-host.patch");
+  const targetPath = path.join(root, sourcePath);
+  await mkdir(path.dirname(targetPath), { recursive: true });
+  await writeFile(patchPath, patchText);
+  await execFileAsync("git", ["init", "--quiet"], { cwd: root });
+  await execFileAsync("git", ["apply", `--include=${sourcePath}`, patchPath], { cwd: root });
+
+  const source = await readFile(targetPath, "utf8");
+  const expectedDigest = provenance.simulatorPatch.fileDigests.find((entry) => entry.path === sourcePath)?.postimageSha256;
+  assert.equal(createHash("sha256").update(source).digest("hex"), expectedDigest);
+  const importPath = path.join(root, "simulator-host-v2-event-stream.mjs");
+  await writeFile(importPath, source);
+  const parser = await import(`${pathToFileURL(importPath).href}?test=${Date.now()}`);
+  assert.equal(typeof parser.createSimulatorHostV2EventHandler, "function");
 });
 
 test("patch uses an ordinary json-event-stream runtime with an empty argv", () => {
