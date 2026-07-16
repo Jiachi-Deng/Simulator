@@ -37,10 +37,26 @@ export interface ModuleOperationIdentity {
   readonly operationId?: string
 }
 
+/** Signed Catalog facts bound to an install request by resolveInstallRequest. */
+export interface ModuleCoordinatorCatalogEvidence {
+  readonly schemaVersion: 1
+  readonly sequence: number
+  readonly issuedAt: string
+  readonly expiresAt: string
+  readonly artifactSize: number
+}
+
 export interface ModuleCoordinatorInstallRequest extends ModuleOperationIdentity {
   readonly catalogUrl: string
   readonly descriptor: VerifiedArtifactDescriptor
   readonly hostVersionRange: string
+  /** Optional only for compatibility with durable operations created before Catalog evidence existed. */
+  readonly catalogEvidence?: ModuleCoordinatorCatalogEvidence
+}
+
+/** A new install request resolved from the coordinator's own verified v2 Catalog. */
+export interface ResolvedModuleCoordinatorInstallRequest extends ModuleCoordinatorInstallRequest {
+  readonly catalogEvidence: ModuleCoordinatorCatalogEvidence
 }
 
 /** Exact release selection resolved from the coordinator's own verified downloader. */

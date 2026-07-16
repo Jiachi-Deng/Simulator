@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto'
 import { parseModuleManifest, type ModuleArtifact, type ModuleId, type ModuleVersion } from '@simulator/module-contract'
+import { parseModuleCoordinatorCatalogEvidence } from './catalog-evidence.ts'
 import {
   MODULE_COORDINATOR_STATE_SCHEMA_VERSION,
   type ModuleCoordinatorCheckpoint,
@@ -130,7 +131,7 @@ function request(kind: ModuleCoordinatorOperationKind, input: unknown, operation
   const value = record(input, 'operation.request')
   if (text(value.operationId, 'operation.request.operationId', OPERATION_ID) !== operationId) fail('request operationId does not match operation id')
   if (kind === 'install' || kind === 'update') {
-    fields(value, ['operationId', 'catalogUrl', 'descriptor', 'hostVersionRange'], [], 'operation.request')
+    fields(value, ['operationId', 'catalogUrl', 'descriptor', 'hostVersionRange'], ['catalogEvidence'], 'operation.request')
     const descriptor = record(value.descriptor, 'operation.request.descriptor')
     fields(descriptor, ['verified', 'manifest', 'artifact', 'extractedManifestSha256', 'format'], [], 'operation.request.descriptor')
     if (descriptor.verified !== true || descriptor.format !== 'tar.gz') fail('operation descriptor trust marker or format is invalid')
@@ -147,6 +148,9 @@ function request(kind: ModuleCoordinatorOperationKind, input: unknown, operation
         format: 'tar.gz',
       },
       hostVersionRange: text(value.hostVersionRange, 'operation.request.hostVersionRange'),
+      ...(Object.hasOwn(value, 'catalogEvidence')
+        ? { catalogEvidence: parseModuleCoordinatorCatalogEvidence(value.catalogEvidence, 'operation.request.catalogEvidence') }
+        : {}),
     }
   }
   if (kind === 'rollback') {
