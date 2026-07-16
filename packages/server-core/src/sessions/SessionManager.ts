@@ -6608,13 +6608,41 @@ export class SessionManager implements ISessionManager {
     if (!managed) return
 
     await this.cancelProcessing(sessionId, true)
-    await this.awaitSessionStopped(sessionId, timeoutMs)
+    try {
+      await this.awaitSessionStopped(sessionId, timeoutMs)
+    } catch (error) {
+      // A cooperative stop timeout is not permission to leave a provider
+      // alive. Continue into the provider-specific hard/graceful disposal
+      // below; only return success after the Session and disk boundary vanish.
+      sessionLog.warn(`Transient Module session ${sessionId} did not stop cooperatively; forcing disposal`, {
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
 
     // Provider-specific destroy paths terminate their current query/process.
     // Disconnect the shared pool explicitly as BaseAgent cleanup is otherwise
     // fire-and-forget.
-    managed.agent?.dispose()
-    managed.agent = null
+    const agent = managed.agent
+    if (agent) {
+      try {
+        if (agent.disposeForRestart) await agent.disposeForRestart()
+        else agent.dispose()
+      } catch (error) {
+        // `disposeForRestart` is the awaited Pi path. If it fails, still use
+        // the backend's hard disposal before fencing this Module path.
+        sessionLog.warn(`Graceful provider disposal failed for transient Module session ${sessionId}; forcing abort`, {
+          error: error instanceof Error ? error.message : String(error),
+        })
+        agent.dispose()
+      } finally {
+        managed.agent = null
+      }
+    }
+    // A timed-out stream may never reach onProcessingStopped after its backend
+    // has been destroyed. Close the Host-owned state explicitly so the strict
+    // verification below cannot mistake a dead provider for live work.
+    this.setProcessing(managed, false)
+    managed.stopRequested = false
     if (managed.mcpPool) await managed.mcpPool.disconnectAll()
     if (managed.poolServer) await managed.poolServer.stop()
     managed.mcpPool = undefined
