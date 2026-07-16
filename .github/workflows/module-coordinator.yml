@@ -49,6 +49,8 @@ on:
       - "apps/electron/src/main/electron-module-view-port.ts"
       - "apps/electron/src/main/host-module-coordinator.ts"
       - "apps/electron/src/main/host-module-coordinator-smoke.ts"
+      - "apps/electron/src/main/host-module-process-evidence.ts"
+      - "apps/electron/src/main/host-module-process-evidence.test.ts"
       - "apps/electron/src/main/host-module-smoke-deadline.ts"
       - "apps/electron/src/main/host-module-smoke-deadline.test.ts"
       - "apps/electron/src/main/index.ts"
@@ -107,6 +109,8 @@ on:
       - "apps/electron/src/main/electron-module-view-port.ts"
       - "apps/electron/src/main/host-module-coordinator.ts"
       - "apps/electron/src/main/host-module-coordinator-smoke.ts"
+      - "apps/electron/src/main/host-module-process-evidence.ts"
+      - "apps/electron/src/main/host-module-process-evidence.test.ts"
       - "apps/electron/src/main/host-module-smoke-deadline.ts"
       - "apps/electron/src/main/host-module-smoke-deadline.test.ts"
       - "apps/electron/src/main/index.ts"
@@ -221,6 +225,7 @@ jobs:
           packages/pi-agent-server/src/file-tool-path-input.test.ts
           apps/electron/src/main/module-agent-runtime.test.ts
           apps/electron/src/main/module-agent-worker-recovery.test.ts
+          apps/electron/src/main/host-module-process-evidence.test.ts
           apps/electron/src/main/host-module-smoke-deadline.test.ts
       - name: Validate Host Agent Run Core closure
         run: bun run validate:host-agent-run-core

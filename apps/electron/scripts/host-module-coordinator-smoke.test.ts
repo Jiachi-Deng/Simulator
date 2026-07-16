@@ -7,6 +7,11 @@ import { publicWrapperFailure } from './host-module-smoke-public-failure'
 const repositoryRoot = resolve(import.meta.dir, '..', '..', '..')
 const scriptPath = join(repositoryRoot, 'apps/electron/scripts/host-module-coordinator-smoke.ts')
 const mainSmokePath = join(repositoryRoot, 'apps/electron/src/main/host-module-coordinator-smoke.ts')
+const processEvidencePath = join(repositoryRoot, 'apps/electron/src/main/host-module-process-evidence.ts')
+const v1FixturePath = join(
+  repositoryRoot,
+  'packages/module-coordinator/fixtures/packaged-fake-module/bin/module.ts',
+)
 const v2FixturePath = join(
   repositoryRoot,
   'packages/module-coordinator/fixtures/packaged-fake-module/bin/module-v2.ts',
@@ -145,6 +150,8 @@ describe('Electron packaged Host Agent smoke scenarios', () => {
   it('maps only the exact OpenDesign rollback and RC versions to their fixture entrypoints', async () => {
     const source = await readFile(scriptPath, 'utf8')
     const mainSource = await readFile(mainSmokePath, 'utf8')
+    const processEvidenceSource = await readFile(processEvidencePath, 'utf8')
+    const v1FixtureSource = await readFile(v1FixturePath, 'utf8')
     const v2FixtureSource = await readFile(v2FixturePath, 'utf8')
     expect(source).toContain("moduleId: 'org.simulator.open-design'")
     expect(source).toContain("version: '0.14.5'")
@@ -172,9 +179,18 @@ describe('Electron packaged Host Agent smoke scenarios', () => {
     expect(mainSource).toContain("errorCode: 'SMOKE_TIMEOUT'")
     expect(mainSource).toContain('sessionPersistenceVerified')
     expect(mainSource).not.toContain('        sessionPath,')
-    expect(mainSource).toContain("execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,comm=']")
+    expect(mainSource).toContain("execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,ucomm=']")
     expect(mainSource).toContain("'module-provider-root'")
-    expect(mainSource).toContain('sameProcessLostItsExecutableName')
+    expect(mainSource).toContain('processGroupsAddedSince(baselineProcessGroups')
+    expect(mainSource).not.toContain('sameProcessLostItsExecutableName')
+    expect(processEvidenceSource).toContain('row.ppid === rootPid && row.pid === row.pgid')
+    expect(processEvidenceSource).not.toContain("new Set(['bun', 'node'")
+    for (const fixtureSource of [v1FixtureSource, v2FixtureSource]) {
+      expect(fixtureSource).toContain('hostAgentSmoke ??= runHostAgentSmoke().catch(')
+      expect(fixtureSource).toContain("url.pathname === '/host-agent-smoke'")
+      expect(fixtureSource).toContain('Response.json(await getHostAgentSmoke())')
+      expect(fixtureSource).not.toContain('const hostAgentSmoke = runHostAgentSmoke()')
+    }
     expect(v2FixtureSource).toContain('const SAFE_SHIM_DIAGNOSTIC_CODES = new Set([')
     expect(v2FixtureSource).toContain(
       "return code && SAFE_SHIM_DIAGNOSTIC_CODES.has(code) ? code : 'INTERNAL_ERROR'",

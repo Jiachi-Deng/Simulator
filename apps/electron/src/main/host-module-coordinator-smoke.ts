@@ -20,6 +20,11 @@ import {
   resolveHostModuleSmokeNodeRuntime,
 } from './host-module-smoke-gate'
 import { AuthoritativeSmokeWatchdogState, waitForAcceptedValue } from './host-module-smoke-deadline'
+import {
+  parseSanitizedMacosProcessTree,
+  processGroupsAddedSince,
+  type SanitizedMacosProcessTree,
+} from './host-module-process-evidence'
 
 const MANIFEST_PREFIX = '--host-module-smoke-manifest='
 const RESULT_PREFIX = '--host-module-smoke-result='
@@ -153,67 +158,23 @@ async function waitForProcessGroupsToExit(pgids: readonly number[], timeoutMs: n
  * to numeric ownership plus basename, so command lines, environment variables,
  * bearer material, and absolute paths can never enter the smoke artifact.
  */
-function macosProcessTree(rootPid: number): SafeProcessEvidence[] {
+function macosProcessTree(
+  rootPid: number,
+  knownOwnedProcessGroups: ReadonlySet<number> = new Set(),
+): SanitizedMacosProcessTree {
   if (process.platform !== 'darwin') {
     throw new Error('Host Module process-tree acceptance is supported only on macOS')
   }
   let output: string
   try {
-    output = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,comm='], {
+    output = execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,ucomm='], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     })
   } catch {
     throw new Error('Could not collect sanitized macOS process-tree evidence')
   }
-  const rows = output.split('\n').flatMap((line) => {
-    const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+?)\s*$/.exec(line)
-    if (!match) return []
-    const pid = Number(match[1])
-    const ppid = Number(match[2])
-    const pgid = Number(match[3])
-    if (![pid, ppid, pgid].every((value) => Number.isSafeInteger(value) && value > 0)) return []
-    const rawExecutable = match[4]!.split('/').at(-1) ?? 'unknown'
-    // macOS wraps a just-exited process name in parentheses while the parent
-    // is collecting its status; normalize that harmless lifecycle notation.
-    const executable = /^\(([^()]+)\)$/.exec(rawExecutable)?.[1] ?? rawExecutable
-    return [{ pid, ppid, pgid, executable }]
-  })
-  const byParent = new Map<number, typeof rows>()
-  for (const row of rows) {
-    const children = byParent.get(row.ppid) ?? []
-    children.push(row)
-    byParent.set(row.ppid, children)
-  }
-  const descendants = new Map<number, (typeof rows)[number]>()
-  const queue = [rootPid]
-  while (queue.length > 0) {
-    const parent = queue.shift()!
-    for (const child of byParent.get(parent) ?? []) {
-      if (child.executable === 'ps' || descendants.has(child.pid)) continue
-      descendants.set(child.pid, child)
-      queue.push(child.pid)
-    }
-  }
-  const providerRuntimeNames = new Set(['bun', 'bun.exe', 'node', 'node.exe'])
-  const providerGroups = new Set(
-    [...descendants.values()]
-      .filter((row) => row.pid === row.pgid && providerRuntimeNames.has(row.executable))
-      .map((row) => row.pgid),
-  )
-  // Include descendants that were re-parented during the snapshot but remain
-  // in the dedicated provider process group.
-  for (const row of rows) {
-    if (providerGroups.has(row.pgid) && row.executable !== 'ps') descendants.set(row.pid, row)
-  }
-  return [...descendants.values()].map((row) => ({
-    ...row,
-    role: row.pid === row.pgid && providerGroups.has(row.pgid)
-      ? 'module-provider-root'
-      : providerGroups.has(row.pgid)
-        ? 'module-provider-descendant'
-        : 'host-descendant',
-  }))
+  return parseSanitizedMacosProcessTree(output, rootPid, knownOwnedProcessGroups)
 }
 
 async function canConnect(host: string, port: number): Promise<boolean> {
@@ -556,15 +517,31 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
     const observedProcessIds = new Set<number>([hostMainProcessId, hostRendererProcessId])
     const safeProcessRecords = new Map<number, SafeProcessEvidence>()
     const moduleProviderGroups = smokeOwnedProcessGroups
-    const captureProcessEvidence = (): void => {
-      for (const record of macosProcessTree(hostMainProcessId)) {
-        const previous = safeProcessRecords.get(record.pid)
-        const sameProcessLostItsExecutableName = previous?.pgid === record.pgid
-          && previous.role !== 'host-descendant'
-          && record.role === 'host-descendant'
-        if (!sameProcessLostItsExecutableName) safeProcessRecords.set(record.pid, record)
+    const captureProcessEvidence = (
+      knownOwnedProcessGroups: ReadonlySet<number> = new Set(),
+    ): Set<number> => {
+      const snapshot = macosProcessTree(hostMainProcessId, knownOwnedProcessGroups)
+      for (const record of snapshot.records) {
+        const providerOwned = knownOwnedProcessGroups.has(record.pgid)
+        safeProcessRecords.set(record.pid, {
+          ...record,
+          role: providerOwned
+            ? (record.pid === record.pgid ? 'module-provider-root' : 'module-provider-descendant')
+            : 'host-descendant',
+        })
         observedProcessIds.add(record.pid)
-        if (record.role === 'module-provider-root') moduleProviderGroups.add(record.pgid)
+      }
+      return new Set(snapshot.directChildGroupLeaders)
+    }
+    const promoteProviderProcessGroups = (pgids: readonly number[]): void => {
+      const promoted = new Set(pgids)
+      for (const pgid of promoted) moduleProviderGroups.add(pgid)
+      for (const [pid, record] of safeProcessRecords) {
+        if (!promoted.has(record.pgid)) continue
+        safeProcessRecords.set(pid, {
+          ...record,
+          role: pid === record.pgid ? 'module-provider-root' : 'module-provider-descendant',
+        })
       }
     }
     const assertStableHost = async (phase: string): Promise<void> => {
@@ -652,11 +629,22 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
     const resourceText = await resource.text()
     const fetchJourney = async (endpoint: { host: string; port: number }, phaseBase: 60 | 90 | 120) => {
       failurePhase = phaseBase
-      const previousProviderGroups = new Set(moduleProviderGroups)
+      // Snapshot every already-running direct group before the request. Only a
+      // new direct Host child that becomes its own group while the deterministic
+      // provider Turn is active can be claimed by this journey.
+      const baselineProcessGroups = captureProcessEvidence()
+      const journeyProviderGroups = new Set<number>()
       let samplingError: Error | undefined
       const sample = (): void => {
         if (samplingError) return
-        try { captureProcessEvidence() } catch (error) {
+        try {
+          const observed = captureProcessEvidence(journeyProviderGroups)
+          const added = processGroupsAddedSince(baselineProcessGroups, [...observed])
+          if (added.length > 0) {
+            for (const pgid of added) journeyProviderGroups.add(pgid)
+            promoteProviderProcessGroups(added)
+          }
+        } catch (error) {
           samplingError = error instanceof Error ? error : new Error('Process evidence sampling failed')
         }
       }
@@ -675,13 +663,12 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
       if (!response.ok) throw new Error(`Module Host Agent smoke endpoint failed with ${response.status}`)
       const journey = validateHostAgentJourney(await response.json(), contractVersion)
       failurePhase = phaseBase + 3
-      const journeyProviderGroups = [...moduleProviderGroups]
-        .filter((pgid) => !previousProviderGroups.has(pgid))
-      if (journeyProviderGroups.length === 0) {
+      const claimedProviderGroups = [...journeyProviderGroups]
+      if (claimedProviderGroups.length === 0) {
         throw new Error('Module Host Agent journey did not expose a dedicated provider process group')
       }
       failurePhase = phaseBase + 4
-      const residualProviderGroups = await waitForProcessGroupsToExit(journeyProviderGroups, 5_000)
+      const residualProviderGroups = await waitForProcessGroupsToExit(claimedProviderGroups, 5_000)
       if (residualProviderGroups.length > 0) {
         throw new Error(`Module Host Agent journey left provider process groups: ${residualProviderGroups.join(',')}`)
       }
