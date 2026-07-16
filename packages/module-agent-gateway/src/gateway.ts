@@ -109,7 +109,7 @@ export class ModuleAgentGateway {
     const workspaceRoot = await this.#deps.pathAuthority.canonicalize(spec.workspaceRoot)
     const authorizedWorkingRoot = await this.#deps.pathAuthority.canonicalize(spec.authorizedWorkingRoot)
     const defaultWorkingDirectory = await this.#deps.pathAuthority.canonicalize(spec.defaultWorkingDirectory)
-    if (!this.#deps.pathAuthority.isEqualOrWithin(defaultWorkingDirectory, authorizedWorkingRoot)) {
+    if (!await this.#deps.pathAuthority.isEqualOrWithin(defaultWorkingDirectory, authorizedWorkingRoot)) {
       throw new ModuleAgentGatewayError('WORKSPACE_DENIED', 'Default working directory is outside the authorized project root')
     }
 
@@ -189,7 +189,7 @@ export class ModuleAgentGateway {
         request.workingDirectory ?? grant.defaultWorkingDirectory,
       )
       this.#assertGrantActive(grant)
-      if (!this.#deps.pathAuthority.isEqualOrWithin(workingDirectory, grant.authorizedWorkingRoot)) {
+      if (!await this.#deps.pathAuthority.isEqualOrWithin(workingDirectory, grant.authorizedWorkingRoot)) {
         throw new ModuleAgentGatewayError('WORKSPACE_DENIED', 'Working directory is outside the authorized project root')
       }
 
@@ -232,7 +232,7 @@ export class ModuleAgentGateway {
       }
 
       try {
-        record.unsubscribePort = this.#deps.port.subscribe(created.sessionId, (event) => {
+        record.unsubscribePort = await this.#deps.port.subscribe(created.sessionId, (event) => {
           this.#receivePortEvent(record, event)
         })
       } catch {

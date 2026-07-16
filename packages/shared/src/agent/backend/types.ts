@@ -474,6 +474,12 @@ export interface AgentBackend {
    */
   disposeForRestart?(): Promise<void>;
 
+  /**
+   * Strict transient-Session teardown. Implementations resolve only after the
+   * provider OS process tree has acknowledged termination.
+   */
+  disposeAndReap?(): Promise<void>;
+
   /** Get current thinking level */
   getThinkingLevel(): ThinkingLevel;
 

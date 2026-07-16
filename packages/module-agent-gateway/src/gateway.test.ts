@@ -49,6 +49,32 @@ async function grantAndSession(setupResult: ReturnType<typeof setup>) {
 }
 
 describe('ModuleAgentGateway', () => {
+  it('treats synchronous and asynchronous path authority decisions identically', async () => {
+    const syncPaths = new MemoryModuleAgentPathAuthority()
+    const asyncPaths = {
+      canonicalize: (path: string) => syncPaths.canonicalize(path),
+      isEqualOrWithin: async (candidate: string, root: string) => syncPaths.isEqualOrWithin(candidate, root),
+    }
+    const create = (pathAuthority: typeof syncPaths | typeof asyncPaths) => new ModuleAgentGateway({
+      port: new FakeModuleAgentSessionPort(),
+      pathAuthority,
+      tokenSource: new DeterministicModuleAgentTokenSource(),
+      clock: { now: () => 1_000 },
+    })
+    const spec = setup().spec
+    const syncGateway = create(syncPaths)
+    const asyncGateway = create(asyncPaths)
+    const syncGrant = await syncGateway.issueGrant(spec)
+    const asyncGrant = await asyncGateway.issueGrant(spec)
+    expect(asyncGrant).toEqual(syncGrant)
+    expect(await asyncGateway.createSession({ ...spec, grantToken: asyncGrant.grantToken }, { contractVersion: 1 }))
+      .toEqual(await syncGateway.createSession({ ...spec, grantToken: syncGrant.grantToken }, { contractVersion: 1 }))
+
+    const escaped = { ...spec, defaultWorkingDirectory: '/module/projects/other' }
+    await expect(create(syncPaths).issueGrant(escaped)).rejects.toMatchObject({ code: 'WORKSPACE_DENIED' })
+    await expect(create(asyncPaths).issueGrant(escaped)).rejects.toMatchObject({ code: 'WORKSPACE_DENIED' })
+  })
+
   it('renews a live launch grant before its original expiry', async () => {
     const state = setup()
     const grant = await state.gateway.issueGrant(state.spec)

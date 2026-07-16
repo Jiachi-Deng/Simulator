@@ -28,12 +28,12 @@ function ownership(overrides: Record<string, unknown> = {}): Record<string, unkn
 function writeSession(
   workspaceRoot: string,
   sessionId: string,
-  moduleAgentRun: Record<string, unknown>,
+  moduleAgentRun?: unknown,
 ): string {
   const sessionDir = join(workspaceRoot, 'sessions', sessionId)
   mkdirSync(sessionDir, { recursive: true })
   const sessionFile = join(sessionDir, 'session.jsonl')
-  const header = {
+  const header: Record<string, unknown> = {
     id: sessionId,
     workspaceRootPath: workspaceRoot,
     workingDirectory: workspaceRoot,
@@ -48,8 +48,8 @@ function writeSession(
       contextTokens: 0,
       costUsd: 0,
     },
-    moduleAgentRun,
   }
+  if (moduleAgentRun !== undefined) header.moduleAgentRun = moduleAgentRun
   const queued = {
     id: `queued-${sessionId}`,
     type: 'user',
@@ -62,7 +62,7 @@ function writeSession(
 }
 
 describe('transient Module startup quarantine', () => {
-  it('reaps valid ownership before ready and preserves invalid ownership without queued recovery', () => {
+  it('reaps valid ownership, physically quarantines malformed claims, and preserves ordinary recovery', () => {
     const configDir = mkdtempSync(join(tmpdir(), 'module-startup-config-'))
     const workspaceRoot = mkdtempSync(join(tmpdir(), 'module-startup-workspace-'))
     roots.push(configDir, workspaceRoot)
@@ -87,21 +87,61 @@ describe('transient Module startup quarantine', () => {
     }))
 
     const validDir = writeSession(workspaceRoot, 'valid-transient', ownership())
-    const invalidDir = writeSession(workspaceRoot, 'invalid-transient', ownership({ unexpected: true }))
+    const invalidContractDir = writeSession(
+      workspaceRoot,
+      'invalid-contract',
+      ownership({ contractVersion: 3 }),
+    )
+    const invalidStateDir = writeSession(
+      workspaceRoot,
+      'invalid-state',
+      ownership({ state: 'resuming' }),
+    )
+    const missingField = ownership()
+    delete missingField.requestDigest
+    const missingFieldDir = writeSession(workspaceRoot, 'missing-field', missingField)
+    const ordinaryDir = writeSession(workspaceRoot, 'ordinary-session')
+    const quarantineRoot = join(workspaceRoot, 'sessions', '.module-agent-quarantine')
 
     const script = `
-      import { existsSync } from 'node:fs';
+      import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
+      import { join } from 'node:path';
       import { SessionManager } from ${JSON.stringify(SESSION_MANAGER_URL)};
       const manager = new SessionManager();
       let queuedRecoveries = 0;
       manager.processNextQueuedMessage = () => { queuedRecoveries += 1; };
       await manager.reloadSessions();
+      const invalidOpenResults = await Promise.all([
+        manager.getSession('invalid-contract'),
+        manager.getSession('invalid-state'),
+        manager.getSession('missing-field'),
+      ]);
+      const ordinaryOpen = await manager.getSession('ordinary-session');
       await new Promise((resolve) => setTimeout(resolve, 25));
+      const quarantineEntries = existsSync(${JSON.stringify(quarantineRoot)})
+        ? readdirSync(${JSON.stringify(quarantineRoot)}).sort()
+        : [];
+      const manifests = quarantineEntries.map((entry) => JSON.parse(
+        readFileSync(join(${JSON.stringify(quarantineRoot)}, entry, 'quarantine.json'), 'utf8'),
+      ));
       console.log(JSON.stringify({
         queuedRecoveries,
         exposedSessions: manager.getSessions().map((session) => session.id),
         validExists: existsSync(${JSON.stringify(validDir)}),
-        invalidExists: existsSync(${JSON.stringify(invalidDir)}),
+        invalidSourceExists: [
+          ${JSON.stringify(invalidContractDir)},
+          ${JSON.stringify(invalidStateDir)},
+          ${JSON.stringify(missingFieldDir)},
+        ].map((path) => existsSync(path)),
+        invalidOpenResults: invalidOpenResults.map((session) => session?.id ?? null),
+        ordinaryExists: existsSync(${JSON.stringify(ordinaryDir)}),
+        ordinaryOpen: ordinaryOpen?.id ?? null,
+        quarantineEntries,
+        manifests,
+        quarantineRootMode: statSync(${JSON.stringify(quarantineRoot)}).mode & 0o777,
+        manifestModes: quarantineEntries.map((entry) => (
+          statSync(join(${JSON.stringify(quarantineRoot)}, entry, 'quarantine.json')).mode & 0o777
+        )),
       }));
       manager.cleanup();
     `
@@ -118,14 +158,43 @@ describe('transient Module startup quarantine', () => {
       queuedRecoveries: number
       exposedSessions: string[]
       validExists: boolean
-      invalidExists: boolean
+      invalidSourceExists: boolean[]
+      invalidOpenResults: Array<string | null>
+      ordinaryExists: boolean
+      ordinaryOpen: string | null
+      quarantineEntries: string[]
+      manifests: Array<{
+        schemaVersion: number
+        kind: string
+        reasonCode: string
+        sessionId: string
+      }>
+      quarantineRootMode: number
+      manifestModes: number[]
     }
-    expect(output).toEqual({
-      queuedRecoveries: 0,
-      exposedSessions: [],
-      validExists: false,
-      invalidExists: true,
-    })
-    expect(existsSync(invalidDir)).toBe(true)
+    expect(output.queuedRecoveries).toBe(1)
+    expect(output.exposedSessions).toEqual(['ordinary-session'])
+    expect(output.validExists).toBe(false)
+    expect(output.invalidSourceExists).toEqual([false, false, false])
+    expect(output.invalidOpenResults).toEqual([null, null, null])
+    expect(output.ordinaryExists).toBe(true)
+    expect(output.ordinaryOpen).toBe('ordinary-session')
+    expect(output.quarantineEntries).toHaveLength(3)
+    if (process.platform !== 'win32') {
+      expect(output.quarantineRootMode).toBe(0o700)
+      expect(output.manifestModes).toEqual([0o600, 0o600, 0o600])
+    }
+    expect(output.manifests.map((manifest) => manifest.sessionId).sort()).toEqual([
+      'invalid-contract',
+      'invalid-state',
+      'missing-field',
+    ])
+    for (const manifest of output.manifests) {
+      expect(manifest).toMatchObject({
+        schemaVersion: 1,
+        kind: 'module-agent-cleanup-debt',
+        reasonCode: 'MALFORMED_MODULE_AGENT_RUN',
+      })
+    }
   })
 })

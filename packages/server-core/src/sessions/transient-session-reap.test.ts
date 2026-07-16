@@ -43,7 +43,7 @@ describe('transient Module Session strict reap', () => {
     await expect(manager.getSession(managed.id)).resolves.toBeNull()
   })
 
-  it('falls back to hard disposal when awaited graceful disposal fails', async () => {
+  it('does not report success or delete ownership when awaited strict disposal fails', async () => {
     const root = await mkdtemp(join(tmpdir(), 'transient-session-reap-'))
     roots.push(root)
     const workspace = {
@@ -68,10 +68,10 @@ describe('transient Module Session strict reap', () => {
     } as unknown as AgentBackend
     ;(manager as unknown as { sessions: Map<string, typeof managed> }).sessions.set(managed.id, managed)
 
-    await manager.disposeSessionAndReap(managed.id, 25)
+    await expect(manager.disposeSessionAndReap(managed.id, 25)).rejects.toThrow('graceful shutdown failed')
 
     expect(lifecycle).toEqual(['disposeForRestart', 'dispose'])
-    expect(managed.agent).toBeNull()
-    await expect(manager.getSession(managed.id)).resolves.toBeNull()
+    expect(managed.agent).not.toBeNull()
+    await expect(manager.getSession(managed.id)).resolves.not.toBeNull()
   })
 })

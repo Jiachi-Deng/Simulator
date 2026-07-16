@@ -79,6 +79,17 @@ export interface ISessionManager {
     options?: CreateSessionOptions,
     internal?: InternalCreateSessionOptions,
   ): Promise<Session>
+  /**
+   * Host-only recovery seam for a transient Module Session whose durable
+   * creation may have completed before the caller received its response.
+   * `null` is authoritative absence; malformed, conflicting, or ambiguous
+   * ownership rejects so the caller keeps the Run reserved.
+   */
+  recoverModuleAgentSession(input: {
+    workspaceId: string
+    workingDirectory: string
+    ownership: ModuleAgentRunMetadata
+  }): Promise<Session | null>
   /** Resolved working directory of a live session (Tasks Conductor uses it so children inherit
    *  the orchestrator's cwd). */
   getSessionWorkingDirectory(sessionId: string): string | undefined

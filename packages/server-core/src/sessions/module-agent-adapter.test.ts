@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test'
 import { MemoryModuleAgentPathAuthority } from '@simulator/module-agent-gateway/testing'
-import type { ModuleAgentPortEvent } from '@simulator/module-agent-gateway'
+import type { ModuleAgentPathAuthority, ModuleAgentPortEvent } from '@simulator/module-agent-gateway'
 import type { HostAgentSessionEvent } from '@simulator/host-agent-run-core'
 import type { Session } from '@craft-agent/shared/protocol'
 import { checkModuleAgentToolBoundary } from '@craft-agent/shared/agent'
@@ -164,6 +164,124 @@ describe('CraftHostAgentRunSessionPort', () => {
     complete!({ sessionId: 'raw-v2', reason: 'error', finalText: 'secret provider detail' })
     expect(events).toEqual([{ type: 'turn.failed', sessionId: 'raw-v2', code: 'INTERNAL_ERROR' }])
     expect(JSON.stringify(events)).not.toContain('secret provider detail')
+  })
+
+  it('recovers the same durable Session when post-create canonicalization loses the response', async () => {
+    const container = await mkdtemp(join(tmpdir(), 'host-agent-v2-response-loss-'))
+    temporaryRoots.push(container)
+    const workspaceRoot = join(container, 'workspace')
+    const projectRoot = join(container, 'module-data', 'open-design', 'project')
+    await Promise.all([mkdir(workspaceRoot, { recursive: true }), mkdir(projectRoot, { recursive: true })])
+
+    let createdSession: Session | undefined
+    let createdOwnership: unknown
+    const manager = {
+      getWorkspaces: () => [{ id: 'workspace', rootPath: workspaceRoot }],
+      createSession: async (_workspaceId: string, _options: unknown, internal: Record<string, unknown>) => {
+        createdOwnership = internal.moduleAgentRun
+        createdSession = {
+          id: 'response-lost-v2', workspaceId: 'workspace', workspaceName: 'Workspace', lastMessageAt: 0,
+          messages: [], isProcessing: false, hidden: true, workingDirectory: projectRoot,
+        } as Session
+        return createdSession
+      },
+      recoverModuleAgentSession: async (input: { ownership: unknown }) => {
+        expect(input.ownership).toEqual(createdOwnership)
+        return createdSession ?? null
+      },
+      disposeSessionAndReap: async () => undefined,
+      deleteSession: async () => undefined,
+      onModuleAgentRuntimeEvent: () => () => undefined,
+      onSessionComplete: () => () => undefined,
+    } as unknown as ISessionManager
+
+    let canonicalizeCalls = 0
+    let loseCreateResponse = true
+    const paths: ModuleAgentPathAuthority = {
+      canonicalize: async (path: string) => {
+        canonicalizeCalls++
+        // actual workspace, expected workspace, grant root, request cwd,
+        // then the cwd in SessionManager's response.
+        if (loseCreateResponse && canonicalizeCalls === 5) {
+          throw new Error('simulated response loss after durable creation')
+        }
+        return path
+      },
+      isEqualOrWithin: async () => true,
+    }
+    const port = new CraftHostAgentRunSessionPort(manager, paths)
+    const ownership = {
+      transient: true as const,
+      contractVersion: 2 as const,
+      moduleId: 'org.simulator.open-design',
+      runHandle: `run_${'d'.repeat(32)}`,
+      idempotencyKeyDigest: 'e'.repeat(64),
+      requestDigest: 'f'.repeat(64),
+      workerEpoch: 'epoch_response_loss',
+      state: 'accepted' as const,
+    }
+    const input = {
+      workspaceId: 'workspace',
+      workspaceRoot,
+      authorizedWorkingRoot: projectRoot,
+      workingDirectory: projectRoot,
+      ownership,
+    }
+
+    await expect(port.createSession(input)).rejects.toThrow('simulated response loss')
+    loseCreateResponse = false
+    canonicalizeCalls = 0
+    const recovered = await port.recoverSession(input)
+    expect(recovered?.sessionId).toBe('response-lost-v2')
+    expect(checkModuleAgentToolBoundary('response-lost-v2', 'Write', {
+      file_path: join(projectRoot, 'index.ts'),
+    }).allowed).toBe(true)
+    await port.disposeAndReap('response-lost-v2')
+  })
+
+  it('does not erase the fail-closed boundary when strict provider reap rejects', async () => {
+    const container = await mkdtemp(join(tmpdir(), 'host-agent-v2-reap-failure-'))
+    temporaryRoots.push(container)
+    const workspaceRoot = join(container, 'workspace')
+    const projectRoot = join(container, 'project')
+    await Promise.all([mkdir(workspaceRoot, { recursive: true }), mkdir(projectRoot, { recursive: true })])
+    let rejectReap = true
+    const manager = {
+      getWorkspaces: () => [{ id: 'workspace', rootPath: workspaceRoot }],
+      createSession: async () => ({
+        id: 'strict-reap-v2', workspaceId: 'workspace', workspaceName: 'Workspace', lastMessageAt: 0,
+        messages: [], isProcessing: false, hidden: true, workingDirectory: projectRoot,
+      } as Session),
+      deleteSession: async () => undefined,
+      disposeSessionAndReap: async () => {
+        if (rejectReap) throw new Error('provider tree still alive')
+      },
+      onModuleAgentRuntimeEvent: () => () => undefined,
+      onSessionComplete: () => () => undefined,
+    } as unknown as ISessionManager
+    const port = new CraftHostAgentRunSessionPort(manager, new MemoryModuleAgentPathAuthority())
+    await port.createSession({
+      workspaceId: 'workspace',
+      workspaceRoot,
+      authorizedWorkingRoot: projectRoot,
+      workingDirectory: projectRoot,
+      ownership: {
+        transient: true,
+        contractVersion: 2,
+        moduleId: 'org.simulator.open-design',
+        runHandle: `run_${'0'.repeat(32)}`,
+        idempotencyKeyDigest: '1'.repeat(64),
+        requestDigest: '2'.repeat(64),
+        workerEpoch: 'epoch_reap_failure',
+        state: 'accepted',
+      },
+    })
+
+    await expect(port.disposeAndReap('strict-reap-v2')).rejects.toThrow('provider tree still alive')
+    expect(checkModuleAgentToolBoundary('strict-reap-v2', 'Bash', { command: 'pwd' }).allowed).toBe(false)
+    rejectReap = false
+    await port.disposeAndReap('strict-reap-v2')
+    expect(checkModuleAgentToolBoundary('strict-reap-v2', 'Bash', { command: 'pwd' }).allowed).toBe(true)
   })
 })
 

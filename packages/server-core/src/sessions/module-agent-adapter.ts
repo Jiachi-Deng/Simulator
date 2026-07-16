@@ -78,7 +78,7 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
     }
     const authorizedWorkingRoot = await this.paths.canonicalize(input.authorizedWorkingRoot)
     const workingDirectory = await this.paths.canonicalize(input.workingDirectory)
-    if (!this.paths.isEqualOrWithin(workingDirectory, authorizedWorkingRoot)) {
+    if (!await this.paths.isEqualOrWithin(workingDirectory, authorizedWorkingRoot)) {
       throw new Error('Module working directory is outside the launch grant')
     }
 
@@ -210,7 +210,7 @@ export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
     }
     const authorizedWorkingRoot = await this.paths.canonicalize(input.authorizedWorkingRoot)
     const workingDirectory = await this.paths.canonicalize(input.workingDirectory)
-    if (!this.paths.isEqualOrWithin(workingDirectory, authorizedWorkingRoot)) {
+    if (!await this.paths.isEqualOrWithin(workingDirectory, authorizedWorkingRoot)) {
       throw new Error('Module working directory is outside the v2 launch grant')
     }
 
@@ -243,6 +243,51 @@ export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
       await this.sessions.deleteSession(session.id).catch(() => undefined)
       throw error
     }
+    return {
+      sessionId: session.id,
+      workspaceId: session.workspaceId,
+      workspaceRoot: actualWorkspaceRoot,
+      workingDirectory: returnedWorkingDirectory,
+      hidden: true,
+    }
+  }
+
+  async recoverSession(input: CreateHostAgentSessionInput): Promise<CreatedHostAgentSession | undefined> {
+    const workspace = this.sessions.getWorkspaces().find((candidate) => candidate.id === input.workspaceId)
+    if (!workspace) throw new Error('Authorized Craft workspace no longer exists')
+
+    const actualWorkspaceRoot = await this.paths.canonicalize(workspace.rootPath)
+    const expectedWorkspaceRoot = await this.paths.canonicalize(input.workspaceRoot)
+    if (actualWorkspaceRoot !== expectedWorkspaceRoot) {
+      throw new Error('Craft workspace root does not match the v2 recovery grant')
+    }
+    const authorizedWorkingRoot = await this.paths.canonicalize(input.authorizedWorkingRoot)
+    const workingDirectory = await this.paths.canonicalize(input.workingDirectory)
+    if (!await this.paths.isEqualOrWithin(workingDirectory, authorizedWorkingRoot)) {
+      throw new Error('Module working directory is outside the v2 recovery grant')
+    }
+
+    const session = await this.sessions.recoverModuleAgentSession({
+      workspaceId: input.workspaceId,
+      workingDirectory,
+      ownership: parseV2Ownership(input.ownership),
+    })
+    if (!session) return undefined
+
+    const returnedWorkingDirectory = session.workingDirectory
+      ? await this.paths.canonicalize(session.workingDirectory)
+      : ''
+    if (!session.hidden
+      || session.workspaceId !== input.workspaceId
+      || returnedWorkingDirectory !== workingDirectory) {
+      throw new Error('Craft recovered an invalid hidden v2 Module session')
+    }
+
+    // A recovered Session is never usable until its canonical boundary is
+    // reinstalled. Keep the mark on registration failure so every tool remains
+    // fail-closed; do not delete durable ownership while recovery is uncertain.
+    markModuleAgentSession(session.id)
+    registerModuleAgentToolBoundary(session.id, workingDirectory, workingDirectory)
     return {
       sessionId: session.id,
       workspaceId: session.workspaceId,

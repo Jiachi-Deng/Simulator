@@ -140,7 +140,7 @@ export interface ModuleAgentGrant {
 
 export interface ModuleAgentPathAuthority {
   canonicalize(path: string): Promise<string>
-  isEqualOrWithin(candidate: string, root: string): boolean
+  isEqualOrWithin(candidate: string, root: string): boolean | Promise<boolean>
 }
 
 export interface ModuleAgentTokenSource {
@@ -185,7 +185,10 @@ export interface ModuleAgentSessionPort {
   awaitStopped(sessionId: string): Promise<void>
   /** Strict teardown: stop, dispose, reap Host resources, and remove persistence. */
   disposeAndReap(sessionId: string): Promise<void>
-  subscribe(sessionId: string, listener: (event: ModuleAgentPortEvent) => void): () => void
+  subscribe(
+    sessionId: string,
+    listener: (event: ModuleAgentPortEvent) => void,
+  ): (() => void) | Promise<() => void>
 }
 
 export const MODULE_AGENT_ERROR_CODES = [
