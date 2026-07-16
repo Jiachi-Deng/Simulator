@@ -57,6 +57,7 @@ import {
   getSessionPath as getSessionStoragePath,
   ensureSessionDir,
   getSessionFilePath,
+  readSessionHeader,
   generateSessionId,
   sessionPersistenceQueue,
   getHeaderMetadataSignature,
@@ -100,6 +101,7 @@ import { loadStatusConfig } from '@craft-agent/shared/statuses/storage'
 import { AutomationSystem, createPromptHistoryEntry, appendAutomationHistoryEntry, type AutomationSystemMetadataSnapshot } from '@craft-agent/shared/automations'
 import { buildBackendRuntimeSignature, buildRestartRequiredSignature, filterAttachmentsForModelInput } from './runtime-config'
 import type { ModuleAgentPortEvent } from '@simulator/module-agent-gateway'
+import { isHostAgentRunTransition, type HostAgentRunState } from '@simulator/host-agent-contract'
 
 // Import from server-core domain utilities
 import { sanitizeForTitle, shouldActivateBrowserOverlay, normalizeBrowserToolName, rollbackFailedBranchCreation, releaseBrowserOwnershipOnForcedStop } from '@craft-agent/server-core/domain'
@@ -2684,6 +2686,33 @@ export class SessionManager implements ISessionManager {
     const managed = this.sessions.get(sessionId)
     if (!managed) return null
     return getSessionStoragePath(managed.workspace.rootPath, sessionId)
+  }
+
+  /**
+   * Persist a v1/v2 transient Run state before the corresponding public state
+   * or event is committed. This remains an internal Host method: renderer and
+   * remote DTOs never receive moduleAgentRun.
+   */
+  async updateModuleAgentRunState(sessionId: string, state: HostAgentRunState): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) throw new Error(`Transient Module session ${sessionId} was not found`)
+    const current = parseModuleAgentRunMetadata(managed.moduleAgentRun)
+    if (current.state === state) return
+    if (!isHostAgentRunTransition(current.state, state)) {
+      throw new Error(`Invalid transient Module run transition ${current.state} -> ${state}`)
+    }
+
+    const next = parseModuleAgentRunMetadata({ ...current, state })
+    managed.moduleAgentRun = next
+    this.setMetadataWriteGuard(managed)
+    this.persistSession(managed)
+    await sessionPersistenceQueue.flush(sessionId)
+
+    const header = readSessionHeader(getSessionFilePath(managed.workspace.rootPath, sessionId))
+    const persisted = parseModuleAgentRunMetadata(header?.moduleAgentRun)
+    if (persisted.state !== state || persisted.runHandle !== current.runHandle) {
+      throw new Error(`Transient Module run state ${state} was not durably persisted`)
+    }
   }
 
   async createSession(

@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, it } from 'bun:test'
 import { MemoryModuleAgentPathAuthority } from '@simulator/module-agent-gateway/testing'
 import type { ModuleAgentPortEvent } from '@simulator/module-agent-gateway'
+import type { HostAgentSessionEvent } from '@simulator/host-agent-run-core'
 import type { Session } from '@craft-agent/shared/protocol'
 import { checkModuleAgentToolBoundary } from '@craft-agent/shared/agent'
 import { mkdir, mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { ISessionManager } from '../handlers/session-manager-interface'
-import { CraftModuleAgentSessionPort } from './module-agent-adapter.ts'
+import { CraftHostAgentRunSessionPort, CraftModuleAgentSessionPort } from './module-agent-adapter.ts'
 import { toModuleAgentPortEvent } from './SessionManager.ts'
 import { parseModuleAgentRunMetadata } from '@craft-agent/shared/sessions'
 
@@ -95,6 +96,74 @@ describe('CraftModuleAgentSessionPort', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(events).toEqual([{ type: 'turn.failed', sessionId: 'raw', code: 'HOST_RUNTIME_ERROR' }])
     expect(JSON.stringify(events)).not.toContain('secret=abc')
+  })
+})
+
+describe('CraftHostAgentRunSessionPort', () => {
+  it('persists RunCore ownership unchanged and advances state through the internal seam', async () => {
+    const container = await mkdtemp(join(tmpdir(), 'host-agent-v2-adapter-'))
+    temporaryRoots.push(container)
+    const workspaceRoot = join(container, 'workspace')
+    const projectRoot = join(container, 'module-data', 'open-design', 'project')
+    await Promise.all([mkdir(workspaceRoot, { recursive: true }), mkdir(projectRoot, { recursive: true })])
+    let internalOptions: Record<string, unknown> | undefined
+    const stateUpdates: Array<{ sessionId: string; state: string }> = []
+    const manager = {
+      getWorkspaces: () => [{ id: 'workspace', rootPath: workspaceRoot }],
+      createSession: async (_workspaceId: string, _options: Record<string, unknown>, internal: Record<string, unknown>) => {
+        internalOptions = internal
+        return {
+          id: 'raw-v2', workspaceId: 'workspace', workspaceName: 'Workspace', lastMessageAt: 0,
+          messages: [], isProcessing: false, hidden: true, workingDirectory: projectRoot,
+        } as Session
+      },
+      updateModuleAgentRunState: async (sessionId: string, state: string) => { stateUpdates.push({ sessionId, state }) },
+      deleteSession: async () => undefined,
+      awaitSessionStopped: async () => undefined,
+      disposeSessionAndReap: async () => undefined,
+      sendMessage: async () => undefined,
+      cancelProcessing: async () => undefined,
+      onModuleAgentRuntimeEvent: () => () => undefined,
+      onSessionComplete: () => () => undefined,
+    } as unknown as ISessionManager
+    const port = new CraftHostAgentRunSessionPort(manager, new MemoryModuleAgentPathAuthority())
+    const ownership = {
+      transient: true as const,
+      contractVersion: 2 as const,
+      moduleId: 'org.simulator.open-design',
+      runHandle: `run_${'1'.repeat(32)}`,
+      idempotencyKeyDigest: '2'.repeat(64),
+      requestDigest: '3'.repeat(64),
+      workerEpoch: 'epoch_1234',
+      state: 'accepted' as const,
+    }
+    await port.createSession({
+      workspaceId: 'workspace',
+      workspaceRoot,
+      authorizedWorkingRoot: projectRoot,
+      workingDirectory: projectRoot,
+      ownership,
+    })
+    expect(parseModuleAgentRunMetadata(internalOptions?.moduleAgentRun)).toEqual(ownership)
+    await port.updateRunState('raw-v2', 'starting')
+    expect(stateUpdates).toEqual([{ sessionId: 'raw-v2', state: 'starting' }])
+    await port.disposeAndReap('raw-v2')
+    expect(checkModuleAgentToolBoundary('raw-v2', 'Bash', { command: 'pwd' }).allowed).toBe(true)
+  })
+
+  it('maps completion errors without leaking provider details', async () => {
+    let complete: ((event: { sessionId: string; reason: 'error'; finalText: string }) => void) | undefined
+    const manager = {
+      sendMessage: async () => undefined,
+      onModuleAgentRuntimeEvent: () => () => undefined,
+      onSessionComplete: (listener: typeof complete) => { complete = listener; return () => undefined },
+    } as unknown as ISessionManager
+    const port = new CraftHostAgentRunSessionPort(manager, new MemoryModuleAgentPathAuthority())
+    const events: HostAgentSessionEvent[] = []
+    port.subscribe('raw-v2', (event) => events.push(event))
+    complete!({ sessionId: 'raw-v2', reason: 'error', finalText: 'secret provider detail' })
+    expect(events).toEqual([{ type: 'turn.failed', sessionId: 'raw-v2', code: 'INTERNAL_ERROR' }])
+    expect(JSON.stringify(events)).not.toContain('secret provider detail')
   })
 })
 

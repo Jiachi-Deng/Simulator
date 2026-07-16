@@ -26,6 +26,7 @@ import type {
 import type { SessionBundle, DispatchMode, ModuleAgentRunMetadata } from '@craft-agent/shared/sessions'
 import type { EventSink } from '../transport'
 import type { ModuleAgentPortEvent } from '@simulator/module-agent-gateway'
+import type { HostAgentRunState } from '@simulator/host-agent-contract'
 
 /** Host-only creation controls. These fields are deliberately absent from the wire DTO. */
 export interface InternalCreateSessionOptions {
@@ -63,6 +64,8 @@ export interface ISessionManager {
    *  the orchestrator's cwd). */
   getSessionWorkingDirectory(sessionId: string): string | undefined
   deleteSession(sessionId: string): Promise<void>
+  /** Atomically advances Host-internal transient run ownership in the JSONL header. */
+  updateModuleAgentRunState(sessionId: string, state: HostAgentRunState): Promise<void>
 
   // ---------------------------------------------------------------------------
   // Session state
