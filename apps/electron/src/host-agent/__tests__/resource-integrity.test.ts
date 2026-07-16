@@ -6,7 +6,9 @@ import {
   assertHostAgentArtifactsMatch,
   copyHostAgentShim,
   HOST_AGENT_SHIM_BOOTSTRAP_PREFIX,
+  HOST_AGENT_WORKER_MODE,
   inspectHostAgentArtifact,
+  normalizeHostAgentWorkerMode,
 } from '../../../scripts/copy-assets'
 
 const temporaryRoots: string[] = []
@@ -38,12 +40,28 @@ describe('Host Agent executable resource integrity', () => {
       readFile(join(repositoryRoot, 'apps/electron/scripts/build-dmg.sh'), 'utf8'),
     ])
     expect(mainBuild).toContain('rebuildAndCopyHostAgentShim(ROOT_DIR)')
+    expect(mainBuild).toContain('normalizeHostAgentWorkerMode(HOST_AGENT_WORKER_OUTPUT)')
     expect(devBuild).toContain('copyElectronAssets(ROOT_DIR)')
     expect(windowsBuild).toContain('rebuildAndCopyHostAgentShim(rootDir)')
     expect(windowsBuild).toContain('copyElectronAssets(rootDir)')
     expect(windowsBuild).toContain('validate-assets.ts --packaged-app')
     expect(JSON.parse(packageManifest).scripts['build:host-agent-shim']).toBe('bun scripts/copy-assets.ts')
     expect(macPackage).toContain('validate-assets.ts" --packaged-app "$APP_ROOT"')
+  })
+
+  it('normalizes a hardened-umask worker output before packaging', async () => {
+    if (process.platform === 'win32') return
+    const createdRoot = await realpath(await mkdtemp(join(tmpdir(), 'simulator-host-agent-worker-mode-')))
+    temporaryRoots.push(createdRoot)
+    const worker = join(createdRoot, 'worker.cjs')
+    const contents = 'module.exports = { worker: true }\n'
+    await writeFile(worker, contents, { mode: 0o600 })
+    await chmod(worker, 0o600)
+
+    const normalized = normalizeHostAgentWorkerMode(worker)
+
+    expect(normalized.mode).toBe(HOST_AGENT_WORKER_MODE)
+    expect(await readFile(worker, 'utf8')).toBe(contents)
   })
 
   it('copies source to dist as a unique file with identical hash, size, and mode', async () => {

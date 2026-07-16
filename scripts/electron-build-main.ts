@@ -24,7 +24,10 @@ import {
   currentPackagedPlatform,
   validatePackagedServerResources,
 } from "./packaged-server-resources";
-import { rebuildAndCopyHostAgentShim } from "../apps/electron/scripts/copy-assets";
+import {
+  normalizeHostAgentWorkerMode,
+  rebuildAndCopyHostAgentShim,
+} from "../apps/electron/scripts/copy-assets";
 
 const ROOT_DIR = join(import.meta.dir, "..");
 const DIST_DIR = join(ROOT_DIR, "apps/electron/dist");
@@ -424,6 +427,7 @@ async function main(): Promise<void> {
     console.error("❌ Host Agent worker build failed with exit code", workerExitCode);
     process.exit(workerExitCode);
   }
+  normalizeHostAgentWorkerMode(HOST_AGENT_WORKER_OUTPUT);
 
   // Wait for file to stabilize
   console.log("⏳ Waiting for file to stabilize...");

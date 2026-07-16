@@ -24,6 +24,7 @@ import { HOST_AGENT_SHIM_BOOTSTRAP_PREFIX } from '../../../packages/host-agent-s
 export { HOST_AGENT_SHIM_BOOTSTRAP_PREFIX }
 
 export const HOST_AGENT_SHIM_RELATIVE_PATH = join('host-agent', 'simulator-host-agent.mjs')
+export const HOST_AGENT_WORKER_MODE = 0o644
 
 export interface HostAgentArtifactEvidence {
   path: string
@@ -103,6 +104,19 @@ export function assertHostAgentArtifactsMatch(
       + `got sha256=${actual.sha256} mode=${actual.mode.toString(8)} size=${actual.size}`,
     )
   }
+}
+
+export function normalizeHostAgentWorkerMode(path: string): HostAgentArtifactEvidence {
+  const before = inspectHostAgentArtifact(path, 'Fresh Host Agent worker', { executable: false })
+  if (process.platform !== 'win32') chmodSync(before.path, HOST_AGENT_WORKER_MODE)
+  const after = inspectHostAgentArtifact(path, 'Normalized Host Agent worker', { executable: false })
+  if (after.sha256 !== before.sha256 || after.size !== before.size) {
+    throw new Error('Normalizing Host Agent worker mode changed its content identity')
+  }
+  if (process.platform !== 'win32' && after.mode !== HOST_AGENT_WORKER_MODE) {
+    throw new Error(`Host Agent worker must use mode ${HOST_AGENT_WORKER_MODE.toString(8)}`)
+  }
+  return after
 }
 
 export function rebuildHostAgentShim(repositoryRoot: string): HostAgentArtifactEvidence {
