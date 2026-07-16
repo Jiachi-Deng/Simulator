@@ -184,6 +184,71 @@ describe('createManagedSession', () => {
     manager.cleanup()
   })
 
+  for (const delayedState of ['starting', 'running'] as const) {
+    it(`lets terminal authority bypass a stuck ${delayedState} tail and rejects its late resolution`, async () => {
+      const rootPath = await mkdtemp(join(tmpdir(), `module-run-${delayedState}-fence-`))
+      temporaryRoots.push(rootPath)
+      const ownership = {
+        transient: true as const,
+        contractVersion: 2 as const,
+        moduleId: 'org.simulator.open-design',
+        runHandle: `run_${(delayedState === 'starting' ? 'a' : 'b').repeat(32)}`,
+        idempotencyKeyDigest: (delayedState === 'starting' ? 'c' : 'd').repeat(64),
+        requestDigest: (delayedState === 'starting' ? 'e' : 'f').repeat(64),
+        workerEpoch: `epoch_${delayedState}_fence`,
+        state: 'accepted' as const,
+      }
+      const stored = await createStoredSession(rootPath, {
+        hidden: true,
+        workingDirectory: rootPath,
+        moduleAgentRun: ownership,
+      })
+      const managed = createManagedSession(stored, { ...workspace, id: `ws_${delayedState}_fence`, rootPath } as any, {
+        messagesLoaded: true,
+      })
+      const manager = new SessionManager()
+      ;(manager as unknown as { sessions: Map<string, unknown> }).sessions.set(managed.id, managed)
+      if (delayedState === 'running') await manager.updateModuleAgentRunState(managed.id, 'starting')
+
+      const originalFlush = sessionPersistenceQueue.flush.bind(sessionPersistenceQueue)
+      let releaseActive!: () => void
+      const activeBlocked = new Promise<void>((resolve) => { releaseActive = resolve })
+      let activeReachedTail!: () => void
+      const activeAtTail = new Promise<void>((resolve) => { activeReachedTail = resolve })
+      let blockNextFlush = true
+      sessionPersistenceQueue.flush = async (sessionId: string) => {
+        if (sessionId === managed.id && blockNextFlush) {
+          blockNextFlush = false
+          activeReachedTail()
+          await activeBlocked
+        }
+        await originalFlush(sessionId)
+      }
+
+      try {
+        const lateActive = manager.updateModuleAgentRunState(managed.id, delayedState)
+        await activeAtTail
+        await manager.updateModuleAgentRunState(managed.id, 'failed')
+        expect(readSessionHeader(getSessionFilePath(rootPath, managed.id))?.moduleAgentRun).toEqual({
+          ...ownership,
+          state: 'failed',
+        })
+
+        releaseActive()
+        await expect(lateActive).rejects.toThrow(`run state ${delayedState} was superseded`)
+        expect((managed.moduleAgentRun as { state: string }).state).toBe('failed')
+        expect(readSessionHeader(getSessionFilePath(rootPath, managed.id))?.moduleAgentRun).toEqual({
+          ...ownership,
+          state: 'failed',
+        })
+      } finally {
+        sessionPersistenceQueue.flush = originalFlush
+        releaseActive()
+        manager.cleanup()
+      }
+    })
+  }
+
   it('recovers exactly one matching durable transient Session and rejects ambiguity', async () => {
     const rootPath = await mkdtemp(join(tmpdir(), 'module-run-recovery-'))
     temporaryRoots.push(rootPath)

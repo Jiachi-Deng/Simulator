@@ -100,6 +100,38 @@ describe('CraftModuleAgentSessionPort', () => {
 })
 
 describe('CraftHostAgentRunSessionPort', () => {
+  it('waits for the SessionManager provider-admission acknowledgement', async () => {
+    let admit!: () => void
+    const admission = new Promise<void>((resolve) => { admit = resolve })
+    const manager = {
+      sendModuleAgentMessage: () => admission,
+      onModuleAgentRuntimeEvent: () => () => undefined,
+      onSessionComplete: () => () => undefined,
+    } as unknown as ISessionManager
+    const port = new CraftHostAgentRunSessionPort(manager, new MemoryModuleAgentPathAuthority())
+    let settled = false
+    const send = port.sendTurn('raw-v2', 'prompt').finally(() => { settled = true })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(settled).toBe(false)
+    admit()
+    await send
+    expect(settled).toBe(true)
+  })
+
+  it('reports provider-admission rejection without leaking its details', async () => {
+    const manager = {
+      sendModuleAgentMessage: async () => { throw new Error('secret provider path') },
+      onModuleAgentRuntimeEvent: () => () => undefined,
+      onSessionComplete: () => () => undefined,
+    } as unknown as ISessionManager
+    const port = new CraftHostAgentRunSessionPort(manager, new MemoryModuleAgentPathAuthority())
+    const events: HostAgentSessionEvent[] = []
+    port.subscribe('raw-v2', (event) => events.push(event))
+    await expect(port.sendTurn('raw-v2', 'prompt')).rejects.toThrow('Host provider admission failed')
+    expect(events).toEqual([{ type: 'turn.failed', sessionId: 'raw-v2', code: 'RUNTIME_UNAVAILABLE' }])
+    expect(JSON.stringify(events)).not.toContain('secret provider path')
+  })
+
   it('persists RunCore ownership unchanged and advances state through the internal seam', async () => {
     const container = await mkdtemp(join(tmpdir(), 'host-agent-v2-adapter-'))
     temporaryRoots.push(container)

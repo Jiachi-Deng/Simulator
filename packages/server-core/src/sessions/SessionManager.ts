@@ -1241,6 +1241,21 @@ export interface SessionCompletionEvent {
   tokenUsage?: TokenUsage
 }
 
+interface ModuleAgentAdmissionClaim {
+  readonly revision: number
+  readonly acknowledged: Promise<void>
+  status: 'pending' | 'admitted' | 'cancelled'
+  resolve: () => void
+  reject: (error: Error) => void
+}
+
+class ModuleAgentAdmissionError extends Error {
+  constructor(message = 'Transient Module provider admission is no longer authorized') {
+    super(message)
+    this.name = 'ModuleAgentAdmissionError'
+  }
+}
+
 export class SessionManager implements ISessionManager {
   private sessions: Map<string, ManagedSession> = new Map()
   /**
@@ -1250,14 +1265,22 @@ export class SessionManager implements ISessionManager {
    * temporarily unavailable, so reload/open/queue paths remain fail-closed.
    */
   private malformedModuleAgentSessionIds = new Set<string>()
-  /** Serialize state transitions per transient Session. */
+  /** Serialize ordinary active-state transitions per transient Session. */
   private moduleAgentRunStateTails = new Map<string, Promise<void>>()
+  /**
+   * Monotonic authority fencing for Run state persistence. Terminal/cleanup
+   * transitions increment the revision and bypass a stuck active-state tail.
+   */
+  private moduleAgentRunStateRevisions = new Map<string, number>()
   /**
    * Durable state being written but not yet published in memory. Every normal
    * persistence snapshot consults this map so an unrelated autosave cannot
    * enqueue the older state while the atomic JSONL write is in flight.
    */
   private moduleAgentRunPersistenceOverrides = new Map<string, ModuleAgentRunMetadata>()
+  /** v2 provider-admission claims; never exposed to renderer/RPC callers. */
+  private moduleAgentAdmissionRevisions = new Map<string, number>()
+  private moduleAgentAdmissions = new Map<string, ModuleAgentAdmissionClaim>()
   // Delta batching for performance - reduces IPC events from 50+/sec to ~20/sec
   private pendingDeltas: Map<string, PendingDelta> = new Map()
   private deltaFlushTimers: Map<string, NodeJS.Timeout> = new Map()
@@ -2403,33 +2426,31 @@ export class SessionManager implements ISessionManager {
   // Caller must ensure `managed.messagesLoaded` is true.
   private enqueuePersist(managed: ManagedSession): void {
     try {
-      // Filter out transient status messages (progress indicators like "Compacting...")
-      // Error messages are now persisted with rich fields for diagnostics
-      const persistableMessages = managed.messages.filter(m =>
-        m.role !== 'status'
-      )
-
-      const storedSession: StoredSession = {
-        ...pickSessionFields(managed),
-        workspaceRootPath: managed.workspace.rootPath,
-        createdAt: managed.createdAt ?? Date.now(),
-        lastUsedAt: Date.now(),
-        messages: persistableMessages.map(messageToStored),
-        tokenUsage: managed.tokenUsage ?? DEFAULT_TOKEN_USAGE,
-      } as StoredSession
-
-      // A transient Run state is published to ManagedSession only after the
-      // corresponding JSONL header has been read back and validated. While
-      // that write is in flight, force every concurrent autosave to carry the
-      // pending durable state rather than re-enqueueing the older memory state.
-      const moduleAgentRunOverride = this.moduleAgentRunPersistenceOverrides.get(managed.id)
-      if (moduleAgentRunOverride) storedSession.moduleAgentRun = moduleAgentRunOverride
-
-      // Queue for async persistence with debouncing
-      sessionPersistenceQueue.enqueue(storedSession)
+      sessionPersistenceQueue.enqueue(this.createStoredSessionSnapshot(managed))
     } catch (error) {
       sessionLog.error(`Failed to queue session ${managed.id} for persistence:`, error)
     }
+  }
+
+  private createStoredSessionSnapshot(managed: ManagedSession): StoredSession {
+    // Filter out transient status messages (progress indicators like "Compacting...")
+    // Error messages are now persisted with rich fields for diagnostics.
+    const persistableMessages = managed.messages.filter(m => m.role !== 'status')
+    const storedSession: StoredSession = {
+      ...pickSessionFields(managed),
+      workspaceRootPath: managed.workspace.rootPath,
+      createdAt: managed.createdAt ?? Date.now(),
+      lastUsedAt: Date.now(),
+      messages: persistableMessages.map(messageToStored),
+      tokenUsage: managed.tokenUsage ?? DEFAULT_TOKEN_USAGE,
+    } as StoredSession
+
+    // This override remains authoritative for the transient Session lifetime.
+    // Consequently every unrelated autosave carries the latest fenced state,
+    // including autosaves scheduled after an older writer is superseded.
+    const moduleAgentRunOverride = this.moduleAgentRunPersistenceOverrides.get(managed.id)
+    if (moduleAgentRunOverride) storedSession.moduleAgentRun = moduleAgentRunOverride
+    return storedSession
   }
 
   // Flush a specific session immediately (call on session close/switch).
@@ -2988,10 +3009,49 @@ export class SessionManager implements ISessionManager {
    * remote DTOs never receive moduleAgentRun.
    */
   async updateModuleAgentRunState(sessionId: string, state: HostAgentRunState): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) throw new Error(`Transient Module session ${sessionId} was not found`)
+
+    const current = this.resolveModuleAgentRunStateAuthority(managed)
+    if (current.state === state) {
+      if (state !== 'starting' && state !== 'running') {
+        const revision = (this.moduleAgentRunStateRevisions.get(sessionId) ?? 0) + 1
+        this.moduleAgentRunStateRevisions.set(sessionId, revision)
+        this.fenceModuleAgentAdmission(sessionId)
+        await this.persistModuleAgentRunStateAuthoritatively(managed, current, revision)
+        return
+      }
+      const pending = this.moduleAgentRunStateTails.get(sessionId)
+      if (pending) await pending
+      const persisted = parseModuleAgentRunMetadata(
+        readSessionHeader(getSessionFilePath(managed.workspace.rootPath, sessionId))?.moduleAgentRun,
+      )
+      if (!hasSameModuleAgentRunIdentity(current, persisted) || persisted.state !== state) {
+        throw new Error(`Transient Module run state ${state} is not durably authoritative`)
+      }
+      return
+    }
+    if (!isHostAgentRunTransition(current.state, state)) {
+      throw new Error(`Invalid transient Module run transition ${current.state} -> ${state}`)
+    }
+
+    const revision = (this.moduleAgentRunStateRevisions.get(sessionId) ?? 0) + 1
+    const next = parseModuleAgentRunMetadata({ ...current, state })
+    this.moduleAgentRunStateRevisions.set(sessionId, revision)
+    this.moduleAgentRunPersistenceOverrides.set(sessionId, next)
+
+    if (state !== 'starting' && state !== 'running') {
+      // Terminal/cleanup authority must never queue behind an active write. It
+      // also closes provider admission before the terminal header is visible.
+      this.fenceModuleAgentAdmission(sessionId)
+      await this.persistModuleAgentRunStateAuthoritatively(managed, next, revision)
+      return
+    }
+
     const previous = this.moduleAgentRunStateTails.get(sessionId) ?? Promise.resolve()
     const operation = previous
       .catch(() => undefined)
-      .then(() => this.updateModuleAgentRunStateNow(sessionId, state))
+      .then(() => this.updateModuleAgentRunStateNow(sessionId, state, revision))
     this.moduleAgentRunStateTails.set(sessionId, operation)
     try {
       await operation
@@ -3002,15 +3062,46 @@ export class SessionManager implements ISessionManager {
     }
   }
 
+  private resolveModuleAgentRunStateAuthority(managed: ManagedSession): ModuleAgentRunMetadata {
+    const override = this.moduleAgentRunPersistenceOverrides.get(managed.id)
+    if (override) return override
+
+    const memory = parseModuleAgentRunMetadata(managed.moduleAgentRun)
+    const disk = parseModuleAgentRunMetadata(
+      readSessionHeader(getSessionFilePath(managed.workspace.rootPath, managed.id))?.moduleAgentRun,
+    )
+    if (!hasSameModuleAgentRunIdentity(memory, disk)) {
+      managed.moduleAgentRun = disk
+      throw new Error(`Transient Module session ${managed.id} has split ownership identity`)
+    }
+    if (memory.state !== disk.state) {
+      managed.moduleAgentRun = disk
+      throw new Error(`Transient Module session ${managed.id} has split ownership state`)
+    }
+    this.moduleAgentRunPersistenceOverrides.set(managed.id, disk)
+    return disk
+  }
+
   private async updateModuleAgentRunStateNow(
     sessionId: string,
     state: HostAgentRunState,
+    revision: number,
   ): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (!managed) throw new Error(`Transient Module session ${sessionId} was not found`)
 
+    const assertCurrentRevision = () => {
+      const current = this.moduleAgentRunPersistenceOverrides.get(sessionId)
+      if (this.moduleAgentRunStateRevisions.get(sessionId) !== revision || current?.state !== state) {
+        throw new Error(`Transient Module run state ${state} was superseded by newer authority`)
+      }
+      return current
+    }
+    assertCurrentRevision()
+
     // Drain earlier autosaves before treating the disk header as authority.
     await sessionPersistenceQueue.flush(sessionId)
+    const next = assertCurrentRevision()
     const filePath = getSessionFilePath(managed.workspace.rootPath, sessionId)
     const memoryBefore = parseModuleAgentRunMetadata(managed.moduleAgentRun)
     const diskBefore = parseModuleAgentRunMetadata(readSessionHeader(filePath)?.moduleAgentRun)
@@ -3023,22 +3114,14 @@ export class SessionManager implements ISessionManager {
       throw new Error(`Transient Module session ${sessionId} has split ownership state`)
     }
 
-    // Idempotent requests still verify the durable header above; no in-memory
-    // fast path is allowed to conceal a prior failed write.
-    if (diskBefore.state === state) return
-    if (!isHostAgentRunTransition(diskBefore.state, state)) {
-      throw new Error(`Invalid transient Module run transition ${diskBefore.state} -> ${state}`)
-    }
-
-    const next = parseModuleAgentRunMetadata({ ...diskBefore, state })
-    this.moduleAgentRunPersistenceOverrides.set(sessionId, next)
     try {
       this.setMetadataWriteGuard(managed)
       this.persistSession(managed)
       await sessionPersistenceQueue.flush(sessionId)
+      assertCurrentRevision()
 
       const persisted = parseModuleAgentRunMetadata(readSessionHeader(filePath)?.moduleAgentRun)
-      if (!hasSameModuleAgentRunIdentity(persisted, diskBefore) || persisted.state !== state) {
+      if (!hasSameModuleAgentRunIdentity(persisted, next) || persisted.state !== state) {
         throw new Error(`Transient Module run state ${state} was not durably persisted`)
       }
 
@@ -3048,15 +3131,52 @@ export class SessionManager implements ISessionManager {
       // Prevent an autosave queued during the failed write from later
       // publishing the unacknowledged state. Then reload the best valid disk
       // header so memory never claims a transition that was not confirmed.
-      sessionPersistenceQueue.cancel(sessionId)
-      try {
-        managed.moduleAgentRun = parseModuleAgentRunMetadata(readSessionHeader(filePath)?.moduleAgentRun)
-      } catch {
-        managed.moduleAgentRun = diskBefore
+      if (this.moduleAgentRunStateRevisions.get(sessionId) === revision) {
+        sessionPersistenceQueue.cancel(sessionId)
+        let restored = diskBefore
+        try {
+          restored = parseModuleAgentRunMetadata(readSessionHeader(filePath)?.moduleAgentRun)
+        } catch {
+          // Retain the last identity-checked disk state.
+        }
+        managed.moduleAgentRun = restored
+        this.moduleAgentRunPersistenceOverrides.set(sessionId, restored)
+        this.moduleAgentRunStateRevisions.set(sessionId, revision + 1)
       }
       throw error
-    } finally {
-      this.moduleAgentRunPersistenceOverrides.delete(sessionId)
+    }
+  }
+
+  private async persistModuleAgentRunStateAuthoritatively(
+    managed: ManagedSession,
+    next: ModuleAgentRunMetadata,
+    revision: number,
+  ): Promise<void> {
+    const sessionId = managed.id
+    const filePath = getSessionFilePath(managed.workspace.rootPath, sessionId)
+    try {
+      this.setMetadataWriteGuard(managed)
+      await sessionPersistenceQueue.supersede(this.createStoredSessionSnapshot(managed))
+      if (this.moduleAgentRunStateRevisions.get(sessionId) !== revision) return
+
+      const persisted = parseModuleAgentRunMetadata(readSessionHeader(filePath)?.moduleAgentRun)
+      if (!hasSameModuleAgentRunIdentity(persisted, next) || persisted.state !== next.state) {
+        throw new Error(`Transient Module run state ${next.state} was not durably persisted`)
+      }
+      managed.moduleAgentRun = persisted
+    } catch (error) {
+      if (this.moduleAgentRunStateRevisions.get(sessionId) === revision) {
+        let restored: ModuleAgentRunMetadata
+        try {
+          restored = parseModuleAgentRunMetadata(readSessionHeader(filePath)?.moduleAgentRun)
+        } catch {
+          restored = parseModuleAgentRunMetadata(managed.moduleAgentRun)
+        }
+        managed.moduleAgentRun = restored
+        this.moduleAgentRunPersistenceOverrides.set(sessionId, restored)
+        this.moduleAgentRunStateRevisions.set(sessionId, revision + 1)
+      }
+      throw error
     }
   }
 
@@ -6081,6 +6201,7 @@ export class SessionManager implements ISessionManager {
       sessionLog.warn(`Cannot delete session: ${sessionId} not found`)
       return
     }
+    this.fenceModuleAgentAdmission(sessionId)
 
     // Get workspace slug before deleting
     const workspaceRootPath = managed.workspace.rootPath
@@ -6156,6 +6277,11 @@ export class SessionManager implements ISessionManager {
     managed.autoRetryPending = undefined
 
     this.sessions.delete(sessionId)
+    this.moduleAgentRunStateTails.delete(sessionId)
+    this.moduleAgentRunStateRevisions.delete(sessionId)
+    this.moduleAgentRunPersistenceOverrides.delete(sessionId)
+    this.moduleAgentAdmissionRevisions.delete(sessionId)
+    this.moduleAgentAdmissions.delete(sessionId)
 
     // Clean up session metadata in AutomationSystem (prevents memory leak)
     const automationSystem = this.automationSystems.get(workspaceRootPath)
@@ -6172,6 +6298,121 @@ export class SessionManager implements ISessionManager {
 
     // Clean up attachments directory (handled by deleteStoredSession for workspace-scoped storage)
     sessionLog.info(`Deleted session ${sessionId}`)
+  }
+
+  /**
+   * Start a v2 transient Module turn and acknowledge only after SessionManager
+   * has crossed every cancellable preflight and entered the provider iterator.
+   * The full sendMessage promise remains detached so streaming can continue.
+   */
+  async sendModuleAgentMessage(sessionId: string, message: string): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) throw new ModuleAgentAdmissionError('Transient Module session was not found')
+    const ownership = parseModuleAgentRunMetadata(managed.moduleAgentRun)
+    if (managed.hidden !== true || ownership.transient !== true || ownership.contractVersion !== 2) {
+      throw new ModuleAgentAdmissionError('Provider admission is only available to a v2 transient Module session')
+    }
+    if (ownership.state !== 'starting') {
+      throw new ModuleAgentAdmissionError('Transient Module provider admission requires starting state')
+    }
+    if (this.moduleAgentAdmissions.has(sessionId)) {
+      throw new ModuleAgentAdmissionError('Transient Module session already has an active provider admission')
+    }
+
+    const revision = (this.moduleAgentAdmissionRevisions.get(sessionId) ?? 0) + 1
+    this.moduleAgentAdmissionRevisions.set(sessionId, revision)
+    let resolveAdmission!: () => void
+    let rejectAdmission!: (error: Error) => void
+    const acknowledged = new Promise<void>((resolve, reject) => {
+      resolveAdmission = resolve
+      rejectAdmission = reject
+    })
+    const claim: ModuleAgentAdmissionClaim = {
+      revision,
+      acknowledged,
+      status: 'pending',
+      resolve: resolveAdmission,
+      reject: rejectAdmission,
+    }
+    this.moduleAgentAdmissions.set(sessionId, claim)
+
+    const turn = this.sendMessage(
+      sessionId,
+      message,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      claim,
+    )
+    void turn.then(
+      () => {
+        if (claim.status === 'pending') {
+          claim.status = 'cancelled'
+          claim.reject(new ModuleAgentAdmissionError('Provider turn ended before admission'))
+        }
+      },
+      () => {
+        if (claim.status === 'pending') {
+          claim.status = 'cancelled'
+          claim.reject(new ModuleAgentAdmissionError())
+        }
+      },
+    ).finally(() => {
+      if (this.moduleAgentAdmissions.get(sessionId) === claim) {
+        this.moduleAgentAdmissions.delete(sessionId)
+      }
+    })
+    await acknowledged
+  }
+
+  private assertModuleAgentAdmission(
+    managed: ManagedSession,
+    claim: ModuleAgentAdmissionClaim | undefined,
+  ): void {
+    if (!claim) return
+    if (this.moduleAgentAdmissions.get(managed.id) === claim
+      && this.moduleAgentAdmissionRevisions.get(managed.id) === claim.revision
+      && claim.status === 'pending') return
+
+    // No provider iterator has been admitted yet, so this is local state only.
+    // Undo the optimistic processing flag without emitting a fake completion.
+    if (claim.status !== 'admitted' && managed.isProcessing && !managed.agent?.isProcessing()) {
+      this.setProcessing(managed, false)
+      managed.stopRequested = false
+    }
+    throw new ModuleAgentAdmissionError()
+  }
+
+  private acknowledgeModuleAgentAdmission(
+    managed: ManagedSession,
+    claim: ModuleAgentAdmissionClaim | undefined,
+  ): void {
+    if (!claim) return
+    this.assertModuleAgentAdmission(managed, claim)
+    claim.status = 'admitted'
+    claim.resolve()
+  }
+
+  private fenceModuleAgentAdmission(sessionId: string): void {
+    if (!this.moduleAgentAdmissionRevisions.has(sessionId)
+      && !this.moduleAgentAdmissions.has(sessionId)) return
+    this.moduleAgentAdmissionRevisions.set(
+      sessionId,
+      (this.moduleAgentAdmissionRevisions.get(sessionId) ?? 0) + 1,
+    )
+    const claim = this.moduleAgentAdmissions.get(sessionId)
+    if (!claim) return
+    this.moduleAgentAdmissions.delete(sessionId)
+    if (claim.status === 'pending') {
+      claim.status = 'cancelled'
+      claim.reject(new ModuleAgentAdmissionError())
+    } else {
+      claim.status = 'cancelled'
+    }
   }
 
   async sendMessage(
@@ -6197,6 +6438,7 @@ export class SessionManager implements ISessionManager {
      * directly (tests, intra-server flows) to leave the existing pin in place.
      */
     rpcContext?: { callerClientId?: string },
+    moduleAgentAdmission?: ModuleAgentAdmissionClaim,
   ): Promise<void> {
     if (this.malformedModuleAgentSessionIds.has(sessionId)) {
       throw new Error(`Session ${sessionId} is quarantined due to malformed Module ownership`)
@@ -6204,6 +6446,15 @@ export class SessionManager implements ISessionManager {
     const managed = this.sessions.get(sessionId)
     if (!managed) {
       throw new Error(`Session ${sessionId} not found`)
+    }
+    if (managed.moduleAgentRun !== undefined) {
+      const ownership = parseModuleAgentRunMetadata(managed.moduleAgentRun)
+      if (ownership.contractVersion === 2) {
+        this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
+        if (!moduleAgentAdmission) {
+          throw new ModuleAgentAdmissionError('v2 transient Module messages require provider admission authority')
+        }
+      }
     }
     this.setLastMessageClientId(sessionId, rpcContext?.callerClientId)
 
@@ -6221,9 +6472,11 @@ export class SessionManager implements ISessionManager {
     // This acts as a safety valve - if the user moves on, we don't want to
     // auto-execute an old plan later.
     await clearStoredPendingPlanExecution(managed.workspace.rootPath, sessionId)
+    this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
 
     // Ensure messages are loaded before we try to add new ones
     await this.ensureMessagesLoaded(managed)
+    this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
 
     // If currently processing, behavior depends on the connection's
     // `midStreamBehavior` (resolved via {@link resolveMidStreamBehavior},
@@ -6296,6 +6549,7 @@ export class SessionManager implements ISessionManager {
       // before we tell the renderer "accepted" — `persistSession` only
       // enqueues with a 500ms debounce. (#616 reliability fix.)
       await this.flushSession(managed.id)
+      this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
       onAck?.(userMessage.id)
       return
     }
@@ -6335,6 +6589,7 @@ export class SessionManager implements ISessionManager {
       // `persistSession` is debounced (500ms). #616.
       this.persistSession(managed)
       await this.flushSession(managed.id)
+      this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
       onAck?.(userMessage.id)
 
       // Emit user_message event so UI can confirm the optimistic message
@@ -6368,6 +6623,7 @@ export class SessionManager implements ISessionManager {
         this.persistSession(managed)
         // Flush immediately so disk is authoritative before notifying renderer
         await this.flushSession(managed.id)
+        this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
         this.sendEvent({
           type: 'title_generated',
           sessionId,
@@ -6412,6 +6668,7 @@ export class SessionManager implements ISessionManager {
     // starts, allow the Host to interrupt and await an active Module turn.
     // Hidden/transient sessions deliberately bypass this priority seam.
     await this.beginVisibleCraftTurn(managed)
+    this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
     this.setProcessing(managed, true)
     managed.streamingText = ''
     managed.processingGeneration++
@@ -6512,6 +6769,7 @@ export class SessionManager implements ISessionManager {
 
     if (hasSources && managed.tokenRefreshManager) {
       const refreshResult = await refreshExpiredCredentials(sources, managed.tokenRefreshManager)
+      this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
       if (refreshResult.failedSources.length > 0) {
         sessionLog.warn('[OAuth] Some sources failed token refresh:', refreshResult.failedSources.map(f => f.slug))
       }
@@ -6523,7 +6781,9 @@ export class SessionManager implements ISessionManager {
     // Get or create the agent (lazy loading). Its internal cold-session build at
     // ~L2956 now sees fresh tokens (or correctly-needs_auth failed sources, since
     // ensureFreshToken mirrors the disk write to source.config in-memory).
+    this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
     const agent = await this.getOrCreateAgent(managed)
+    this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
     sendSpan.mark('agent.ready')
 
     // Always set all sources for context (even if none are enabled), including built-ins
@@ -6536,6 +6796,7 @@ export class SessionManager implements ISessionManager {
       const sessionPath = getSessionStoragePath(workspaceRootPath, sessionId)
       // Single fresh build — tokens already refreshed above.
       const { mcpServers, apiServers, errors } = await buildServersFromSources(sources, sessionPath, managed.tokenRefreshManager, agent.getSummarizeCallback())
+      this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
       if (errors.length > 0) {
         sessionLog.warn(`Source build errors:`, errors)
       }
@@ -6546,7 +6807,9 @@ export class SessionManager implements ISessionManager {
         const usableSources = sources.filter(isSourceUsable)
         const intendedSlugs = usableSources.map(s => s.config.slug)
         await agent.setSourceServers(mcpServers, apiServers, intendedSlugs)
+        this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
         await applyBridgeUpdates(agent, sessionPath, usableSources, mcpServers, sessionId, workspaceRootPath, 'send message', managed.poolServer?.url)
+        this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
         sessionLog.info(`Applied ${mcpCount} MCP + ${apiCount} API sources to session ${sessionId} (${allSources.length} total)`)
       }
       sendSpan.mark('servers.applied')
@@ -6607,10 +6870,30 @@ export class SessionManager implements ISessionManager {
       }
 
       sendSpan.mark('chat.starting')
-      const chatIterator = agent.chat(effectiveMessage, modelInputAttachments.attachments)
+      this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
+      const chatIterator = agent.chat(effectiveMessage, modelInputAttachments.attachments)[Symbol.asyncIterator]()
+      // Async generators do not execute until next() is called. Starting the
+      // first read is therefore the narrow provider-admission point: all Host
+      // preflight awaits are behind us and cancellation cannot interleave
+      // between the final fence, next(), and this acknowledgement.
+      const firstProviderEvent = chatIterator.next()
+      this.acknowledgeModuleAgentAdmission(managed, moduleAgentAdmission)
       sessionLog.info('Got chat iterator, starting iteration...')
 
-      for await (const event of chatIterator) {
+      const admittedEvents = async function* (): AsyncGenerator<AgentEvent> {
+        let completed = false
+        try {
+          let step = await firstProviderEvent
+          while (!step.done) {
+            yield step.value
+            step = await chatIterator.next()
+          }
+          completed = true
+        } finally {
+          if (!completed) await chatIterator.return?.(undefined)
+        }
+      }
+      for await (const event of admittedEvents()) {
         // Log events (skip noisy text_delta)
         if (event.type !== 'text_delta') {
           if (event.type === 'tool_start') {
@@ -6797,6 +7080,7 @@ export class SessionManager implements ISessionManager {
 
   async cancelProcessing(sessionId: string, silent = false): Promise<void> {
     const managed = this.sessions.get(sessionId)
+    this.fenceModuleAgentAdmission(sessionId)
     if (!managed?.isProcessing) {
       return // Not processing, nothing to cancel
     }
@@ -6926,6 +7210,7 @@ export class SessionManager implements ISessionManager {
     const managed = this.sessions.get(sessionId)
     if (!managed) return
 
+    this.fenceModuleAgentAdmission(sessionId)
     await this.cancelProcessing(sessionId, true)
     try {
       await this.awaitSessionStopped(sessionId, timeoutMs)
@@ -9542,6 +9827,14 @@ export class SessionManager implements ISessionManager {
     this.pendingPermissionRequests.clear()
     this.adminRememberApprovals.clear()
     this.visibleCraftTurnGate.clear()
+    for (const sessionId of this.moduleAgentAdmissions.keys()) {
+      this.fenceModuleAgentAdmission(sessionId)
+    }
+    this.moduleAgentAdmissions.clear()
+    this.moduleAgentAdmissionRevisions.clear()
+    this.moduleAgentRunStateTails.clear()
+    this.moduleAgentRunStateRevisions.clear()
+    this.moduleAgentRunPersistenceOverrides.clear()
 
     // Clean up session-scoped tool callbacks for all sessions
     for (const sessionId of this.sessions.keys()) {

@@ -5,7 +5,7 @@
  * race conditions when rapid successive flushes write to the same .tmp file.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdirSync, rmSync, existsSync, readFileSync } from 'fs';
+import { mkdirSync, rmSync, existsSync, readFileSync, readdirSync, unlinkSync } from 'fs';
 import { join } from 'path';
 import { tmpdir } from 'os';
 import { SessionPersistenceQueue } from '../src/sessions/persistence-queue.ts';
@@ -90,6 +90,49 @@ describe('SessionPersistenceQueue', () => {
     expect(header.sdkSessionId).toBe('new-thread-id');
   });
 
+  it('keeps every concurrent flush joined to the latest claimed writer', async () => {
+    let releaseOld!: () => void;
+    const oldBlocked = new Promise<void>((resolve) => { releaseOld = resolve; });
+    let oldReachedCommit!: () => void;
+    const oldAtCommit = new Promise<void>((resolve) => { oldReachedCommit = resolve; });
+    let releaseLatest!: () => void;
+    const latestBlocked = new Promise<void>((resolve) => { releaseLatest = resolve; });
+    let latestReachedCommit!: () => void;
+    const latestAtCommit = new Promise<void>((resolve) => { latestReachedCommit = resolve; });
+    queue = new SessionPersistenceQueue(60_000, {
+      beforeCommit: async (session) => {
+        if (session.sdkSessionId === 'old-in-flight') {
+          oldReachedCommit();
+          await oldBlocked;
+        }
+        if (session.sdkSessionId === 'latest-pending') {
+          latestReachedCommit();
+          await latestBlocked;
+        }
+      },
+    });
+
+    queue.enqueue(createTestSession('test-session', testDir, 'old-in-flight'));
+    const oldFlush = queue.flush('test-session');
+    await oldAtCommit;
+
+    queue.enqueue(createTestSession('test-session', testDir, 'intermediate-pending'));
+    const firstWaitingFlush = queue.flush('test-session');
+    queue.enqueue(createTestSession('test-session', testDir, 'latest-pending'));
+    let latestFlushSettled = false;
+    const latestFlush = queue.flush('test-session').then(() => { latestFlushSettled = true; });
+
+    releaseOld();
+    await latestAtCommit;
+    await Promise.resolve();
+    expect(latestFlushSettled).toBe(false);
+
+    releaseLatest();
+    await Promise.all([oldFlush, firstWaitingFlush, latestFlush]);
+    const filePath = join(testDir, 'sessions', 'test-session', 'session.jsonl');
+    expect(JSON.parse(readFileSync(filePath, 'utf-8').split('\n')[0]).sdkSessionId).toBe('latest-pending');
+  });
+
   it('allows parallel writes to different sessions', async () => {
     // Different sessions should write in parallel without blocking each other
     mkdirSync(join(testDir, 'sessions', 'session-a'), { recursive: true });
@@ -119,5 +162,192 @@ describe('SessionPersistenceQueue', () => {
 
     expect(JSON.parse(contentA.split('\n')[0]).sdkSessionId).toBe('id-a');
     expect(JSON.parse(contentB.split('\n')[0]).sdkSessionId).toBe('id-b');
+  });
+
+  it('lets an authoritative snapshot supersede a stuck older writer without late regression', async () => {
+    let releaseOld!: () => void;
+    const oldBlocked = new Promise<void>((resolve) => { releaseOld = resolve; });
+    let oldReachedCommit!: () => void;
+    const oldAtCommit = new Promise<void>((resolve) => { oldReachedCommit = resolve; });
+    queue = new SessionPersistenceQueue(60_000, {
+      beforeCommit: async (session) => {
+        if (session.sdkSessionId !== 'old-active-state') return;
+        oldReachedCommit();
+        await oldBlocked;
+      },
+    });
+
+    queue.enqueue(createTestSession('test-session', testDir, 'old-active-state'));
+    const staleFlush = queue.flush('test-session');
+    await oldAtCommit;
+
+    await queue.supersede(createTestSession('test-session', testDir, 'terminal-authority'));
+    const filePath = join(testDir, 'sessions', 'test-session', 'session.jsonl');
+    expect(JSON.parse(readFileSync(filePath, 'utf-8').split('\n')[0]).sdkSessionId).toBe('terminal-authority');
+
+    releaseOld();
+    await staleFlush;
+    expect(JSON.parse(readFileSync(filePath, 'utf-8').split('\n')[0]).sdkSessionId).toBe('terminal-authority');
+    expect(readdirSync(join(testDir, 'sessions', 'test-session')).filter((name) => name.includes('.tmp.'))).toEqual([]);
+  });
+
+  it('keeps flush and flushAll joined to a blocked authoritative supersede', async () => {
+    let releaseAuthority!: () => void;
+    const authorityBlocked = new Promise<void>((resolve) => { releaseAuthority = resolve; });
+    let authorityReachedCommit!: () => void;
+    const authorityAtCommit = new Promise<void>((resolve) => { authorityReachedCommit = resolve; });
+    queue = new SessionPersistenceQueue(60_000, {
+      beforeCommit: async (session) => {
+        if (session.sdkSessionId !== 'terminal-authority') return;
+        authorityReachedCommit();
+        await authorityBlocked;
+      },
+    });
+
+    const authorityWrite = queue.supersede(
+      createTestSession('test-session', testDir, 'terminal-authority'),
+    );
+    await authorityAtCommit;
+
+    let flushSettled = false;
+    let flushAllSettled = false;
+    const concurrentFlush = queue.flush('test-session').then(() => { flushSettled = true; });
+    const concurrentFlushAll = queue.flushAll().then(() => { flushAllSettled = true; });
+    await Promise.resolve();
+    expect(flushSettled).toBe(false);
+    expect(flushAllSettled).toBe(false);
+
+    releaseAuthority();
+    await Promise.all([authorityWrite, concurrentFlush, concurrentFlushAll]);
+    const filePath = join(testDir, 'sessions', 'test-session', 'session.jsonl');
+    expect(JSON.parse(readFileSync(filePath, 'utf-8').split('\n')[0]).sdkSessionId).toBe('terminal-authority');
+  });
+
+  it('commits a blocked authority before a concurrently enqueued autosave can supersede it', async () => {
+    let releaseAuthority!: () => void;
+    const authorityBlocked = new Promise<void>((resolve) => { releaseAuthority = resolve; });
+    let authorityReachedCommit!: () => void;
+    const authorityAtCommit = new Promise<void>((resolve) => { authorityReachedCommit = resolve; });
+    queue = new SessionPersistenceQueue(60_000, {
+      beforeCommit: async (session) => {
+        if (session.sdkSessionId !== 'terminal-authority') return;
+        authorityReachedCommit();
+        await authorityBlocked;
+      },
+    });
+
+    queue.enqueue(createTestSession('test-session', testDir, 'baseline'));
+    await queue.flush('test-session');
+    const authorityWrite = queue.supersede(
+      createTestSession('test-session', testDir, 'terminal-authority'),
+    );
+    await authorityAtCommit;
+    queue.enqueue(createTestSession('test-session', testDir, 'terminal-autosave'));
+
+    releaseAuthority();
+    await authorityWrite;
+    const filePath = join(testDir, 'sessions', 'test-session', 'session.jsonl');
+    expect(JSON.parse(readFileSync(filePath, 'utf-8').split('\n')[0]).sdkSessionId).toBe('terminal-authority');
+
+    await queue.flush('test-session');
+    expect(JSON.parse(readFileSync(filePath, 'utf-8').split('\n')[0]).sdkSessionId).toBe('terminal-autosave');
+  });
+
+  it('contains a failing authority for fire-and-forget flush and safely drains its queued retry', async () => {
+    let releaseAuthority!: () => void;
+    const authorityBlocked = new Promise<void>((resolve) => { releaseAuthority = resolve; });
+    let authorityReachedCommit!: () => void;
+    const authorityAtCommit = new Promise<void>((resolve) => { authorityReachedCommit = resolve; });
+    let retryReachedCommit!: () => void;
+    const retryAtCommit = new Promise<void>((resolve) => { retryReachedCommit = resolve; });
+    queue = new SessionPersistenceQueue(0, {
+      beforeCommit: async (session) => {
+        if (session.sdkSessionId === 'failing-authority') {
+          authorityReachedCommit();
+          await authorityBlocked;
+          throw new Error('injected-authority-failure');
+        }
+        if (session.sdkSessionId === 'safe-retry') retryReachedCommit();
+      },
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const authorityResult = queue.supersede(
+        createTestSession('test-session', testDir, 'failing-authority'),
+      ).then(
+        () => 'resolved' as const,
+        (error: unknown) => error,
+      );
+      await authorityAtCommit;
+      // The 0ms debounce path joins the never-reject tracked authority tail.
+      queue.enqueue(createTestSession('test-session', testDir, 'safe-retry'));
+      releaseAuthority();
+
+      expect(await authorityResult).toBeInstanceOf(Error);
+      await retryAtCommit;
+      await queue.flush('test-session');
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      expect(unhandled).toEqual([]);
+      const filePath = join(testDir, 'sessions', 'test-session', 'session.jsonl');
+      expect(JSON.parse(readFileSync(filePath, 'utf-8').split('\n')[0]).sdkSessionId).toBe('safe-retry');
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  it('rejects a cancelled authority and cannot resurrect the deleted session', async () => {
+    let releaseAuthority!: () => void;
+    const authorityBlocked = new Promise<void>((resolve) => { releaseAuthority = resolve; });
+    let authorityReachedCommit!: () => void;
+    const authorityAtCommit = new Promise<void>((resolve) => { authorityReachedCommit = resolve; });
+    queue = new SessionPersistenceQueue(60_000, {
+      beforeCommit: async () => {
+        authorityReachedCommit();
+        await authorityBlocked;
+      },
+    });
+
+    const authorityResult = queue.supersede(
+      createTestSession('test-session', testDir, 'must-not-resurrect'),
+    ).then(
+      () => 'resolved' as const,
+      (error: unknown) => error,
+    );
+    await authorityAtCommit;
+    queue.cancel('test-session');
+    const filePath = join(testDir, 'sessions', 'test-session', 'session.jsonl');
+    try { unlinkSync(filePath); } catch { /* The authority has not committed. */ }
+
+    releaseAuthority();
+    expect(await authorityResult).toBeInstanceOf(Error);
+    expect(existsSync(filePath)).toBe(false);
+    expect(readdirSync(join(testDir, 'sessions', 'test-session')).filter((name) => name.includes('.tmp.'))).toEqual([]);
+  });
+
+  it('invalidates an in-flight writer on cancel so deletion cannot resurrect the session', async () => {
+    let releaseWrite!: () => void;
+    const writeBlocked = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    let reachedCommit!: () => void;
+    const atCommit = new Promise<void>((resolve) => { reachedCommit = resolve; });
+    queue = new SessionPersistenceQueue(60_000, {
+      beforeCommit: async () => {
+        reachedCommit();
+        await writeBlocked;
+      },
+    });
+
+    queue.enqueue(createTestSession('test-session', testDir, 'must-not-resurrect'));
+    const staleFlush = queue.flush('test-session');
+    await atCommit;
+    queue.cancel('test-session');
+    const filePath = join(testDir, 'sessions', 'test-session', 'session.jsonl');
+    try { unlinkSync(filePath); } catch { /* The staged writer has not committed yet. */ }
+
+    releaseWrite();
+    await staleFlush;
+    expect(existsSync(filePath)).toBe(false);
+    expect(readdirSync(join(testDir, 'sessions', 'test-session')).filter((name) => name.includes('.tmp.'))).toEqual([]);
   });
 });

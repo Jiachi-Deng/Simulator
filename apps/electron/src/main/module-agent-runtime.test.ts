@@ -48,6 +48,17 @@ function fakeSessions(workspaceRoot: string, options: {
   const deleted: string[] = []
   const prompts: string[] = []
   const visibleListeners = new Set<(change: { active: boolean }) => void | Promise<void>>()
+  const sendFixtureMessage = async (sessionId: string, prompt: string): Promise<void> => {
+    prompts.push(prompt)
+    if (options.autoComplete === false) return
+    for (const listener of moduleListeners) {
+      listener({ type: 'message.delta', sessionId, delta: 'host runtime ' })
+      listener({ type: 'message.completed', sessionId, text: 'host runtime reply' })
+    }
+    for (const listener of completionListeners) {
+      listener({ sessionId, reason: 'complete', finalText: 'host runtime reply' })
+    }
+  }
   const sessions = {
     getWorkspaces: () => [{
       id: 'workspace-1',
@@ -74,15 +85,10 @@ function fakeSessions(workspaceRoot: string, options: {
       return () => completionListeners.delete(listener)
     },
     async sendMessage(sessionId: string, prompt: string) {
-      prompts.push(prompt)
-      if (options.autoComplete === false) return
-      for (const listener of moduleListeners) {
-        listener({ type: 'message.delta', sessionId, delta: 'host runtime ' })
-        listener({ type: 'message.completed', sessionId, text: 'host runtime reply' })
-      }
-      for (const listener of completionListeners) {
-        listener({ sessionId, reason: 'complete', finalText: 'host runtime reply' })
-      }
+      await sendFixtureMessage(sessionId, prompt)
+    },
+    async sendModuleAgentMessage(sessionId: string, prompt: string) {
+      await sendFixtureMessage(sessionId, prompt)
     },
     async cancelProcessing() {},
     async awaitSessionStopped() {},

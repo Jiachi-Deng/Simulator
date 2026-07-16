@@ -302,9 +302,15 @@ export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
   }
 
   async sendTurn(sessionId: string, prompt: string): Promise<void> {
-    void this.sessions.sendMessage(sessionId, prompt).catch(() => {
+    try {
+      // This resolves at the provider-admission boundary, not at end-of-turn.
+      // RunCore can therefore publish `running` only after every cancellable
+      // SessionManager preflight has completed.
+      await this.sessions.sendModuleAgentMessage(sessionId, prompt)
+    } catch {
       this.emitLocal({ type: 'turn.failed', sessionId, code: 'RUNTIME_UNAVAILABLE' })
-    })
+      throw new Error('Host provider admission failed')
+    }
   }
 
   cancelTurn(sessionId: string): Promise<void> {

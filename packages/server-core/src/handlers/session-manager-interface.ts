@@ -160,6 +160,11 @@ export interface ISessionManager {
     onAck?: (messageId: string) => void,
     rpcContext?: { callerClientId?: string },
   ): Promise<void>
+  /**
+   * Host-only v2 Module seam. Resolves once the provider iterator has accepted
+   * the turn, not when the long-running turn completes.
+   */
+  sendModuleAgentMessage(sessionId: string, message: string): Promise<void>
   cancelProcessing(sessionId: string, silent?: boolean): Promise<void>
   /** Internal lifecycle seam used by the Module Agent adapter. */
   awaitSessionStopped(sessionId: string, timeoutMs?: number): Promise<void>
