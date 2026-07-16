@@ -78,6 +78,10 @@ import { resolveSearchProvider } from './tools/search/resolve-provider.ts';
 import { createSearchTool } from './tools/search/create-search-tool.ts';
 import { allowCraftMetadataProperties, stripCraftMetadata } from './craft-metadata-schema.ts';
 import { applySystemPromptOverride } from './system-prompt-override.ts';
+import {
+  preparePiFileToolInputForExecutor,
+  preparePiFileToolInputForHost,
+} from './file-tool-path-input.ts';
 
 // ============================================================
 // Types — JSONL Protocol
@@ -740,17 +744,24 @@ function wrapSingleTool(tool: ToolDefinition<any, any>): ToolDefinition<any, any
     const sdkToolName = PI_TOOL_NAME_MAP[tool.name] || tool.name;
     let inputObj: Record<string, unknown> = { ...(params as Record<string, unknown>) };
 
-    // Extract intent before main process strips metadata (used for summarization)
-    const intent = typeof inputObj._intent === 'string' ? inputObj._intent : undefined;
-
-    // Normalize Pi SDK parameter names: path → file_path
-    if ((sdkToolName === 'Write' || sdkToolName === 'Edit' || sdkToolName === 'MultiEdit' || sdkToolName === 'NotebookEdit')
-        && typeof inputObj.path === 'string' && !inputObj.file_path) {
+    // Preserve the existing NotebookEdit adapter contract. It is not part of
+    // the Module Agent file-tool allowlist or the Pi built-in executor set.
+    if (sdkToolName === 'NotebookEdit' && typeof inputObj.path === 'string' && !inputObj.file_path) {
       inputObj = { ...inputObj, file_path: inputObj.path };
     }
 
+    inputObj = preparePiFileToolInputForHost(sdkToolName, inputObj);
+
+    // Extract intent before main process strips metadata (used for summarization)
+    const intent = typeof inputObj._intent === 'string' ? inputObj._intent : undefined;
+
     // Send to main process for permission checking + transforms
     inputObj = await requestPreToolUseApproval(sdkToolName, inputObj, toolCallId);
+
+    // The shared Host pipeline uses Claude's `file_path` spelling. Pi's actual
+    // file executors consume `path`, so restore exactly that one canonical field
+    // after approval and reject any ambiguous response before filesystem I/O.
+    inputObj = preparePiFileToolInputForExecutor(sdkToolName, inputObj);
 
     // Metadata is for Craft UI only. Keep a final defensive strip here so the
     // upstream Pi tool implementation always receives clean executable args,
