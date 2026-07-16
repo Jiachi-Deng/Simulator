@@ -424,6 +424,7 @@ export class ModuleAgentGateway {
     if (active) {
       try {
         await this.#deps.port.cancelTurn(session.rawSessionId)
+        await this.#deps.port.awaitStopped(session.rawSessionId)
         session.activeTurn = undefined
         this.#emit(session, { type: 'turn.cancelled', data: EMPTY_DATA }, active.turnId)
       } catch {
@@ -432,7 +433,7 @@ export class ModuleAgentGateway {
       }
     }
     try {
-      await this.#deps.port.deleteSession(session.rawSessionId)
+      await this.#deps.port.disposeAndReap(session.rawSessionId)
     } catch (error) {
       throw error
     }

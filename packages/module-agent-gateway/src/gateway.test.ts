@@ -150,6 +150,19 @@ describe('ModuleAgentGateway', () => {
     expect(() => state.gateway.getCapabilities(auth)).toThrow()
   })
 
+  it('waits for an active provider turn before strict session reaping', async () => {
+    const state = setup()
+    const { auth, session } = await grantAndSession(state)
+    await state.gateway.startTurn(auth, session.sessionHandle, { contractVersion: 1, prompt: 'Create' })
+
+    await state.gateway.closeSession(auth, session.sessionHandle)
+
+    expect(state.port.cancelled).toEqual(['raw-1'])
+    expect(state.port.awaitedStopped).toEqual(['raw-1'])
+    expect(state.port.deleted).toEqual(['raw-1'])
+    expect(state.gateway.debugSnapshot()).toMatchObject({ activeSessions: 0, activeTurns: 0 })
+  })
+
   it('never forwards a raw provider failure message', async () => {
     const state = setup()
     state.port.failSend = true
@@ -180,7 +193,7 @@ describe('ModuleAgentGateway', () => {
     const { grant, auth, session } = await grantAndSession(state)
     let releaseDelete!: () => void
     const deleteGate = new Promise<void>((resolve) => { releaseDelete = resolve })
-    state.port.deleteSession = async (sessionId: string) => {
+    state.port.disposeAndReap = async (sessionId: string) => {
       await deleteGate
       state.port.deleted.push(sessionId)
     }

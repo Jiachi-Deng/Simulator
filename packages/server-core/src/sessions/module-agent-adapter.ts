@@ -93,8 +93,12 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
     return this.sessions.cancelProcessing(sessionId, true)
   }
 
-  async deleteSession(sessionId: string): Promise<void> {
-    await this.sessions.deleteSession(sessionId)
+  awaitStopped(sessionId: string): Promise<void> {
+    return this.sessions.awaitSessionStopped(sessionId)
+  }
+
+  async disposeAndReap(sessionId: string): Promise<void> {
+    await this.sessions.disposeSessionAndReap(sessionId)
     unregisterModuleAgentToolBoundary(sessionId)
     this.localListeners.delete(sessionId)
   }

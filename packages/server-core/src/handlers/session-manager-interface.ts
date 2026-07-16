@@ -122,6 +122,10 @@ export interface ISessionManager {
     rpcContext?: { callerClientId?: string },
   ): Promise<void>
   cancelProcessing(sessionId: string, silent?: boolean): Promise<void>
+  /** Internal lifecycle seam used by the Module Agent adapter. */
+  awaitSessionStopped(sessionId: string, timeoutMs?: number): Promise<void>
+  /** Strict internal teardown used for transient Module Agent sessions. */
+  disposeSessionAndReap(sessionId: string, timeoutMs?: number): Promise<void>
   killShell(sessionId: string, shellId: string): Promise<{ success: boolean; error?: string }>
   getTaskOutput(taskId: string): Promise<string | null>
 

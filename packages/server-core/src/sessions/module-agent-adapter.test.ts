@@ -31,6 +31,7 @@ describe('CraftModuleAgentSessionPort', () => {
     ])
     let createOptions: Record<string, unknown> | undefined
     let internalOptions: Record<string, unknown> | undefined
+    const lifecycleCalls: string[] = []
     const manager = {
       getWorkspaces: () => [{ id: 'workspace', rootPath: workspaceRoot }],
       createSession: async (_workspaceId: string, options: Record<string, unknown>, internal: Record<string, unknown>) => {
@@ -41,7 +42,9 @@ describe('CraftModuleAgentSessionPort', () => {
           messages: [], isProcessing: false, hidden: true, workingDirectory: projectRoot,
         } as Session
       },
-      deleteSession: async () => undefined,
+      deleteSession: async () => { lifecycleCalls.push('delete') },
+      awaitSessionStopped: async () => { lifecycleCalls.push('stopped') },
+      disposeSessionAndReap: async () => { lifecycleCalls.push('reaped') },
       sendMessage: async () => undefined,
       cancelProcessing: async () => undefined,
       onModuleAgentRuntimeEvent: () => () => undefined,
@@ -63,7 +66,9 @@ describe('CraftModuleAgentSessionPort', () => {
     expect(checkModuleAgentToolBoundary('raw', 'Read', { file_path: join(projectRoot, 'index.ts') }).allowed).toBe(true)
     expect(checkModuleAgentToolBoundary('raw', 'Read', { file_path: join(siblingProject, 'secret.ts') }).allowed).toBe(false)
     expect(checkModuleAgentToolBoundary('raw', 'Write', { file_path: daemonData }).allowed).toBe(false)
-    await port.deleteSession('raw')
+    await port.awaitStopped('raw')
+    await port.disposeAndReap('raw')
+    expect(lifecycleCalls).toEqual(['stopped', 'reaped'])
     expect(checkModuleAgentToolBoundary('raw', 'Bash', { command: 'pwd' }).allowed).toBe(true)
   })
 

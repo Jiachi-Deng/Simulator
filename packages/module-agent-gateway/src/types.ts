@@ -181,7 +181,10 @@ export interface ModuleAgentSessionPort {
   createSession(input: CreateHostModuleSessionInput): Promise<CreatedHostModuleSession>
   sendTurn(sessionId: string, prompt: string): Promise<void>
   cancelTurn(sessionId: string): Promise<void>
-  deleteSession(sessionId: string): Promise<void>
+  /** Wait until provider/query turn processing and its persistence tail have stopped. */
+  awaitStopped(sessionId: string): Promise<void>
+  /** Strict teardown: stop, dispose, reap Host resources, and remove persistence. */
+  disposeAndReap(sessionId: string): Promise<void>
   subscribe(sessionId: string, listener: (event: ModuleAgentPortEvent) => void): () => void
 }
 

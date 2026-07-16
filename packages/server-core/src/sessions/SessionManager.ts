@@ -6414,6 +6414,80 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
+   * Wait for the full turn-completion seam and its persistence tail. Module
+   * teardown uses this instead of a fixed sleep so a slow provider cannot keep
+   * writing after its hidden session has been removed.
+   */
+  async awaitSessionStopped(sessionId: string, timeoutMs = 10_000): Promise<void> {
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      throw new TypeError('Session stop timeout must be a positive finite number')
+    }
+    const stopped = () => {
+      const current = this.sessions.get(sessionId)
+      return !current || (!current.isProcessing && !current.agent?.isProcessing())
+    }
+
+    if (!stopped()) {
+      await new Promise<void>((resolve, reject) => {
+        let settled = false
+        let timeout: ReturnType<typeof setTimeout>
+        let poll: ReturnType<typeof setInterval>
+        const unsubscribe = this.onSessionComplete((event) => {
+          if (event.sessionId === sessionId && stopped()) settle()
+        })
+        const settle = (error?: Error) => {
+          if (settled) return
+          settled = true
+          clearTimeout(timeout)
+          clearInterval(poll)
+          unsubscribe()
+          if (error) reject(error)
+          else resolve()
+        }
+        poll = setInterval(() => {
+          if (stopped()) settle()
+        }, 25)
+        timeout = setTimeout(() => {
+          settle(new Error(`Session ${sessionId} did not stop within ${timeoutMs}ms`))
+        }, timeoutMs)
+      })
+    }
+
+    await sessionPersistenceQueue.flush(sessionId)
+    if (!stopped()) throw new Error(`Session ${sessionId} resumed while awaiting stop`)
+  }
+
+  /**
+   * Strict transient-session teardown. Unlike ordinary UI deletion, every
+   * provider, MCP pool, persistence and on-disk boundary is awaited and then
+   * verified before the caller may report the Module Run closed.
+   */
+  async disposeSessionAndReap(sessionId: string, timeoutMs = 10_000): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) return
+
+    await this.cancelProcessing(sessionId, true)
+    await this.awaitSessionStopped(sessionId, timeoutMs)
+
+    // Provider-specific destroy paths terminate their current query/process.
+    // Disconnect the shared pool explicitly as BaseAgent cleanup is otherwise
+    // fire-and-forget.
+    managed.agent?.dispose()
+    managed.agent = null
+    if (managed.mcpPool) await managed.mcpPool.disconnectAll()
+    if (managed.poolServer) await managed.poolServer.stop()
+    managed.mcpPool = undefined
+    managed.poolServer = undefined
+    await sessionPersistenceQueue.flush(sessionId)
+
+    const sessionPath = getSessionStoragePath(managed.workspace.rootPath, sessionId)
+    await this.deleteSession(sessionId)
+    if (this.sessions.has(sessionId) || existsSync(sessionPath)) {
+      throw new Error(`Session ${sessionId} was not fully reaped`)
+    }
+  }
+
+  /**
    * Attempt auth retry: refresh token, destroy agent, resend last message.
    * Shared by both typed_error and plain error auth-retry paths.
    * Returns true if retry was initiated, false if conditions not met.
