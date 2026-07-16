@@ -38,7 +38,7 @@ import {
 const execFileAsync = promisify(execFile);
 const productionCli = fileURLToPath(new URL("../package/production-cli.mjs", import.meta.url));
 const supported = process.platform === "darwin" && process.arch === "arm64";
-const RELEASE_TAG = "open-design-v0.14.3";
+const RELEASE_TAG = "open-design-v0.14.4";
 const ISSUED_AT = "2026-07-15T00:00:00.000Z";
 const EXPIRES_AT = "2026-07-15T12:00:00.000Z";
 const VERIFY_AT = Date.parse(ISSUED_AT) + 1_000;
@@ -105,7 +105,7 @@ test("production package emits deterministic Catalog v2, exact-tag metadata, and
   assert.deepEqual(await verifyBundle(first.output, fixture), {
     ok: true,
     moduleId: "org.simulator.open-design",
-    version: "0.14.3",
+    version: "0.14.4",
     platform: "darwin-arm64",
     archiveSha256: first.archiveSha256,
     extractedManifestSha256: first.extractedManifestSha256,
