@@ -1,4 +1,5 @@
-#!/usr/bin/env node
+#!/bin/sh
+':' //; shim_dir="${0%/*}"; shim_bun="$shim_dir/../../../vendor/bun/bun"; if [ ! -x "$shim_bun" ]; then shim_bun="$shim_dir/../../vendor/bun/bun"; fi; if [ ! -x "$shim_bun" ] || ! "$shim_bun" --version >/dev/null 2>&1; then printf '%s\n' '[simulator-host-agent] RUNTIME_UNAVAILABLE' >&2; exit 127; fi; exec "$shim_bun" "$0" "$@"; printf '%s\n' '[simulator-host-agent] RUNTIME_UNAVAILABLE' >&2; exit 127
 
 // src/shim.ts
 import { randomBytes, timingSafeEqual } from "node:crypto";

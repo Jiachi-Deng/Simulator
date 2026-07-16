@@ -8,6 +8,7 @@ import {
   realpath,
   rename,
   rm,
+  writeFile,
 } from 'node:fs/promises'
 import { dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -16,6 +17,11 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const repositoryRoot = resolve(packageRoot, '../..')
 const outputDirectory = join(repositoryRoot, 'apps/electron/resources/host-agent')
 const outputPath = join(outputDirectory, 'simulator-host-agent.mjs')
+const BUNDLED_NODE_SHEBANG = '#!/usr/bin/env node\n'
+export const HOST_AGENT_SHIM_BOOTSTRAP_PREFIX = [
+  '#!/bin/sh',
+  `':' //; shim_dir="\${0%/*}"; shim_bun="$shim_dir/../../../vendor/bun/bun"; if [ ! -x "$shim_bun" ]; then shim_bun="$shim_dir/../../vendor/bun/bun"; fi; if [ ! -x "$shim_bun" ] || ! "$shim_bun" --version >/dev/null 2>&1; then printf '%s\\n' '[simulator-host-agent] RUNTIME_UNAVAILABLE' >&2; exit 127; fi; exec "$shim_bun" "$0" "$@"; printf '%s\\n' '[simulator-host-agent] RUNTIME_UNAVAILABLE' >&2; exit 127`,
+].join('\n') + '\n'
 
 function isSameCanonicalPath(left: string, right: string): boolean {
   return process.platform === 'win32' ? relative(left, right) === '' : left === right
@@ -35,8 +41,9 @@ async function inspectGeneratedShim(path: string, label: string): Promise<Buffer
   }
   const bytes = await readFile(path)
   if (bytes.length === 0) throw new Error(`${label} must not be empty`)
-  if (!bytes.subarray(0, 20).toString('utf8').startsWith('#!/usr/bin/env node')) {
-    throw new Error(`${label} must retain the Node shebang`)
+  const bootstrap = Buffer.from(HOST_AGENT_SHIM_BOOTSTRAP_PREFIX)
+  if (bytes.byteLength < bootstrap.byteLength || !bytes.subarray(0, bootstrap.byteLength).equals(bootstrap)) {
+    throw new Error(`${label} must retain the Host-owned bundled Bun bootstrap`)
   }
   if (bytes.includes(Buffer.from('sourceMappingURL='))) {
     throw new Error(`${label} must not contain a source map reference`)
@@ -87,6 +94,16 @@ export async function buildHostAgentShim(): Promise<string> {
       for (const log of result.logs) console.error(log)
       throw new Error('Host Agent shim bundle failed')
     }
+    const bundledBytes = await readFile(temporaryOutput)
+    const bundledShebang = Buffer.from(BUNDLED_NODE_SHEBANG)
+    if (bundledBytes.byteLength < bundledShebang.byteLength
+      || !bundledBytes.subarray(0, bundledShebang.byteLength).equals(bundledShebang)) {
+      throw new Error('Host Agent shim bundle lost its deterministic Node build shebang')
+    }
+    await writeFile(temporaryOutput, Buffer.concat([
+      Buffer.from(HOST_AGENT_SHIM_BOOTSTRAP_PREFIX),
+      bundledBytes.subarray(bundledShebang.byteLength),
+    ]), { mode: 0o755 })
     await chmod(temporaryOutput, 0o755)
     const bytes = await inspectGeneratedShim(temporaryOutput, 'Fresh Host Agent generated shim')
 

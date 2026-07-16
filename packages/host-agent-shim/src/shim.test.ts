@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test'
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Readable, Writable } from 'node:stream'
@@ -139,14 +139,97 @@ function json(response: ServerResponse, value: unknown): void {
 }
 
 describe('Host Agent shim', () => {
-  it('ships a standalone executable artifact with a detection-only version path', async () => {
+  it('ships a zero-argument executable that works directly with an empty PATH and under Bun', async () => {
     const artifact = join(repositoryRoot, 'apps/electron/resources/host-agent/simulator-host-agent.mjs')
-    const result = await execFileAsync(process.execPath, [artifact, '--version'], {
+    const bunResult = await execFileAsync(process.execPath, [artifact, '--version'], {
       env: {},
       timeout: 5_000,
     })
-    expect(result.stdout).toBe('simulator-host-agent 2\n')
-    expect(result.stderr).toBe('')
+    expect((process.versions as NodeJS.ProcessVersions & { bun?: string }).bun).toBeTruthy()
+    expect(bunResult.stdout).toBe('simulator-host-agent 2\n')
+    expect(bunResult.stderr).toBe('')
+
+    if (process.platform !== 'win32') {
+      const directResult = await execFileAsync(artifact, ['--version'], {
+        env: { PATH: '' },
+        timeout: 5_000,
+      })
+      expect(directResult.stdout).toBe('simulator-host-agent 2\n')
+      expect(directResult.stderr).toBe('')
+
+      let shimFailure: (Error & { code?: number | string; stdout?: string; stderr?: string }) | undefined
+      try {
+        await execFileAsync(artifact, ['--not-a-runtime-argument'], {
+          env: { PATH: '' },
+          timeout: 5_000,
+        })
+      } catch (error) {
+        shimFailure = error as Error & { code?: number | string; stdout?: string; stderr?: string }
+      }
+      expect(shimFailure?.code).toBe(2)
+      expect(shimFailure?.stdout).toBe('')
+      expect(shimFailure?.stderr).toBe('[simulator-host-agent] INVALID_ARGUMENTS\n')
+    }
+  })
+
+  it('fails closed with only a public diagnostic when the relative bundled Bun is absent', async () => {
+    if (process.platform === 'win32') return
+    const artifact = join(repositoryRoot, 'apps/electron/resources/host-agent/simulator-host-agent.mjs')
+    const root = await mkdtemp(join(tmpdir(), 'host-agent-shim-missing-runtime-'))
+    temporaryRoots.push(root)
+    const isolatedDirectory = join(root, 'app', 'dist', 'resources', 'host-agent')
+    const isolatedArtifact = join(isolatedDirectory, 'simulator-host-agent.mjs')
+    await mkdir(isolatedDirectory, { recursive: true })
+    await writeFile(isolatedArtifact, await readFile(artifact), { mode: 0o755 })
+    await chmod(isolatedArtifact, 0o755)
+
+    let failure: (Error & { code?: number | string; stdout?: string; stderr?: string }) | undefined
+    try {
+      await execFileAsync(isolatedArtifact, ['--version'], { env: { PATH: '' }, timeout: 5_000 })
+    } catch (error) {
+      failure = error as Error & { code?: number | string; stdout?: string; stderr?: string }
+    }
+    expect(failure?.code).toBe(127)
+    expect(failure?.stdout).toBe('')
+    expect(failure?.stderr).toBe('[simulator-host-agent] RUNTIME_UNAVAILABLE\n')
+  })
+
+  it('fails closed without path or parser leakage when the bundled runtime is corrupt or the wrong format', async () => {
+    if (process.platform === 'win32') return
+    const artifact = join(repositoryRoot, 'apps/electron/resources/host-agent/simulator-host-agent.mjs')
+
+    for (const [name, runtimeBytes] of [
+      ['wrong-format', 'this executable README is not Bun\n'],
+      [
+        'corrupt-runtime',
+        "#!/bin/sh\nprintf '%s\\n' \"RAW_RUNTIME_FAILURE:$0\" >&2\nexit 64\n",
+      ],
+    ] as const) {
+      const root = await mkdtemp(join(tmpdir(), `host-agent-shim-${name}-`))
+      temporaryRoots.push(root)
+      const isolatedDirectory = join(root, 'app', 'dist', 'resources', 'host-agent')
+      const isolatedArtifact = join(isolatedDirectory, 'simulator-host-agent.mjs')
+      const bundledRuntime = join(root, 'app', 'vendor', 'bun', 'bun')
+      await mkdir(isolatedDirectory, { recursive: true })
+      await mkdir(dirname(bundledRuntime), { recursive: true })
+      await writeFile(isolatedArtifact, await readFile(artifact), { mode: 0o755 })
+      await writeFile(bundledRuntime, runtimeBytes, { mode: 0o755 })
+      await chmod(isolatedArtifact, 0o755)
+      await chmod(bundledRuntime, 0o755)
+
+      let failure: (Error & { code?: number | string; stdout?: string; stderr?: string }) | undefined
+      try {
+        await execFileAsync(isolatedArtifact, ['--version'], { env: { PATH: '' }, timeout: 5_000 })
+      } catch (error) {
+        failure = error as Error & { code?: number | string; stdout?: string; stderr?: string }
+      }
+      expect(failure?.code).toBe(127)
+      expect(failure?.stdout).toBe('')
+      expect(failure?.stderr).toBe('[simulator-host-agent] RUNTIME_UNAVAILABLE\n')
+      expect(failure?.stderr).not.toContain(root)
+      expect(failure?.stderr).not.toContain('RAW_RUNTIME_FAILURE')
+      expect(failure?.stderr).not.toContain('syntax error')
+    }
   })
 
   it('streams only canonical JSONL and waits for strict DELETE/run.closed', async () => {

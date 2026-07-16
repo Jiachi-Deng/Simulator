@@ -19,6 +19,9 @@ import {
   rmSync,
 } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
+import { HOST_AGENT_SHIM_BOOTSTRAP_PREFIX } from '../../../packages/host-agent-shim/scripts/build'
+
+export { HOST_AGENT_SHIM_BOOTSTRAP_PREFIX }
 
 export const HOST_AGENT_SHIM_RELATIVE_PATH = join('host-agent', 'simulator-host-agent.mjs')
 

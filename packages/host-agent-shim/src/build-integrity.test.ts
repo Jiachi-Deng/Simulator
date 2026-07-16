@@ -2,7 +2,10 @@ import { afterEach, describe, expect, it } from 'bun:test'
 import { chmod, link, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { assertReplaceableGeneratedShim } from '../scripts/build'
+import {
+  assertReplaceableGeneratedShim,
+  HOST_AGENT_SHIM_BOOTSTRAP_PREFIX,
+} from '../scripts/build'
 
 const roots: string[] = []
 
@@ -10,7 +13,7 @@ async function fixture(mode = 0o755): Promise<{ root: string; artifact: string }
   const root = await mkdtemp(join(tmpdir(), 'host-agent-shim-build-integrity-'))
   roots.push(root)
   const artifact = join(root, 'simulator-host-agent.mjs')
-  await writeFile(artifact, '#!/usr/bin/env node\nconsole.log("fixture")\n', { mode })
+  await writeFile(artifact, `${HOST_AGENT_SHIM_BOOTSTRAP_PREFIX}console.log("fixture")\n`, { mode })
   if (process.platform !== 'win32') await chmod(artifact, mode)
   return { root, artifact }
 }

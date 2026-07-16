@@ -5,6 +5,7 @@ import { join, resolve } from 'node:path'
 import {
   assertHostAgentArtifactsMatch,
   copyHostAgentShim,
+  HOST_AGENT_SHIM_BOOTSTRAP_PREFIX,
   inspectHostAgentArtifact,
 } from '../../../scripts/copy-assets'
 
@@ -17,7 +18,7 @@ async function fixture(): Promise<{ root: string; source: string }> {
   const sourceDirectory = join(root, 'source')
   await mkdir(sourceDirectory)
   const source = join(sourceDirectory, 'simulator-host-agent.mjs')
-  await writeFile(source, '#!/usr/bin/env node\nconsole.log("shim")\n', { mode: 0o755 })
+  await writeFile(source, `${HOST_AGENT_SHIM_BOOTSTRAP_PREFIX}console.log("shim")\n`, { mode: 0o755 })
   if (process.platform !== 'win32') await chmod(source, 0o755)
   return { root, source }
 }
@@ -96,7 +97,7 @@ describe('Host Agent executable resource integrity', () => {
     const packagedCopy = copyHostAgentShim(source, packaged)
     assertHostAgentArtifactsMatch(copied.source, packagedCopy.destination, 'Packaged Host Agent shim')
 
-    await writeFile(packaged, '#!/usr/bin/env node\nconsole.log("tampered")\n', { mode: 0o755 })
+    await writeFile(packaged, `${HOST_AGENT_SHIM_BOOTSTRAP_PREFIX}console.log("tampered")\n`, { mode: 0o755 })
     if (process.platform !== 'win32') await chmod(packaged, 0o755)
     const changed = inspectHostAgentArtifact(packaged, 'Packaged Host Agent shim', {
       executable: true,

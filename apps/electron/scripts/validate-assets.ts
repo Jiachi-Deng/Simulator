@@ -3,6 +3,7 @@ import { basename, join, resolve } from "node:path"
 import { validatePackagedServerResources } from "../../../scripts/packaged-server-resources"
 import {
   assertHostAgentArtifactsMatch,
+  HOST_AGENT_SHIM_BOOTSTRAP_PREFIX,
   inspectHostAgentArtifact,
 } from "./copy-assets"
 
@@ -64,8 +65,9 @@ const sourceHostAgentShimPath = "resources/host-agent/simulator-host-agent.mjs"
 const hostAgentShimPath = "dist/resources/host-agent/simulator-host-agent.mjs"
 if (existsSync(sourceHostAgentShimPath) && existsSync(hostAgentShimPath)) {
   const bytes = readFileSync(hostAgentShimPath)
-  if (!bytes.subarray(0, 20).toString("utf8").startsWith("#!/usr/bin/env node")) {
-    failures.push(`${hostAgentShimPath} does not have the required Node shebang`)
+  const bootstrap = Buffer.from(HOST_AGENT_SHIM_BOOTSTRAP_PREFIX)
+  if (bytes.byteLength < bootstrap.byteLength || !bytes.subarray(0, bootstrap.byteLength).equals(bootstrap)) {
+    failures.push(`${hostAgentShimPath} does not have the Host-owned bundled Bun bootstrap`)
   }
   if (bytes.includes(Buffer.from("sourceMappingURL="))) {
     failures.push(`${hostAgentShimPath} unexpectedly contains a source map reference`)
