@@ -134,6 +134,13 @@ import {
   type OpenDesignOfficialChannelBootstrap,
 } from './open-design-official-channel'
 import { loadOpenDesignCompatibilityAuthority } from './open-design-compatibility-authority'
+import {
+  OPEN_DESIGN_ACCEPTANCE_ENV,
+  OpenDesignAcceptanceController,
+  loadOpenDesignAcceptance,
+  registerOpenDesignAcceptanceIpc,
+  type OpenDesignAcceptanceIpcRegistration,
+} from './open-design-acceptance'
 import { resolveHostModuleStorageRoot } from './host-module-storage-root'
 import {
   createIsolatedHostModuleAgentRuntime,
@@ -268,6 +275,8 @@ let openDesignHostChannel: OpenDesignHostChannelBootstrap = Object.freeze({
 })
 let openDesignModuleController: OpenDesignModuleController | null = null
 let openDesignModuleIpc: OpenDesignModuleIpcRegistration | null = null
+let openDesignAcceptanceController: OpenDesignAcceptanceController | null = null
+let openDesignAcceptanceIpc: OpenDesignAcceptanceIpcRegistration | null = null
 let stopServer: (() => Promise<void>) | null = null
 let embeddedServer: { host: string; port: number } | null = null
 let oauthFlowStore: OAuthFlowStore | null = null
@@ -1072,34 +1081,93 @@ app.whenReady().then(async () => {
     // Create initial windows (restores from saved state or opens first workspace)
     // In headless mode the server runs without any UI — skip window creation.
     if (!isHeadless) {
-      await createInitialWindows()
-      openDesignDevelopmentBootstrap = await loadOpenDesignDevelopmentBootstrap({
-        argv: process.argv,
-        platform: currentModulePlatform(),
+      let openDesignOfficialBootstrap: OpenDesignOfficialChannelBootstrap = Object.freeze({
+        status: 'not-ready',
+        errorCode: 'OFFICIAL_CHANNEL_NOT_INITIALIZED',
+        errorMessage: 'The OpenDesign official channel is not ready.',
       })
-      if (openDesignDevelopmentBootstrap.status === 'not-ready') {
-        mainLog.error('OpenDesign development bundle bootstrap failed', {
-          errorCode: openDesignDevelopmentBootstrap.errorCode,
+      try {
+        openDesignDevelopmentBootstrap = await loadOpenDesignDevelopmentBootstrap({
+          argv: process.argv,
+          platform: currentModulePlatform(),
+        })
+        if (openDesignDevelopmentBootstrap.status === 'not-ready') {
+          mainLog.error('OpenDesign development bundle bootstrap failed', {
+            errorCode: openDesignDevelopmentBootstrap.errorCode,
+          })
+        }
+        openDesignOfficialBootstrap = openDesignDevelopmentBootstrap.status === 'disabled'
+          ? await loadOpenDesignOfficialChannel({
+              isPackaged: app.isPackaged,
+              resourcesPath: process.resourcesPath,
+              platform: currentModulePlatform(),
+            })
+          : Object.freeze({
+              status: 'not-ready',
+              errorCode: 'OFFICIAL_CHANNEL_BYPASSED_FOR_DEVELOPMENT',
+              errorMessage: 'The OpenDesign official channel is not ready.',
+            })
+        openDesignHostChannel = selectOpenDesignHostChannel(
+          openDesignDevelopmentBootstrap,
+          openDesignOfficialBootstrap,
+        )
+        if (openDesignDevelopmentBootstrap.status === 'disabled' && openDesignHostChannel.status === 'not-ready') {
+          mainLog.info('OpenDesign official channel is not ready', { errorCode: openDesignHostChannel.errorCode })
+        }
+      } catch (error) {
+        openDesignHostChannel = Object.freeze({
+          status: 'not-ready',
+          errorCode: 'OPEN_DESIGN_PRE_WINDOW_BOOTSTRAP_FAILED',
+          errorMessage: 'The optional OpenDesign channel is not ready.',
+        })
+        mainLog.error('Optional OpenDesign pre-window bootstrap was contained', {
+          errorType: error instanceof Error ? error.name : typeof error,
         })
       }
-      const openDesignOfficialBootstrap: OpenDesignOfficialChannelBootstrap = openDesignDevelopmentBootstrap.status === 'disabled'
-        ? await loadOpenDesignOfficialChannel({
-            isPackaged: app.isPackaged,
-            resourcesPath: process.resourcesPath,
-            platform: currentModulePlatform(),
+
+      try {
+        const openDesignAcceptanceBootstrap = await loadOpenDesignAcceptance({
+          isPackaged: app.isPackaged,
+          hostVersion: app.getVersion(),
+          platform: currentModulePlatform(),
+          argv: process.argv,
+          env: process.env,
+          userDataRoot: app.getPath('userData'),
+          development: openDesignDevelopmentBootstrap,
+          official: openDesignOfficialBootstrap,
+        })
+        if (openDesignAcceptanceBootstrap.status === 'ready') {
+          openDesignAcceptanceController = new OpenDesignAcceptanceController({
+            bootstrap: openDesignAcceptanceBootstrap,
+            getRuntime: () => hostModuleCoordinator ?? undefined,
+            host: {
+              isAllowedSender: (sender) => windowManager?.getAllWindows().some(
+                ({ window }) => !window.isDestroyed()
+                  && !window.webContents.isDestroyed()
+                  && window.webContents === sender,
+              ) ?? false,
+            },
           })
-        : Object.freeze({
-            status: 'not-ready',
-            errorCode: 'OFFICIAL_CHANNEL_BYPASSED_FOR_DEVELOPMENT',
-            errorMessage: 'The OpenDesign official channel is not ready.',
+          // Registration intentionally precedes BrowserWindow creation. The preload
+          // exposes its fixed facade only after this gated synchronous capability probe.
+          openDesignAcceptanceIpc = registerOpenDesignAcceptanceIpc(ipcMain, openDesignAcceptanceController)
+        } else if (process.env[OPEN_DESIGN_ACCEPTANCE_ENV] === '1') {
+          mainLog.info('OpenDesign acceptance control surface is not ready', {
+            errorCode: openDesignAcceptanceBootstrap.errorCode,
           })
-      openDesignHostChannel = selectOpenDesignHostChannel(
-        openDesignDevelopmentBootstrap,
-        openDesignOfficialBootstrap,
-      )
-      if (openDesignDevelopmentBootstrap.status === 'disabled' && openDesignHostChannel.status === 'not-ready') {
-        mainLog.info('OpenDesign official channel is not ready', { errorCode: openDesignHostChannel.errorCode })
+        }
+      } catch (error) {
+        mainLog.error('OpenDesign acceptance control surface is unavailable', {
+          errorType: error instanceof Error ? error.name : typeof error,
+        })
+        openDesignAcceptanceIpc?.dispose()
+        openDesignAcceptanceIpc = null
+        openDesignAcceptanceController = null
       }
+
+      // Optional Module and acceptance bootstrap failures are contained before
+      // this point so they cannot prevent the primary Craft window from opening.
+      await createInitialWindows()
       const developmentBundle = openDesignHostChannel.status === 'ready' && openDesignHostChannel.source === 'development'
         ? openDesignHostChannel.bundle
         : undefined
@@ -1437,6 +1505,9 @@ async function cleanupBeforeQuit(): Promise<void> {
   moduleAgentWorkerRecovery = null
 
   setOpenDesignModuleEscapeHandler(null)
+  openDesignAcceptanceIpc?.dispose()
+  openDesignAcceptanceIpc = null
+  openDesignAcceptanceController = null
   openDesignModuleIpc?.dispose()
   openDesignModuleIpc = null
   openDesignModuleController?.dispose()

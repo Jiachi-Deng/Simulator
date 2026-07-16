@@ -1,6 +1,7 @@
 // Runs separately because Bun's Electron module mocks are process-global.
 import { describe, expect, it, mock } from 'bun:test'
 import { OPEN_DESIGN_MODULE_CHANNELS } from '../../shared/open-design-module-ipc'
+import { OPEN_DESIGN_ACCEPTANCE_CHANNELS } from '../../shared/open-design-acceptance-ipc'
 
 type Listener = (...args: any[]) => void
 
@@ -10,6 +11,7 @@ const removeListener = mock((channel: string, listener: Listener) => {
   if (ipcListeners.get(channel) === listener) ipcListeners.delete(channel)
 })
 const exposeInMainWorld = mock((_name: string, _api: unknown) => {})
+const sendSync = mock(() => undefined)
 
 mock.module('electron', () => ({
   contextBridge: { exposeInMainWorld },
@@ -18,7 +20,7 @@ mock.module('electron', () => ({
     on: mock((channel: string, listener: Listener) => ipcListeners.set(channel, listener)),
     removeListener,
     send: mock(() => {}),
-    sendSync: mock(() => undefined),
+    sendSync,
   },
   shell: {
     openExternal: mock(async () => {}),
@@ -58,7 +60,11 @@ mock.module('@craft-agent/server-core/transport', () => ({
 }))
 
 process.env.CRAFT_SERVER_URL = 'ws://127.0.0.1:43117'
-const { createOpenDesignModuleFacade } = await import('../bootstrap')
+const {
+  createOpenDesignAcceptanceFacade,
+  createOpenDesignModuleFacade,
+  discoverOpenDesignAcceptanceFacade,
+} = await import('../bootstrap')
 
 describe('OpenDesign preload facade', () => {
   it('invokes only fixed channels without renderer-controlled arguments', async () => {
@@ -101,5 +107,30 @@ describe('OpenDesign preload facade', () => {
     expect(removeListener).toHaveBeenCalledTimes(1)
     expect(removeListener).toHaveBeenCalledWith(OPEN_DESIGN_MODULE_CHANNELS.STATE_CHANGED, handler)
     expect(ipcListeners.size).toBe(0)
+  })
+})
+
+describe('OpenDesign acceptance preload facade', () => {
+  it('invokes only the three fixed acceptance channels without renderer-controlled input', async () => {
+    invoke.mockClear()
+    const facade = createOpenDesignAcceptanceFacade({ invoke })
+    await facade.getState()
+    await facade.updateToRc()
+    await facade.rollback()
+    expect(invoke.mock.calls).toEqual([
+      [OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE],
+      [OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC],
+      [OPEN_DESIGN_ACCEPTANCE_CHANNELS.ROLLBACK],
+    ])
+  })
+
+  it('keeps the facade absent unless the gated main process answers exact true', () => {
+    const ipc = { invoke, sendSync: mock(() => undefined) }
+    expect(discoverOpenDesignAcceptanceFacade(ipc)).toBeUndefined()
+    expect(ipc.sendSync).toHaveBeenCalledWith(OPEN_DESIGN_ACCEPTANCE_CHANNELS.IS_AVAILABLE)
+
+    expect(discoverOpenDesignAcceptanceFacade({ invoke, sendSync: () => false })).toBeUndefined()
+    expect(discoverOpenDesignAcceptanceFacade({ invoke, sendSync: () => { throw new Error('absent') } })).toBeUndefined()
+    expect(discoverOpenDesignAcceptanceFacade({ invoke, sendSync: () => true })).toBeDefined()
   })
 })

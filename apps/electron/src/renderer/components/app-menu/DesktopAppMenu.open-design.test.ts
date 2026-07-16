@@ -1,6 +1,7 @@
 import { describe, expect, it, mock } from 'bun:test'
 import type { OpenDesignModuleState } from '../../../shared/open-design-module-ipc'
 import type { OpenDesignMenuCommand } from './DesktopAppMenu'
+import type { OpenDesignAcceptanceState } from '../../../shared/open-design-acceptance-ipc'
 
 mock.module('@/actions', () => ({
   useActionLabel: () => ({ hotkey: undefined }),
@@ -8,7 +9,12 @@ mock.module('@/actions', () => ({
 mock.module('pdfjs-dist/build/pdf.worker.min.mjs?url', () => ({ default: '' }))
 mock.module('pdfjs-dist', () => ({ GlobalWorkerOptions: { workerSrc: '' }, getDocument: () => ({}) }))
 
-const { getOpenDesignMenuPresentation, loadOpenDesignStateWithRetry } = await import('./DesktopAppMenu')
+const {
+  getOpenDesignAcceptanceMenuAvailability,
+  getOpenDesignMenuPresentation,
+  loadOpenDesignAcceptanceStateWithRetry,
+  loadOpenDesignStateWithRetry,
+} = await import('./DesktopAppMenu')
 
 describe('OpenDesign Debug menu presentation', () => {
   it('keeps retrying beyond the former startup window and returns the first real state', async () => {
@@ -119,5 +125,91 @@ describe('OpenDesign Debug menu presentation', () => {
     for (const status of ['not-installed', 'available', 'running', 'error'] as const) {
       expect(getOpenDesignMenuPresentation({ status }, true).actionDisabled).toBe(true)
     }
+  })
+})
+
+describe('OpenDesign acceptance Debug menu', () => {
+  const state = (
+    activeVersion: string | null,
+    lastKnownGoodVersion: string | null,
+    status: OpenDesignAcceptanceState['status'] = 'ready',
+    installedVersions: readonly string[] = activeVersion === '0.14.6-rc.1' || lastKnownGoodVersion === '0.14.6-rc.1'
+      ? ['0.14.5', '0.14.6-rc.1']
+      : ['0.14.5'],
+  ): OpenDesignAcceptanceState => ({
+    status,
+    hostVersion: '0.12.0',
+    activeVersion,
+    lastKnownGoodVersion,
+    installedVersions,
+  })
+
+  it('offers only the fixed baseline update and exact active/LKG swap', () => {
+    expect(getOpenDesignAcceptanceMenuAvailability(state('0.14.5', null))).toEqual({
+      updateEnabled: true,
+      rollbackEnabled: false,
+    })
+    for (const pair of [
+      state('0.14.6-rc.1', '0.14.5'),
+      state('0.14.5', '0.14.6-rc.1'),
+    ]) {
+      expect(getOpenDesignAcceptanceMenuAvailability(pair)).toEqual({
+        updateEnabled: false,
+        rollbackEnabled: true,
+      })
+    }
+    expect(getOpenDesignAcceptanceMenuAvailability(state('0.14.6-rc.1', null))).toEqual({
+      updateEnabled: false,
+      rollbackEnabled: false,
+    })
+    expect(getOpenDesignAcceptanceMenuAvailability(state('0.14.5', null, 'ready', [
+      '0.14.5', '0.14.4',
+    ]))).toEqual({
+      updateEnabled: false,
+      rollbackEnabled: false,
+    })
+  })
+
+  it('waits for the lazily-created Host runtime without accepting other errors as startup lag', async () => {
+    let attempts = 0
+    const waits: number[] = []
+    const available = await loadOpenDesignAcceptanceStateWithRetry({
+      async getState() {
+        attempts += 1
+        if (attempts < 3) {
+          return {
+            ...state(null, null, 'error', []),
+            errorCode: 'ACCEPTANCE_RUNTIME_UNAVAILABLE',
+          }
+        }
+        return state('0.14.5', null)
+      },
+    }, async (milliseconds) => { waits.push(milliseconds) })
+    expect(available).toMatchObject({ activeVersion: '0.14.5', lastKnownGoodVersion: null })
+    expect(waits).toEqual([250, 250])
+
+    const hardFailure = { ...state(null, null, 'error', []), errorCode: 'ACCEPTANCE_STATE_UNAVAILABLE' }
+    expect(await loadOpenDesignAcceptanceStateWithRetry({ getState: async () => hardFailure })).toEqual(hardFailure)
+
+    let hardFailureWaits = 0
+    expect(await loadOpenDesignAcceptanceStateWithRetry({
+      getState: async () => { throw new Error('sender rejected') },
+    }, async () => { hardFailureWaits += 1 })).toBeUndefined()
+    expect(hardFailureWaits).toBe(0)
+  })
+
+  it('disables both commands while loading, busy, or a renderer command is in flight', () => {
+    expect(getOpenDesignAcceptanceMenuAvailability(undefined)).toEqual({
+      updateEnabled: false,
+      rollbackEnabled: false,
+    })
+    expect(getOpenDesignAcceptanceMenuAvailability(state('0.14.5', null, 'busy'))).toEqual({
+      updateEnabled: false,
+      rollbackEnabled: false,
+    })
+    expect(getOpenDesignAcceptanceMenuAvailability(state('0.14.5', null), true)).toEqual({
+      updateEnabled: false,
+      rollbackEnabled: false,
+    })
   })
 })
