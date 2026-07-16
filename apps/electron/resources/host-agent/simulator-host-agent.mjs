@@ -619,6 +619,7 @@ function parseHostAgentJsonBytes(input, maxBytes) {
 // src/shim.ts
 var REQUEST_TIMEOUT_MS = 1e4;
 var CLEANUP_TIMEOUT_MS = 5000;
+var TERMINAL_CLOSE_TIMEOUT_MS = 15000;
 var MAX_CREATE_ATTEMPTS = 3;
 var MAX_SSE_RECONNECTS = 3;
 var MAX_HTTP_RESPONSE_BYTES = 512 * 1024;
@@ -655,6 +656,8 @@ async function runHostAgentShim(options) {
   let terminal = false;
   let closed = false;
   let terminalType;
+  let terminalEvent;
+  let closedEvent;
   let environment;
   const fetchImpl = options.fetch ?? globalThis.fetch;
   try {
@@ -677,57 +680,108 @@ async function runHostAgentShim(options) {
       phase: "awaiting-accepted"
     };
     let closePromise;
+    let terminalFailure;
+    let rejectTerminalFailure;
+    const terminalFailurePromise = new Promise((_resolve, reject) => {
+      rejectTerminalFailure = reject;
+    });
+    let terminalCloseTimer;
+    const streamController = new AbortController;
+    const streamSignal = AbortSignal.any([options.signal, streamController.signal]);
     let reconnects = 0;
-    while (!closed) {
-      try {
-        await consumeEventStream({
-          fetchImpl,
-          environment,
-          state,
-          signal: options.signal,
-          onEvent: async (event) => {
-            validateEventTransition(state, event);
-            await write(options.stdout, `${JSON.stringify(event)}
+    const failTerminalCleanup = () => {
+      if (terminalFailure)
+        return;
+      terminalFailure = new ShimError("CLEANUP_FAILED");
+      rejectTerminalFailure(terminalFailure);
+      streamController.abort(terminalFailure);
+    };
+    try {
+      while (!closed) {
+        try {
+          await Promise.race([consumeEventStream({
+            fetchImpl,
+            environment,
+            state,
+            signal: streamSignal,
+            onEvent: async (event) => {
+              validateEventTransition(state, event);
+              if (isTerminal(event)) {
+                terminal = true;
+                terminalType = event.type;
+                terminalEvent = event;
+                const closeTimeoutMs = validatedTerminalCloseTimeout(options.terminalCloseTimeoutMs);
+                const closeController = new AbortController;
+                const closeSignal = AbortSignal.any([options.signal, closeController.signal]);
+                terminalCloseTimer = setTimeout(() => {
+                  failTerminalCleanup();
+                  closeController.abort(terminalFailure);
+                }, closeTimeoutMs);
+                closePromise ??= closeRun(fetchImpl, environment, runHandle, closeSignal);
+                closePromise.then((snapshot) => {
+                  if (snapshot.runHandle !== runHandle || snapshot.state !== "closed") {
+                    failTerminalCleanup();
+                  }
+                }, () => {
+                  failTerminalCleanup();
+                });
+              } else if (event.type === "run.closed") {
+                closed = true;
+                closedEvent = event;
+              } else {
+                await write(options.stdout, `${JSON.stringify(event)}
 `);
-            if (isTerminal(event)) {
-              terminal = true;
-              terminalType = event.type;
-              closePromise ??= closeRun(fetchImpl, environment, runHandle, options.signal);
-              closePromise.catch(() => {
-                return;
-              });
-            } else if (event.type === "run.closed") {
-              closed = true;
+              }
             }
-          }
-        });
-        if (!closed)
-          throw new ShimError("BROKER_DISCONNECTED");
-      } catch (error) {
-        if (options.signal.aborted)
-          throw error;
-        if (error instanceof HttpShimError && error.publicCode === "REPLAY_UNAVAILABLE")
-          throw error;
-        if (closed || reconnects >= MAX_SSE_RECONNECTS)
-          throw error;
-        reconnects += 1;
-        await delay(50 * reconnects, options.signal);
+          }), terminalFailurePromise]);
+          if (!closed)
+            throw new ShimError("BROKER_DISCONNECTED");
+        } catch (error) {
+          if (terminalFailure)
+            throw terminalFailure;
+          if (options.signal.aborted)
+            throw error;
+          if (error instanceof HttpShimError && error.publicCode === "REPLAY_UNAVAILABLE")
+            throw error;
+          if (closed || reconnects >= MAX_SSE_RECONNECTS)
+            throw error;
+          reconnects += 1;
+          await delay(50 * reconnects, options.signal);
+        }
       }
+    } finally {
+      if (terminalCloseTimer)
+        clearTimeout(terminalCloseTimer);
     }
-    if (!terminal || !terminalType || !closePromise)
+    if (!terminal || !terminalType || !terminalEvent || !closedEvent || !closePromise) {
       throw new ShimError("INVALID_EVENT_ORDER");
-    const closeSnapshot = await closePromise;
-    if (closeSnapshot.runHandle !== runHandle || closeSnapshot.state !== "closed") {
-      throw new ShimError("INVALID_CLOSE_RESPONSE");
     }
+    const closeSnapshot = await closePromise.catch(() => {
+      throw new ShimError("CLEANUP_FAILED");
+    });
+    if (closeSnapshot.runHandle !== runHandle || closeSnapshot.state !== "closed") {
+      throw new ShimError("CLEANUP_FAILED");
+    }
+    await write(options.stdout, `${JSON.stringify(terminalEvent)}
+`);
+    await write(options.stdout, `${JSON.stringify(closedEvent)}
+`);
     return terminalType === "turn.completed" ? 0 : terminalType === "turn.interrupted" ? 2 : 1;
   } catch (error) {
-    if (environment && runHandle && !closed) {
+    if (environment && runHandle && !closed && !terminal) {
       await bestEffortCancelAndClose(fetchImpl, environment, runHandle);
     }
     diagnostic(options.stderr, options.signal.aborted ? "CANCELLED" : publicDiagnostic(error));
     return options.signal.aborted ? 143 : 1;
   }
+}
+function validatedTerminalCloseTimeout(value) {
+  if (value === undefined)
+    return TERMINAL_CLOSE_TIMEOUT_MS;
+  if (!Number.isSafeInteger(value) || value < 10 || value > TERMINAL_CLOSE_TIMEOUT_MS) {
+    throw new TypeError("terminalCloseTimeoutMs must be an integer within the closed test range");
+  }
+  return value;
 }
 async function validateEnvironment(options) {
   if (options.env.SIMULATOR_HOST_AGENT_CONTRACT_VERSION !== HOST_AGENT_ENV_CONTRACT_VERSION) {
@@ -848,7 +902,7 @@ async function consumeEventStream(input) {
   let buffered = "";
   try {
     while (true) {
-      const { value, done } = await reader.read();
+      const { value, done } = await readStreamChunk(reader, input.signal);
       if (done)
         break;
       try {
@@ -878,8 +932,42 @@ async function consumeEventStream(input) {
     if (buffered.length !== 0)
       throw new ShimError("BROKER_DISCONNECTED");
   } finally {
-    reader.releaseLock();
+    try {
+      reader.releaseLock();
+    } catch {}
   }
+}
+async function readStreamChunk(reader, signal) {
+  if (signal.aborted)
+    throw abortReason(signal);
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (result) => {
+      if (settled)
+        return;
+      settled = true;
+      signal.removeEventListener("abort", abort);
+      resolve(result);
+    };
+    const fail = (error) => {
+      if (settled)
+        return;
+      settled = true;
+      signal.removeEventListener("abort", abort);
+      reject(error);
+    };
+    const abort = () => {
+      reader.cancel(signal.reason).catch(() => {
+        return;
+      });
+      fail(abortReason(signal));
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    reader.read().then(finish, fail);
+  });
+}
+function abortReason(signal) {
+  return signal.reason instanceof Error ? signal.reason : new ShimError("CANCELLED");
 }
 function parseSseFrame(frame) {
   if (Buffer.byteLength(frame, "utf8") > MAX_SSE_FRAME_BYTES || frame.includes("\r")) {

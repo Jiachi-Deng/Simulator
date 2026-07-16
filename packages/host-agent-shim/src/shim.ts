@@ -18,6 +18,7 @@ import { parseHostAgentJsonBytes } from '@simulator/host-agent-contract/node'
 
 const REQUEST_TIMEOUT_MS = 10_000
 const CLEANUP_TIMEOUT_MS = 5_000
+const TERMINAL_CLOSE_TIMEOUT_MS = 15_000
 const MAX_CREATE_ATTEMPTS = 3
 const MAX_SSE_RECONNECTS = 3
 const MAX_HTTP_RESPONSE_BYTES = 512 * 1024
@@ -35,6 +36,8 @@ export interface HostAgentShimOptions {
   stderr: Writable
   signal: AbortSignal
   fetch?: Fetch
+  /** Test-only override; the packaged entrypoint always uses the closed default. */
+  terminalCloseTimeoutMs?: number
 }
 
 interface ValidatedEnvironment {
@@ -78,6 +81,8 @@ export async function runHostAgentShim(options: HostAgentShimOptions): Promise<n
   let terminal = false
   let closed = false
   let terminalType: EventState['terminalType']
+  let terminalEvent: HostAgentEvent | undefined
+  let closedEvent: HostAgentEvent | undefined
   let environment: ValidatedEnvironment | undefined
   const fetchImpl = options.fetch ?? globalThis.fetch
 
@@ -101,52 +106,102 @@ export async function runHostAgentShim(options: HostAgentShimOptions): Promise<n
       phase: 'awaiting-accepted',
     }
     let closePromise: Promise<HostAgentRunSnapshot> | undefined
+    let terminalFailure: ShimError | undefined
+    let rejectTerminalFailure!: (error: ShimError) => void
+    const terminalFailurePromise = new Promise<never>((_resolve, reject) => {
+      rejectTerminalFailure = reject
+    })
+    let terminalCloseTimer: ReturnType<typeof setTimeout> | undefined
+    const streamController = new AbortController()
+    const streamSignal = AbortSignal.any([options.signal, streamController.signal])
     let reconnects = 0
+    const failTerminalCleanup = (): void => {
+      if (terminalFailure) return
+      terminalFailure = new ShimError('CLEANUP_FAILED')
+      rejectTerminalFailure(terminalFailure)
+      streamController.abort(terminalFailure)
+    }
 
-    while (!closed) {
-      try {
-        await consumeEventStream({
-          fetchImpl,
-          environment,
-          state,
-          signal: options.signal,
-          onEvent: async (event) => {
-            validateEventTransition(state, event)
-            await write(options.stdout, `${JSON.stringify(event)}\n`)
-            if (isTerminal(event)) {
-              terminal = true
-              terminalType = event.type
-              closePromise ??= closeRun(fetchImpl, environment!, runHandle!, options.signal)
-              // Mark the original promise handled while SSE continues. Its
-              // authoritative result is still awaited after run.closed.
-              void closePromise.catch(() => undefined)
-            } else if (event.type === 'run.closed') {
-              closed = true
-            }
-          },
-        })
-        if (!closed) throw new ShimError('BROKER_DISCONNECTED')
-      } catch (error) {
-        if (options.signal.aborted) throw error
-        if (error instanceof HttpShimError && error.publicCode === 'REPLAY_UNAVAILABLE') throw error
-        if (closed || reconnects >= MAX_SSE_RECONNECTS) throw error
-        reconnects += 1
-        await delay(50 * reconnects, options.signal)
+    try {
+      while (!closed) {
+        try {
+          await Promise.race([consumeEventStream({
+            fetchImpl,
+            environment,
+            state,
+            signal: streamSignal,
+            onEvent: async (event) => {
+              validateEventTransition(state, event)
+              if (isTerminal(event)) {
+                terminal = true
+                terminalType = event.type
+                terminalEvent = event
+                const closeTimeoutMs = validatedTerminalCloseTimeout(options.terminalCloseTimeoutMs)
+                const closeController = new AbortController()
+                const closeSignal = AbortSignal.any([options.signal, closeController.signal])
+                terminalCloseTimer = setTimeout(() => {
+                  failTerminalCleanup()
+                  closeController.abort(terminalFailure)
+                }, closeTimeoutMs)
+                closePromise ??= closeRun(fetchImpl, environment!, runHandle!, closeSignal)
+                void closePromise.then((snapshot) => {
+                  if (snapshot.runHandle !== runHandle || snapshot.state !== 'closed') {
+                    failTerminalCleanup()
+                  }
+                }, () => {
+                  failTerminalCleanup()
+                })
+              } else if (event.type === 'run.closed') {
+                closed = true
+                closedEvent = event
+              } else {
+                await write(options.stdout, `${JSON.stringify(event)}\n`)
+              }
+            },
+          }), terminalFailurePromise])
+          if (!closed) throw new ShimError('BROKER_DISCONNECTED')
+        } catch (error) {
+          if (terminalFailure) throw terminalFailure
+          if (options.signal.aborted) throw error
+          if (error instanceof HttpShimError && error.publicCode === 'REPLAY_UNAVAILABLE') throw error
+          if (closed || reconnects >= MAX_SSE_RECONNECTS) throw error
+          reconnects += 1
+          await delay(50 * reconnects, options.signal)
+        }
       }
+    } finally {
+      if (terminalCloseTimer) clearTimeout(terminalCloseTimer)
     }
-    if (!terminal || !terminalType || !closePromise) throw new ShimError('INVALID_EVENT_ORDER')
-    const closeSnapshot = await closePromise
+    if (!terminal || !terminalType || !terminalEvent || !closedEvent || !closePromise) {
+      throw new ShimError('INVALID_EVENT_ORDER')
+    }
+    const closeSnapshot = await closePromise.catch(() => {
+      throw new ShimError('CLEANUP_FAILED')
+    })
     if (closeSnapshot.runHandle !== runHandle || closeSnapshot.state !== 'closed') {
-      throw new ShimError('INVALID_CLOSE_RESPONSE')
+      throw new ShimError('CLEANUP_FAILED')
     }
+    // A terminal event is not observable by the ordinary Runtime parser until
+    // strict Host cleanup has produced both DELETE=closed and run.closed. This
+    // prevents a completed-looking transcript from escaping when reap fails.
+    await write(options.stdout, `${JSON.stringify(terminalEvent)}\n`)
+    await write(options.stdout, `${JSON.stringify(closedEvent)}\n`)
     return terminalType === 'turn.completed' ? 0 : terminalType === 'turn.interrupted' ? 2 : 1
   } catch (error) {
-    if (environment && runHandle && !closed) {
+    if (environment && runHandle && !closed && !terminal) {
       await bestEffortCancelAndClose(fetchImpl, environment, runHandle)
     }
     diagnostic(options.stderr, options.signal.aborted ? 'CANCELLED' : publicDiagnostic(error))
     return options.signal.aborted ? 143 : 1
   }
+}
+
+function validatedTerminalCloseTimeout(value: number | undefined): number {
+  if (value === undefined) return TERMINAL_CLOSE_TIMEOUT_MS
+  if (!Number.isSafeInteger(value) || value < 10 || value > TERMINAL_CLOSE_TIMEOUT_MS) {
+    throw new TypeError('terminalCloseTimeoutMs must be an integer within the closed test range')
+  }
+  return value
 }
 
 async function validateEnvironment(options: HostAgentShimOptions): Promise<ValidatedEnvironment> {
@@ -276,7 +331,7 @@ async function consumeEventStream(input: {
   let buffered = ''
   try {
     while (true) {
-      const { value, done } = await reader.read()
+      const { value, done } = await readStreamChunk(reader, input.signal)
       if (done) break
       try {
         buffered += decoder.decode(value, { stream: true })
@@ -300,8 +355,40 @@ async function consumeEventStream(input: {
     }
     if (buffered.length !== 0) throw new ShimError('BROKER_DISCONNECTED')
   } finally {
-    reader.releaseLock()
+    try { reader.releaseLock() } catch { /* An aborted read owns the lock until cancellation settles. */ }
   }
+}
+
+async function readStreamChunk<Result>(
+  reader: { read(): Promise<Result>; cancel(reason?: unknown): Promise<void> },
+  signal: AbortSignal,
+): Promise<Result> {
+  if (signal.aborted) throw abortReason(signal)
+  return await new Promise<Result>((resolve, reject) => {
+    let settled = false
+    const finish = (result: Result): void => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', abort)
+      resolve(result)
+    }
+    const fail = (error: unknown): void => {
+      if (settled) return
+      settled = true
+      signal.removeEventListener('abort', abort)
+      reject(error)
+    }
+    const abort = (): void => {
+      void reader.cancel(signal.reason).catch(() => undefined)
+      fail(abortReason(signal))
+    }
+    signal.addEventListener('abort', abort, { once: true })
+    void reader.read().then(finish, fail)
+  })
+}
+
+function abortReason(signal: AbortSignal): Error {
+  return signal.reason instanceof Error ? signal.reason : new ShimError('CANCELLED')
 }
 
 function parseSseFrame(frame: string): HostAgentEvent {

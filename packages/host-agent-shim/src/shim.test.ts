@@ -241,6 +241,58 @@ describe('Host Agent shim', () => {
     expect(stderr.value).toBe('')
   })
 
+  it('fails within a deadline and withholds success when terminal cleanup never closes', async () => {
+    const files = await fixtureFiles()
+    let heartbeat: ReturnType<typeof setInterval> | undefined
+    const { url } = await listen((request, response) => {
+      request.resume()
+      request.on('end', () => {
+        if (request.method === 'POST' && request.url === '/v2/runs') {
+          json(response, snapshot('accepted'))
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}/events`) {
+          response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+          response.flushHeaders()
+          writeSse(response, accepted)
+          writeSse(response, started)
+          writeSse(response, delta)
+          writeSse(response, completed)
+          heartbeat = setInterval(() => response.write(': heartbeat\n\n'), 5)
+          response.once('close', () => {
+            if (heartbeat) clearInterval(heartbeat)
+          })
+        } else if (request.method === 'DELETE' && request.url === `/v2/runs/${RUN}`) {
+          // Keep the response open. The SSE heartbeat must not keep the Shim
+          // alive past its terminal cleanup deadline.
+        } else {
+          response.writeHead(404).end()
+        }
+      })
+    })
+    const stdout = new Capture()
+    const stderr = new Capture()
+    const startedAt = Date.now()
+    const code = await runHostAgentShim({
+      argv: [], entryPath: files.entryPath, cwd: files.root,
+      env: {
+        SIMULATOR_HOST_AGENT_URL: url,
+        SIMULATOR_HOST_AGENT_TOKEN_FILE: files.tokenPath,
+        SIMULATOR_HOST_AGENT_SHIM_PATH: files.entryPath,
+        SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',
+      },
+      stdin: Readable.from(['prompt']), stdout, stderr,
+      signal: new AbortController().signal,
+      terminalCloseTimeoutMs: 50,
+    })
+    if (heartbeat) clearInterval(heartbeat)
+    expect(code).toBe(1)
+    expect(Date.now() - startedAt).toBeLessThan(1_000)
+    expect(stdout.value).toContain('run.accepted')
+    expect(stdout.value).toContain('turn.started')
+    expect(stdout.value).not.toContain('turn.completed')
+    expect(stdout.value).not.toContain('run.closed')
+    expect(stderr.value).toBe('[simulator-host-agent] CLEANUP_FAILED\n')
+  })
+
   it('cancels and strictly closes on SIGTERM without fabricating success', async () => {
     const files = await fixtureFiles()
     const calls: string[] = []
