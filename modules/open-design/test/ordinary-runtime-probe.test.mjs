@@ -92,8 +92,8 @@ test("V0-V12 run against the exact pinned OpenDesign daemon and V13 remains an i
     maxBuffer: 8 * 1024 * 1024,
     timeout: 60_000,
   });
-  assert.match(host.stdout, /# tests 20/);
-  assert.match(host.stdout, /# pass 20/);
+  assert.match(host.stdout, /# tests 29/);
+  assert.match(host.stdout, /# pass 29/);
   assert.match(host.stdout, /# fail 0/);
-  t.diagnostic("Simulator Host V13: 20/20 passed independently");
+  t.diagnostic("Simulator Host V13: 29/29 passed independently");
 });

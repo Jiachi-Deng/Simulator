@@ -42,6 +42,7 @@ const runtimeSourceRoot = path.join(moduleRoot, "runtime");
 export const OPEN_DESIGN_MODULE_ID = "org.simulator.open-design";
 export const OPEN_DESIGN_MODULE_VERSION = "0.14.1-development.1";
 export const OPEN_DESIGN_MODULE_PLATFORM = "darwin-arm64";
+export const OPEN_DESIGN_MIN_HOST_VERSION_RANGE = ">=0.12.0";
 export const OPEN_DESIGN_ENTRYPOINT = "runtime/open-design-launcher";
 export const OPEN_DESIGN_AUXILIARY_EXECUTABLES = Object.freeze([
   "runtime/node/bin/node",
@@ -212,7 +213,7 @@ async function buildOpenDesignDevelopmentPackageWithPolicy({
         },
         agentRuntime: {
           kind: "simulator-host-runtime",
-          transport: "launch-scoped-loopback-grant-v1",
+          transport: "ordinary-json-event-stream-cli-v2",
           bundledAgentExecutables: [],
           verification: "runtime-contract-and-fail-closed-integration-tests",
         },
@@ -751,7 +752,7 @@ function createBundleDescriptor({ archiveSha256, archiveSize, envelopeBytes, ext
     nonPromotable: true,
     moduleId: OPEN_DESIGN_MODULE_ID,
     release: { version: OPEN_DESIGN_MODULE_VERSION, platform: OPEN_DESIGN_MODULE_PLATFORM },
-    install: { extractedManifestSha256, hostVersionRange: "*" },
+    install: { extractedManifestSha256, hostVersionRange: OPEN_DESIGN_MIN_HOST_VERSION_RANGE },
     trustedKey: {
       developmentOnly: true,
       keyId: developmentIdentity.keyId,
