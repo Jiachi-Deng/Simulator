@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -23,6 +24,26 @@ test("strict patch allowlist matches all 22 pinned Host integration paths and re
     "/absolute/package.json",
   ]) {
     assert.equal(isAllowedPatchPath(unsupported), false, unsupported);
+  }
+});
+
+test("pinned new-file hunk metadata and postimages match the exact materialized patch bytes", async () => {
+  const provenance = JSON.parse(await readFile(new URL("provenance.json", moduleRoot), "utf8"));
+  const newFiles = provenance.simulatorPatch.fileDigests.filter((entry) => entry.preimageSha256 === null);
+  assert.ok(newFiles.length > 0);
+  for (const entry of newFiles) {
+    const marker = `diff --git a/${entry.path} b/${entry.path}\n`;
+    const sectionStart = patchText.indexOf(marker) + marker.length;
+    const nextSection = patchText.indexOf("\ndiff --git ", sectionStart);
+    const section = patchText.slice(sectionStart, nextSection === -1 ? undefined : nextSection);
+    const source = materializedNewFileSource(entry.path);
+    const bytes = Buffer.from(`${source}\n`);
+    const hunk = section.match(/^@@ -0,0 \+1,(\d+) @@$/m);
+    const index = section.match(/^index 0{40}\.\.([0-9a-f]{40})$/m);
+    assert.equal(Number(hunk?.[1]), source.split("\n").length, `${entry.path} hunk line count`);
+    const blobHeader = Buffer.from(`blob ${bytes.length}\0`);
+    assert.equal(createHash("sha1").update(blobHeader).update(bytes).digest("hex"), index?.[1], `${entry.path} blob id`);
+    assert.equal(createHash("sha256").update(bytes).digest("hex"), entry.postimageSha256, entry.path);
   }
 });
 

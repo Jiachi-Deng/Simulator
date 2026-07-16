@@ -353,10 +353,10 @@ index d383bb87a90aa4c3298a94d5dbd41624238782a2..521f241733346a5c8de1f5d8929b1f2f
      };
 diff --git a/apps/daemon/src/simulator-host-agent.ts b/apps/daemon/src/simulator-host-agent.ts
 new file mode 100644
-index 0000000000000000000000000000000000000000..13ff76eb0abe133ba273bbd5cdc9a28fe3365759
+index 0000000000000000000000000000000000000000..824f30811716038405415bed67a107240d925deb
 --- /dev/null
 +++ b/apps/daemon/src/simulator-host-agent.ts
-@@ -0,0 +1,730 @@
+@@ -0,0 +1,753 @@
 +// @ts-nocheck
 +
 +import { constants as fsConstants } from 'node:fs';
