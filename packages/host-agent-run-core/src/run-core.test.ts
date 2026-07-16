@@ -20,7 +20,7 @@ function deferred<T = void>() {
   return { promise, resolve }
 }
 
-async function setup(overrides?: { maxReplayEvents?: number }) {
+async function setup(overrides?: { maxReplayEvents?: number; maxCraftPreemptionMs?: number }) {
   const sessions = new InMemoryHostAgentRunSessionPort()
   let canonicalizeBarrier: Promise<void> | undefined
   const core = new ModuleAgentRunCore({
@@ -37,6 +37,7 @@ async function setup(overrides?: { maxReplayEvents?: number }) {
       maxReplayEvents: overrides?.maxReplayEvents ?? 32,
       maxReplayBytes: 1024 * 1024,
       maxRunDurationMs: 60_000,
+      maxCraftPreemptionMs: overrides?.maxCraftPreemptionMs ?? 5_000,
       tombstoneMinRetentionMs: 60_000,
     },
   })
@@ -97,6 +98,48 @@ describe('ModuleAgentRunCore', () => {
     expect(sessions.created).toHaveLength(1)
   })
 
+  it('recovers the committed Session when the create response is lost', async () => {
+    const { core, sessions } = await setup()
+    const createSession = sessions.createSession.bind(sessions)
+    sessions.createSession = async (input) => {
+      await createSession(input)
+      throw new Error('response lost after ownership header commit')
+    }
+
+    const first = await core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'lost-create-response', request: request(),
+    })
+    const duplicate = await core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'lost-create-response', request: request(),
+    })
+    expect(duplicate.runHandle).toBe(first.runHandle)
+    expect(sessions.created).toHaveLength(1)
+    expect(sessions.recovered).toHaveLength(1)
+    expect(core.debugSnapshot()).toMatchObject({ retainedRuns: 1, moduleSessions: 1 })
+  })
+
+  it('retains idempotency ownership when Session recovery is uncertain', async () => {
+    const { core, sessions } = await setup()
+    let createAttempts = 0
+    sessions.createSession = async () => {
+      createAttempts += 1
+      throw new Error('response lost after possible commit')
+    }
+    sessions.recoverError = new Error('ownership lookup unavailable')
+
+    await expect(core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'unknown-create-ownership', request: request(),
+    })).rejects.toMatchObject({ code: 'CLEANUP_FAILED' })
+    expect(core.debugSnapshot()).toMatchObject({ activeRuns: 1, retainedRuns: 1 })
+    await expect(core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'unknown-create-ownership', request: request(),
+    })).rejects.toMatchObject({ code: 'CLEANUP_FAILED' })
+    await expect(core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'another-key', request: request('another'),
+    })).rejects.toMatchObject({ code: 'CLEANUP_FAILED' })
+    expect(createAttempts).toBe(1)
+  })
+
   it('enforces one global Module Run across concurrent distinct creates', async () => {
     const { core, sessions, setCanonicalizeBarrier } = await setup()
     const gate = deferred()
@@ -126,6 +169,20 @@ describe('ModuleAgentRunCore', () => {
     await expect(creating).rejects.toMatchObject({ code: 'CRAFT_TURN_ACTIVE' })
     expect(sessions.created).toHaveLength(0)
     core.endCraftTurn()
+  })
+
+  it('bounds Craft admission when Module Session initialization never settles', async () => {
+    const { core, sessions } = await setup({ maxCraftPreemptionMs: 20 })
+    sessions.createSession = async () => await new Promise<never>(() => undefined)
+    const creating = core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'never-settled-init', request: request(),
+    })
+    void creating.catch(() => undefined)
+    await flush()
+    const startedAt = Date.now()
+    await expect(core.beginCraftTurn()).rejects.toMatchObject({ code: 'CLEANUP_FAILED' })
+    expect(Date.now() - startedAt).toBeLessThan(500)
+    expect(core.debugSnapshot()).toMatchObject({ activeRuns: 1, moduleSessions: 0 })
   })
 
   it('rechecks grant revocation after asynchronous path canonicalization', async () => {
@@ -170,6 +227,59 @@ describe('ModuleAgentRunCore', () => {
         ? 'failed'
         : 'interrupted'
     expect(core.getRun('grant-1', run.runHandle).state).toBe(terminalState)
+  })
+
+  it('fails and closes when accepted to starting persistence fails', async () => {
+    const { core, sessions } = await setup()
+    sessions.updateError = new Error('disk unavailable')
+    const run = await core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'starting-persist-failure', request: request(),
+    })
+    const events: HostAgentEvent[] = []
+    core.subscribe('grant-1', run.runHandle, undefined, (event) => events.push(event))
+    await flush()
+    expect(core.getRun('grant-1', run.runHandle).state).toBe('closed')
+    expect(events.map((event) => event.type)).toEqual(['run.accepted', 'turn.failed', 'run.closed'])
+    expect(sessions.prompts).toHaveLength(0)
+    expect(sessions.reaped).toEqual(['session-1'])
+    expect(core.debugSnapshot()).toMatchObject({ activeRuns: 0, moduleSessions: 0 })
+  })
+
+  it('fails and closes when starting to running persistence fails after provider admission', async () => {
+    const { core, sessions } = await setup()
+    const updateRunState = sessions.updateRunState.bind(sessions)
+    sessions.updateRunState = async (sessionId, state) => {
+      if (state === 'running') throw new Error('running header unavailable')
+      await updateRunState(sessionId, state)
+    }
+    const run = await core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'running-persist-failure', request: request(),
+    })
+    const events: HostAgentEvent[] = []
+    core.subscribe('grant-1', run.runHandle, undefined, (event) => events.push(event))
+    await flush()
+    expect(core.getRun('grant-1', run.runHandle).state).toBe('closed')
+    expect(events.map((event) => event.type)).toEqual(['run.accepted', 'turn.failed', 'run.closed'])
+    expect(sessions.prompts).toHaveLength(1)
+    expect(sessions.reaped).toEqual(['session-1'])
+  })
+
+  it('does not strand running when terminal persistence fails', async () => {
+    const { core, sessions } = await setup()
+    const run = await core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'terminal-persist-failure', request: request(),
+    })
+    const events: HostAgentEvent[] = []
+    core.subscribe('grant-1', run.runHandle, undefined, (event) => events.push(event))
+    await flush()
+    sessions.updateError = new Error('terminal header unavailable')
+    sessions.emit('session-1', { type: 'turn.completed', finalText: 'must not escape as success' })
+    await flush()
+    expect(core.getRun('grant-1', run.runHandle).state).toBe('closed')
+    expect(events.filter((event) => event.type === 'turn.completed')).toHaveLength(0)
+    expect(events.filter((event) => event.type === 'turn.failed')).toHaveLength(1)
+    expect(events.at(-1)?.type).toBe('run.closed')
+    expect(core.debugSnapshot()).toMatchObject({ activeRuns: 0, moduleSessions: 0 })
   })
 
   it('fails stale replay explicitly instead of fabricating continuity', async () => {
@@ -258,6 +368,23 @@ describe('ModuleAgentRunCore', () => {
     sessions.reapError = undefined
     await expect(core.closeRun('grant-1', run.runHandle)).resolves.toMatchObject({ state: 'closed' })
     expect(core.debugSnapshot().moduleSessions).toBe(0)
+  })
+
+  it('blocks a second Run while strict cleanup debt retains a Session', async () => {
+    const { core, sessions } = await setup()
+    const run = await core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'cleanup-debt-first', request: request(),
+    })
+    await flush()
+    sessions.emit('session-1', { type: 'turn.completed', finalText: 'done' })
+    await flush()
+    sessions.reapError = new Error('provider process still alive')
+    await expect(core.closeRun('grant-1', run.runHandle)).rejects.toMatchObject({ code: 'CLEANUP_FAILED' })
+    await expect(core.createRun({
+      grantId: 'grant-1', idempotencyKey: 'cleanup-debt-second', request: request('second'),
+    })).rejects.toMatchObject({ code: 'CLEANUP_FAILED' })
+    expect(sessions.created).toHaveLength(1)
+    expect(core.debugSnapshot()).toMatchObject({ retainedRuns: 1, moduleSessions: 1 })
   })
 
   it('fails and reaps only the disconnected Broker grant without replay', async () => {

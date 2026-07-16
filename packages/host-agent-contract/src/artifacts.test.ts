@@ -58,16 +58,22 @@ describe('static JSON Schema and canonical fixtures', () => {
   })
 
   it('publishes replayable transcripts with one terminal and contiguous event ids', () => {
-    const outcomes = ['completed', 'failed', 'interrupted'] as const
+    const outcomes = ['completed', 'failed', 'interrupted', 'failedBeforeStart', 'interruptedBeforeStart'] as const
     const terminalTypes = {
       completed: 'turn.completed',
       failed: 'turn.failed',
       interrupted: 'turn.interrupted',
+      failedBeforeStart: 'turn.failed',
+      interruptedBeforeStart: 'turn.interrupted',
     } as const
     for (const outcome of outcomes) {
       const transcript = HOST_AGENT_V2_FIXTURES.valid.transcripts[outcome]
       expect(transcript[0]?.type, outcome).toBe('run.accepted')
-      expect(transcript[1]?.type, outcome).toBe('turn.started')
+      if (outcome.endsWith('BeforeStart')) {
+        expect(['turn.failed', 'turn.interrupted'], outcome).toContain(transcript[1]?.type)
+      } else {
+        expect(transcript[1]?.type, outcome).toBe('turn.started')
+      }
       expect(transcript.at(-1)?.type, outcome).toBe('run.closed')
       expect(transcript.map((event) => event.sequence), outcome).toEqual(
         Array.from({ length: transcript.length }, (_, index) => index + 1),

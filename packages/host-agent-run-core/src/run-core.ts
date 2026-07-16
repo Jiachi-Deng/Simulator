@@ -60,6 +60,7 @@ interface StoredRun {
   operationTail: Promise<void>
   initialization?: Promise<void>
   initializationFailure?: HostAgentRunCoreError
+  initializationDisposition: 'unknown' | 'not-created' | 'session-owned'
   timeoutHandle?: unknown
   closing?: Promise<HostAgentRunSnapshot>
 }
@@ -76,6 +77,7 @@ const DEFAULT_LIMITS: Readonly<HostAgentRunCoreLimits> = Object.freeze({
   maxSubscribersPerGrant: HOST_AGENT_LIMITS.maxSseSubscribersPerGrant,
   maxConcurrentRuns: HOST_AGENT_LIMITS.maxConcurrentModuleRuns,
   maxRunDurationMs: HOST_AGENT_LIMITS.maxRunDurationMs,
+  maxCraftPreemptionMs: 5_000,
   tombstoneMinRetentionMs: HOST_AGENT_LIMITS.tombstoneMinRetentionMs,
 })
 
@@ -195,9 +197,7 @@ export class ModuleAgentRunCore {
     if (this.#craftTurnActive) {
       throw new HostAgentRunCoreError('CRAFT_TURN_ACTIVE', 'A visible Craft turn has priority')
     }
-    if (this.#activeRunCount() >= this.#limits.maxConcurrentRuns) {
-      throw new HostAgentRunCoreError('RUN_ACTIVE', 'Only one Module run may be active')
-    }
+    this.#assertRunCapacityAvailable()
 
     const requestedWorkingDirectory = request.workingDirectory ?? grant.defaultWorkingDirectory
     const workingDirectory = await this.#deps.paths.canonicalize(requestedWorkingDirectory)
@@ -210,9 +210,7 @@ export class ModuleAgentRunCore {
     if (this.#activeGrant(input.grantId) !== grant) {
       throw new HostAgentRunCoreError('UNAUTHORIZED', 'Launch grant changed during run creation')
     }
-    if (this.#activeRunCount() >= this.#limits.maxConcurrentRuns) {
-      throw new HostAgentRunCoreError('RUN_ACTIVE', 'Only one Module run may be active')
-    }
+    this.#assertRunCapacityAvailable()
     if (!this.#deps.paths.isEqualOrWithin(workingDirectory, grant.authorizedWorkingRoot)) {
       throw new HostAgentRunCoreError('FORBIDDEN', 'Working directory is outside the launch grant')
     }
@@ -234,6 +232,7 @@ export class ModuleAgentRunCore {
       listeners: new Set(),
       unsubscribeSession: () => undefined,
       operationTail: Promise.resolve(),
+      initializationDisposition: 'unknown',
     }
     this.#runs.set(handle, run)
     grant.runs.add(handle)
@@ -253,7 +252,8 @@ export class ModuleAgentRunCore {
       // If strict cleanup could not prove the Session gone, keep the Run and
       // idempotency ownership for retryable shutdown cleanup. Never turn an
       // uncertain Session into an untracked orphan or a fresh duplicate Run.
-      const safeToDiscard = !run.sessionId
+      const safeToDiscard = run.initializationDisposition === 'not-created'
+        && !run.sessionId
         && grant.active
         && !this.#craftTurnActive
         && run.state === 'accepted'
@@ -269,6 +269,7 @@ export class ModuleAgentRunCore {
       if (run.initialization === initialization) run.initialization = undefined
     }
 
+    this.#armRunTimeout(run)
     void this.#serialize(run, () => this.#startRunNow(run)).catch(() => undefined)
     return this.#snapshot(run)
   }
@@ -337,7 +338,10 @@ export class ModuleAgentRunCore {
     const active = [...this.#runs.values()].find((run) =>
       run.state === 'accepted' || run.state === 'starting' || run.state === 'running')
     if (!active) return
-    await this.#serialize(active, async () => {
+    if (active.initialization) {
+      await this.#awaitCraftPreemptionDeadline(active, active.initialization)
+    }
+    const preemption = this.#serialize(active, async () => {
       if (isHostAgentTerminalRunState(active.state) || active.state === 'closing' || active.state === 'closed') return
 
       // Craft cannot share its provider with an unconfirmed Module turn. The
@@ -365,6 +369,7 @@ export class ModuleAgentRunCore {
       })
       await this.#closeRunNow(active, 'CRAFT_TURN_PREEMPTED')
     })
+    await this.#awaitCraftPreemptionDeadline(active, preemption)
   }
 
   endCraftTurn(): void { this.#craftTurnActive = false }
@@ -440,17 +445,38 @@ export class ModuleAgentRunCore {
       workerEpoch: grant.workerEpoch,
       state: 'accepted',
     }
+    const input = {
+      workspaceId: grant.workspaceId,
+      workspaceRoot: grant.workspaceRoot,
+      authorizedWorkingRoot: grant.authorizedWorkingRoot,
+      workingDirectory: run.workingDirectory,
+      ownership,
+    }
     let created
     try {
-      created = await this.#deps.sessions.createSession({
-        workspaceId: grant.workspaceId,
-        workspaceRoot: grant.workspaceRoot,
-        authorizedWorkingRoot: grant.authorizedWorkingRoot,
-        workingDirectory: run.workingDirectory,
-        ownership,
-      })
-    } catch {
-      throw new HostAgentRunCoreError('RUNTIME_UNAVAILABLE', 'Host could not create a transient Module session')
+      created = await this.#deps.sessions.createSession(input)
+    } catch (createError) {
+      // A rejected Promise does not prove that the ownership header was never
+      // committed. Recover by the same Run ownership before deciding whether
+      // the idempotency reservation may be released.
+      try {
+        created = await this.#deps.sessions.recoverSession(input)
+      } catch {
+        run.initializationDisposition = 'unknown'
+        throw new HostAgentRunCoreError(
+          'CLEANUP_FAILED',
+          'Transient Module session ownership could not be recovered after creation failed',
+        )
+      }
+      if (!created) {
+        run.initializationDisposition = 'not-created'
+        throw new HostAgentRunCoreError(
+          'RUNTIME_UNAVAILABLE',
+          createError instanceof Error
+            ? 'Host did not create a transient Module session'
+            : 'Host could not create a transient Module session',
+        )
+      }
     }
     const valid = created.hidden
       && created.workspaceId === grant.workspaceId
@@ -461,12 +487,14 @@ export class ModuleAgentRunCore {
     if (typeof created.sessionId === 'string' && created.sessionId.length > 0) {
       // Take cleanup ownership before validating any post-create field.
       run.sessionId = created.sessionId
+      run.initializationDisposition = 'session-owned'
     }
     if (!valid) {
       if (run.sessionId) {
         try {
           await this.#deps.sessions.disposeAndReap(run.sessionId)
           run.sessionId = undefined
+          run.initializationDisposition = 'not-created'
         } catch {
           throw new HostAgentRunCoreError('CLEANUP_FAILED', 'Rejected transient Module session could not be reaped')
         }
@@ -481,6 +509,7 @@ export class ModuleAgentRunCore {
       try {
         await this.#deps.sessions.disposeAndReap(created.sessionId)
         run.sessionId = undefined
+        run.initializationDisposition = 'not-created'
       } catch {
         throw new HostAgentRunCoreError('CLEANUP_FAILED', 'Unsubscribed transient Module session could not be reaped')
       }
@@ -497,13 +526,8 @@ export class ModuleAgentRunCore {
       if (!this.#runIsInState(run, 'starting')) return
       await this.#setStateNow(run, 'running')
       this.#emit(run, { type: 'turn.started', data: {} })
-      run.timeoutHandle = this.#clock.setTimeout(() => {
-        void this.#serialize(run, () => this.#timeoutRunNow(run)).catch(() => undefined)
-      }, this.#limits.maxRunDurationMs)
-    } catch {
-      if (this.#runIsInState(run, 'starting')) {
-        await this.#commitTerminalNow(run, { state: 'failed', code: 'RUNTIME_UNAVAILABLE' })
-      }
+    } catch (error) {
+      await this.#failAfterSessionOperationNow(run, error, 'RUNTIME_UNAVAILABLE')
     }
   }
 
@@ -525,26 +549,28 @@ export class ModuleAgentRunCore {
         this.#emit(run, { type: 'presentation.item', data: event.data })
         return
       case 'turn.completed':
-        await this.#commitTerminalNow(run, { state: 'completed', ...(event.finalText === undefined ? {} : { finalText: event.finalText }) })
+        await this.#commitTerminalWithRecoveryNow(run, {
+          state: 'completed', ...(event.finalText === undefined ? {} : { finalText: event.finalText }),
+        })
         return
       case 'turn.failed':
-        await this.#commitTerminalNow(run, { state: 'failed', code: event.code })
+        await this.#commitTerminalWithRecoveryNow(run, { state: 'failed', code: event.code })
         return
       case 'turn.interrupted':
-        await this.#commitTerminalNow(run, { state: 'interrupted', reason: event.reason })
+        await this.#commitTerminalWithRecoveryNow(run, { state: 'interrupted', reason: event.reason })
     }
   }
 
   async #timeoutRunNow(run: StoredRun): Promise<void> {
     if (run.state !== 'starting' && run.state !== 'running') return
     await this.#stopProviderNow(run)
-    await this.#commitTerminalNow(run, { state: 'failed', code: 'RUN_TIMEOUT' })
+    await this.#commitTerminalWithRecoveryNow(run, { state: 'failed', code: 'RUN_TIMEOUT' })
   }
 
   async #interruptNow(run: StoredRun, reason: HostAgentInterruptionReason): Promise<void> {
     if (isHostAgentTerminalRunState(run.state) || run.state === 'closing' || run.state === 'closed') return
     await this.#stopProviderNow(run)
-    await this.#commitTerminalNow(run, { state: 'interrupted', reason })
+    await this.#commitTerminalWithRecoveryNow(run, { state: 'interrupted', reason })
   }
 
   async #stopProviderNow(run: StoredRun): Promise<void> {
@@ -561,8 +587,8 @@ export class ModuleAgentRunCore {
   async #commitTerminalNow(run: StoredRun, commit: HostAgentRunTerminalCommit): Promise<boolean> {
     if (isHostAgentTerminalRunState(run.state) || run.state === 'closing' || run.state === 'closed') return false
     if (!isHostAgentRunTransition(run.state, commit.state)) return false
-    this.#clearRunTimeout(run)
     await this.#setStateNow(run, commit.state)
+    this.#clearRunTimeout(run)
     if (commit.state === 'completed') {
       this.#emit(run, { type: 'turn.completed', data: commit.finalText === undefined ? {} : { finalText: commit.finalText } })
     } else if (commit.state === 'failed') {
@@ -573,12 +599,72 @@ export class ModuleAgentRunCore {
     return true
   }
 
+  async #commitTerminalWithRecoveryNow(
+    run: StoredRun,
+    commit: HostAgentRunTerminalCommit,
+  ): Promise<boolean> {
+    try {
+      return await this.#commitTerminalNow(run, commit)
+    } catch (error) {
+      await this.#failAfterSessionOperationNow(run, error, 'INTERNAL_ERROR')
+      return false
+    }
+  }
+
+  async #failAfterSessionOperationNow(
+    run: StoredRun,
+    _cause: unknown,
+    code: HostAgentTurnFailureCode,
+  ): Promise<void> {
+    if (isHostAgentTerminalRunState(run.state) || run.state === 'closing' || run.state === 'closed') return
+    const sessionId = run.sessionId
+    if (sessionId) {
+      run.unsubscribeSession()
+      run.unsubscribeSession = () => undefined
+      try {
+        await this.#deps.sessions.disposeAndReap(sessionId)
+        run.sessionId = undefined
+        run.initializationDisposition = 'not-created'
+        run.initializationFailure = undefined
+      } catch {
+        run.initializationFailure = new HostAgentRunCoreError(
+          'CLEANUP_FAILED',
+          'Transient Module session could not be reaped after a Host state failure',
+        )
+      }
+    }
+
+    // The Session has either been deleted or is fenced as cleanup debt. Commit
+    // a local failure so polling/SSE never remain accepted/running forever.
+    // A retained stale header is startup-quarantined and blocks new Module work
+    // until DELETE or shutdown proves strict reap.
+    if (isHostAgentRunTransition(run.state, 'failed')) {
+      this.#setLocalStateNow(run, 'failed')
+      this.#clearRunTimeout(run)
+      this.#emit(run, {
+        type: 'turn.failed',
+        data: { code, retryable: code === 'RUNTIME_UNAVAILABLE' || code === 'RUN_TIMEOUT' },
+      })
+    }
+    if (!run.sessionId) await this.#closeRunNow(run, 'HOST_SHUTDOWN')
+  }
+
   async #closeRunNow(run: StoredRun, reason: HostAgentInterruptionReason): Promise<HostAgentRunSnapshot> {
     if (run.state === 'closed') return this.#snapshot(run)
     if (!isHostAgentTerminalRunState(run.state) && run.state !== 'closing') {
       await this.#interruptNow(run, reason)
     }
-    if (isHostAgentTerminalRunState(run.state)) await this.#setStateNow(run, 'closing')
+    if (isHostAgentTerminalRunState(run.state)) {
+      try {
+        await this.#setStateNow(run, 'closing')
+      } catch {
+        run.initializationFailure = new HostAgentRunCoreError(
+          'CLEANUP_FAILED',
+          'Transient Module closing state could not be persisted',
+        )
+        this.#setLocalStateNow(run, 'closing')
+      }
+    }
     if (run.state !== 'closing') return this.#snapshot(run)
     this.#clearRunTimeout(run)
     run.unsubscribeSession()
@@ -588,6 +674,8 @@ export class ModuleAgentRunCore {
       try {
         await this.#deps.sessions.disposeAndReap(sessionId)
         run.sessionId = undefined
+        run.initializationDisposition = 'not-created'
+        run.initializationFailure = undefined
       } catch {
         throw new HostAgentRunCoreError('CLEANUP_FAILED', 'Transient Module session cleanup did not finish')
       }
@@ -605,6 +693,13 @@ export class ModuleAgentRunCore {
       throw new HostAgentRunCoreError('INTERNAL_ERROR', `Invalid run transition ${run.state} -> ${next}`)
     }
     if (run.sessionId) await this.#deps.sessions.updateRunState(run.sessionId, next)
+    this.#setLocalStateNow(run, next)
+  }
+
+  #setLocalStateNow(run: StoredRun, next: HostAgentRunState): void {
+    if (!isHostAgentRunTransition(run.state, next)) {
+      throw new HostAgentRunCoreError('INTERNAL_ERROR', `Invalid run transition ${run.state} -> ${next}`)
+    }
     const now = this.#clock.now()
     run.state = next
     run.updatedAt = Math.max(now, run.updatedAt)
@@ -680,6 +775,25 @@ export class ModuleAgentRunCore {
     return count
   }
 
+  #assertRunCapacityAvailable(): void {
+    for (const run of this.#runs.values()) {
+      if (run.initializationFailure || (run.state === 'closing' && run.sessionId)) {
+        throw new HostAgentRunCoreError(
+          'CLEANUP_FAILED',
+          'A previous Module session still has unresolved cleanup ownership',
+        )
+      }
+    }
+    if (this.#activeRunCount() >= this.#limits.maxConcurrentRuns) {
+      throw new HostAgentRunCoreError('RUN_ACTIVE', 'Only one Module run may be active')
+    }
+    // A terminal Run retains provider/session capacity until strict DELETE has
+    // reaped it. Do not admit a second hidden Session in this narrow window.
+    if ([...this.#runs.values()].some((run) => run.sessionId !== undefined)) {
+      throw new HostAgentRunCoreError('RUN_ACTIVE', 'A Module session is still awaiting strict cleanup')
+    }
+  }
+
   #createRunHandle(): string {
     for (let attempt = 0; attempt < 4; attempt += 1) {
       const hex = this.#deps.ids.createHex(16)
@@ -696,8 +810,38 @@ export class ModuleAgentRunCore {
     run.timeoutHandle = undefined
   }
 
+  #armRunTimeout(run: StoredRun): void {
+    if (run.timeoutHandle !== undefined || isHostAgentTerminalRunState(run.state)
+      || run.state === 'closing' || run.state === 'closed') return
+    run.timeoutHandle = this.#clock.setTimeout(() => {
+      void this.#serialize(run, () => this.#timeoutRunNow(run)).catch(() => undefined)
+    }, this.#limits.maxRunDurationMs)
+  }
+
   #runIsInState(run: StoredRun, state: HostAgentRunState): boolean {
     return run.state === state
+  }
+
+  async #awaitCraftPreemptionDeadline(run: StoredRun, operation: Promise<void>): Promise<void> {
+    let timeoutHandle: unknown
+    const timeout = new Promise<never>((_resolve, reject) => {
+      timeoutHandle = this.#clock.setTimeout(() => {
+        reject(new HostAgentRunCoreError(
+          'CLEANUP_FAILED',
+          'Module cleanup exceeded the Craft admission deadline',
+        ))
+      }, this.#limits.maxCraftPreemptionMs)
+    })
+    try {
+      await Promise.race([operation, timeout])
+    } catch (error) {
+      if (error instanceof HostAgentRunCoreError && error.code === 'CLEANUP_FAILED') {
+        run.initializationFailure = error
+      }
+      throw error
+    } finally {
+      if (timeoutHandle !== undefined) this.#clock.clearTimeout(timeoutHandle)
+    }
   }
 
   #safeNotify(listener: HostAgentRunEventListener, event: HostAgentEvent): void {

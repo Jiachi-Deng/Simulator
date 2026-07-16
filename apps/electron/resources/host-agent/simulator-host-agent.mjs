@@ -140,7 +140,7 @@ var HOST_AGENT_ERROR_DEFINITIONS = Object.freeze({
   INTERNAL_ERROR: { httpStatus: 500, retryable: false, message: "The Host Agent failed." }
 });
 var HOST_AGENT_RUN_TRANSITIONS = Object.freeze({
-  accepted: Object.freeze(["starting", "interrupted"]),
+  accepted: Object.freeze(["starting", "failed", "interrupted"]),
   starting: Object.freeze(["running", "failed", "interrupted"]),
   running: Object.freeze(["completed", "failed", "interrupted"]),
   completed: Object.freeze(["closing"]),
@@ -1005,9 +1005,14 @@ function validateEventTransition(state, event) {
       state.phase = "awaiting-started";
       break;
     case "awaiting-started":
-      if (event.type !== "turn.started")
+      if (event.type === "turn.started") {
+        state.phase = "streaming";
+      } else if (isTerminal(event)) {
+        state.terminalType = event.type;
+        state.phase = "terminal";
+      } else {
         throw new ShimError("INVALID_EVENT_ORDER");
-      state.phase = "streaming";
+      }
       break;
     case "streaming":
       if (event.type === "run.accepted" || event.type === "turn.started" || event.type === "run.closed") {

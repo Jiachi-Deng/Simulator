@@ -26,7 +26,9 @@ export class InMemoryHostAgentRunSessionPort implements HostAgentRunSessionPort 
   readonly cancelled: string[] = []
   readonly reaped: string[] = []
   readonly listeners = new Map<string, Set<(event: HostAgentSessionEvent) => void>>()
+  readonly recovered: CreateHostAgentSessionInput[] = []
   createError?: Error
+  recoverError?: Error
   updateError?: Error
   sendError?: Error
   awaitStoppedError?: Error
@@ -37,6 +39,22 @@ export class InMemoryHostAgentRunSessionPort implements HostAgentRunSessionPort 
     this.created.push(structuredClone(input))
     return {
       sessionId: `session-${this.created.length}`,
+      workspaceId: input.workspaceId,
+      workspaceRoot: input.workspaceRoot,
+      workingDirectory: input.workingDirectory,
+      hidden: true,
+    }
+  }
+
+  async recoverSession(input: CreateHostAgentSessionInput): Promise<CreatedHostAgentSession | undefined> {
+    if (this.recoverError) throw this.recoverError
+    this.recovered.push(structuredClone(input))
+    const index = this.created.findIndex((candidate) =>
+      candidate.ownership.runHandle === input.ownership.runHandle
+      && candidate.ownership.idempotencyKeyDigest === input.ownership.idempotencyKeyDigest)
+    if (index < 0) return undefined
+    return {
+      sessionId: `session-${index + 1}`,
       workspaceId: input.workspaceId,
       workspaceRoot: input.workspaceRoot,
       workingDirectory: input.workingDirectory,

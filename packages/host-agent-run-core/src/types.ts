@@ -46,6 +46,13 @@ export type HostAgentSessionEvent =
 /** Narrow Host-owned SessionManager seam. Module workers never receive this object. */
 export interface HostAgentRunSessionPort {
   createSession(input: CreateHostAgentSessionInput): Promise<CreatedHostAgentSession>
+  /**
+   * Authoritatively recover a Session whose ownership header may have been
+   * committed before createSession's response was lost. `undefined` means the
+   * Host proved that no matching Session exists; rejection means ownership is
+   * still uncertain and must remain reserved.
+   */
+  recoverSession(input: CreateHostAgentSessionInput): Promise<CreatedHostAgentSession | undefined>
   updateRunState(sessionId: string, state: HostAgentRunState): Promise<void>
   sendTurn(sessionId: string, prompt: string): Promise<void>
   cancelTurn(sessionId: string): Promise<void>
@@ -86,6 +93,7 @@ export interface HostAgentRunCoreLimits {
   maxSubscribersPerGrant: number
   maxConcurrentRuns: number
   maxRunDurationMs: number
+  maxCraftPreemptionMs: number
   tombstoneMinRetentionMs: number
 }
 
@@ -142,6 +150,17 @@ export class HostAgentRunCoreError extends Error {
   constructor(readonly code: HostAgentRunCoreErrorCode, message: string) {
     super(message)
     this.name = 'HostAgentRunCoreError'
+  }
+}
+
+/** Explicit pre-commit signal; all untyped Session creation errors are uncertain. */
+export class HostAgentSessionCreateError extends Error {
+  constructor(
+    readonly commit: 'not-created' | 'unknown',
+    message: string,
+  ) {
+    super(message)
+    this.name = 'HostAgentSessionCreateError'
   }
 }
 

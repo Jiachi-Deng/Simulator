@@ -70,6 +70,8 @@ const started = event(2, 'turn.started', {})
 const delta = event(3, 'message.delta', { delta: 'hello' })
 const completed = event(4, 'turn.completed', { finalText: 'hello' })
 const closed = event(5, 'run.closed', {})
+const failedBeforeStart = event(2, 'turn.failed', { code: 'RUNTIME_UNAVAILABLE', retryable: true })
+const closedBeforeStart = event(3, 'run.closed', {})
 
 async function fixtureFiles(mode = 0o600) {
   const root = await mkdtemp(join(tmpdir(), 'host-agent-shim-'))
@@ -238,6 +240,49 @@ describe('Host Agent shim', () => {
     expect(code).toBe(0)
     expect(eventRequestCursors).toEqual([undefined, '3'])
     expect(stdout.value.trim().split('\n').map((line) => JSON.parse(line).sequence)).toEqual([1, 2, 3, 4, 5])
+    expect(stderr.value).toBe('')
+  })
+
+  it('accepts an explicit pre-provider failure without inventing turn.started', async () => {
+    const files = await fixtureFiles()
+    let stream: ServerResponse | undefined
+    const { url } = await listen((request, response) => {
+      request.resume()
+      request.on('end', () => {
+        if (request.method === 'POST' && request.url === '/v2/runs') {
+          json(response, snapshot('accepted'))
+        } else if (request.method === 'GET' && request.url === `/v2/runs/${RUN}/events`) {
+          stream = response
+          response.writeHead(200, { 'content-type': 'text/event-stream; charset=utf-8' })
+          response.flushHeaders()
+          writeSse(response, accepted)
+          writeSse(response, failedBeforeStart)
+        } else if (request.method === 'DELETE' && request.url === `/v2/runs/${RUN}`) {
+          writeSse(stream!, closedBeforeStart)
+          stream!.end()
+          json(response, snapshot('closed'))
+        } else {
+          response.writeHead(404).end()
+        }
+      })
+    })
+    const stdout = new Capture()
+    const stderr = new Capture()
+    const code = await runHostAgentShim({
+      argv: [], entryPath: files.entryPath, cwd: files.root,
+      env: {
+        SIMULATOR_HOST_AGENT_URL: url,
+        SIMULATOR_HOST_AGENT_TOKEN_FILE: files.tokenPath,
+        SIMULATOR_HOST_AGENT_SHIM_PATH: files.entryPath,
+        SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',
+      },
+      stdin: Readable.from(['prompt']), stdout, stderr,
+      signal: new AbortController().signal,
+    })
+    expect(code).toBe(1)
+    expect(stdout.value.trim().split('\n').map((line) => JSON.parse(line).type)).toEqual([
+      'run.accepted', 'turn.failed', 'run.closed',
+    ])
     expect(stderr.value).toBe('')
   })
 

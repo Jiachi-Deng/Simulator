@@ -108,6 +108,16 @@ export const HOST_AGENT_V2_FIXTURES = Object.freeze({
       eventBase(10, 'run.closed', {}),
     ],
     transcripts: {
+      failedBeforeStart: [
+        eventBase(1, 'run.accepted', {}),
+        eventBase(2, 'turn.failed', { code: 'RUNTIME_UNAVAILABLE', retryable: true }),
+        eventBase(3, 'run.closed', {}),
+      ],
+      interruptedBeforeStart: [
+        eventBase(1, 'run.accepted', {}),
+        eventBase(2, 'turn.interrupted', { reason: 'CLIENT_CANCELLED', retryable: false }),
+        eventBase(3, 'run.closed', {}),
+      ],
       completed: [
         eventBase(1, 'run.accepted', {}),
         eventBase(2, 'turn.started', {}),

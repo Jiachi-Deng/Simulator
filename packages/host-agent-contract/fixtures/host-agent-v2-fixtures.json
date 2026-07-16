@@ -184,6 +184,70 @@
       }
     ],
     "transcripts": {
+      "failedBeforeStart": [
+        {
+          "contractVersion": 2,
+          "eventId": "1",
+          "sequence": 1,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000001,
+          "type": "run.accepted",
+          "data": {}
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "2",
+          "sequence": 2,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000002,
+          "type": "turn.failed",
+          "data": {
+            "code": "RUNTIME_UNAVAILABLE",
+            "retryable": true
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "3",
+          "sequence": 3,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000003,
+          "type": "run.closed",
+          "data": {}
+        }
+      ],
+      "interruptedBeforeStart": [
+        {
+          "contractVersion": 2,
+          "eventId": "1",
+          "sequence": 1,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000001,
+          "type": "run.accepted",
+          "data": {}
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "2",
+          "sequence": 2,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000002,
+          "type": "turn.interrupted",
+          "data": {
+            "reason": "CLIENT_CANCELLED",
+            "retryable": false
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "3",
+          "sequence": 3,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000003,
+          "type": "run.closed",
+          "data": {}
+        }
+      ],
       "completed": [
         {
           "contractVersion": 2,

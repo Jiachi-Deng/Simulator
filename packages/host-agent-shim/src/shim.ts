@@ -424,8 +424,14 @@ function validateEventTransition(state: EventState, event: HostAgentEvent): void
       state.phase = 'awaiting-started'
       break
     case 'awaiting-started':
-      if (event.type !== 'turn.started') throw new ShimError('INVALID_EVENT_ORDER')
-      state.phase = 'streaming'
+      if (event.type === 'turn.started') {
+        state.phase = 'streaming'
+      } else if (isTerminal(event)) {
+        state.terminalType = event.type
+        state.phase = 'terminal'
+      } else {
+        throw new ShimError('INVALID_EVENT_ORDER')
+      }
       break
     case 'streaming':
       if (event.type === 'run.accepted' || event.type === 'turn.started' || event.type === 'run.closed') {

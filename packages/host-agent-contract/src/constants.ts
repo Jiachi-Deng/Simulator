@@ -186,7 +186,7 @@ export const HOST_AGENT_ERROR_DEFINITIONS = Object.freeze({
 } satisfies Record<(typeof HOST_AGENT_ERROR_CODES)[number], HostAgentPublicErrorDefinition>)
 
 export const HOST_AGENT_RUN_TRANSITIONS = Object.freeze({
-  accepted: Object.freeze(['starting', 'interrupted']),
+  accepted: Object.freeze(['starting', 'failed', 'interrupted']),
   starting: Object.freeze(['running', 'failed', 'interrupted']),
   running: Object.freeze(['completed', 'failed', 'interrupted']),
   completed: Object.freeze(['closing']),

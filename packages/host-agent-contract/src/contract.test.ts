@@ -93,6 +93,7 @@ describe('Host Agent v2 constants', () => {
 
   it('exposes the sole legal state transitions and keeps closed final', () => {
     expect(isHostAgentRunTransition('accepted', 'starting')).toBe(true)
+    expect(isHostAgentRunTransition('accepted', 'failed')).toBe(true)
     expect(isHostAgentRunTransition('accepted', 'interrupted')).toBe(true)
     expect(isHostAgentRunTransition('running', 'completed')).toBe(true)
     expect(isHostAgentRunTransition('failed', 'closing')).toBe(true)
