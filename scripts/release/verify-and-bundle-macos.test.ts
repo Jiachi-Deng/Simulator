@@ -32,6 +32,12 @@ describe("macOS RC bundle verification", () => {
     expect(script).toContain('[[ "$executable_name" != */*')
   })
 
+  test("requires both macOS bundle version fields to remain the Host product version", () => {
+    expect(script).toContain("Print :CFBundleShortVersionString")
+    expect(script).toContain("Print :CFBundleVersion")
+    expect(script.match(/== \"\$VERSION\"/g)).toHaveLength(2)
+  })
+
   test("fails closed when packaged Pi or session server resources are incomplete", () => {
     expect(script).toContain('bun "$SCRIPT_DIR/../packaged-server-resources.ts" --app "$app"')
   })

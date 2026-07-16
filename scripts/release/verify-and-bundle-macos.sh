@@ -79,6 +79,7 @@ verify_app() {
   assert_lstat_type "$app/Contents/MacOS" "directory" "app MacOS directory"
   bun "$SCRIPT_DIR/updates-disabled.ts" --app "$app"
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")" == "$VERSION" ]]
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")" == "$VERSION" ]]
   [[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$plist")" == "com.lukilabs.craft-agent" ]]
   executable_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$plist")
   [[ "$executable_name" != */* && "$executable_name" != "." && "$executable_name" != ".." ]] || {

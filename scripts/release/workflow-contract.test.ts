@@ -5,6 +5,44 @@ import { join } from "node:path"
 const workflow = readFileSync(join(import.meta.dir, "../../.github/workflows/engineering-rc.yml"), "utf8")
 
 describe("engineering RC workflow contract", () => {
+  test("keeps the RC bundle label out of the Host product version", () => {
+    expect(workflow).toContain("rc_label:")
+    expect(workflow).toContain('RC_LABEL: ${{ inputs.rc_label }}')
+    expect(workflow).toContain('engineering-rc.ts --label "$RC_LABEL"')
+    expect(workflow).toContain(".productVersion")
+    expect(workflow).toContain("PRODUCT_VERSION=%s")
+    expect(workflow).toContain('verify-and-bundle-macos.sh "$PRODUCT_VERSION"')
+    expect(workflow).not.toContain('verify-and-bundle-macos.sh "$RC_LABEL"')
+    expect(workflow).not.toContain("RC_VERSION")
+    expect(workflow).not.toContain("inputs.version")
+  })
+
+  test("verifies only exact artifacts staged in a clean owner-only input", () => {
+    expect(workflow).toContain('mktemp -d "$RUNNER_TEMP/engineering-rc-input.XXXXXX"')
+    expect(workflow).toContain('chmod 700 "$CLEAN_INPUT"')
+    expect(workflow).toContain(
+      'stage-engineering-rc-input.ts apps/electron/release "$CLEAN_INPUT" > engineering-rc-input.json',
+    )
+    expect(workflow).toContain('ENGINEERING_RC_INPUT=%s')
+    expect(workflow).toContain(
+      'verify-and-bundle-macos.sh "$PRODUCT_VERSION" "$ENGINEERING_RC_INPUT" engineering-rc-bundle',
+    )
+    expect(workflow).not.toContain(
+      'verify-and-bundle-macos.sh "$PRODUCT_VERSION" apps/electron/release engineering-rc-bundle',
+    )
+    expect(workflow).toContain("verification-input.json")
+  })
+
+  test("records both product version and RC label as separate bundle evidence", () => {
+    expect(workflow).toContain('--arg rcLabel "$RC_LABEL"')
+    expect(workflow).toContain('--arg productVersion "$PRODUCT_VERSION"')
+    expect(workflow).toContain("rcLabel: $rcLabel")
+    expect(workflow).toContain("productVersion: $productVersion")
+    expect(workflow).toContain('release-notes/$PRODUCT_VERSION.md')
+    expect(workflow).toContain('sbom.spdx.json "$PRODUCT_VERSION" "$SOURCE_SHA"')
+    expect(workflow).not.toContain('sbom.spdx.json "$RC_LABEL" "$SOURCE_SHA"')
+  })
+
   test("requires updates-disabled mode before packaging and propagates the marker", () => {
     expect(workflow).toContain('SIMULATOR_DISABLE_UPDATES: "1"')
     expect(workflow).not.toContain("SIMULATOR_UPDATES_DISABLED")
