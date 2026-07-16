@@ -8,8 +8,11 @@ import type {
   ModuleCoordinator,
   ModuleCoordinatorOperationResult,
   ModuleCoordinatorReleaseRequest,
+  ModuleViewPort,
+  ModuleViewSnapshot,
   ResolvedModuleCoordinatorInstallRequest,
 } from '@simulator/module-coordinator'
+import type { ModuleDaemonSnapshot } from '@simulator/module-daemon'
 import type { ModuleRegistry } from '@simulator/module-registry'
 import {
   OPEN_DESIGN_ACCEPTANCE_CHANNELS,
@@ -269,6 +272,44 @@ export async function loadOpenDesignAcceptance(
 export interface OpenDesignAcceptanceRuntime {
   readonly coordinator: Pick<ModuleCoordinator, 'resolveInstallRequest' | 'update' | 'rollback'>
   readonly registry: Pick<ModuleRegistry, 'snapshot'>
+  readonly daemon: { get(moduleId: ModuleId): ModuleDaemonSnapshot | undefined }
+  readonly view: Pick<ModuleViewPort, 'query'>
+}
+
+export interface OpenDesignAcceptanceRuntimeGate {
+  getRuntime(): OpenDesignAcceptanceRuntime | undefined
+  /** Starts a new recovery epoch and returns its one-shot completion marker. */
+  beginRecovery(): () => void
+  reset(): void
+  close(): void
+}
+
+/** Prevents acceptance commands from observing a Coordinator before recovery commits. */
+export function createOpenDesignAcceptanceRuntimeGate(
+  lookup: () => OpenDesignAcceptanceRuntime | undefined,
+): OpenDesignAcceptanceRuntimeGate {
+  let recovered = false
+  let epoch = 0
+  let closed = false
+  return Object.freeze({
+    getRuntime: () => recovered ? lookup() : undefined,
+    beginRecovery: () => {
+      const recoveryEpoch = ++epoch
+      recovered = false
+      return () => {
+        if (!closed && epoch === recoveryEpoch) recovered = true
+      }
+    },
+    reset: () => {
+      epoch += 1
+      recovered = false
+    },
+    close: () => {
+      closed = true
+      epoch += 1
+      recovered = false
+    },
+  })
 }
 
 export interface OpenDesignAcceptanceHostAdapter {
@@ -365,6 +406,13 @@ interface AcceptanceRegistryState {
   readonly installedVersions: readonly string[]
 }
 
+interface AcceptanceObservedState extends AcceptanceRegistryState {
+  readonly daemon: ModuleDaemonSnapshot | undefined
+  readonly view: ModuleViewSnapshot | undefined
+  readonly running: boolean
+  readonly viewAttached: boolean
+}
+
 function exactVersions(actual: readonly string[], expected: readonly string[]): boolean {
   return actual.length === expected.length && actual.every((version, index) => version === expected[index])
 }
@@ -392,7 +440,7 @@ export class OpenDesignAcceptanceController {
 
   updateToRc(): Promise<OpenDesignAcceptanceState> {
     return this.#run('updateToRc', async (runtime, operationId) => {
-      const state = await this.#readState()
+      const state = await this.#requireObservedState(runtime)
       if (state.activeVersion !== OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion
         || state.lastKnownGoodVersion !== null
         || !exactVersions(state.installedVersions, [OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion])) {
@@ -410,7 +458,7 @@ export class OpenDesignAcceptanceController {
 
   rollback(): Promise<OpenDesignAcceptanceState> {
     return this.#run('rollback', async (runtime, operationId) => {
-      const state = await this.#readState()
+      const state = await this.#requireObservedState(runtime)
       const isRcToStable = state.activeVersion === OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion
         && state.lastKnownGoodVersion === OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion
       const isStableToRc = state.activeVersion === OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion
@@ -421,6 +469,9 @@ export class OpenDesignAcceptanceController {
           OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion,
         ])) {
         throw new AcceptanceControlError('ACCEPTANCE_ROLLBACK_PAIR_MISMATCH')
+      }
+      if (!state.running || !state.viewAttached) {
+        throw new AcceptanceControlError('ACCEPTANCE_ROLLBACK_SOURCE_NOT_READY')
       }
       return {
         result: await runtime.coordinator.rollback({
@@ -443,15 +494,17 @@ export class OpenDesignAcceptanceController {
     execute: (runtime: OpenDesignAcceptanceRuntime, operationId: string) => Promise<AcceptanceExecution>,
   ): Promise<OpenDesignAcceptanceState> {
     if (this.#flight) return this.#flight
+    // Acceptance is an evidence-gathering drill: the first control failure stops
+    // all further mutations for this process lifetime. Restart creates a new controller.
+    if (this.#lastError) return this.#readState()
     this.#action = action
-    this.#lastError = undefined
     this.#lastOperation = undefined
     const operationId = this.#options.operationId?.(action)
       ?? `open-design-acceptance-${action}-${randomUUID()}`
     const flight = (async () => {
       try {
         const runtime = this.#options.getRuntime()
-        if (!runtime) throw new AcceptanceControlError('ACCEPTANCE_RUNTIME_UNAVAILABLE')
+        if (!runtime) throw new AcceptanceControlError('ACCEPTANCE_OPERATION_RUNTIME_UNAVAILABLE')
         const execution = await execute(runtime, operationId)
         const { result } = execution
         const expectedKind = action === 'updateToRc' ? 'update' : 'rollback'
@@ -462,19 +515,20 @@ export class OpenDesignAcceptanceController {
           this.#lastOperation = operationEvidence(result)
           this.#lastError = `ACCEPTANCE_${expectedKind.toUpperCase()}_FAILED`
         } else {
-          let registry: AcceptanceRegistryState | undefined
+          let observed: AcceptanceObservedState | undefined
           try {
-            registry = this.#readRegistryState(runtime)
+            observed = await this.#readObservedState(runtime)
           } catch {
             // A claimed success without readable Host state is not acceptance evidence.
           }
-          if (!registry
-            || registry.activeVersion !== execution.expectedActiveVersion
-            || registry.lastKnownGoodVersion !== execution.expectedLastKnownGoodVersion
-            || !exactVersions(registry.installedVersions, [
+          if (!observed
+            || observed.activeVersion !== execution.expectedActiveVersion
+            || observed.lastKnownGoodVersion !== execution.expectedLastKnownGoodVersion
+            || !exactVersions(observed.installedVersions, [
               OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
               OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion,
             ])
+            || !observed.running || !observed.viewAttached
             || result.target.activeVersion !== execution.expectedActiveVersion
             || result.target.lastKnownGoodVersion !== execution.expectedLastKnownGoodVersion
             || !result.target.running || !result.target.viewAttached || !result.target.registryPresent) {
@@ -509,15 +563,19 @@ export class OpenDesignAcceptanceController {
     let activeVersion: string | null = null
     let lastKnownGoodVersion: string | null = null
     let installedVersions: readonly string[] = Object.freeze([])
+    let running = false
+    let viewAttached = false
     let errorCode = this.#lastError
     if (!runtime) {
       errorCode ??= runtimeLookupFailed ? 'ACCEPTANCE_RUNTIME_LOOKUP_FAILED' : 'ACCEPTANCE_RUNTIME_UNAVAILABLE'
     } else {
       try {
-        const registry = this.#readRegistryState(runtime)
-        activeVersion = registry.activeVersion
-        lastKnownGoodVersion = registry.lastKnownGoodVersion
-        installedVersions = registry.installedVersions
+        const observed = await this.#readObservedState(runtime)
+        activeVersion = observed.activeVersion
+        lastKnownGoodVersion = observed.lastKnownGoodVersion
+        installedVersions = observed.installedVersions
+        running = observed.running
+        viewAttached = observed.viewAttached
       } catch {
         errorCode ??= 'ACCEPTANCE_STATE_UNAVAILABLE'
       }
@@ -528,6 +586,8 @@ export class OpenDesignAcceptanceController {
       activeVersion,
       lastKnownGoodVersion,
       installedVersions,
+      running,
+      viewAttached,
       ...(this.#action ? { action: this.#action } : {}),
       ...(this.#lastOperation ? { operation: this.#lastOperation } : {}),
       ...(errorCode ? { errorCode } : {}),
@@ -540,6 +600,34 @@ export class OpenDesignAcceptanceController {
       activeVersion: module?.activeVersion ?? null,
       lastKnownGoodVersion: module?.lastKnownGoodVersion ?? null,
       installedVersions: Object.freeze((module?.versions ?? []).map((version) => version.version).sort()),
+    }
+  }
+
+  async #readObservedState(runtime: OpenDesignAcceptanceRuntime): Promise<AcceptanceObservedState> {
+    const registry = this.#readRegistryState(runtime)
+    const daemon = runtime.daemon.get(MODULE_ID)
+    const view = await runtime.view.query(MODULE_ID)
+    const hasActiveVersion = registry.activeVersion !== null
+    return {
+      ...registry,
+      daemon,
+      view,
+      running: hasActiveVersion
+        && daemon?.id === MODULE_ID
+        && daemon.version === registry.activeVersion
+        && daemon.state === 'healthy',
+      viewAttached: hasActiveVersion
+        && view?.moduleId === MODULE_ID
+        && view.version === registry.activeVersion
+        && view.state === 'attached',
+    }
+  }
+
+  async #requireObservedState(runtime: OpenDesignAcceptanceRuntime): Promise<AcceptanceObservedState> {
+    try {
+      return await this.#readObservedState(runtime)
+    } catch {
+      throw new AcceptanceControlError('ACCEPTANCE_STATE_UNAVAILABLE')
     }
   }
 }
@@ -566,21 +654,28 @@ function assertInvocation(
   if (args.length !== 0) throw new Error('OpenDesign acceptance IPC commands do not accept input')
 }
 
-/** Called only for a ready bootstrap; disposal removes the entire acceptance-only surface. */
+/**
+ * Registers one synchronous availability reply before BrowserWindow preload.
+ * Mutation handlers exist only when every acceptance gate produced a controller.
+ */
 export function registerOpenDesignAcceptanceIpc(
   ipc: AcceptanceIpc,
-  controller: OpenDesignAcceptanceController,
+  controller?: OpenDesignAcceptanceController,
 ): OpenDesignAcceptanceIpcRegistration {
   const key = ipc as object
   ipcRegistrations.get(key)?.dispose()
   const invokeChannels: string[] = []
   let disposed = false
   const available = (event: IpcMainEvent) => {
-    event.returnValue = validSender(controller, event)
+    event.returnValue = controller ? validSender(controller, event) : false
   }
-  const register = (channel: string, invoke: () => Promise<OpenDesignAcceptanceState>) => {
+  const register = (
+    readyController: OpenDesignAcceptanceController,
+    channel: string,
+    invoke: () => Promise<OpenDesignAcceptanceState>,
+  ) => {
     ipc.handle(channel, (event, ...args) => {
-      assertInvocation(controller, event, args)
+      assertInvocation(readyController, event, args)
       return invoke()
     })
     invokeChannels.push(channel)
@@ -602,9 +697,12 @@ export function registerOpenDesignAcceptanceIpc(
   }
   try {
     ipc.on(OPEN_DESIGN_ACCEPTANCE_CHANNELS.IS_AVAILABLE, available)
-    register(OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE, () => controller.getState())
-    register(OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC, () => controller.updateToRc())
-    register(OPEN_DESIGN_ACCEPTANCE_CHANNELS.ROLLBACK, () => controller.rollback())
+    if (controller) {
+      const readyController = controller
+      register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE, () => readyController.getState())
+      register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC, () => readyController.updateToRc())
+      register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.ROLLBACK, () => readyController.rollback())
+    }
   } catch (error) {
     registration.dispose()
     throw error

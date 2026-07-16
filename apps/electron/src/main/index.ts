@@ -137,6 +137,7 @@ import { loadOpenDesignCompatibilityAuthority } from './open-design-compatibilit
 import {
   OPEN_DESIGN_ACCEPTANCE_ENV,
   OpenDesignAcceptanceController,
+  createOpenDesignAcceptanceRuntimeGate,
   loadOpenDesignAcceptance,
   registerOpenDesignAcceptanceIpc,
   type OpenDesignAcceptanceIpcRegistration,
@@ -264,6 +265,9 @@ let sessionManager: SessionManager | null = null
 let browserPaneManager: BrowserPaneManager | null = null
 let moduleViewManager: ModuleViewManager | null = null
 let hostModuleCoordinator: HostModuleCoordinatorRuntime | null = null
+const openDesignAcceptanceRuntimeGate = createOpenDesignAcceptanceRuntimeGate(
+  () => hostModuleCoordinator ?? undefined,
+)
 let hostModuleAgentRuntime: IsolatedHostModuleAgentRuntime | null = null
 let moduleAgentWorkerRecovery: ModuleAgentWorkerRecoveryController | null = null
 let moduleInfrastructureShuttingDown = false
@@ -1139,7 +1143,7 @@ app.whenReady().then(async () => {
         if (openDesignAcceptanceBootstrap.status === 'ready') {
           openDesignAcceptanceController = new OpenDesignAcceptanceController({
             bootstrap: openDesignAcceptanceBootstrap,
-            getRuntime: () => hostModuleCoordinator ?? undefined,
+            getRuntime: openDesignAcceptanceRuntimeGate.getRuntime,
             host: {
               isAllowedSender: (sender) => windowManager?.getAllWindows().some(
                 ({ window }) => !window.isDestroyed()
@@ -1148,9 +1152,6 @@ app.whenReady().then(async () => {
               ) ?? false,
             },
           })
-          // Registration intentionally precedes BrowserWindow creation. The preload
-          // exposes its fixed facade only after this gated synchronous capability probe.
-          openDesignAcceptanceIpc = registerOpenDesignAcceptanceIpc(ipcMain, openDesignAcceptanceController)
         } else if (process.env[OPEN_DESIGN_ACCEPTANCE_ENV] === '1') {
           mainLog.info('OpenDesign acceptance control surface is not ready', {
             errorCode: openDesignAcceptanceBootstrap.errorCode,
@@ -1163,6 +1164,30 @@ app.whenReady().then(async () => {
         openDesignAcceptanceIpc?.dispose()
         openDesignAcceptanceIpc = null
         openDesignAcceptanceController = null
+      }
+
+      try {
+        // Every preload receives one immediate availability reply. Invoke handlers
+        // remain absent unless every startup gate produced the fixed controller.
+        openDesignAcceptanceIpc = registerOpenDesignAcceptanceIpc(
+          ipcMain,
+          openDesignAcceptanceController ?? undefined,
+        )
+      } catch (error) {
+        mainLog.error('OpenDesign acceptance IPC registration was contained', {
+          errorType: error instanceof Error ? error.name : typeof error,
+        })
+        openDesignAcceptanceIpc?.dispose()
+        openDesignAcceptanceIpc = null
+        openDesignAcceptanceController = null
+        try {
+          // Preserve the normal-startup false reply even if gated handler setup failed.
+          openDesignAcceptanceIpc = registerOpenDesignAcceptanceIpc(ipcMain)
+        } catch (fallbackError) {
+          mainLog.error('OpenDesign acceptance availability reply is unavailable', {
+            errorType: fallbackError instanceof Error ? fallbackError.name : typeof fallbackError,
+          })
+        }
       }
 
       // Optional Module and acceptance bootstrap failures are contained before
@@ -1188,6 +1213,7 @@ app.whenReady().then(async () => {
         })
       }
       try {
+        const markOpenDesignCoordinatorRecovered = openDesignAcceptanceRuntimeGate.beginRecovery()
         const moduleStorageRoot = resolveHostModuleStorageRoot({
           userDataRoot: app.getPath('userData'),
           smokeRoot: getHostModuleCoordinatorSmokeRoot(),
@@ -1282,7 +1308,9 @@ app.whenReady().then(async () => {
           },
         })
         await hostModuleCoordinator.coordinator.recover()
+        markOpenDesignCoordinatorRecovered()
       } catch (error) {
+        openDesignAcceptanceRuntimeGate.reset()
         if (isHostModuleCoordinatorSmokeRequested()) throw error
         mainLog.error('Optional Module coordinator is unavailable', {
           errorType: error instanceof Error ? error.name : typeof error,
@@ -1500,6 +1528,7 @@ async function cleanupBeforeQuit(): Promise<void> {
   // Ensure Cmd+Q/app quit bypasses layered window close interception (Cmd+W behavior).
   windowManager?.setAppQuitting(true)
   moduleInfrastructureShuttingDown = true
+  openDesignAcceptanceRuntimeGate.close()
   moduleAgentWorkerRecovery?.dispose()
   await moduleAgentWorkerRecovery?.drain()
   moduleAgentWorkerRecovery = null

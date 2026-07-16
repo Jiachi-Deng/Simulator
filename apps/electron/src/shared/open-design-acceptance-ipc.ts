@@ -21,6 +21,10 @@ export interface OpenDesignAcceptanceState {
   readonly activeVersion: string | null
   readonly lastKnownGoodVersion: string | null
   readonly installedVersions: readonly string[]
+  /** True only when the active Module daemon is healthy and version-aligned. */
+  readonly running: boolean
+  /** True only when the active Module view is attached and version-aligned. */
+  readonly viewAttached: boolean
   readonly action?: OpenDesignAcceptanceAction
   readonly operation?: OpenDesignAcceptanceOperationEvidence
   readonly errorCode?: string

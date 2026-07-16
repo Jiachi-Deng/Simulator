@@ -175,7 +175,7 @@ export async function loadOpenDesignAcceptanceStateWithRetry(
   while (shouldContinue()) {
     try {
       const state = await acceptance.getState()
-      if (state.errorCode !== 'ACCEPTANCE_RUNTIME_UNAVAILABLE') return state
+      if (state.status !== 'busy' && state.errorCode !== 'ACCEPTANCE_RUNTIME_UNAVAILABLE') return state
     } catch {
       // A rejected/removed IPC surface is a hard failure, not startup lag.
       return undefined
@@ -512,7 +512,7 @@ export function getOpenDesignAcceptanceMenuAvailability(
   state: OpenDesignAcceptanceState | undefined,
   commandInFlight = false,
 ): { readonly updateEnabled: boolean; readonly rollbackEnabled: boolean } {
-  if (!state || commandInFlight || state.status === 'busy') {
+  if (!state || commandInFlight || state.status !== 'ready') {
     return { updateEnabled: false, rollbackEnabled: false }
   }
   const baselineInstalled = state.installedVersions.length === 1
@@ -523,7 +523,7 @@ export function getOpenDesignAcceptanceMenuAvailability(
   return {
     updateEnabled: baselineInstalled
       && state.activeVersion === '0.14.5' && state.lastKnownGoodVersion === null,
-    rollbackEnabled: rollbackInstalled && ((
+    rollbackEnabled: rollbackInstalled && state.running && state.viewAttached && ((
       state.activeVersion === '0.14.6-rc.1' && state.lastKnownGoodVersion === '0.14.5'
     ) || (
       state.activeVersion === '0.14.5' && state.lastKnownGoodVersion === '0.14.6-rc.1'

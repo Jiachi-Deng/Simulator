@@ -13,6 +13,7 @@ import {
   OPEN_DESIGN_ACCEPTANCE_ENV,
   OPEN_DESIGN_ACCEPTANCE_IDENTITY,
   OpenDesignAcceptanceController,
+  createOpenDesignAcceptanceRuntimeGate,
   loadOpenDesignAcceptance,
   registerOpenDesignAcceptanceIpc,
   type LoadOpenDesignAcceptanceOptions,
@@ -334,6 +335,17 @@ function result(
 function controllerHarness(initialActive: string | null = '0.14.5', initialLkg: string | null = null) {
   let activeVersion = initialActive
   let lastKnownGoodVersion = initialLkg
+  let daemonSnapshot: any = initialActive === null ? undefined : {
+    id: OPEN_DESIGN_MODULE_ID,
+    version: initialActive,
+    state: 'healthy',
+    restartCount: 0,
+  }
+  let viewSnapshot: any = initialActive === null ? undefined : {
+    moduleId: OPEN_DESIGN_MODULE_ID,
+    version: initialActive,
+    state: 'attached',
+  }
   let installedVersions: string[] = initialActive === OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion
     || initialLkg === OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion
     ? [OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion, OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion]
@@ -343,12 +355,16 @@ function controllerHarness(initialActive: string | null = '0.14.5', initialLkg: 
     activeVersion = OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion
     lastKnownGoodVersion = OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion
     installedVersions = [OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion, OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion]
+    daemonSnapshot = { ...daemonSnapshot, id: OPEN_DESIGN_MODULE_ID, version: activeVersion, state: 'healthy' }
+    viewSnapshot = { moduleId: OPEN_DESIGN_MODULE_ID, version: activeVersion, state: 'attached' }
     return result('update', request.operationId)
   })
   const rollback = mock(async (request: any) => {
     const previous = activeVersion
     activeVersion = lastKnownGoodVersion
     lastKnownGoodVersion = previous
+    daemonSnapshot = { ...daemonSnapshot, id: OPEN_DESIGN_MODULE_ID, version: activeVersion, state: 'healthy' }
+    viewSnapshot = { moduleId: OPEN_DESIGN_MODULE_ID, version: activeVersion, state: 'attached' }
     return result('rollback', request.operationId, true, activeVersion!, lastKnownGoodVersion!)
   })
   const runtime: OpenDesignAcceptanceRuntime = {
@@ -366,6 +382,8 @@ function controllerHarness(initialActive: string | null = '0.14.5', initialLkg: 
         }],
       } as any),
     },
+    daemon: { get: mock(() => daemonSnapshot) },
+    view: { query: mock(async () => viewSnapshot) },
   }
   const controller = new OpenDesignAcceptanceController({
     bootstrap: readyBootstrap(),
@@ -387,10 +405,58 @@ function controllerHarness(initialActive: string | null = '0.14.5', initialLkg: 
     setInstalledVersions(versions: string[]) {
       installedVersions = [...versions]
     },
+    setDaemon(state: string | undefined, version: string | null = activeVersion) {
+      daemonSnapshot = state === undefined || version === null ? undefined : {
+        id: OPEN_DESIGN_MODULE_ID,
+        version,
+        state,
+        restartCount: 0,
+      }
+    },
+    setView(state: string | undefined, version: string | null = activeVersion) {
+      viewSnapshot = state === undefined || version === null ? undefined : {
+        moduleId: OPEN_DESIGN_MODULE_ID,
+        version,
+        state,
+      }
+    },
   }
 }
 
 describe('OpenDesign acceptance controller', () => {
+  it('keeps the runtime unavailable until recovery completes and resets fail-closed', async () => {
+    const harness = controllerHarness()
+    const gate = createOpenDesignAcceptanceRuntimeGate(() => harness.runtime)
+    const controller = new OpenDesignAcceptanceController({
+      bootstrap: readyBootstrap(),
+      getRuntime: gate.getRuntime,
+      host: { isAllowedSender: () => true },
+    })
+    expect(gate.getRuntime()).toBeUndefined()
+    expect(await controller.getState()).toMatchObject({
+      status: 'error', errorCode: 'ACCEPTANCE_RUNTIME_UNAVAILABLE',
+    })
+    const markRecovered = gate.beginRecovery()
+    markRecovered()
+    expect(gate.getRuntime()).toBe(harness.runtime)
+    expect(await controller.getState()).toMatchObject({
+      status: 'ready', running: true, viewAttached: true,
+    })
+    gate.reset()
+    expect(gate.getRuntime()).toBeUndefined()
+    expect(await controller.getState()).toMatchObject({
+      status: 'error', errorCode: 'ACCEPTANCE_RUNTIME_UNAVAILABLE',
+    })
+    const staleCompletion = gate.beginRecovery()
+    gate.reset()
+    staleCompletion()
+    expect(gate.getRuntime()).toBeUndefined()
+    const completionAfterQuit = gate.beginRecovery()
+    gate.close()
+    completionAfterQuit()
+    expect(gate.getRuntime()).toBeUndefined()
+  })
+
   it('resolves the fixed signed public RC and binds exact evidence into the real update call', async () => {
     const harness = controllerHarness()
     const state = await harness.controller.updateToRc()
@@ -491,6 +557,49 @@ describe('OpenDesign acceptance controller', () => {
     expect(harness.rollback).toHaveBeenCalledTimes(2)
   })
 
+  it('refuses rollback before mutation unless the source daemon and view are exactly ready', async () => {
+    const cases: Array<[string, (harness: ReturnType<typeof controllerHarness>) => void]> = [
+      ['stopped daemon', (harness) => harness.setDaemon('stopped')],
+      ['degraded daemon', (harness) => harness.setDaemon('degraded')],
+      ['wrong daemon version', (harness) => harness.setDaemon('healthy', '0.14.5')],
+      ['missing daemon', (harness) => harness.setDaemon(undefined)],
+      ['detached view', (harness) => harness.setView('detached')],
+      ['wrong view version', (harness) => harness.setView('attached', '0.14.5')],
+      ['missing view', (harness) => harness.setView(undefined)],
+    ]
+    for (const [, configure] of cases) {
+      const harness = controllerHarness('0.14.6-rc.1', '0.14.5')
+      configure(harness)
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        expect(await harness.controller.rollback()).toMatchObject({
+          status: 'error',
+          activeVersion: '0.14.6-rc.1',
+          lastKnownGoodVersion: '0.14.5',
+          errorCode: 'ACCEPTANCE_ROLLBACK_SOURCE_NOT_READY',
+        })
+      }
+      expect(harness.rollback).not.toHaveBeenCalled()
+    }
+
+    const queryFailure = controllerHarness('0.14.6-rc.1', '0.14.5')
+    ;(queryFailure.runtime.view.query as any).mockImplementation(async () => {
+      throw new Error('view query failed at /private/path')
+    })
+    expect(await queryFailure.controller.rollback()).toMatchObject({
+      status: 'error', errorCode: 'ACCEPTANCE_STATE_UNAVAILABLE',
+    })
+    expect(queryFailure.rollback).not.toHaveBeenCalled()
+
+    const daemonQueryFailure = controllerHarness('0.14.6-rc.1', '0.14.5')
+    ;(daemonQueryFailure.runtime.daemon.get as any).mockImplementation(() => {
+      throw new Error('daemon query failed at /private/path')
+    })
+    expect(await daemonQueryFailure.controller.rollback()).toMatchObject({
+      status: 'error', errorCode: 'ACCEPTANCE_STATE_UNAVAILABLE',
+    })
+    expect(daemonQueryFailure.rollback).not.toHaveBeenCalled()
+  })
+
   it('contains Coordinator failures, preserves safe state, and never exposes raw errors', async () => {
     const harness = controllerHarness()
     harness.update.mockImplementationOnce(async () => { throw new Error('secret-token=/private/path') })
@@ -551,6 +660,51 @@ describe('OpenDesign acceptance controller', () => {
     expect(JSON.stringify(unavailableState)).not.toContain('secret registry path')
   })
 
+  it('latches the first control error and prevents every later mutation until controller restart', async () => {
+    const identityFailure = controllerHarness()
+    identityFailure.resolveInstallRequest.mockImplementationOnce(async () => resolvedRequest({
+      catalogUrl: 'https://example.test/foreign-catalog.json',
+    }))
+    const identityState = await identityFailure.controller.updateToRc()
+    expect(identityState.errorCode).toBe('ACCEPTANCE_RESOLVED_RELEASE_IDENTITY_MISMATCH')
+    expect((await identityFailure.controller.updateToRc()).errorCode).toBe(identityState.errorCode)
+    expect((await identityFailure.controller.rollback()).errorCode).toBe(identityState.errorCode)
+    expect(identityFailure.resolveInstallRequest).toHaveBeenCalledTimes(1)
+    expect(identityFailure.update).not.toHaveBeenCalled()
+    expect(identityFailure.rollback).not.toHaveBeenCalled()
+
+    const coordinatorFailure = controllerHarness()
+    coordinatorFailure.update.mockImplementationOnce(async () => { throw new Error('coordinator failed') })
+    const coordinatorState = await coordinatorFailure.controller.updateToRc()
+    expect(coordinatorState.errorCode).toBe('ACCEPTANCE_UPDATE_FAILED')
+    await coordinatorFailure.controller.updateToRc()
+    await coordinatorFailure.controller.rollback()
+    expect(coordinatorFailure.resolveInstallRequest).toHaveBeenCalledTimes(1)
+    expect(coordinatorFailure.update).toHaveBeenCalledTimes(1)
+    expect(coordinatorFailure.rollback).not.toHaveBeenCalled()
+
+    const postconditionFailure = controllerHarness()
+    postconditionFailure.update.mockImplementationOnce(async (request: any) => result('update', request.operationId))
+    const postconditionState = await postconditionFailure.controller.updateToRc()
+    expect(postconditionState.errorCode).toBe('ACCEPTANCE_POSTCONDITION_MISMATCH')
+    await postconditionFailure.controller.updateToRc()
+    expect(postconditionFailure.resolveInstallRequest).toHaveBeenCalledTimes(1)
+    expect(postconditionFailure.update).toHaveBeenCalledTimes(1)
+
+    const unavailableHarness = controllerHarness()
+    let recovered = false
+    const unavailableController = new OpenDesignAcceptanceController({
+      bootstrap: readyBootstrap(),
+      getRuntime: () => recovered ? unavailableHarness.runtime : undefined,
+      host: { isAllowedSender: () => true },
+    })
+    expect((await unavailableController.updateToRc()).errorCode).toBe('ACCEPTANCE_OPERATION_RUNTIME_UNAVAILABLE')
+    recovered = true
+    expect((await unavailableController.updateToRc()).errorCode).toBe('ACCEPTANCE_OPERATION_RUNTIME_UNAVAILABLE')
+    expect(unavailableHarness.resolveInstallRequest).not.toHaveBeenCalled()
+    expect(unavailableHarness.update).not.toHaveBeenCalled()
+  })
+
   it('rejects mismatched Coordinator identities and claimed success without exact Registry postconditions', async () => {
     for (const mutate of [
       (value: any) => { value.moduleId = 'org.simulator.other' },
@@ -605,6 +759,34 @@ describe('OpenDesign acceptance controller', () => {
     expect(mixedState.operation).toBeUndefined()
   })
 
+  it('rejects claimed success unless the real daemon and view match the active version', async () => {
+    const cases: Array<[string, (harness: ReturnType<typeof controllerHarness>) => void]> = [
+      ['stopped daemon', (harness) => harness.setDaemon('stopped')],
+      ['degraded daemon', (harness) => harness.setDaemon('degraded')],
+      ['wrong daemon version', (harness) => harness.setDaemon('healthy', '0.14.5')],
+      ['missing daemon', (harness) => harness.setDaemon(undefined)],
+      ['detached view', (harness) => harness.setView('detached')],
+      ['wrong view version', (harness) => harness.setView('attached', '0.14.5')],
+      ['missing view', (harness) => harness.setView(undefined)],
+    ]
+    for (const [, configure] of cases) {
+      const harness = controllerHarness()
+      harness.update.mockImplementationOnce(async (request: any) => {
+        harness.setState('0.14.6-rc.1', '0.14.5')
+        harness.setInstalledVersions(['0.14.5', '0.14.6-rc.1'])
+        harness.setDaemon('healthy')
+        harness.setView('attached')
+        configure(harness)
+        return result('update', request.operationId)
+      })
+      const state = await harness.controller.updateToRc()
+      expect(state).toMatchObject({
+        status: 'error', errorCode: 'ACCEPTANCE_POSTCONDITION_MISMATCH',
+      })
+      expect(state.operation).toBeUndefined()
+    }
+  })
+
   it('coalesces concurrent invocations so a queued renderer call cannot chain update then rollback', async () => {
     const harness = controllerHarness()
     let release: ((request: ResolvedModuleCoordinatorInstallRequest) => void) | undefined
@@ -621,6 +803,31 @@ describe('OpenDesign acceptance controller', () => {
 })
 
 describe('OpenDesign acceptance IPC', () => {
+  it('registers one explicit false availability reply and no mutation handlers when the gate is off', () => {
+    const invokeHandlers = new Map<string, unknown>()
+    const listeners = new Map<string, (event: any) => void>()
+    const ipc = {
+      handle(channel: string, handler: unknown) { invokeHandlers.set(channel, handler) },
+      removeHandler(channel: string) { invokeHandlers.delete(channel) },
+      on(channel: string, handler: (event: any) => void) {
+        if (listeners.has(channel)) throw new Error('duplicate listener')
+        listeners.set(channel, handler)
+      },
+      removeListener(channel: string, handler: (event: any) => void) {
+        if (listeners.get(channel) === handler) listeners.delete(channel)
+      },
+    } as unknown as Pick<IpcMain, 'handle' | 'removeHandler' | 'on' | 'removeListener'>
+
+    const registration = registerOpenDesignAcceptanceIpc(ipc)
+    expect(invokeHandlers.size).toBe(0)
+    expect([...listeners.keys()]).toEqual([OPEN_DESIGN_ACCEPTANCE_CHANNELS.IS_AVAILABLE])
+    const event: { returnValue: boolean | undefined } = { returnValue: undefined }
+    listeners.get(OPEN_DESIGN_ACCEPTANCE_CHANNELS.IS_AVAILABLE)?.(event)
+    expect(event.returnValue).toBe(false)
+    registration.dispose()
+    expect(listeners.size).toBe(0)
+  })
+
   it('registers only fixed no-input channels and validates Host main-frame senders', async () => {
     const harness = controllerHarness()
     const invokeHandlers = new Map<string, (event: any, ...args: unknown[]) => unknown>()

@@ -136,12 +136,16 @@ describe('OpenDesign acceptance Debug menu', () => {
     installedVersions: readonly string[] = activeVersion === '0.14.6-rc.1' || lastKnownGoodVersion === '0.14.6-rc.1'
       ? ['0.14.5', '0.14.6-rc.1']
       : ['0.14.5'],
+    running = true,
+    viewAttached = true,
   ): OpenDesignAcceptanceState => ({
     status,
     hostVersion: '0.12.0',
     activeVersion,
     lastKnownGoodVersion,
     installedVersions,
+    running,
+    viewAttached,
   })
 
   it('offers only the fixed baseline update and exact active/LKG swap', () => {
@@ -168,6 +172,14 @@ describe('OpenDesign acceptance Debug menu', () => {
       updateEnabled: false,
       rollbackEnabled: false,
     })
+    expect(getOpenDesignAcceptanceMenuAvailability({
+      ...state('0.14.6-rc.1', '0.14.5'),
+      running: false,
+    })).toEqual({ updateEnabled: false, rollbackEnabled: false })
+    expect(getOpenDesignAcceptanceMenuAvailability({
+      ...state('0.14.6-rc.1', '0.14.5'),
+      viewAttached: false,
+    })).toEqual({ updateEnabled: false, rollbackEnabled: false })
   })
 
   it('waits for the lazily-created Host runtime without accepting other errors as startup lag', async () => {
@@ -191,11 +203,45 @@ describe('OpenDesign acceptance Debug menu', () => {
     const hardFailure = { ...state(null, null, 'error', []), errorCode: 'ACCEPTANCE_STATE_UNAVAILABLE' }
     expect(await loadOpenDesignAcceptanceStateWithRetry({ getState: async () => hardFailure })).toEqual(hardFailure)
 
+    let busyAttempts = 0
+    const busyWaits: number[] = []
+    const afterBusy = await loadOpenDesignAcceptanceStateWithRetry({
+      async getState() {
+        busyAttempts += 1
+        return busyAttempts === 1
+          ? { ...state('0.14.6-rc.1', '0.14.5', 'busy'), action: 'rollback' }
+          : state('0.14.5', '0.14.6-rc.1')
+      },
+    }, async (milliseconds) => { busyWaits.push(milliseconds) })
+    expect(afterBusy).toMatchObject({ status: 'ready', activeVersion: '0.14.5' })
+    expect(busyWaits).toEqual([250])
+
+    let busyThenErrorAttempts = 0
+    const terminalError = { ...state(null, null, 'error', []), errorCode: 'ACCEPTANCE_ROLLBACK_FAILED' }
+    expect(await loadOpenDesignAcceptanceStateWithRetry({
+      async getState() {
+        busyThenErrorAttempts += 1
+        return busyThenErrorAttempts === 1
+          ? { ...state('0.14.6-rc.1', '0.14.5', 'busy'), action: 'rollback' }
+          : terminalError
+      },
+    }, async () => undefined)).toEqual(terminalError)
+
     let hardFailureWaits = 0
     expect(await loadOpenDesignAcceptanceStateWithRetry({
       getState: async () => { throw new Error('sender rejected') },
     }, async () => { hardFailureWaits += 1 })).toBeUndefined()
     expect(hardFailureWaits).toBe(0)
+
+    let mounted = true
+    let unmountAttempts = 0
+    expect(await loadOpenDesignAcceptanceStateWithRetry({
+      async getState() {
+        unmountAttempts += 1
+        return { ...state('0.14.6-rc.1', '0.14.5', 'busy'), action: 'rollback' }
+      },
+    }, async () => { mounted = false }, () => mounted)).toBeUndefined()
+    expect(unmountAttempts).toBe(1)
   })
 
   it('disables both commands while loading, busy, or a renderer command is in flight', () => {
@@ -204,6 +250,13 @@ describe('OpenDesign acceptance Debug menu', () => {
       rollbackEnabled: false,
     })
     expect(getOpenDesignAcceptanceMenuAvailability(state('0.14.5', null, 'busy'))).toEqual({
+      updateEnabled: false,
+      rollbackEnabled: false,
+    })
+    expect(getOpenDesignAcceptanceMenuAvailability({
+      ...state('0.14.5', null, 'error'),
+      errorCode: 'ACCEPTANCE_UPDATE_FAILED',
+    })).toEqual({
       updateEnabled: false,
       rollbackEnabled: false,
     })
