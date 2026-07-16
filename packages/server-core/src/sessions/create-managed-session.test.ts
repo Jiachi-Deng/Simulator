@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'bun:test'
-import { createManagedSession } from './SessionManager.ts'
+import { SessionManager, createManagedSession } from './SessionManager.ts'
 
 describe('createManagedSession', () => {
   const workspace = {
@@ -25,5 +25,29 @@ describe('createManagedSession', () => {
     }, workspace as any)
 
     expect(managed.thinkingLevel).toBeUndefined()
+  })
+
+  it('never exposes transient Module ownership through renderer Session DTOs', () => {
+    const manager = new SessionManager()
+    const managed = createManagedSession({
+      id: 'session_module',
+      hidden: true,
+      moduleAgentRun: {
+        transient: true,
+        contractVersion: 2,
+        moduleId: 'open-design',
+        runHandle: `run_${'1'.repeat(32)}`,
+        idempotencyKeyDigest: '2'.repeat(64),
+        requestDigest: '3'.repeat(64),
+        workerEpoch: 'epoch_1234',
+        state: 'running',
+      },
+    }, workspace as any)
+    ;(manager as unknown as { sessions: Map<string, unknown> }).sessions.set(managed.id, managed)
+
+    const [rendererSession] = manager.getSessions(workspace.id)
+    expect(rendererSession).toBeDefined()
+    expect(rendererSession).not.toHaveProperty('moduleAgentRun')
+    expect(JSON.stringify(rendererSession)).not.toContain('idempotencyKeyDigest')
   })
 })

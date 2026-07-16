@@ -9,6 +9,7 @@ import { join } from 'node:path'
 import type { ISessionManager } from '../handlers/session-manager-interface'
 import { CraftModuleAgentSessionPort } from './module-agent-adapter.ts'
 import { toModuleAgentPortEvent } from './SessionManager.ts'
+import { parseModuleAgentRunMetadata } from '@craft-agent/shared/sessions'
 
 const temporaryRoots: string[] = []
 afterEach(async () => {
@@ -61,7 +62,14 @@ describe('CraftModuleAgentSessionPort', () => {
     expect(created).toMatchObject({ sessionId: 'raw', hidden: true, workingDirectory: projectRoot })
     expect(createOptions).toMatchObject({ hidden: true, enabledSourceSlugs: [], permissionMode: 'allow-all' })
     expect(createOptions).not.toHaveProperty('llmConnection')
-    expect(internalOptions).toEqual({ emitCreatedEvent: false })
+    expect(internalOptions).toMatchObject({ emitCreatedEvent: false })
+    const ownership = parseModuleAgentRunMetadata(internalOptions?.moduleAgentRun)
+    expect(ownership).toMatchObject({
+      transient: true,
+      contractVersion: 1,
+      moduleId: 'open-design',
+      state: 'accepted',
+    })
     expect(checkModuleAgentToolBoundary('raw', 'Bash', { command: 'pwd' }).allowed).toBe(false)
     expect(checkModuleAgentToolBoundary('raw', 'Read', { file_path: join(projectRoot, 'index.ts') }).allowed).toBe(true)
     expect(checkModuleAgentToolBoundary('raw', 'Read', { file_path: join(siblingProject, 'secret.ts') }).allowed).toBe(false)

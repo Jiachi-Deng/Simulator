@@ -23,9 +23,15 @@ import type {
   UnreadSummary,
   ShareResult,
 } from '@craft-agent/shared/protocol'
-import type { SessionBundle, DispatchMode } from '@craft-agent/shared/sessions'
+import type { SessionBundle, DispatchMode, ModuleAgentRunMetadata } from '@craft-agent/shared/sessions'
 import type { EventSink } from '../transport'
 import type { ModuleAgentPortEvent } from '@simulator/module-agent-gateway'
+
+/** Host-only creation controls. These fields are deliberately absent from the wire DTO. */
+export interface InternalCreateSessionOptions {
+  emitCreatedEvent?: boolean
+  moduleAgentRun?: ModuleAgentRunMetadata
+}
 
 export interface ISessionManager {
   // ---------------------------------------------------------------------------
@@ -51,7 +57,7 @@ export interface ISessionManager {
   createSession(
     workspaceId: string,
     options?: CreateSessionOptions,
-    internal?: { emitCreatedEvent?: boolean },
+    internal?: InternalCreateSessionOptions,
   ): Promise<Session>
   /** Resolved working directory of a live session (Tasks Conductor uses it so children inherit
    *  the orchestrator's cwd). */

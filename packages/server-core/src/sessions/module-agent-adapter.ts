@@ -6,11 +6,48 @@ import type {
   ModuleAgentSessionPort,
 } from '@simulator/module-agent-gateway'
 import type { ISessionManager } from '../handlers/session-manager-interface'
+import type { ModuleAgentRunMetadata } from '@craft-agent/shared/sessions'
 import {
   markModuleAgentSession,
   registerModuleAgentToolBoundary,
   unregisterModuleAgentToolBoundary,
 } from '@craft-agent/shared/agent'
+import { createHash, randomBytes } from 'node:crypto'
+
+function sha256(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex')
+}
+
+/**
+ * Compatibility-only ownership for the v1 Gateway, which creates its public
+ * session handle after the Host session port returns. v2 ModuleAgentRunCore
+ * must supply its final idempotency/request digests and worker epoch directly.
+ */
+export function createLegacyV1ModuleAgentRunMetadata(
+  input: CreateHostModuleSessionInput,
+): ModuleAgentRunMetadata {
+  const nonce = randomBytes(32).toString('hex')
+  const ownershipSeed = sha256(JSON.stringify({
+    contractVersion: 1,
+    moduleId: 'open-design',
+    workspaceId: input.workspaceId,
+    workspaceRoot: input.workspaceRoot,
+    authorizedWorkingRoot: input.authorizedWorkingRoot,
+    workingDirectory: input.workingDirectory,
+    nonce,
+  }))
+
+  return {
+    transient: true,
+    contractVersion: 1,
+    moduleId: 'open-design',
+    runHandle: `run_${sha256(`run:${ownershipSeed}`).slice(0, 32)}`,
+    idempotencyKeyDigest: sha256(`idempotency:${ownershipSeed}`),
+    requestDigest: sha256(`request:${ownershipSeed}`),
+    workerEpoch: `epoch_${sha256(`epoch:${ownershipSeed}`).slice(0, 32)}`,
+    state: 'accepted',
+  }
+}
 
 /**
  * The only trusted adapter between Module Agent Gateway and Craft's full
@@ -47,7 +84,10 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
       // OpenDesign tasks may create project artifacts. A Host-owned session
       // boundary is registered below before any prompt can reach this session.
       permissionMode: 'allow-all',
-    }, { emitCreatedEvent: false })
+    }, {
+      emitCreatedEvent: false,
+      moduleAgentRun: createLegacyV1ModuleAgentRunMetadata(input),
+    })
     const returnedWorkingDirectory = session.workingDirectory
       ? await this.paths.canonicalize(session.workingDirectory)
       : ''

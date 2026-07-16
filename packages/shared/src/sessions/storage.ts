@@ -193,6 +193,7 @@ export async function createSession(
     taskRunId?: string;
     taskNodeId?: string;
     taskDraft?: boolean;
+    moduleAgentRun?: SessionConfig['moduleAgentRun'];
   }
 ): Promise<SessionConfig> {
   ensureSessionsDir(workspaceRootPath);
@@ -230,6 +231,7 @@ export async function createSession(
     taskRunId: options?.taskRunId,
     taskNodeId: options?.taskNodeId,
     taskDraft: options?.taskDraft,
+    moduleAgentRun: options?.moduleAgentRun,
   };
 
   // Save empty session

@@ -19,6 +19,11 @@ export type {
   SessionHeader,
   SessionPersistentField,
 } from './types.ts';
+export type { ModuleAgentRunMetadata } from './module-agent-run.ts';
+export {
+  isModuleAgentRunMetadata,
+  parseModuleAgentRunMetadata,
+} from './module-agent-run.ts';
 
 // Field constants
 export { SESSION_PERSISTENT_FIELDS } from './types.ts';
@@ -126,5 +131,4 @@ export {
   validateBundle,
   MAX_BUNDLE_SIZE_BYTES,
 } from './bundle.ts';
-
 

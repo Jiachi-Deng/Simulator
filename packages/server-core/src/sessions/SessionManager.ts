@@ -1,6 +1,6 @@
 import type { EventSink, RpcServer } from '@craft-agent/server-core/transport'
 import { CLIENT_BROWSER_INVOKE } from '@craft-agent/server-core/transport'
-import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput } from '@craft-agent/server-core/handlers'
+import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput, InternalCreateSessionOptions } from '@craft-agent/server-core/handlers'
 import { RemoteBrowserPaneManager } from './RemoteBrowserPaneManager'
 import { validateFilePath, getWorkspaceAllowedDirs } from '@craft-agent/server-core/handlers'
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '@craft-agent/server-core/runtime'
@@ -8,7 +8,7 @@ import { basename, dirname, join } from 'path'
 import { existsSync } from 'fs'
 import { readFile, writeFile, mkdir } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
-import { type AgentEvent, setPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary, resolveKeepBackgroundTasksAlive } from '@craft-agent/shared/agent'
+import { type AgentEvent, setPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary, resolveKeepBackgroundTasksAlive, markModuleAgentSession, registerModuleAgentToolBoundary, unregisterModuleAgentToolBoundary } from '@craft-agent/shared/agent'
 import {
   resolveSessionConnection,
   createBackendFromConnection,
@@ -70,6 +70,8 @@ import {
   type SessionMetadata,
   type SessionStatus,
   type SessionHeader,
+  type ModuleAgentRunMetadata,
+  parseModuleAgentRunMetadata,
   pickSessionFields,
 } from '@craft-agent/shared/sessions'
 import { loadWorkspaceSources, loadAllSources, getSourcesBySlugs, isSourceUsable, type LoadedSource, type McpServerConfig, getSourcesNeedingAuth, getSourceCredentialManager, getSourceServerBuilder, type SourceWithCredential, isApiOAuthProvider, hasRenewEndpoint, SERVER_BUILD_ERRORS, TokenRefreshManager, createTokenGetter } from '@craft-agent/shared/sources'
@@ -909,6 +911,8 @@ interface ManagedSession {
   taskNodeCount?: number
   // Tasks Conductor: hidden generate-time orchestrator awaiting validated adoption (off the board)
   taskDraft?: boolean
+  // Host-only persisted ownership for a transient Module Agent session.
+  moduleAgentRun?: ModuleAgentRunMetadata
   // Working directory for this session (used by agent for bash commands)
   workingDirectory?: string
   // SDK cwd for session storage - set once at creation, never changes.
@@ -1171,8 +1175,9 @@ const DEFAULT_TOKEN_USAGE = {
  * Uses pickSessionFields() for persistent fields so new fields propagate automatically.
  */
 function managedToSession(m: ManagedSession, overrides?: Partial<Session>): Session {
+  const { moduleAgentRun: _moduleAgentRun, ...publicPersistentFields } = pickSessionFields(m)
   return {
-    ...pickSessionFields(m),
+    ...publicPersistentFields,
     // Pre-computed fields from header (not in SESSION_PERSISTENT_FIELDS)
     preview: m.preview,
     lastMessageRole: m.lastMessageRole,
@@ -1975,7 +1980,7 @@ export class SessionManager implements ISessionManager {
       }
 
       // Load existing sessions from disk
-      this.loadSessionsFromDisk()
+      await this.loadSessionsFromDisk()
 
       // Signal that initialization is complete — IPC handlers waiting on initGate will proceed
       this.initGate.markReady()
@@ -1986,7 +1991,7 @@ export class SessionManager implements ISessionManager {
   }
 
   // Load all existing sessions from disk into memory (metadata only - messages are lazy-loaded)
-  private loadSessionsFromDisk(): void {
+  private async loadSessionsFromDisk(): Promise<void> {
     try {
       const workspaces = getWorkspaces()
       let totalSessions = 0
@@ -2000,6 +2005,71 @@ export class SessionManager implements ISessionManager {
         const wsDefaultWorkingDir = wsConfig?.defaults?.workingDirectory
 
         for (const meta of sessionMetadata) {
+          // A persisted ownership marker means this was a one-turn Module
+          // session whose Host died before strict teardown completed. Treat
+          // presence itself as a quarantine signal: malformed metadata must
+          // never downgrade the session into an ordinary resumable Craft chat.
+          if (Object.hasOwn(meta, 'moduleAgentRun')) {
+            markModuleAgentSession(meta.id)
+
+            let ownership: ModuleAgentRunMetadata
+            try {
+              ownership = parseModuleAgentRunMetadata(meta.moduleAgentRun)
+            } catch (error) {
+              // Preserve the directory as crash evidence. It is intentionally
+              // absent from this.sessions, so no queued-message recovery,
+              // renderer exposure, provider resume, or deletion can occur.
+              sessionLog.error(`Quarantined invalid transient Module session ${meta.id}; disk evidence preserved`, {
+                error: error instanceof Error ? error.message : 'invalid moduleAgentRun metadata',
+              })
+              continue
+            }
+
+            const managed = createManagedSession(meta, workspace, {
+              enabledSourceSlugs: [],
+              workingDirectory: meta.workingDirectory ?? wsDefaultWorkingDir,
+              moduleAgentRun: ownership,
+              messagesLoaded: false,
+            })
+            this.sessions.set(meta.id, managed)
+
+            // Restore the narrowest safe boundary if its canonical anchor is
+            // still present. A missing/invalid directory leaves the session
+            // marked but boundary-less, which is deliberately fail-closed.
+            if (managed.workingDirectory) {
+              try {
+                registerModuleAgentToolBoundary(meta.id, managed.workingDirectory, managed.workingDirectory)
+              } catch (error) {
+                sessionLog.warn(`Transient Module session ${meta.id} boundary could not be restored; cleanup remains fail-closed`, {
+                  error: error instanceof Error ? error.message : 'boundary restore failed',
+                })
+              }
+            }
+
+            try {
+              // Never hydrate messages or call processNextQueuedMessage here.
+              // Strict teardown is awaited before initGate becomes ready.
+              await this.disposeSessionAndReap(meta.id)
+              unregisterModuleAgentToolBoundary(meta.id)
+              sessionLog.info(`Reaped interrupted transient Module session ${meta.id}`, {
+                moduleId: ownership.moduleId,
+                runHandle: ownership.runHandle,
+                state: ownership.state,
+              })
+            } catch (error) {
+              // Craft startup remains available, but the quarantined record
+              // stays fail-closed for a later cleanup attempt.
+              const sessionPath = getSessionStoragePath(workspaceRootPath, meta.id)
+              if (!this.sessions.has(meta.id) && !existsSync(sessionPath)) {
+                unregisterModuleAgentToolBoundary(meta.id)
+              }
+              sessionLog.error(`Failed to reap transient Module session ${meta.id}; it remains quarantined`, {
+                error: error instanceof Error ? error.message : 'transient cleanup failed',
+              })
+            }
+            continue
+          }
+
           // Create managed session from metadata only (messages lazy-loaded on demand)
           // This dramatically reduces memory usage at startup - messages are loaded
           // when getSession() is called for a specific session
@@ -2438,8 +2508,8 @@ export class SessionManager implements ISessionManager {
    * Reload all sessions from disk.
    * Used after importing sessions to refresh the in-memory session list.
    */
-  reloadSessions(): void {
-    this.loadSessionsFromDisk()
+  async reloadSessions(): Promise<void> {
+    await this.loadSessionsFromDisk()
   }
 
   getSessions(workspaceId?: string): Session[] {
@@ -2623,11 +2693,18 @@ export class SessionManager implements ISessionManager {
     // announced to the renderer (see notifySessionCreated). Callers that register the session
     // themselves — the `sessions:create` RPC adds it from the return value — pass
     // `{ emitCreatedEvent: false }` to avoid a redundant hydrate.
-    internal?: { emitCreatedEvent?: boolean },
+    internal?: InternalCreateSessionOptions,
   ): Promise<Session> {
     const workspace = getWorkspaceByNameOrId(workspaceId)
     if (!workspace) {
       throw new Error(`Workspace ${workspaceId} not found`)
+    }
+
+    const moduleAgentRun = internal?.moduleAgentRun === undefined
+      ? undefined
+      : parseModuleAgentRunMetadata(internal.moduleAgentRun)
+    if (moduleAgentRun && options?.hidden !== true) {
+      throw new Error('Transient Module Agent sessions must be hidden')
     }
 
     // Get new session defaults from workspace config (with global fallback)
@@ -2931,6 +3008,7 @@ export class SessionManager implements ISessionManager {
       taskRunId: options?.taskRunId,
       taskNodeId: options?.taskNodeId,
       taskDraft: options?.taskDraft,
+      moduleAgentRun,
       // Persist only an EXPLICIT selection (e.g. a task's spec.sources on its subtasks).
       // The workspace-default fallback stays dynamic — freezing it into the header would
       // pin every ordinary session to the defaults as of its creation time.
@@ -8847,7 +8925,8 @@ export class SessionManager implements ISessionManager {
     const sessionDir = ensureSessionDir(workspaceRootPath, sessionId)
 
     // Build the stored session from bundle data
-    const header = bundle.session.header
+    // Never accept Host-local transient ownership from a portable bundle.
+    const { moduleAgentRun: _moduleAgentRun, ...header } = bundle.session.header as SessionHeader
     const storedSession: StoredSession = {
       id: sessionId,
       workspaceRootPath,

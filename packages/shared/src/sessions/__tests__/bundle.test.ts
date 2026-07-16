@@ -91,6 +91,28 @@ describe('serializeSession', () => {
     expect(Array.isArray(bundle!.files)).toBe(true)
   })
 
+  it('never exports Host-internal transient Module ownership', () => {
+    const session = makeStoredSession({
+      moduleAgentRun: {
+        transient: true,
+        contractVersion: 2,
+        moduleId: 'open-design',
+        runHandle: `run_${'1'.repeat(32)}`,
+        idempotencyKeyDigest: '2'.repeat(64),
+        requestDigest: '3'.repeat(64),
+        workerEpoch: 'epoch_1234',
+        state: 'failed',
+      },
+    })
+    setupSessionDir(tmpDir, session)
+
+    const bundle = serializeSession(tmpDir, session.id)
+
+    expect(bundle).not.toBeNull()
+    expect(bundle!.session.header).not.toHaveProperty('moduleAgentRun')
+    expect(JSON.stringify(bundle)).not.toContain('idempotencyKeyDigest')
+  })
+
   it('includes attachment files in bundle', () => {
     const session = makeStoredSession()
     const sessionDir = setupSessionDir(tmpDir, session)
