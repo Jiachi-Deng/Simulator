@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Initial publication is manual; only the current stable release may be refreshed.
+        description: Initial publication is manual; refresh is limited to the current stable release or the fixed 0.14.6-rc.1 prerelease.
         required: true
         default: refresh
         type: choice
