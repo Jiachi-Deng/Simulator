@@ -26,6 +26,10 @@ import {
   OPEN_DESIGN_MODULE_ID,
   type OpenDesignModuleState,
 } from '../../shared/open-design-module-ipc'
+import {
+  createOpenDesignMutationGate,
+  type OpenDesignMutationGate,
+} from '../open-design-mutation-gate'
 
 const MODULE_ID = OPEN_DESIGN_MODULE_ID as ModuleId
 const VERSION = '1.2.3' as ModuleVersion
@@ -338,12 +342,14 @@ function createController(
     getRuntime?: () => OpenDesignModuleRuntimeLookup
     getInstallRequest?: () => ModuleCoordinatorInstallRequest | undefined
     host?: OpenDesignModuleHostAdapter
+    mutationGate?: OpenDesignMutationGate
   } = {},
 ) {
   return new OpenDesignModuleController({
     getRuntime: options.getRuntime ?? (() => ({ status: 'ready', runtime: harness.runtime })),
     getInstallRequest: options.getInstallRequest ?? (() => installRequest()),
     host: options.host ?? harness.host,
+    mutationGate: options.mutationGate ?? createOpenDesignMutationGate(),
     clock: options.clock,
   })
 }

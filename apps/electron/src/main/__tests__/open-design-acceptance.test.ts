@@ -23,6 +23,11 @@ import {
 import { OPEN_DESIGN_ACCEPTANCE_CHANNELS } from '../../shared/open-design-acceptance-ipc'
 import { OPEN_DESIGN_MODULE_ID } from '../../shared/open-design-module-ipc'
 import type { OpenDesignOfficialChannelBootstrap } from '../open-design-official-channel'
+import {
+  createOpenDesignMutationGate,
+  type OpenDesignMutationGate,
+} from '../open-design-mutation-gate'
+import { OpenDesignModuleController } from '../open-design-module-controller'
 
 const roots: string[] = []
 const PUBLIC_KEY = Uint8Array.from(Buffer.from('KvpR89GuQd670SZMZuuR+aK4FUIprxRlqE58K3twQZk=', 'base64'))
@@ -332,7 +337,112 @@ function result(
   }
 }
 
-function controllerHarness(initialActive: string | null = '0.14.5', initialLkg: string | null = null) {
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+async function until(predicate: () => boolean): Promise<void> {
+  for (let index = 0; index < 100; index += 1) {
+    if (predicate()) return
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+  throw new Error('Timed out waiting for test condition')
+}
+
+function ordinaryControllerHarness(
+  mutationGate: OpenDesignMutationGate,
+  stopBarrier?: Promise<void>,
+) {
+  let daemon: any = {
+    id: OPEN_DESIGN_MODULE_ID,
+    version: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
+    state: 'healthy',
+    restartCount: 0,
+  }
+  let view: any = {
+    moduleId: OPEN_DESIGN_MODULE_ID,
+    version: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
+    state: 'attached',
+  }
+  const stop = mock(async (request: any) => {
+    await stopBarrier
+    const operationResult = {
+      operationId: request.operationId,
+      moduleId: OPEN_DESIGN_MODULE_ID,
+      kind: 'stop' as const,
+      ok: true,
+      source: {
+        activeVersion: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
+        lastKnownGoodVersion: null,
+        running: true,
+        viewAttached: true,
+        registryPresent: true,
+      },
+      target: {
+        activeVersion: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
+        lastKnownGoodVersion: null,
+        running: false,
+        viewAttached: false,
+        registryPresent: true,
+      },
+      completedAt: 1,
+    } as ModuleCoordinatorOperationResult
+    daemon = { ...daemon, state: 'stopped' }
+    view = undefined
+    return operationResult
+  })
+  const runtime: any = {
+    coordinator: {
+      install: mock(() => { throw new Error('unexpected install') }),
+      start: mock(() => { throw new Error('unexpected start') }),
+      stop,
+      snapshot: mock(async () => ({
+        operations: [], events: [], manifests: [], platform: 'darwin-arm64',
+      })),
+    },
+    registry: {
+      snapshot: () => ({
+        host: { version: '0.12.0', platform: 'darwin-arm64' },
+        diagnostics: [],
+        modules: [{
+          id: OPEN_DESIGN_MODULE_ID,
+          disabled: false,
+          activeVersion: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
+          lastKnownGoodVersion: null,
+          versions: [{ version: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion }],
+        }],
+      }),
+    },
+    daemon: {
+      get: () => daemon,
+      subscribe: () => () => undefined,
+      touch: () => true,
+    },
+    view: {
+      query: async () => view,
+      setPresentation: () => undefined,
+    },
+  }
+  const controller = new OpenDesignModuleController({
+    getRuntime: () => ({ status: 'ready', runtime }),
+    getInstallRequest: () => undefined,
+    host: { isAllowedSender: () => true, emitState: () => undefined },
+    mutationGate,
+  })
+  return { controller, stop }
+}
+
+function controllerHarness(
+  initialActive: string | null = '0.14.5',
+  initialLkg: string | null = null,
+  mutationGate: OpenDesignMutationGate = createOpenDesignMutationGate(),
+) {
   let activeVersion = initialActive
   let lastKnownGoodVersion = initialLkg
   let daemonSnapshot: any = initialActive === null ? undefined : {
@@ -389,6 +499,7 @@ function controllerHarness(initialActive: string | null = '0.14.5', initialLkg: 
     bootstrap: readyBootstrap(),
     getRuntime: () => runtime,
     host: { isAllowedSender: (sender) => sender === 'host' },
+    mutationGate,
     operationId: (action) => `fixed-${action}`,
     now: () => TEST_NOW,
   })
@@ -431,6 +542,7 @@ describe('OpenDesign acceptance controller', () => {
       bootstrap: readyBootstrap(),
       getRuntime: gate.getRuntime,
       host: { isAllowedSender: () => true },
+      mutationGate: createOpenDesignMutationGate(),
     })
     expect(gate.getRuntime()).toBeUndefined()
     expect(await controller.getState()).toMatchObject({
@@ -637,6 +749,7 @@ describe('OpenDesign acceptance controller', () => {
       bootstrap: readyBootstrap(),
       getRuntime: () => undefined,
       host: { isAllowedSender: () => true },
+      mutationGate: createOpenDesignMutationGate(),
     })
     expect(await unavailable.getState()).toMatchObject({
       status: 'error', errorCode: 'ACCEPTANCE_RUNTIME_UNAVAILABLE',
@@ -646,6 +759,7 @@ describe('OpenDesign acceptance controller', () => {
       bootstrap: readyBootstrap(),
       getRuntime: () => { throw new Error('secret runtime lookup') },
       host: { isAllowedSender: () => true },
+      mutationGate: createOpenDesignMutationGate(),
     })
     const lookupFailureState = await lookupFailure.getState()
     expect(lookupFailureState).toMatchObject({
@@ -697,6 +811,7 @@ describe('OpenDesign acceptance controller', () => {
       bootstrap: readyBootstrap(),
       getRuntime: () => recovered ? unavailableHarness.runtime : undefined,
       host: { isAllowedSender: () => true },
+      mutationGate: createOpenDesignMutationGate(),
     })
     expect((await unavailableController.updateToRc()).errorCode).toBe('ACCEPTANCE_OPERATION_RUNTIME_UNAVAILABLE')
     recovered = true
@@ -800,6 +915,62 @@ describe('OpenDesign acceptance controller', () => {
     expect(harness.update).toHaveBeenCalledTimes(1)
     expect(harness.rollback).not.toHaveBeenCalled()
   })
+
+  it('rejects a second-window ordinary stop while acceptance owns the shared gate through postcondition', async () => {
+    const mutationGate = createOpenDesignMutationGate()
+    const acceptance = controllerHarness('0.14.5', null, mutationGate)
+    const ordinary = ordinaryControllerHarness(mutationGate)
+    const postconditionBarrier = deferred<void>()
+    const query = acceptance.runtime.view.query.bind(acceptance.runtime.view)
+    let queryCount = 0
+    ;(acceptance.runtime.view as any).query = mock(async (moduleId: any) => {
+      queryCount += 1
+      const snapshot = await query(moduleId)
+      if (queryCount === 2) await postconditionBarrier.promise
+      return snapshot
+    })
+
+    const acceptanceFlight = acceptance.controller.updateToRc()
+    await until(() => queryCount === 2)
+
+    expect(await ordinary.controller.stop()).toEqual({
+      status: 'error',
+      errorCode: 'OPEN_DESIGN_MUTATION_CONFLICT',
+      errorMessage: 'Another OpenDesign operation is already in progress.',
+    })
+    expect(ordinary.stop).not.toHaveBeenCalled()
+
+    postconditionBarrier.resolve(undefined)
+    expect(await acceptanceFlight).toMatchObject({
+      status: 'ready', activeVersion: '0.14.6-rc.1', lastKnownGoodVersion: '0.14.5',
+    })
+    ordinary.controller.dispose()
+  })
+
+  it('rejects acceptance update and rollback without Coordinator calls while lifecycle stop owns the gate', async () => {
+    const mutationGate = createOpenDesignMutationGate()
+    const stopBarrier = deferred<void>()
+    const ordinary = ordinaryControllerHarness(mutationGate, stopBarrier.promise)
+    const update = controllerHarness('0.14.5', null, mutationGate)
+    const rollback = controllerHarness('0.14.6-rc.1', '0.14.5', mutationGate)
+
+    const stopFlight = ordinary.controller.stopForHostView()
+    await until(() => ordinary.stop.mock.calls.length === 1)
+
+    expect(await update.controller.updateToRc()).toMatchObject({
+      status: 'error', errorCode: 'ACCEPTANCE_MUTATION_CONFLICT',
+    })
+    expect(await rollback.controller.rollback()).toMatchObject({
+      status: 'error', errorCode: 'ACCEPTANCE_MUTATION_CONFLICT',
+    })
+    expect(update.resolveInstallRequest).not.toHaveBeenCalled()
+    expect(update.update).not.toHaveBeenCalled()
+    expect(rollback.rollback).not.toHaveBeenCalled()
+
+    stopBarrier.resolve(undefined)
+    expect(await stopFlight).toMatchObject({ status: 'available', daemonState: 'stopped' })
+    ordinary.controller.dispose()
+  })
 })
 
 describe('OpenDesign acceptance IPC', () => {
@@ -868,6 +1039,7 @@ describe('OpenDesign acceptance IPC', () => {
       bootstrap: readyBootstrap(),
       getRuntime: () => harness.runtime,
       host: { isAllowedSender: (candidate) => hostSenders.has(candidate) },
+      mutationGate: createOpenDesignMutationGate(),
     })
     first.dispose()
     const registration = registerOpenDesignAcceptanceIpc(ipc, ipcController)

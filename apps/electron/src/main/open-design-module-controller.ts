@@ -21,6 +21,7 @@ import {
   type OpenDesignModuleViewBounds,
   type OpenDesignModuleViewPresentation,
 } from '../shared/open-design-module-ipc'
+import type { OpenDesignMutationGate } from './open-design-mutation-gate'
 
 const POLL_INTERVAL_MS = 150
 const VISIBLE_KEEPALIVE_INTERVAL_MS = 60_000
@@ -59,6 +60,7 @@ export interface OpenDesignModuleControllerOptions {
   readonly getRuntime: () => OpenDesignModuleRuntimeLookup
   readonly getInstallRequest: () => Awaitable<ModuleCoordinatorInstallRequest | undefined>
   readonly host: OpenDesignModuleHostAdapter
+  readonly mutationGate: OpenDesignMutationGate
   readonly clock?: OpenDesignModuleClock
 }
 
@@ -420,16 +422,47 @@ export class OpenDesignModuleController {
     const existing = this.#flights.get(action)
     if (existing) return existing
 
-    const operationId = `open-design-${action}-${this.#clock.now().toString(36)}-${randomUUID()}`
+    const mutationLease = this.#options.mutationGate.tryAcquire('ordinary')
+    if (!mutationLease) return this.#mutationConflictState()
+
+    let operationId: string
+    try {
+      operationId = `open-design-${action}-${this.#clock.now().toString(36)}-${randomUUID()}`
+    } catch {
+      mutationLease.release()
+      return this.#operationSetupFailureState(action)
+    }
     const flight = this.#tail
       .catch(() => undefined)
       .then(() => this.#execute(action, operationId, operation))
+      .finally(() => mutationLease.release())
     this.#tail = flight.catch(() => undefined)
     this.#flights.set(action, flight)
     void flight.finally(() => {
       if (this.#flights.get(action) === flight) this.#flights.delete(action)
     }).catch(() => undefined)
     return flight
+  }
+
+  #mutationConflictState(): Promise<OpenDesignModuleState> {
+    const state = Object.freeze({
+      status: 'error' as const,
+      errorCode: 'OPEN_DESIGN_MUTATION_CONFLICT',
+      errorMessage: 'Another OpenDesign operation is already in progress.',
+    })
+    this.#emit(state)
+    return Promise.resolve(state)
+  }
+
+  #operationSetupFailureState(action: OpenDesignModuleAction): Promise<OpenDesignModuleState> {
+    const error = failedResultError(action)
+    const state = Object.freeze({
+      status: 'error' as const,
+      errorCode: error.code,
+      errorMessage: error.message,
+    })
+    this.#emit(state)
+    return Promise.resolve(state)
   }
 
   async #execute(

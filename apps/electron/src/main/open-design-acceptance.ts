@@ -22,6 +22,7 @@ import {
 import { OPEN_DESIGN_MODULE_ID } from '../shared/open-design-module-ipc'
 import type { OpenDesignDevelopmentBootstrap } from './open-design-development-bootstrap'
 import type { OpenDesignOfficialChannelBootstrap } from './open-design-official-channel'
+import type { OpenDesignMutationGate } from './open-design-mutation-gate'
 
 export const OPEN_DESIGN_ACCEPTANCE_ENV = 'SIMULATOR_HOST_MODULE_ACCEPTANCE' as const
 export const OPEN_DESIGN_ACCEPTANCE_DESCRIPTOR_RELATIVE_PATH = join(
@@ -320,6 +321,7 @@ export interface OpenDesignAcceptanceControllerOptions {
   readonly bootstrap: Extract<OpenDesignAcceptanceBootstrap, { status: 'ready' }>
   readonly getRuntime: () => OpenDesignAcceptanceRuntime | undefined
   readonly host: OpenDesignAcceptanceHostAdapter
+  readonly mutationGate: OpenDesignMutationGate
   readonly operationId?: (action: OpenDesignAcceptanceAction) => string
   readonly now?: () => number
 }
@@ -516,12 +518,17 @@ export class OpenDesignAcceptanceController {
     // Acceptance is an evidence-gathering drill: the first control failure stops
     // all further mutations for this process lifetime. Restart creates a new controller.
     if (this.#lastError) return this.#readState()
+    const mutationLease = this.#options.mutationGate.tryAcquire('acceptance')
+    if (!mutationLease) {
+      this.#lastError = 'ACCEPTANCE_MUTATION_CONFLICT'
+      return this.#readState()
+    }
     this.#action = action
     this.#lastOperation = undefined
-    const operationId = this.#options.operationId?.(action)
-      ?? `open-design-acceptance-${action}-${randomUUID()}`
     const flight = (async () => {
       try {
+        const operationId = this.#options.operationId?.(action)
+          ?? `open-design-acceptance-${action}-${randomUUID()}`
         const runtime = this.#options.getRuntime()
         if (!runtime) throw new AcceptanceControlError('ACCEPTANCE_OPERATION_RUNTIME_UNAVAILABLE')
         const execution = await execute(runtime, operationId)
@@ -563,7 +570,7 @@ export class OpenDesignAcceptanceController {
         this.#action = undefined
       }
       return this.#readState()
-    })()
+    })().finally(() => mutationLease.release())
     this.#flight = flight
     void flight.finally(() => {
       if (this.#flight === flight) this.#flight = undefined

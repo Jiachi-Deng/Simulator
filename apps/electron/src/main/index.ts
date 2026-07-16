@@ -142,6 +142,7 @@ import {
   registerOpenDesignAcceptanceIpc,
   type OpenDesignAcceptanceIpcRegistration,
 } from './open-design-acceptance'
+import { createOpenDesignMutationGate } from './open-design-mutation-gate'
 import { resolveHostModuleStorageRoot } from './host-module-storage-root'
 import {
   createIsolatedHostModuleAgentRuntime,
@@ -265,6 +266,7 @@ let sessionManager: SessionManager | null = null
 let browserPaneManager: BrowserPaneManager | null = null
 let moduleViewManager: ModuleViewManager | null = null
 let hostModuleCoordinator: HostModuleCoordinatorRuntime | null = null
+const openDesignMutationGate = createOpenDesignMutationGate()
 const openDesignAcceptanceRuntimeGate = createOpenDesignAcceptanceRuntimeGate(
   () => hostModuleCoordinator ?? undefined,
 )
@@ -1151,6 +1153,7 @@ app.whenReady().then(async () => {
                   && window.webContents === sender,
               ) ?? false,
             },
+            mutationGate: openDesignMutationGate,
           })
         } else if (process.env[OPEN_DESIGN_ACCEPTANCE_ENV] === '1') {
           mainLog.info('OpenDesign acceptance control surface is not ready', {
@@ -1377,6 +1380,7 @@ app.whenReady().then(async () => {
           hostModuleCoordinator?.coordinator,
         ),
         host: hostAdapter,
+        mutationGate: openDesignMutationGate,
       })
       try {
         openDesignModuleIpc = registerOpenDesignModuleIpc(ipcMain, openDesignModuleController)
