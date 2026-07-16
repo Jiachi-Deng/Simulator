@@ -49,7 +49,8 @@ describe("OpenDesign official release workflow", () => {
     })
     expect(workflow.env.RELEASE_OWNER).toBe("Jiachi-Deng")
     expect(workflow.env.RELEASE_REPOSITORY).toBe("Simulator")
-    expect(workflow.env.RELEASE_TAG).toBe("open-design-v0.14.5")
+    expect(workflow.env.RELEASE_TAG).toBeUndefined()
+    expect(workflow.env.MODULE_VERSION).toBeUndefined()
     expect(workflow.on.schedule).toEqual([{ cron: "23 */12 * * *" }])
     expect(workflow.on.workflow_dispatch.inputs.operation.options).toEqual(["refresh", "initial"])
     expect(workflow.on.workflow_dispatch.inputs.release_track.options).toEqual(["prerelease", "stable"])
@@ -258,6 +259,12 @@ describe("OpenDesign official release workflow", () => {
 
   test("refreshes only three assets behind a draft rollback transaction", () => {
     const refresh = source.slice(source.indexOf("  refresh:"))
+    const resolveStable = step("refresh", "Resolve current supported stable release").run
+    expect(resolveStable).toContain('candidate_versions=("0.14.6" "0.14.5")')
+    expect(resolveStable).toContain('test "$(jq -r .isDraft <<<"$release_state")" = false')
+    expect(resolveStable).toContain('test "$(jq -r .isPrerelease <<<"$release_state")" = false')
+    expect(resolveStable).toContain('test "$actual" = "$expected"')
+    expect(resolveStable).toContain("RELEASE_TAG=open-design-v%s")
     expect(refresh.indexOf("Dry-run catalog refresh")).toBeLessThan(refresh.indexOf("Create signed refresh assets"))
     expect(refresh.indexOf("Reconstruct and verify complete refreshed bundle")).toBeLessThan(refresh.indexOf("Replace only refresh assets"))
     expect(refresh).toContain('canonical=("$CATALOG_ASSET" "$ENVELOPE_ASSET" "$METADATA_ASSET")')

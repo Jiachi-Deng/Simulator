@@ -151,13 +151,19 @@ write permission only inside that subtree immediately before deleting it.
 
 The refresh job runs every 12 hours on Linux and may also be manually
 dispatched only with `release_track=stable`, the exact existing version/tag, and
-`REFRESH_OPEN_DESIGN_0_14_5`. It downloads the five fixed 0.14.5-tag assets,
+`REFRESH_OPEN_DESIGN_<current version with underscores>`. A fixed newest-first
+support matrix contains stable `0.14.6` followed by the `0.14.5` rollback
+baseline. The job selects the first tag that already exists as a non-draft,
+non-prerelease Release with exactly the five expected version-bound assets. It
+therefore refreshes `0.14.5` before stable promotion and automatically begins
+refreshing `0.14.6` after promotion, without a post-release source or SHA edit.
+It downloads the selected five fixed-tag assets,
 advances the signed Catalog state, runs refresh dry-run, signs through the
 Environment secret, reconstructs the full bundle, and verifies it before any
-GitHub mutation. Schedule events ignore release inputs and remain pinned to
-0.14.5 until a separately approved stable-channel cutover changes that policy.
+GitHub mutation. A present-but-draft, prerelease, or asset-incomplete candidate
+fails closed instead of silently falling back.
 Initial and refresh jobs share one non-cancelling concurrency group, so the
-authenticated 0.14.5 snapshot cannot race this workflow's scheduled refresh
+authenticated selected stable snapshot cannot race this workflow's scheduled refresh
 transaction.
 
 Only the raw Catalog, envelope, and release metadata are replaceable. New

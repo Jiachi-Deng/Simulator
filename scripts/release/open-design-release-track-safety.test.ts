@@ -116,17 +116,25 @@ describe("OpenDesign release-track safety", () => {
     expect(verify).toContain('--previous-issued-at "$PRIOR_ISSUED_AT"')
   })
 
-  test("keeps scheduled refresh pinned to the existing 0.14.5 stable release", () => {
-    expect(workflow.env.RELEASE_TAG).toBe("open-design-v0.14.5")
-    expect(workflow.env.MODULE_VERSION).toBe("0.14.5")
+  test("refreshes the newest existing release from the fixed stable support matrix", () => {
+    expect(workflow.env.RELEASE_TAG).toBeUndefined()
+    expect(workflow.env.MODULE_VERSION).toBeUndefined()
     expect(workflow.jobs.refresh.environment.name).toBe("open-design-production")
     expect(workflow.jobs.refresh.if).toContain("github.event_name == 'schedule'")
     expect(workflow.jobs.refresh.if).toContain("inputs.operation == 'refresh'")
     expect(workflow.jobs.refresh.if).toContain("inputs.release_track == 'stable'")
+    const resolver = step("refresh", "Resolve current supported stable release").run
+    expect(resolver).toContain('candidate_versions=("0.14.6" "0.14.5")')
+    expect(resolver.indexOf('"0.14.6"')).toBeLessThan(resolver.indexOf('"0.14.5"'))
+    expect(resolver).toContain('test "$(jq -r .isDraft <<<"$release_state")" = false')
+    expect(resolver).toContain('test "$(jq -r .isPrerelease <<<"$release_state")" = false')
+    expect(resolver).toContain('test "$actual" = "$expected"')
+    expect(resolver).toContain('test -n "$selected_version"')
     const authority = step("refresh", "Validate fixed refresh authority").run
     expect(authority).toContain('test "$DISPATCH_MODULE_VERSION" = "$MODULE_VERSION"')
     expect(authority).toContain('test "$DISPATCH_RELEASE_TAG" = "$RELEASE_TAG"')
-    expect(authority).toContain('test "$STABLE_CHANNEL_CONFIRMATION" = "REFRESH_OPEN_DESIGN_0_14_5"')
+    expect(authority).toContain('expected_confirmation="REFRESH_OPEN_DESIGN_${MODULE_VERSION//./_}"')
+    expect(authority).toContain('test "$STABLE_CHANNEL_CONFIRMATION" = "$expected_confirmation"')
     expect(source.match(/--module-version "\$MODULE_VERSION"/g)).toHaveLength(7)
   })
 })
