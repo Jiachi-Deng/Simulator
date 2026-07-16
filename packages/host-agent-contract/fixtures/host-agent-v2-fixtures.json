@@ -183,6 +183,191 @@
         "data": {}
       }
     ],
+    "transcripts": {
+      "completed": [
+        {
+          "contractVersion": 2,
+          "eventId": "1",
+          "sequence": 1,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000001,
+          "type": "run.accepted",
+          "data": {}
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "2",
+          "sequence": 2,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000002,
+          "type": "turn.started",
+          "data": {}
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "3",
+          "sequence": 3,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000003,
+          "type": "message.delta",
+          "data": {
+            "delta": "Hello"
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "4",
+          "sequence": 4,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000004,
+          "type": "message.delta",
+          "data": {
+            "delta": " world"
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "5",
+          "sequence": 5,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000005,
+          "type": "reasoning.delta",
+          "data": {
+            "delta": "Checking layout"
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "6",
+          "sequence": 6,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000006,
+          "type": "activity",
+          "data": {
+            "phase": "started",
+            "kind": "tool",
+            "label": "Write file"
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "7",
+          "sequence": 7,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000007,
+          "type": "presentation.item",
+          "data": {
+            "itemId": "preview.main",
+            "kind": "preview",
+            "title": "Main preview",
+            "uri": "http://127.0.0.1:4173/",
+            "mediaType": "text/html"
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "8",
+          "sequence": 8,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000008,
+          "type": "turn.completed",
+          "data": {
+            "finalText": "Hello world"
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "9",
+          "sequence": 9,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000009,
+          "type": "run.closed",
+          "data": {}
+        }
+      ],
+      "failed": [
+        {
+          "contractVersion": 2,
+          "eventId": "1",
+          "sequence": 1,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000001,
+          "type": "run.accepted",
+          "data": {}
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "2",
+          "sequence": 2,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000002,
+          "type": "turn.started",
+          "data": {}
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "3",
+          "sequence": 3,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000003,
+          "type": "turn.failed",
+          "data": {
+            "code": "RUNTIME_UNAVAILABLE",
+            "retryable": true
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "4",
+          "sequence": 4,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000004,
+          "type": "run.closed",
+          "data": {}
+        }
+      ],
+      "interrupted": [
+        {
+          "contractVersion": 2,
+          "eventId": "1",
+          "sequence": 1,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000001,
+          "type": "run.accepted",
+          "data": {}
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "2",
+          "sequence": 2,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000002,
+          "type": "turn.started",
+          "data": {}
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "3",
+          "sequence": 3,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000003,
+          "type": "turn.interrupted",
+          "data": {
+            "reason": "CRAFT_TURN_PREEMPTED",
+            "retryable": true
+          }
+        },
+        {
+          "contractVersion": 2,
+          "eventId": "4",
+          "sequence": 4,
+          "runHandle": "run_0123456789abcdef0123456789abcdef",
+          "occurredAt": 1700000000004,
+          "type": "run.closed",
+          "data": {}
+        }
+      ]
+    },
     "errorResponse": {
       "contractVersion": 2,
       "error": {

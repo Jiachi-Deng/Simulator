@@ -107,6 +107,37 @@ export const HOST_AGENT_V2_FIXTURES = Object.freeze({
       eventBase(9, 'turn.interrupted', { reason: 'CRAFT_TURN_PREEMPTED', retryable: true }),
       eventBase(10, 'run.closed', {}),
     ],
+    transcripts: {
+      completed: [
+        eventBase(1, 'run.accepted', {}),
+        eventBase(2, 'turn.started', {}),
+        eventBase(3, 'message.delta', { delta: 'Hello' }),
+        eventBase(4, 'message.delta', { delta: ' world' }),
+        eventBase(5, 'reasoning.delta', { delta: 'Checking layout' }),
+        eventBase(6, 'activity', { phase: 'started', kind: 'tool', label: 'Write file' }),
+        eventBase(7, 'presentation.item', {
+          itemId: 'preview.main',
+          kind: 'preview',
+          title: 'Main preview',
+          uri: 'http://127.0.0.1:4173/',
+          mediaType: 'text/html',
+        }),
+        eventBase(8, 'turn.completed', { finalText: 'Hello world' }),
+        eventBase(9, 'run.closed', {}),
+      ],
+      failed: [
+        eventBase(1, 'run.accepted', {}),
+        eventBase(2, 'turn.started', {}),
+        eventBase(3, 'turn.failed', { code: 'RUNTIME_UNAVAILABLE', retryable: true }),
+        eventBase(4, 'run.closed', {}),
+      ],
+      interrupted: [
+        eventBase(1, 'run.accepted', {}),
+        eventBase(2, 'turn.started', {}),
+        eventBase(3, 'turn.interrupted', { reason: 'CRAFT_TURN_PREEMPTED', retryable: true }),
+        eventBase(4, 'run.closed', {}),
+      ],
+    },
     errorResponse: {
       contractVersion: HOST_AGENT_CONTRACT_VERSION,
       error: {
