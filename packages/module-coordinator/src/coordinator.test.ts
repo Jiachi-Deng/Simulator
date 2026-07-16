@@ -15,7 +15,7 @@ import { FilesystemModuleRegistryPersistence } from '@simulator/module-registry/
 import { encodeCanonicalCatalog, type TrustedReleaseKey } from '@simulator/module-release-trust'
 import { ModuleCoordinator } from './coordinator.ts'
 import { NodeFilesystemModuleCoordinatorStore } from './node-store.ts'
-import { SimulatedCoordinatorCrash, type ModuleCoordinatorCheckpoint, type ModuleCoordinatorFaultPoint, type ModuleCoordinatorState, type ModuleCoordinatorStore, type ModuleViewSnapshot } from './types.ts'
+import { SimulatedCoordinatorCrash, type ModuleCoordinatorCheckpoint, type ModuleCoordinatorDependencies, type ModuleCoordinatorFaultPoint, type ModuleCoordinatorState, type ModuleCoordinatorStore, type ModuleViewSnapshot } from './types.ts'
 import { ModuleRuntimeUseGate } from './usage-gate.ts'
 import { InMemoryModuleCoordinatorStore } from './testing/memory-store.ts'
 
@@ -247,12 +247,13 @@ async function createSystem(
   input?: PersistentFixture,
   inputStore?: ModuleCoordinatorStore,
   faultInjector?: (point: ModuleCoordinatorFaultPoint) => void | Promise<void>,
+  downloaderOverride?: ModuleCoordinatorDependencies['downloader'],
 ): Promise<System> {
   const fixture = input ?? await createFixture()
   const store = inputStore ?? fixture.store
   const { root, treeHash, releases, key, fetch } = fixture
   const cacheRoot = join(root, 'cache')
-  const downloader = new ModuleDownloader({
+  const downloader = downloaderOverride ?? new ModuleDownloader({
     fetch,
     cache: new NodeFilesystemModuleDownloaderCache(cacheRoot),
     clock: new ManualClock(NOW),
@@ -418,6 +419,42 @@ describe('ModuleCoordinator packaged fake module E2E', () => {
     expect((await system.coordinator.install({ ...request, operationId: 'refreshed-evidence-install' })).ok).toBe(true)
     expect(fixture.fetch.catalogRequests).toBe(3)
     expect(fixture.fetch.artifactRequests).toBe(1)
+  })
+
+  it('rejects a higher-sequence Catalog refresh whose issuance time did not advance', async () => {
+    const fixture = await createFixture()
+    let catalogRequests = 0
+    let artifactRequests = 0
+    const downloader: ModuleCoordinatorDependencies['downloader'] = {
+      fetchCatalog: async () => ({
+        catalog: {
+          schemaVersion: 2,
+          sequence: ++catalogRequests,
+          issuedAt: INITIAL_CATALOG_REVISION.issuedAt,
+          expiresAt: catalogRequests === 1
+            ? INITIAL_CATALOG_REVISION.expiresAt
+            : '2026-07-13T17:30:00.000Z',
+          releases: fixture.releases,
+        },
+        source: 'network',
+      }),
+      downloadArtifact: async () => {
+        artifactRequests += 1
+        throw new Error('Catalog evidence must fail before artifact download')
+      },
+    }
+    const system = await createSystem(fixture, undefined, undefined, downloader)
+    const request = await system.coordinator.resolveInstallRequest({
+      catalogUrl: CATALOG_URL,
+      moduleId: MODULE_ID as ModuleId,
+      version: '1.0.0' as ModuleVersion,
+    })
+    const result = await system.coordinator.install({ ...request, operationId: 'same-issued-at-refresh' })
+
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('Catalog evidence')
+    expect(catalogRequests).toBe(2)
+    expect(artifactRequests).toBe(0)
   })
 
   it('rejects a higher-sequence Catalog refresh that changes the bound artifact size', async () => {

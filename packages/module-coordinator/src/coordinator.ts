@@ -621,6 +621,8 @@ export class ModuleCoordinator {
         || size !== evidence.artifactSize
         || current.sequence < evidence.sequence
         || Date.parse(current.issuedAt) < Date.parse(evidence.issuedAt)
+        || (current.sequence > evidence.sequence
+          && Date.parse(current.issuedAt) === Date.parse(evidence.issuedAt))
         || (current.sequence === evidence.sequence
           && (current.issuedAt !== evidence.issuedAt || current.expiresAt !== evidence.expiresAt))) {
         throw new ModuleCoordinatorError(
