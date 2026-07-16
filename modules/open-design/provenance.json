@@ -22,7 +22,7 @@
   },
   "simulatorPatch": {
     "path": "patches/open-design-v0.14.1-simulator-host-runtime.patch",
-    "sha256": "250e130a1b4ded69c63aa4db515d717e5f394ec87746099042767cda4310715f",
+    "sha256": "0e9a48c903697537f09bde3e710b57ac6d648e991470a9284e7d3a0892e16c5a",
     "preimageSha256": "4513a63d525931288a1874676c2a5be397680ff51aeff30acffaf878cae20a74",
     "postimageSha256": "74401e8c0550cedb17eadfac927fa4db384be277703520db9bbbe8e945bc7e1d",
     "changedPaths": [
@@ -93,7 +93,7 @@
     {"path": "pnpm-lock.yaml", "sha256": "5b0f471b76ffdcca7f427e5b3cc9eb88cb82f1a30c7ab8a41fb57d46306da80f"},
     {"path": "pnpm-workspace.yaml", "sha256": "7036cab2720e4e2db1e613bf0b7eb83075be2e60e1dd0ae683f2bca2483cc2ac"},
     {"path": "apps/web/next-env.d.ts", "sha256": "7ad303e40d4fddf44f156129e397511953a71481c5cfd86b1862649aaaf240cc"},
-    {"path": "patches/open-design-v0.14.1-simulator-host-runtime.patch", "sha256": "250e130a1b4ded69c63aa4db515d717e5f394ec87746099042767cda4310715f"}
+    {"path": "patches/open-design-v0.14.1-simulator-host-runtime.patch", "sha256": "0e9a48c903697537f09bde3e710b57ac6d648e991470a9284e7d3a0892e16c5a"}
   ],
   "buildToolchainExpectations": {
     "node": "24.18.0",

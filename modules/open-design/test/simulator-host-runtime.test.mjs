@@ -309,6 +309,106 @@ test("Host Runtime adapter reuses one conversation session across turns and clos
   assert.equal(requests.at(-1)?.method, "DELETE");
 });
 
+test("Host Runtime adapter preserves multiple assistant messages around tool activity", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "simulator-host-multi-message-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tokenFile = await writeGrantToken(root);
+  const adapter = await importMaterializedAdapter(root);
+  const frames = [
+    envelope(1, "session.ready", {}),
+    envelope(2, "turn.started", {}, "opaque-turn"),
+    envelope(3, "message.delta", { delta: "Working" }, "opaque-turn"),
+    envelope(4, "message.completed", { text: "Working on it." }, "opaque-turn"),
+    envelope(5, "activity", { phase: "finished", kind: "tool", label: "Write" }, "opaque-turn"),
+    envelope(6, "message.delta", { delta: "Done" }, "opaque-turn"),
+    envelope(7, "message.completed", { text: "Done." }, "opaque-turn"),
+    envelope(8, "turn.completed", { text: "Done." }, "opaque-turn"),
+  ];
+  const sent = [];
+  const finished = [];
+
+  await adapter.runSimulatorHostAgentTurn({
+    prompt: "Create the page",
+    continuationPrompt: "Create the page",
+    workingDirectory: "/tmp/project",
+    run: { id: "run-multi-message", conversationId: "conversation-multi-message", status: "starting", updatedAt: 0, cancelRequested: false },
+    env: hostEnv(tokenFile),
+    fetchImpl: hostFetchForFrames(frames),
+    send: (event, data) => sent.push({ event, data }),
+    finish: (...args) => { finished.push(args); },
+  });
+
+  assert.deepEqual(finished.map((entry) => entry.slice(1)), [["succeeded", 0, null]]);
+  assert.deepEqual(sent.filter((entry) => entry.event === "agent").map((entry) => entry.data), [
+    { type: "text_delta", delta: "Working" },
+    { type: "text_delta", delta: " on it." },
+    { type: "status", label: "Write" },
+    { type: "text_delta", delta: "Done" },
+    { type: "text_delta", delta: "." },
+  ]);
+  await adapter.disposeSimulatorHostAgentSessions();
+});
+
+test("Host Runtime adapter still rejects a completed message that disagrees with its deltas", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "simulator-host-inconsistent-message-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tokenFile = await writeGrantToken(root);
+  const adapter = await importMaterializedAdapter(root);
+  const frames = [
+    envelope(1, "session.ready", {}),
+    envelope(2, "turn.started", {}, "opaque-turn"),
+    envelope(3, "message.delta", { delta: "Working" }, "opaque-turn"),
+    envelope(4, "message.completed", { text: "Different" }, "opaque-turn"),
+    envelope(5, "turn.completed", { text: "Different" }, "opaque-turn"),
+  ];
+
+  await assert.rejects(adapter.runSimulatorHostAgentTurn({
+    prompt: "Create the page",
+    continuationPrompt: "Create the page",
+    workingDirectory: "/tmp/project",
+    run: { id: "run-inconsistent-message", conversationId: "conversation-inconsistent-message", status: "starting", updatedAt: 0, cancelRequested: false },
+    env: hostEnv(tokenFile),
+    fetchImpl: hostFetchForFrames(frames),
+    send: () => {},
+    finish: () => {},
+  }), (error) => {
+    assert.equal(error.code, "PROTOCOL_INVALID");
+    assert.match(error.message, /inconsistent transcript/);
+    return true;
+  });
+  await adapter.disposeSimulatorHostAgentSessions();
+});
+
+test("Host Runtime adapter rejects a turn summary that disagrees with the last completed message", async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "simulator-host-inconsistent-turn-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const tokenFile = await writeGrantToken(root);
+  const adapter = await importMaterializedAdapter(root);
+  const frames = [
+    envelope(1, "session.ready", {}),
+    envelope(2, "turn.started", {}, "opaque-turn"),
+    envelope(3, "message.delta", { delta: "Done" }, "opaque-turn"),
+    envelope(4, "message.completed", { text: "Done." }, "opaque-turn"),
+    envelope(5, "turn.completed", { text: "Different." }, "opaque-turn"),
+  ];
+
+  await assert.rejects(adapter.runSimulatorHostAgentTurn({
+    prompt: "Create the page",
+    continuationPrompt: "Create the page",
+    workingDirectory: "/tmp/project",
+    run: { id: "run-inconsistent-turn", conversationId: "conversation-inconsistent-turn", status: "starting", updatedAt: 0, cancelRequested: false },
+    env: hostEnv(tokenFile),
+    fetchImpl: hostFetchForFrames(frames),
+    send: () => {},
+    finish: () => {},
+  }), (error) => {
+    assert.equal(error.code, "PROTOCOL_INVALID");
+    assert.match(error.message, /inconsistent transcript/);
+    return true;
+  });
+  await adapter.disposeSimulatorHostAgentSessions();
+});
+
 test("different conversations in one project never share a Host session", async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), "simulator-host-conversation-isolation-"));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -715,6 +815,30 @@ function createSuccessfulHostFetch({ closeFailures = 0, gateTurnNumber = null } 
     turnPrompts: () => requests
       .filter((request) => request.method === "POST" && request.url.endsWith("/turns"))
       .map((request) => JSON.parse(request.body).prompt),
+  };
+}
+
+function hostFetchForFrames(frames) {
+  return async (input, options = {}) => {
+    const url = new URL(input);
+    const request = { method: options.method, url: `${url.pathname}${url.search}` };
+    if (request.method === "GET" && request.url === "/v1/capabilities") return capabilitiesResponse();
+    if (request.method === "POST" && request.url === "/v1/module-sessions") {
+      return json(200, { contractVersion: 1, sessionHandle: "opaque-session", state: "idle" });
+    }
+    if (request.method === "POST" && request.url === "/v1/module-sessions/opaque-session/turns") {
+      return json(200, { contractVersion: 1, turnId: "opaque-turn", state: "running" });
+    }
+    if (request.method === "GET" && request.url === "/v1/module-sessions/opaque-session/events?afterSequence=0") {
+      return new Response(
+        frames.map((event) => `event: module-agent.event\nid: ${event.sequence}\ndata: ${JSON.stringify(event)}\n\n`).join(""),
+        { status: 200, headers: { "content-type": "text/event-stream" } },
+      );
+    }
+    if (request.method === "DELETE" && request.url === "/v1/module-sessions/opaque-session") {
+      return new Response(null, { status: 204 });
+    }
+    return json(404, {});
   };
 }
 
