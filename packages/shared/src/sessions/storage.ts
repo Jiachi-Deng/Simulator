@@ -171,6 +171,24 @@ export function generateSessionId(workspaceRootPath: string): string {
 // Session CRUD
 // ============================================================
 
+function rethrowFailedInitialSessionCommit(
+  workspaceRootPath: string,
+  sessionId: string,
+  ownsSessionDirectory: boolean,
+  error: unknown,
+): never {
+  // The failed write may still have a debounced retry or an in-flight staged
+  // snapshot. Cancel it before returning failure so it cannot resurrect a
+  // Session after the caller has treated creation as failed.
+  sessionPersistenceQueue.cancel(sessionId);
+  // A fixed-ID caller may point at an orphan directory containing attachments
+  // or other user data. Only remove a directory allocated by this invocation.
+  if (ownsSessionDirectory && !deleteSession(workspaceRootPath, sessionId)) {
+    throw new Error('Failed to persist and clean up the new session', { cause: error });
+  }
+  throw error;
+}
+
 /**
  * Create a new session for a workspace
  */
@@ -200,6 +218,7 @@ export async function createSession(
 
   const now = Date.now();
   const sessionId = generateSessionId(workspaceRootPath);
+  const ownsSessionDirectory = !existsSync(getSessionPath(workspaceRootPath, sessionId));
 
   // Create session directory with all subdirectories (plans, attachments)
   ensureSessionDir(workspaceRootPath, sessionId);
@@ -246,7 +265,16 @@ export async function createSession(
       costUsd: 0,
     },
   };
-  await saveSession(storedSession);
+  try {
+    await saveSession(storedSession);
+  } catch (error) {
+    rethrowFailedInitialSessionCommit(
+      workspaceRootPath,
+      sessionId,
+      ownsSessionDirectory,
+      error,
+    );
+  }
 
   return session;
 }
@@ -275,6 +303,7 @@ export async function getOrCreateSessionById(
 
   // Create new session with the specified ID
   ensureSessionsDir(workspaceRootPath);
+  const ownsSessionDirectory = !existsSync(getSessionPath(workspaceRootPath, sessionId));
 
   // Create session directory with all subdirectories (plans, attachments)
   ensureSessionDir(workspaceRootPath, sessionId);
@@ -302,7 +331,16 @@ export async function getOrCreateSessionById(
       costUsd: 0,
     },
   };
-  await saveSession(storedSession);
+  try {
+    await saveSession(storedSession);
+  } catch (error) {
+    rethrowFailedInitialSessionCommit(
+      workspaceRootPath,
+      sessionId,
+      ownsSessionDirectory,
+      error,
+    );
+  }
 
   return session;
 }
@@ -313,12 +351,13 @@ export async function getOrCreateSessionById(
  *
  * This unified approach ensures all session writes go through the same
  * async code path, which is more reliable on Windows.
+ * Rejects if the queue cannot durably publish the final snapshot.
  *
  * Writes in JSONL format: line 1 = header, lines 2+ = messages
  */
 export async function saveSession(session: StoredSession): Promise<void> {
   sessionPersistenceQueue.enqueue(session);
-  await sessionPersistenceQueue.flush(session.id);
+  await sessionPersistenceQueue.flushDurably(session.id);
 }
 
 /**

@@ -18,7 +18,17 @@ interface WriteGeneration {
   readonly sequence: number
 }
 
+interface SessionLifecycleToken {
+  readonly sequence: number
+}
+
 type WriteOutcome = 'committed' | 'superseded'
+
+type WriteResult =
+  | { outcome: WriteOutcome }
+  | { outcome: 'failed'; error: unknown }
+
+const DURABILITY_SUPERSEDED_MESSAGE = 'Session persistence was superseded before durable commit'
 
 export interface SessionPersistenceQueueHooks {
   /** Test-only scheduling seam. Production queues leave this undefined. */
@@ -72,10 +82,18 @@ function mergeHeaderWithExternalMetadata(localHeader: SessionHeader, diskHeader:
  */
 class SessionPersistenceQueue {
   private pending = new Map<string, PendingWrite>()
-  private writeInProgress = new Map<string, Promise<void>>()
+  // Active writes always settle with a result object. This lets ordinary
+  // fire-and-forget flushes contain failures without hiding the same failure
+  // from callers that explicitly require durable persistence.
+  private writeInProgress = new Map<string, Promise<WriteResult>>()
   private lastWrittenHeaderSignature = new Map<string, string>()
   private currentGeneration = new Map<string, WriteGeneration>()
   private authoritativeGeneration = new Map<string, WriteGeneration>()
+  // Only live Session IDs retain a lifecycle token. A cancel removes it; any
+  // later reuse gets a globally unique token, so an old durability waiter can
+  // never cross the cancellation boundary or retain a permanent ID entry.
+  private liveLifecycles = new Map<string, SessionLifecycleToken>()
+  private lifecycleSequence = 0
   private generationSequence = 0
   private backgroundFlushFailureLogs = 0
   private debounceMs: number
@@ -91,6 +109,7 @@ class SessionPersistenceQueue {
    * session, it will be replaced with the new data and the timer reset.
    */
   enqueue(session: StoredSession): void {
+    this.ensureLiveLifecycle(session.id)
     const existing = this.pending.get(session.id)
     if (existing) {
       clearTimeout(existing.timer)
@@ -124,9 +143,9 @@ class SessionPersistenceQueue {
    * Write a session to disk immediately in JSONL format.
    * Uses atomic write (write-to-temp-then-rename) to prevent corruption on crash.
    */
-  private async write(sessionId: string): Promise<void> {
+  private async write(sessionId: string): Promise<WriteResult> {
     const entry = this.pending.get(sessionId)
-    if (!entry) return
+    if (!entry) return { outcome: 'superseded' }
 
     this.pending.delete(sessionId)
     // A pending snapshot created behind an authoritative writer becomes the
@@ -134,9 +153,10 @@ class SessionPersistenceQueue {
     this.currentGeneration.set(sessionId, entry.generation)
 
     try {
-      await this.writeSnapshot(entry.data, entry.generation)
+      return { outcome: await this.writeSnapshot(entry.data, entry.generation) }
     } catch (error) {
       console.error(`[PersistenceQueue] Failed to write session ${sessionId}:`, error)
+      return { outcome: 'failed', error }
     }
   }
 
@@ -150,6 +170,7 @@ class SessionPersistenceQueue {
    * it to remain available even if an earlier active-state write never settles.
    */
   async supersede(session: StoredSession): Promise<void> {
+    this.ensureLiveLifecycle(session.id)
     const existing = this.pending.get(session.id)
     if (existing) clearTimeout(existing.timer)
     this.pending.delete(session.id)
@@ -159,21 +180,25 @@ class SessionPersistenceQueue {
     const generation = this.createGeneration()
     this.currentGeneration.set(session.id, generation)
     this.authoritativeGeneration.set(session.id, generation)
-    const authorityPromise = this.writeSnapshot(session, generation).then((outcome) => {
-      if (outcome !== 'committed') {
-        throw new Error('Authoritative session snapshot was superseded before commit')
-      }
-    })
+    const trackedPromise: Promise<WriteResult> = this.writeSnapshot(session, generation).then(
+      (outcome) => outcome === 'committed'
+        ? { outcome }
+        : {
+            outcome: 'failed',
+            error: new Error('Authoritative session snapshot was superseded before commit'),
+          },
+      (error: unknown) => ({ outcome: 'failed', error }),
+    )
     // `flush()` historically contains persistence failures because several
     // SessionManager callbacks intentionally call it fire-and-forget. Publish a
-    // never-reject tracked tail while the supersede owner awaits the raw result.
-    const trackedPromise = authorityPromise.catch(() => undefined)
+    // never-reject result tail while the supersede owner still observes failure.
     // Although this authority bypasses the old tail, it becomes the new tail:
     // flush/flushAll must not acknowledge durability while its atomic publish
     // is still pending. Equality-safe cleanup keeps a later supersede intact.
     this.writeInProgress.set(session.id, trackedPromise)
     try {
-      await authorityPromise
+      const result = await trackedPromise
+      if (result.outcome === 'failed') throw result.error
     } finally {
       if (this.authoritativeGeneration.get(session.id) === generation) {
         this.authoritativeGeneration.delete(session.id)
@@ -258,20 +283,58 @@ class SessionPersistenceQueue {
    * to prevent race conditions on the shared .tmp file.
    */
   async flush(sessionId: string): Promise<void> {
+    await this.drain(sessionId, false)
+  }
+
+  /**
+   * Flush a session and reject if the final write needed to drain the queue
+   * fails. Unlike flush(), this is a durability acknowledgement for callers
+   * that must not proceed until their session state is actually on disk.
+   */
+  async flushDurably(sessionId: string): Promise<void> {
+    const expectedLifecycle = this.liveLifecycles.get(sessionId)
+    await this.drain(sessionId, true, expectedLifecycle)
+  }
+
+  private async drain(
+    sessionId: string,
+    rejectOnFailure: boolean,
+    expectedLifecycle?: SessionLifecycleToken,
+  ): Promise<void> {
     // Drain until both the current writer and pending slot are empty. Multiple
     // callers may await the same old writer; after it settles, only one caller
     // may claim the pending snapshot and the others must then join that new
     // writer. A single-pass implementation can otherwise replace the tracked
     // writer with a resolved no-op and acknowledge durability too early.
+    let hasFailure = false
+    let lastFailure: unknown
     while (true) {
+      if (rejectOnFailure) this.assertLifecycle(sessionId, expectedLifecycle)
       const inProgress = this.writeInProgress.get(sessionId)
       if (inProgress) {
-        await inProgress
+        const result = await inProgress
+        if (this.writeInProgress.get(sessionId) === inProgress) {
+          this.writeInProgress.delete(sessionId)
+        }
+        if (rejectOnFailure) this.assertLifecycle(sessionId, expectedLifecycle)
+        if (result.outcome === 'failed') {
+          hasFailure = true
+          lastFailure = result.error
+        } else if (result.outcome === 'superseded') {
+          hasFailure = true
+          lastFailure = new Error(DURABILITY_SUPERSEDED_MESSAGE)
+        } else if (result.outcome === 'committed') {
+          hasFailure = false
+          lastFailure = undefined
+        }
         continue
       }
 
       const entry = this.pending.get(sessionId)
-      if (!entry) return
+      if (!entry) {
+        if (rejectOnFailure && hasFailure) throw lastFailure
+        return
+      }
       clearTimeout(entry.timer)
 
       // Start new write and track it
@@ -279,7 +342,18 @@ class SessionPersistenceQueue {
       this.writeInProgress.set(sessionId, writePromise)
 
       try {
-        await writePromise
+        const result = await writePromise
+        if (rejectOnFailure) this.assertLifecycle(sessionId, expectedLifecycle)
+        if (result.outcome === 'failed') {
+          hasFailure = true
+          lastFailure = result.error
+        } else if (result.outcome === 'superseded') {
+          hasFailure = true
+          lastFailure = new Error(DURABILITY_SUPERSEDED_MESSAGE)
+        } else if (result.outcome === 'committed') {
+          hasFailure = false
+          lastFailure = undefined
+        }
       } finally {
         if (this.writeInProgress.get(sessionId) === writePromise) {
           this.writeInProgress.delete(sessionId)
@@ -288,10 +362,28 @@ class SessionPersistenceQueue {
     }
   }
 
+  private ensureLiveLifecycle(sessionId: string): SessionLifecycleToken {
+    const existing = this.liveLifecycles.get(sessionId)
+    if (existing) return existing
+    const lifecycle = { sequence: ++this.lifecycleSequence }
+    this.liveLifecycles.set(sessionId, lifecycle)
+    return lifecycle
+  }
+
+  private assertLifecycle(
+    sessionId: string,
+    expectedLifecycle: SessionLifecycleToken | undefined,
+  ): void {
+    if (this.liveLifecycles.get(sessionId) !== expectedLifecycle) {
+      throw new Error(DURABILITY_SUPERSEDED_MESSAGE)
+    }
+  }
+
   /**
    * Cancel a pending write for a session (e.g., when deleting the session).
    */
   cancel(sessionId: string): void {
+    this.liveLifecycles.delete(sessionId)
     const entry = this.pending.get(sessionId)
     if (entry) {
       clearTimeout(entry.timer)
@@ -337,6 +429,11 @@ class SessionPersistenceQueue {
    */
   get pendingCount(): number {
     return this.pending.size
+  }
+
+  /** Test/debug visibility for proving cancelled Session IDs retain no token. */
+  get liveLifecycleCount(): number {
+    return this.liveLifecycles.size
   }
 }
 

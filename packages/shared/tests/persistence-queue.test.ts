@@ -133,6 +133,93 @@ describe('SessionPersistenceQueue', () => {
     expect(JSON.parse(readFileSync(filePath, 'utf-8').split('\n')[0]).sdkSessionId).toBe('latest-pending');
   });
 
+  it('lets a durable flush observe a failure from the ordinary writer it joins', async () => {
+    let releaseWrite!: () => void;
+    const writeBlocked = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    let reachedCommit!: () => void;
+    const atCommit = new Promise<void>((resolve) => { reachedCommit = resolve; });
+    queue = new SessionPersistenceQueue(60_000, {
+      beforeCommit: async () => {
+        reachedCommit();
+        await writeBlocked;
+        throw new Error('injected-write-failure');
+      },
+    });
+
+    queue.enqueue(createTestSession('test-session', testDir, 'will-fail'));
+    const ordinaryFlush = queue.flush('test-session').then(
+      () => 'resolved' as const,
+      () => 'rejected' as const,
+    );
+    await atCommit;
+    const durableFlush = queue.flushDurably('test-session').then(
+      () => 'resolved' as const,
+      (error: unknown) => error,
+    );
+
+    releaseWrite();
+    expect(await ordinaryFlush).toBe('resolved');
+    const durableFailure = await durableFlush;
+    expect(durableFailure).toBeInstanceOf(Error);
+    expect((durableFailure as Error).message).toBe('injected-write-failure');
+  });
+
+  it('lets a later pending snapshot repair an earlier failure in the same durable drain', async () => {
+    let releaseFailedWrite!: () => void;
+    const failedWriteBlocked = new Promise<void>((resolve) => { releaseFailedWrite = resolve; });
+    let failedWriteReachedCommit!: () => void;
+    const failedWriteAtCommit = new Promise<void>((resolve) => { failedWriteReachedCommit = resolve; });
+    let repairedWriteReachedCommit!: () => void;
+    const repairedWriteAtCommit = new Promise<void>((resolve) => { repairedWriteReachedCommit = resolve; });
+    queue = new SessionPersistenceQueue(60_000, {
+      beforeCommit: async (session) => {
+        if (session.sdkSessionId === 'failed-write') {
+          failedWriteReachedCommit();
+          await failedWriteBlocked;
+          throw new Error('repairable-write-failure');
+        }
+        if (session.sdkSessionId === 'repaired-write') repairedWriteReachedCommit();
+      },
+    });
+
+    queue.enqueue(createTestSession('test-session', testDir, 'failed-write'));
+    const ordinaryFlush = queue.flush('test-session');
+    await failedWriteAtCommit;
+    queue.enqueue(createTestSession('test-session', testDir, 'repaired-write'));
+    const durableFlush = queue.flushDurably('test-session');
+
+    releaseFailedWrite();
+    await repairedWriteAtCommit;
+    await Promise.all([ordinaryFlush, durableFlush]);
+
+    const filePath = join(testDir, 'sessions', 'test-session', 'session.jsonl');
+    expect(JSON.parse(readFileSync(filePath, 'utf-8').split('\n')[0]).sdkSessionId).toBe('repaired-write');
+  });
+
+  it('contains ordinary write failures without rejection or an unhandled rejection', async () => {
+    queue = new SessionPersistenceQueue(60_000, {
+      beforeCommit: async () => {
+        throw new Error('contained-write-failure');
+      },
+    });
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      queue.enqueue(createTestSession('test-session', testDir, 'will-fail-safely'));
+      const result = await queue.flush('test-session').then(
+        () => 'resolved' as const,
+        () => 'rejected' as const,
+      );
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+      expect(result).toBe('resolved');
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
   it('allows parallel writes to different sessions', async () => {
     // Different sessions should write in parallel without blocking each other
     mkdirSync(join(testDir, 'sessions', 'session-a'), { recursive: true });
@@ -349,5 +436,88 @@ describe('SessionPersistenceQueue', () => {
     await staleFlush;
     expect(existsSync(filePath)).toBe(false);
     expect(readdirSync(join(testDir, 'sessions', 'test-session')).filter((name) => name.includes('.tmp.'))).toEqual([]);
+  });
+
+  it('rejects a durable flush when its in-flight generation is cancelled', async () => {
+    let releaseWrite!: () => void;
+    const writeBlocked = new Promise<void>((resolve) => { releaseWrite = resolve; });
+    let reachedCommit!: () => void;
+    const atCommit = new Promise<void>((resolve) => { reachedCommit = resolve; });
+    queue = new SessionPersistenceQueue(60_000, {
+      beforeCommit: async () => {
+        reachedCommit();
+        await writeBlocked;
+      },
+    });
+
+    queue.enqueue(createTestSession('test-session', testDir, 'must-be-durable'));
+    const durableFlush = queue.flushDurably('test-session').then(
+      () => 'resolved' as const,
+      (error: unknown) => error,
+    );
+    await atCommit;
+    queue.cancel('test-session');
+    releaseWrite();
+
+    const result = await durableFlush;
+    expect(result).toBeInstanceOf(Error);
+    expect((result as Error).message).toBe('Session persistence was superseded before durable commit');
+  });
+
+  it('does not let a post-cancel same-ID generation satisfy the old durable waiter', async () => {
+    let releaseOld!: () => void;
+    const oldBlocked = new Promise<void>((resolve) => { releaseOld = resolve; });
+    let oldReachedCommit!: () => void;
+    const oldAtCommit = new Promise<void>((resolve) => { oldReachedCommit = resolve; });
+    let releaseNew!: () => void;
+    const newBlocked = new Promise<void>((resolve) => { releaseNew = resolve; });
+    let newReachedCommit!: () => void;
+    const newAtCommit = new Promise<void>((resolve) => { newReachedCommit = resolve; });
+    queue = new SessionPersistenceQueue(60_000, {
+      beforeCommit: async (session) => {
+        if (session.sdkSessionId === 'old-generation') {
+          oldReachedCommit();
+          await oldBlocked;
+        }
+        if (session.sdkSessionId === 'new-generation') {
+          newReachedCommit();
+          await newBlocked;
+        }
+      },
+    });
+
+    queue.enqueue(createTestSession('test-session', testDir, 'old-generation'));
+    const oldDurableFlush = queue.flushDurably('test-session').then(
+      () => 'resolved' as const,
+      (error: unknown) => error,
+    );
+    await oldAtCommit;
+    queue.cancel('test-session');
+
+    queue.enqueue(createTestSession('test-session', testDir, 'new-generation'));
+    const newDurableFlush = queue.flushDurably('test-session').then(
+      () => 'resolved' as const,
+      (error: unknown) => error,
+    );
+    await newAtCommit;
+
+    releaseOld();
+    releaseNew();
+    const [oldResult, newResult] = await Promise.all([oldDurableFlush, newDurableFlush]);
+    expect(oldResult).toBeInstanceOf(Error);
+    expect((oldResult as Error).message).toBe('Session persistence was superseded before durable commit');
+    expect(newResult).toBe('resolved');
+  });
+
+  it('releases live lifecycle tokens after many unique Session cancellations', () => {
+    queue = new SessionPersistenceQueue(60_000);
+    for (let index = 0; index < 1_000; index++) {
+      const sessionId = `cancelled-session-${index}`;
+      queue.enqueue(createTestSession(sessionId, testDir, `sdk-${index}`));
+      queue.cancel(sessionId);
+    }
+
+    expect(queue.pendingCount).toBe(0);
+    expect(queue.liveLifecycleCount).toBe(0);
   });
 });

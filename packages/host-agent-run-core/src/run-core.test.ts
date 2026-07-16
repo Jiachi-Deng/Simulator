@@ -1893,6 +1893,10 @@ describe('ModuleAgentRunCore', () => {
       grantId: 'grant-1', idempotencyKey: 'turn-retryable-create', request: request(),
     })).rejects.toMatchObject({ code: 'RUNTIME_UNAVAILABLE' })
     expect(core.debugSnapshot()).toMatchObject({ activeRuns: 0, retainedRuns: 0, moduleSessions: 0 })
+    expect(sessions.created).toHaveLength(0)
+    expect(sessions.states).toHaveLength(0)
+    expect(sessions.prompts).toHaveLength(0)
+    expect(sessions.reaped).toHaveLength(0)
     expect(clock.pendingTimers).toBe(0)
     sessions.createError = undefined
     await expect(core.createRun({
