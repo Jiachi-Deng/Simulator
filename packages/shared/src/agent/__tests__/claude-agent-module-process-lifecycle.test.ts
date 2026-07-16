@@ -169,6 +169,8 @@ describe('ClaudeAgent transient Module process lifecycle', () => {
       'win32',
     )).toEqual({});
     expect(moduleSpawner).not.toHaveBeenCalled();
+    expect('disposeForRestart' in ClaudeAgent.prototype).toBe(false);
+    expect(typeof ClaudeAgent.prototype.disposeAndReap).toBe('function');
   });
 
   testOnPosix('spawns transient Module Claude in a dedicated process group', async () => {

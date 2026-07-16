@@ -3713,6 +3713,11 @@ export class SessionManager implements ISessionManager {
   }
 
   private async disposeManagedAgentRuntime(managed: ManagedSession, reason: string): Promise<void> {
+    // One-Turn Module Sessions own a fixed provider/runtime until their strict
+    // disposeSessionAndReap transaction completes. Generic connection refresh
+    // must never detach their agent or pools from that ownership transaction.
+    if (managed.moduleAgentRun !== undefined) return
+
     const sessionId = managed.id
 
     if (managed.agent) {
@@ -3778,6 +3783,13 @@ export class SessionManager implements ISessionManager {
    *     can't apply the update.
    */
   private async tryRefreshAgentRuntime(managed: ManagedSession, reason: string): Promise<void> {
+    // A transient Module Turn must not switch provider/runtime mid-run. Its
+    // agent, process tree and pools remain owned by disposeSessionAndReap even
+    // when the matching connection is edited while the Turn is active. Treat
+    // any ownership marker as fail-closed; startup isolation handles invalid
+    // metadata separately.
+    if (managed.moduleAgentRun !== undefined) return
+
     // Serialize against any in-flight refresh on this session. The waiter
     // doesn't propagate the prior call's errors — those are logged at the
     // origin call site.

@@ -2906,7 +2906,12 @@ This is a branched conversation. All prior messages in this conversation are par
     return child as unknown as SpawnedProcess;
   }
 
-  async disposeForRestart(): Promise<void> {
+  /**
+   * Strict teardown for transient Module Sessions only. This intentionally
+   * has no disposeForRestart alias, so ordinary SessionManager runtime refresh
+   * keeps the pre-existing synchronous dispose() path for visible Host Sessions.
+   */
+  async disposeAndReap(): Promise<void> {
     const activeQuery = this.currentQuery;
     const processTrees = [...this.moduleProcessTrees];
     try { this.persistentInput?.end(); } catch { /* already closed */ }
@@ -2929,10 +2934,6 @@ This is a branched conversation. All prior messages in this conversation are par
       this.currentQueryAbortController = null;
       this.destroy();
     }
-  }
-
-  async disposeAndReap(): Promise<void> {
-    await this.disposeForRestart();
   }
 
   /**
