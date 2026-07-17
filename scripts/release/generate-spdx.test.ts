@@ -8,7 +8,7 @@ const lock = `{
     "nested/z": ["zeta@2.0.0", "", {}],
   }
 }`
-const inventory = `${"a".repeat(64)}  Contents/MacOS/Simulator\n${"b".repeat(64)}  Contents/Info.plist\n`
+const inventory = `${"b".repeat(64)}  Contents/Info.plist\n${"a".repeat(64)}  Contents/MacOS/Simulator\n`
 const packageVerificationCode = `${"c".repeat(40)}\n`
 
 function assertSpdx23ArtifactPackageSchema(value: unknown): void {
@@ -36,12 +36,34 @@ describe("minimal SPDX generator", () => {
     ])
   })
 
-  test("parses deterministic packaged file checksums", () => {
+  test("preserves canonical byte-ordered packaged file checksums", () => {
     expect(packagedFilesFromChecksums(inventory)).toEqual([
       { path: "Contents/Info.plist", sha256: "b".repeat(64) },
       { path: "Contents/MacOS/Simulator", sha256: "a".repeat(64) },
     ])
+
+    const edgePaths = [
+      "Contents/Frameworks/A.dylib",
+      "Contents/Info.plist",
+      "Contents/_CodeSignature/CodeResources",
+      "Contents/a.txt",
+      "Contents/\u{e000}.txt",
+      "Contents/\u{1f600}.txt",
+    ]
+    const edgeInventory = edgePaths
+      .map((path, index) => `${index.toString(16).padStart(64, "0")}  ${path}\n`)
+      .join("")
+    expect(packagedFilesFromChecksums(edgeInventory).map((entry) => entry.path)).toEqual(edgePaths)
+
     expect(() => packagedFilesFromChecksums(`${"a".repeat(64)}  ../escape\n`)).toThrow()
+    expect(() => packagedFilesFromChecksums(`${"a".repeat(64)}  Contents\\escape\n`)).toThrow()
+    expect(() => packagedFilesFromChecksums(`${"a".repeat(64)}  Contents//escape\n`)).toThrow()
+    expect(() => packagedFilesFromChecksums(`${"a".repeat(64)}  Contents/control\tname\n`)).toThrow()
+    expect(() => packagedFilesFromChecksums(`${"a".repeat(64)}  Contents/A\r\n`)).toThrow("canonical LF")
+    expect(() => packagedFilesFromChecksums(`${"a".repeat(64)}  Contents/A`)).toThrow("canonical LF")
+    expect(() => packagedFilesFromChecksums("\n")).toThrow("at least one")
+    expect(() => packagedFilesFromChecksums(`${"a".repeat(64)}  Contents/A\n${"b".repeat(64)}  Contents/A\n`)).toThrow("unique")
+    expect(() => packagedFilesFromChecksums(`${"a".repeat(64)}  Contents/_CodeSignature/CodeResources\n${"b".repeat(64)}  Contents/Frameworks/A.dylib\n`)).toThrow("byte order")
     expect(packageVerificationCodeFromContent(packageVerificationCode)).toBe("c".repeat(40))
     expect(() => packageVerificationCodeFromContent("not-a-sha1")).toThrow()
   })

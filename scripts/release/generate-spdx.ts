@@ -1,9 +1,23 @@
 import { createHash } from "node:crypto"
+import { Buffer } from "node:buffer"
 import { readFileSync, writeFileSync } from "node:fs"
 import { basename } from "node:path"
 
 interface LockedPackage { name: string; version: string }
 interface PackagedFile { path: string; sha256: string }
+
+function compareUtf8Bytes(left: string, right: string): number {
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"))
+}
+
+function isSafePackagedPath(path: string): boolean {
+  return path.length > 0
+    && !path.startsWith("/")
+    && !path.includes("\\")
+    && !/[\u0000-\u001f\u007f]/u.test(path)
+    && !path.split("/").some((part) => !part || part === "." || part === "..")
+    && Buffer.from(path, "utf8").toString("utf8") === path
+}
 
 export function packagesFromBunLock(content: string): LockedPackage[] {
   const packages = new Map<string, LockedPackage>()
@@ -12,21 +26,30 @@ export function packagesFromBunLock(content: string): LockedPackage[] {
     const item = { name: match[1], version: match[2] }
     packages.set(`${item.name}@${item.version}`, item)
   }
-  return [...packages.values()].sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version))
+  return [...packages.values()].sort((a, b) => compareUtf8Bytes(a.name, b.name) || compareUtf8Bytes(a.version, b.version))
 }
 
 export function packagedFilesFromChecksums(content: string): PackagedFile[] {
-  const files = content
-    .split(/\r?\n/)
-    .filter(Boolean)
-    .map((line) => {
-      const match = line.match(/^([0-9a-f]{64})  (.+)$/)
-      if (!match || match[2].startsWith("/") || match[2].split("/").includes("..")) {
-        throw new Error(`Invalid packaged file checksum line: ${line}`)
-      }
-      return { path: match[2], sha256: match[1] }
-    })
-  return files.sort((a, b) => a.path.localeCompare(b.path))
+  if (!content.endsWith("\n") || content.includes("\r")) {
+    throw new Error("Packaged file checksums must be canonical LF-terminated text")
+  }
+  if (content === "\n") {
+    throw new Error("Packaged file checksums must contain at least one entry")
+  }
+
+  const files = content.slice(0, -1).split("\n").map((line) => {
+    const match = line.match(/^([0-9a-f]{64})  (.+)$/)
+    if (!match || !isSafePackagedPath(match[2])) {
+      throw new Error("Invalid packaged file checksum line")
+    }
+    return { path: match[2], sha256: match[1] }
+  })
+  for (let index = 1; index < files.length; index += 1) {
+    if (compareUtf8Bytes(files[index - 1].path, files[index].path) >= 0) {
+      throw new Error("Packaged file checksum paths must be unique and in canonical UTF-8 byte order")
+    }
+  }
+  return files
 }
 
 export function packageVerificationCodeFromContent(content: string): string {

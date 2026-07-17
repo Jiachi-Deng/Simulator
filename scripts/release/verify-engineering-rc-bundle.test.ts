@@ -33,13 +33,16 @@ function mutateJson(name: string, mutate: (value: Record<string, any>) => void):
   write(path, canonicalJson(value))
 }
 
-function makeBundle(phase: EngineeringRcBundlePhase): void {
+function makeBundle(phase: EngineeringRcBundlePhase, packagedPaths = ["Contents/MacOS/Simulator"]): void {
   mkdirSync(root, { recursive: true })
   const dmg = "dmg-bytes"
   const zip = "zip-bytes"
   const verificationCode = "b".repeat(40)
-  const packagedPath = "Contents/MacOS/Simulator"
-  const packagedSha256 = "c".repeat(64)
+  const packagedFiles = packagedPaths.map((path, index) => ({
+    path,
+    sha256: index.toString(16).padStart(64, "0"),
+    spdxId: `SPDXRef-File-${index + 1}`,
+  }))
   const signatureObjects = [
     {
       path: ".",
@@ -87,7 +90,7 @@ function makeBundle(phase: EngineeringRcBundlePhase): void {
     ["dmg-app-inventory.raw.jsonl", "{\"path\":\".\"}\n"],
     ["dmg-signatures.json", signatureEvidence],
     ["package-verification-code.txt", `${verificationCode}\n`],
-    ["packaged-files.sha256", `${packagedSha256}  ${packagedPath}\n`],
+    ["packaged-files.sha256", packagedFiles.map((file) => `${file.sha256}  ${file.path}\n`).join("")],
     ["rc-validation.json", canonicalJson({
       schemaVersion: 1,
       ok: true,
@@ -108,18 +111,18 @@ function makeBundle(phase: EngineeringRcBundlePhase): void {
         downloadLocation: `git+https://github.com/Jiachi-Deng/Simulator.git@${sourceSha}`,
         filesAnalyzed: true,
         packageVerificationCode: { packageVerificationCodeValue: verificationCode },
-        hasFiles: ["SPDXRef-File-1"],
+        hasFiles: packagedFiles.map((file) => file.spdxId),
       }],
-      files: [{
-        fileName: `./app/${packagedPath}`,
-        SPDXID: "SPDXRef-File-1",
-        checksums: [{ algorithm: "SHA256", checksumValue: packagedSha256 }],
-      }],
-      relationships: [{
+      files: packagedFiles.map((file) => ({
+        fileName: `./app/${file.path}`,
+        SPDXID: file.spdxId,
+        checksums: [{ algorithm: "SHA256", checksumValue: file.sha256 }],
+      })),
+      relationships: packagedFiles.map((file) => ({
         spdxElementId: "SPDXRef-Package-Simulator",
         relationshipType: "CONTAINS",
-        relatedSpdxElement: "SPDXRef-File-1",
-      }],
+        relatedSpdxElement: file.spdxId,
+      })),
     })],
     ["transport-normalization-policy.json", "{\"schemaVersion\":1}\n"],
     ["verification-input.json", canonicalJson({
@@ -158,6 +161,23 @@ describe("Engineering RC bundle closure", () => {
   test.each(["pre", "final"] as const)("accepts an exact %s bundle", async (phase) => {
     makeBundle(phase)
     await expect(verify(phase)).resolves.toBeUndefined()
+  })
+
+  test("accepts canonical UTF-8 byte order across underscore, case, and Unicode paths", async () => {
+    makeBundle("pre", [
+      "Contents/Frameworks/A.dylib",
+      "Contents/Info.plist",
+      "Contents/_CodeSignature/CodeResources",
+      "Contents/a.txt",
+      "Contents/\u{e000}.txt",
+      "Contents/\u{1f600}.txt",
+    ])
+    await expect(verify("pre")).resolves.toBeUndefined()
+  })
+
+  test("rejects UTF-16-sorted paths that are not in canonical UTF-8 byte order", async () => {
+    makeBundle("pre", ["Contents/\u{1f600}.txt", "Contents/\u{e000}.txt"])
+    await expect(verify("pre")).rejects.toThrow("canonical UTF-8 byte order")
   })
 
   test("rejects an unexpected artifact member", async () => {

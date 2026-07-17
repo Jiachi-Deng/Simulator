@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto"
+import { Buffer } from "node:buffer"
 import { createReadStream, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs"
 import { basename, join, relative, resolve } from "node:path"
 
@@ -33,6 +34,10 @@ const SHA256 = /^[0-9a-f]{64}$/
 const SOURCE_SHA = /^[0-9a-f]{40}$/
 const RC_LABEL = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-rc\.([1-9]\d*)$/
 const MAXIMUM_TOTAL_BYTES = 3 * 1024 * 1024 * 1024
+
+function compareUtf8Bytes(left: string, right: string): number {
+  return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"))
+}
 
 interface VerificationOptions {
   phase: EngineeringRcBundlePhase
@@ -238,9 +243,10 @@ function assertSpdx(root: string, options: VerificationOptions): void {
     return { sha256: match[1], path: match[2] }
   })
   const packagedPaths = packagedFiles.map((entry) => entry.path)
-  if (packagedFiles.length === 0 || new Set(packagedPaths).size !== packagedPaths.length
-    || JSON.stringify(packagedPaths) !== JSON.stringify([...packagedPaths].sort())) {
-    throw new Error("packaged-files.sha256 must contain unique sorted entries")
+  if (packagedFiles.length === 0
+    || packagedPaths.some((path) => Buffer.from(path, "utf8").toString("utf8") !== path)
+    || packagedPaths.slice(1).some((path, index) => compareUtf8Bytes(packagedPaths[index], path) >= 0)) {
+    throw new Error("packaged-files.sha256 must contain unique entries in canonical UTF-8 byte order")
   }
 
   const spdxFiles = document.files.map((entry, index) => object(entry, `SPDX file ${index}`))
