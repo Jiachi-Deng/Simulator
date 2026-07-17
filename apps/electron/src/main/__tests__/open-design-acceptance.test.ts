@@ -1038,8 +1038,12 @@ describe('OpenDesign acceptance IPC', () => {
 
     const first = registerOpenDesignAcceptanceIpc(ipc, harness.controller)
     expect([...invokeHandlers.keys()].sort()).toEqual([
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_NEXT_BLACKOUT,
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_BLACKOUT_PROXY_CAPABILITY,
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_MODULE_AGENT_RUNTIME_SNAPSHOT,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.ROLLBACK,
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.TAKE_BLACKOUT_EVIDENCE,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC,
     ].sort())
     expect([...listeners.keys()]).toEqual([OPEN_DESIGN_ACCEPTANCE_CHANNELS.IS_AVAILABLE])
@@ -1058,6 +1062,44 @@ describe('OpenDesign acceptance IPC', () => {
       getRuntime: () => harness.runtime,
       host: { isAllowedSender: (candidate) => hostSenders.has(candidate) },
       mutationGate: createOpenDesignMutationGate(),
+      blackoutProxy: {
+        getCapability: () => ({
+          schemaVersion: 1, available: true, producer: 'external-host-agent-sse-proxy',
+          blackoutMs: 65_000, heartbeatMs: 10_000,
+        }),
+        armNextBlackout: async (request) => ({
+          schemaVersion: 1, armed: true, producer: 'external-host-agent-sse-proxy',
+          evidenceId: 'evidence-D01-1', caseId: request.caseId, turnOrdinal: request.turnOrdinal,
+          blackoutMs: 65_000, heartbeatMs: 10_000,
+        }),
+        takeBlackoutEvidence: async (request) => {
+          const start = Date.parse('2026-07-17T00:00:00.000Z')
+          const frame = (sequence: number, offset: number, type: string, source: string, business: boolean) => ({
+            sequence, at: new Date(start + offset).toISOString(), type, source, business, payloadSha256: 'a'.repeat(64),
+          })
+          return {
+            schemaVersion: 1, producer: 'external-host-agent-sse-proxy', ...request,
+            startedAt: new Date(start).toISOString(), endedAt: new Date(start + 65_000).toISOString(),
+            eventSequenceBefore: 1, eventSequenceAfter: 9, eventsLost: 0, heartbeatCount: 7,
+            heartbeatMaxGapMs: 10_000, bufferedEventCount: 3, replayedEventCount: 3,
+            replayComplete: true, replaySequenceStart: 10, terminalEventCount: 1,
+            deliveredFrames: [
+              frame(1, 0, 'blackout.started', 'harness', false),
+              ...Array.from({ length: 7 }, (_, index) => frame(index + 2, 1 + index * 10_000, 'heartbeat', 'host-health', false)),
+              frame(9, 65_000, 'blackout.ended', 'harness', false),
+              frame(10, 65_001, 'run.accepted', 'daemon', true),
+              frame(11, 65_002, 'turn.completed', 'daemon', true),
+              frame(12, 65_003, 'run.closed', 'daemon', true),
+            ],
+          } as any
+        },
+      },
+      getModuleAgentRuntimeSnapshot: () => ({
+        schemaVersion: 1,
+        v1: { activeRuns: 0, moduleSessions: 0 },
+        v2: { activeRuns: 0, moduleSessions: 0 },
+        sessions: { hiddenSessions: 0, transientSessions: 0, quarantinedSessions: 0 },
+      }),
     })
     first.dispose()
     const registration = registerOpenDesignAcceptanceIpc(ipc, ipcController)
@@ -1077,10 +1119,36 @@ describe('OpenDesign acceptance IPC', () => {
     const getState = invokeHandlers.get(OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE)!
     expect(await getState(ownerReload)).toMatchObject({ activeVersion: '0.14.5' })
     await expect(Promise.resolve().then(() => getState(ownerReload, {}))).rejects.toThrow('do not accept input')
+    expect(await invokeHandlers.get(OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_BLACKOUT_PROXY_CAPABILITY)!(ownerReload)).toEqual({
+      schemaVersion: 1, available: true, producer: 'external-host-agent-sse-proxy',
+      blackoutMs: 65_000, heartbeatMs: 10_000,
+    })
+    const armRequest = { caseId: 'D01', stack: 'new', turnOrdinal: 1 }
+    const arm = await invokeHandlers.get(OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_NEXT_BLACKOUT)!(ownerReload, armRequest) as any
+    expect(arm).toMatchObject({ evidenceId: 'evidence-D01-1', caseId: 'D01', turnOrdinal: 1 })
+    const evidenceRequest = { evidenceId: arm.evidenceId, caseId: 'D01', turnOrdinal: 1 }
+    expect(await invokeHandlers.get(OPEN_DESIGN_ACCEPTANCE_CHANNELS.TAKE_BLACKOUT_EVIDENCE)!(ownerReload, evidenceRequest))
+      .toMatchObject({ evidenceId: arm.evidenceId, terminalEventCount: 1 })
+    expect(await invokeHandlers.get(OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_MODULE_AGENT_RUNTIME_SNAPSHOT)!(ownerReload)).toEqual({
+      schemaVersion: 1,
+      v1: { activeRuns: 0, moduleSessions: 0 },
+      v2: { activeRuns: 0, moduleSessions: 0 },
+      sessions: { hiddenSessions: 0, transientSessions: 0, quarantinedSessions: 0 },
+    })
+    await expect(Promise.resolve().then(() => invokeHandlers.get(
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_NEXT_BLACKOUT,
+    )!(ownerReload, { ...armRequest, upstreamBaseUrl: 'http://127.0.0.1:1' }))).rejects.toThrow('invalid')
+    await expect(Promise.resolve().then(() => invokeHandlers.get(
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.TAKE_BLACKOUT_EVIDENCE,
+    )!(ownerReload, { ...evidenceRequest, token: 'secret' }))).rejects.toThrow('invalid')
     for (const channel of [
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.ROLLBACK,
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_BLACKOUT_PROXY_CAPABILITY,
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_NEXT_BLACKOUT,
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.TAKE_BLACKOUT_EVIDENCE,
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_MODULE_AGENT_RUNTIME_SNAPSHOT,
     ]) {
       await expect(Promise.resolve().then(() => invokeHandlers.get(channel)!(secondWindow))).rejects.toThrow('sender was rejected')
     }
@@ -1095,9 +1163,9 @@ describe('OpenDesign acceptance IPC', () => {
     await expect(Promise.resolve().then(() => getState(ownerReload))).rejects.toThrow('sender was rejected')
 
     const replacement = registerOpenDesignAcceptanceIpc(ipc, ipcController)
-    expect(invokeHandlers.size).toBe(3)
+    expect(invokeHandlers.size).toBe(7)
     registration.dispose()
-    expect(invokeHandlers.size).toBe(3)
+    expect(invokeHandlers.size).toBe(7)
     replacement.dispose()
     replacement.dispose()
     expect(invokeHandlers.size).toBe(0)

@@ -86,6 +86,17 @@ describe('remaining Craft references', () => {
     })).toBeUndefined()
 
     expect(categoryForCraftReference({
+      path: 'scripts/qa/run-open-design-m1-machine-evidence.ts',
+      line: "throw new Error('Craft main PID exited')",
+      value: 'Craft',
+    })?.id).toBe('m1-host-agent-craft-runtime-terminology')
+    expect(categoryForCraftReference({
+      path: 'scripts/qa/unrelated-product-copy.ts',
+      line: 'Welcome to Craft',
+      value: 'Craft',
+    })).toBeUndefined()
+
+    expect(categoryForCraftReference({
       path: 'docs/module-architecture.md',
       line: '### Craft priority 与失败结果',
       value: 'Craft',

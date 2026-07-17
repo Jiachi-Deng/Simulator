@@ -6,10 +6,17 @@ on:
       - .github/workflows/engineering-rc.yml
       - .github/workflows/open-design-production-input.yml
       - .github/workflows/open-design-release.yml
+      - .github/workflows/open-design-m1-machine-evidence.yml
+      - .github/workflows/open-design-m1-visual-attestation.yml
+      - .github/workflows/open-design-rc-acceptance.yml
       - .github/workflows/open-design-acceptance-rollback.yml
       - .github/workflows/open-design-release.md
       - .github/workflows/release-static-validation.yml
       - scripts/release/**
+      - scripts/qa/open-design-rc-acceptance-evidence.ts
+      - scripts/qa/open-design-rc-acceptance-evidence.test.ts
+      - scripts/qa/open-design-m1-*.ts
+      - scripts/qa/run-open-design-m1-machine-evidence.ts
       - scripts/build-policy.ts
       - scripts/build-policy.test.ts
       - scripts/build-environment.ts
@@ -26,6 +33,7 @@ on:
       - apps/electron/src/main/__tests__/update-policy.isolated.test.ts
       - package.json
       - bun.lock
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -41,6 +49,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -60,11 +69,17 @@ jobs:
           npm ci --ignore-scripts --prefix modules/open-design
 
       - name: Run release unit tests
-        run: bun test scripts/release/*.test.ts scripts/build-environment.test.ts scripts/build-policy.test.ts
+        run: >-
+          bun test scripts/release/*.test.ts
+          scripts/qa/open-design-m1-machine-evidence.test.ts
+          scripts/qa/open-design-m1-visual-attestation.test.ts
+          scripts/qa/open-design-m1-final-evidence.test.ts
+          scripts/qa/open-design-rc-acceptance-evidence.test.ts
+          scripts/build-environment.test.ts scripts/build-policy.test.ts
 
       - name: Parse release workflow YAML
         run: >-
-          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }' .github/workflows/engineering-rc.yml .github/workflows/open-design-production-input.yml .github/workflows/open-design-release.yml .github/workflows/open-design-acceptance-rollback.yml .github/workflows/release-static-validation.yml
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }' .github/workflows/engineering-rc.yml .github/workflows/open-design-production-input.yml .github/workflows/open-design-release.yml .github/workflows/open-design-m1-machine-evidence.yml .github/workflows/open-design-m1-visual-attestation.yml .github/workflows/open-design-rc-acceptance.yml .github/workflows/open-design-acceptance-rollback.yml .github/workflows/release-static-validation.yml
 
       - name: Validate embedded release workflow Bash
         shell: bash
@@ -76,6 +91,9 @@ jobs:
           paths = [
             ".github/workflows/open-design-production-input.yml",
             ".github/workflows/open-design-release.yml",
+            ".github/workflows/open-design-m1-machine-evidence.yml",
+            ".github/workflows/open-design-m1-visual-attestation.yml",
+            ".github/workflows/open-design-rc-acceptance.yml",
             ".github/workflows/open-design-acceptance-rollback.yml",
           ]
           paths.each do |path|
@@ -97,4 +115,16 @@ jobs:
         run: find scripts/release -type f -name '*.sh' -print0 | xargs -0 -r -n1 bash -n
 
       - name: Check whitespace diff
-        run: git diff --check "${{ github.event.pull_request.base.sha }}" HEAD
+        shell: bash
+        env:
+          PULL_REQUEST_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_EVENT_NAME" = pull_request ]]; then
+            [[ "$PULL_REQUEST_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]
+            git diff --check "$PULL_REQUEST_BASE_SHA" HEAD
+          else
+            test "$GITHUB_EVENT_NAME" = workflow_dispatch
+            test "$GITHUB_REF" = refs/heads/main
+            git diff --check HEAD^ HEAD
+          fi

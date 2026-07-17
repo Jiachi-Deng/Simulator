@@ -10,15 +10,18 @@ const workflowPath = join(root, ".github/workflows/open-design-release.yml")
 const documentationPath = join(root, ".github/workflows/open-design-release.md")
 const staticValidationPath = join(root, ".github/workflows/release-static-validation.yml")
 const rollbackPath = join(root, ".github/workflows/open-design-acceptance-rollback.yml")
+const acceptancePath = join(root, ".github/workflows/open-design-rc-acceptance.yml")
 const producerSource = readFileSync(producerPath, "utf8")
 const source = readFileSync(workflowPath, "utf8")
 const documentation = readFileSync(documentationPath, "utf8")
 const staticValidation = readFileSync(staticValidationPath, "utf8")
 const rollbackSource = readFileSync(rollbackPath, "utf8")
+const acceptanceSource = readFileSync(acceptancePath, "utf8")
 const producer = Bun.YAML.parse(producerSource) as Record<string, any>
 const workflow = Bun.YAML.parse(source) as Record<string, any>
 const staticWorkflow = Bun.YAML.parse(staticValidation) as Record<string, any>
 const rollbackWorkflow = Bun.YAML.parse(rollbackSource) as Record<string, any>
+const acceptanceWorkflow = Bun.YAML.parse(acceptanceSource) as Record<string, any>
 
 function step(jobName: "initial" | "refresh", name: string): Record<string, any> {
   const found = workflow.jobs[jobName].steps.find((candidate: Record<string, any>) => candidate.name === name)
@@ -54,18 +57,25 @@ describe("OpenDesign official release workflow", () => {
     expect(workflow.on.schedule).toEqual([{ cron: "23 */12 * * *" }])
     expect(workflow.on.workflow_dispatch.inputs.operation.options).toEqual(["refresh", "initial"])
     expect(workflow.on.workflow_dispatch.inputs.release_track.options).toEqual(["prerelease", "stable"])
-    expect(workflow.jobs.initial.environment.name).toContain("open-design-production-stable")
+    expect(workflow.jobs.initial.environment.name).toContain("open-design-production")
     expect(workflow.jobs.initial.environment.name).toContain("open-design-prerelease")
-    expect(workflow.jobs.refresh.environment.name).toContain("open-design-prerelease")
-    expect(workflow.jobs.refresh.environment.name).toContain("open-design-production")
+    expect(workflow.jobs.refresh.environment.name).toBe(
+      "${{ github.event_name == 'workflow_dispatch' && inputs.release_track == 'prerelease' && 'open-design-prerelease' || 'open-design-production' }}",
+    )
     expect(workflow.jobs.initial.if).toContain("github.repository == 'Jiachi-Deng/Simulator'")
     expect(workflow.jobs.refresh.if).toContain("github.repository == 'Jiachi-Deng/Simulator'")
     expect(workflow.jobs.initial.if).toContain("vars.OPEN_DESIGN_PRERELEASE_ENABLED == 'true'")
     expect(workflow.jobs.initial.if).toContain("vars.OPEN_DESIGN_STABLE_CHANNEL_ENABLED == 'true'")
     expect(workflow.jobs.refresh.if).toContain("vars.OPEN_DESIGN_RELEASE_ENABLED == 'true'")
     expect(workflow.jobs.refresh.if).toContain("vars.OPEN_DESIGN_PRERELEASE_ENABLED == 'true'")
+    expect(workflow.jobs.refresh.if).toContain("vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED != 'true'")
     expect(workflow.jobs.initial.if).toContain("inputs.operation == 'initial'")
+    expect(workflow.jobs.initial.env.RC_SOURCE_SHA).toBe("6b39a9bcc0f158645897976e23f334c5cab771f4")
     expect(workflow.jobs.refresh.if).toContain("github.event_name == 'schedule'")
+    for (const jobName of ["initial", "refresh"] as const) {
+      const checkout = step(jobName, "Checkout fixed main source")
+      expect(checkout.with["persist-credentials"]).toBe(false)
+    }
     const actionReferences = [...source.matchAll(/uses:\s+([^\s#]+)/g)].map((match) => match[1])
     expect(actionReferences.length).toBeGreaterThan(0)
     expect(actionReferences.every((reference) => /@[0-9a-f]{40}$/.test(reference))).toBe(true)
@@ -248,22 +258,45 @@ describe("OpenDesign official release workflow", () => {
     expect(stable).toContain('test "$actual_rc" = "$expected_rc"')
     expect(stable).toContain('test "$(find "$rc" -maxdepth 1 -type f | wc -l | tr -d \' \')" = 4')
     expect(stable).toContain('test -f "$rc/$asset"')
+    expect(stable).toContain('git rev-parse "refs/tags/$RC_RELEASE_TAG^{commit}"')
+    expect(stable).toContain('git merge-base --is-ancestor "$RC_SOURCE_SHA" "$GITHUB_SHA"')
+    expect(stable).toContain('.targetCommitish <<<"$rc_state")" = "$RC_SOURCE_SHA"')
+    expect(stable).toContain(".schemaVersion == 2")
+    expect(stable).toContain(".hostHeadSha == $hostHeadSha")
+    expect(stable).toContain(".rcSourceSha == $rcSourceSha")
+    expect(stable).toContain("hostArtifactSha256")
+    expect(stable).toContain("hostBuildRunId")
+    expect(stable).toContain("open-design-rc-acceptance-intake.json")
+    expect(stable).toContain("evidenceBundleSha256")
+    expect(stable).toContain("machineEvidence")
+    expect(stable).toContain("visualEvidence")
+    expect(stable).toContain('test "$(wc -l < "$acceptance/SHA256SUMS" | tr -d \' \')" = 2')
+    expect(stable).toContain('test "$(find "$acceptance" -maxdepth 1 -type f | wc -l | tr -d \' \')" = 3')
     expect(stable).not.toContain("|| true")
 
     const authenticatedBuild = step("initial", "Authenticate prior state, dry-run, and build signed initial assets").run
     expect(authenticatedBuild).toContain('--bundle-root "$BASELINE_BUNDLE"')
     expect(authenticatedBuild).toContain('--bundle-root "$rc_verify"')
+    expect(authenticatedBuild).toContain('--previous-sequence "$BASELINE_SEQUENCE"')
+    expect(authenticatedBuild).toContain('--previous-issued-at "$BASELINE_ISSUED_AT"')
     expect(authenticatedBuild).toContain('import { encodeCanonicalCatalog } from "@simulator/module-release-trust";')
     expect(authenticatedBuild).toContain('flag: "wx"')
     expect(authenticatedBuild.indexOf('baseline-verify.json')).toBeLessThan(authenticatedBuild.indexOf("--dry-run"))
     expect(authenticatedBuild.indexOf('rc-verify.json')).toBeLessThan(authenticatedBuild.indexOf("--dry-run"))
   })
 
-  test("refreshes stable on schedule or the exact RC manually without publishing an official config", () => {
+  test("refreshes either fixed track above authenticated high-water without publishing the RC config", () => {
     const refresh = source.slice(source.indexOf("  refresh:"))
     const resolve = step("refresh", "Resolve exact refresh target").run
+    expect(resolve).toContain("release_pages=$(gh api --paginate --slurp")
+    expect(resolve.match(/releases\?per_page=100/g)).toHaveLength(1)
+    expect(resolve).not.toContain("if gh ")
     expect(resolve).toContain('candidate_versions=("0.14.6" "0.14.5")')
     expect(resolve).toContain('test -z "$DISPATCH_RELEASE_TRACK"')
+    expect(resolve).toContain('stable_matching_count=$(jq')
+    expect(resolve).toContain('test "$stable_matching_count" = 0')
+    expect(resolve).toContain('lkg_matching_count=$(jq')
+    expect(resolve).toContain('test "$lkg_matching_count" = 1')
     expect(resolve).toContain('selected_version="0.14.6-rc.1"')
     expect(resolve).toContain('release_track="prerelease"')
     expect(resolve).toContain('expected_prerelease="true"')
@@ -271,6 +304,8 @@ describe("OpenDesign official release workflow", () => {
     expect(resolve).toContain('expected_host_version_range=">=0.12.0"')
     expect(resolve).toContain('test "$(jq -r .isDraft <<<"$release_state")" = false')
     expect(resolve).toContain('test "$(jq -r .isPrerelease <<<"$release_state")" = "$expected_prerelease"')
+    expect(resolve).toContain('test "$(jq -r .targetCommitish <<<"$release_state")" = "$RC_SOURCE_SHA"')
+    expect(resolve).toContain("RELEASE_TARGET_COMMITISH=%s")
     expect(resolve).toContain('test "$actual" = "$expected"')
 
     const authority = step("refresh", "Validate fixed refresh authority").run
@@ -278,16 +313,29 @@ describe("OpenDesign official release workflow", () => {
     expect(authority).toContain('test "$RELEASE_TAG" = "open-design-v0.14.6-rc.1"')
     expect(authority).toContain('test "$PUBLIC_ASSET_COUNT" = 4')
     expect(authority).toContain('test "$STABLE_CHANNEL_CONFIRMATION" = "REFRESH_OPEN_DESIGN_0_14_6_RC_1"')
+    expect(authority).toContain('test "$RELEASE_TARGET_COMMITISH" = "$RC_SOURCE_SHA"')
+    expect(authority).toContain('git rev-parse "refs/tags/$RELEASE_TAG^{commit}"')
 
     const download = step("refresh", "Download exact fixed-tag public bundle").run
     expect(download).toContain('expected_assets=("$ARCHIVE_ASSET" "$CATALOG_ASSET" "$ENVELOPE_ASSET" "$METADATA_ASSET")')
     expect(download).toContain('[[ "$CONFIG_REQUIRED" = false ]] || expected_assets+=("$CONFIG_ASSET")')
     expect(download).toContain('test ! -e "$source/$CONFIG_ASSET"')
     expect(download).toContain('refresh_input="$work/private-input"')
+    expect(download).toContain('cmp "$SOURCE_AUTHORITY_CONFIG" "$baseline/open-design-official-channel.json"')
+    expect(download).not.toContain("encodeCanonicalCatalog")
+
+    const predecessor = step("refresh", "Authenticate prerelease cross-track predecessor").run
+    expect(predecessor).toContain('--module-version 0.14.5')
+    expect(predecessor).toContain('--bundle-root "$BASELINE_BUNDLE"')
+    expect(predecessor).toContain('.catalogState.highestSequence == $sequence')
 
     const state = step("refresh", "Derive monotonic refresh state and bounded window").run
     expect(state).toContain("SOURCE_VERIFICATION_TIME_MS=${previousIssuedAtMs + 1000}")
-    expect(state).toContain("CATALOG_SEQUENCE=${catalog.sequence + 1}")
+    expect(state).toContain("highWaterSequence = Math.max(highWaterSequence, baselineSequence)")
+    expect(state).toContain("highWaterIssuedAtMs = Math.max(highWaterIssuedAtMs, baselineIssuedAtMs)")
+    expect(state).toContain("VERIFY_PREVIOUS_SEQUENCE=${highWaterSequence}")
+    expect(state).toContain("VERIFY_PREVIOUS_ISSUED_AT=${new Date(highWaterIssuedAtMs).toISOString()}")
+    expect(state).toContain("CATALOG_SEQUENCE=${highWaterSequence + 1}")
     expect(state).toContain("issuedAtMs + 20 * 60 * 60 * 1000")
 
     const signedRefresh = step("refresh", "Authenticate source, dry-run, and create signed refresh assets").run
@@ -306,7 +354,12 @@ describe("OpenDesign official release workflow", () => {
     expect(signedRefresh).toContain('.previousCatalog.sequence == $previousSequence')
     expect(signedRefresh).toContain('.plannedFiles == [$catalog, $envelope, $metadata]')
     expect(signedRefresh).toContain('.immutableArchiveVerified == true and .verifiedWithModuleInstaller == true')
-
+    expect(signedRefresh.match(/PRIVATE_DERIVED_PUBLIC=/g)).toHaveLength(1)
+    const keyComparison = signedRefresh.indexOf('cmp "$PUBLIC_KEY_FILE" "$REFRESH_WORK/private-derived-public.pem"')
+    expect(keyComparison).toBeGreaterThan(0)
+    expect(keyComparison).toBeLessThan(signedRefresh.indexOf("verifyModuleReleaseCatalog"))
+    expect(keyComparison).toBeLessThan(signedRefresh.indexOf("--dry-run"))
+    expect(keyComparison).toBeLessThan(signedRefresh.indexOf("--private-key-env OPEN_DESIGN_RELEASE_PRIVATE_KEY"))
     expect(refresh.indexOf("Reconstruct and verify complete refreshed bundle")).toBeLessThan(refresh.indexOf("Replace only refresh assets"))
     expect(refresh).toContain('canonical=("$CATALOG_ASSET" "$ENVELOPE_ASSET" "$METADATA_ASSET")')
     expect(refresh).toContain('public_assets=("$ARCHIVE_ASSET" "$CATALOG_ASSET" "$ENVELOPE_ASSET" "$METADATA_ASSET")')
@@ -315,12 +368,16 @@ describe("OpenDesign official release workflow", () => {
     expect(refresh).toContain("--draft=true")
     expect(refresh).toContain("--draft=false")
     expect(refresh).toContain('cmp "$SOURCE_BUNDLE/$ARCHIVE_ASSET" "$remote/$ARCHIVE_ASSET"')
+    expect(refresh).toContain('[[ "$CONFIG_REQUIRED" = false ]] || public_assets+=("$CONFIG_ASSET")')
     expect(refresh).toContain('cmp "$SOURCE_BUNDLE/$CONFIG_ASSET" "$remote/$CONFIG_ASSET"')
     expect(refresh).toContain('test ! -e "$remote/$CONFIG_ASSET"')
     expect(refresh).toContain('cp "$REFRESH_INPUT/$CONFIG_ASSET" "$remote/$CONFIG_ASSET"')
     expect(refresh.indexOf('gh release edit "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --draft=true')).toBeLessThan(refresh.indexOf('gh release upload "$RELEASE_TAG"'))
     expect(refresh).toContain('cmp "$SOURCE_BUNDLE/$asset" "$preflight/$asset"')
     expect(refresh.indexOf('cmp "$SOURCE_BUNDLE/$asset" "$preflight/$asset"')).toBeLessThan(refresh.indexOf('gh release upload "$RELEASE_TAG"'))
+    expect(refresh).toContain("hide_requested=1")
+    expect(refresh).toContain("Draft transition response was lost")
+    expect(refresh).toContain("Republish response was lost")
     expect(refresh).not.toContain('cp "$REFRESH_OUTPUT/$ARCHIVE_ASSET"')
     expect(refresh).not.toContain('cp "$REFRESH_OUTPUT/$CONFIG_ASSET"')
     expect(refresh).not.toContain('gh release upload "$RELEASE_TAG" "$REFRESH_INPUT/$CONFIG_ASSET"')
@@ -339,6 +396,8 @@ describe("OpenDesign official release workflow", () => {
     expect(prose).toContain("current 0.14.5 sequence + 1")
     expect(prose).toContain("max(current 0.14.5 sequence, accepted RC sequence) + 1")
     expect(prose).toContain("all four public RC assets")
+    expect(prose).toContain("separate immutable source authority")
+    expect(prose).toContain("tag is never moved")
     expect(documentation).not.toContain("BEGIN PRIVATE KEY")
   })
 
@@ -351,6 +410,7 @@ describe("OpenDesign official release workflow", () => {
     expect(staticValidation.indexOf("Setup Node")).toBeLessThan(staticValidation.indexOf("Install exact OpenDesign publisher dependencies"))
     expect(staticValidation.indexOf("Install exact OpenDesign publisher dependencies")).toBeLessThan(staticValidation.indexOf("Run release unit tests"))
     expect(staticValidation).toContain(".github/workflows/open-design-release.yml")
+    expect(staticValidation).toContain(".github/workflows/open-design-rc-acceptance.yml")
     expect(staticValidation).toContain(".github/workflows/open-design-acceptance-rollback.yml")
     expect(staticValidation).toContain(".github/workflows/open-design-production-input.yml")
     expect(staticValidation).toContain(".github/workflows/open-design-release.md")
@@ -363,6 +423,7 @@ describe("OpenDesign official release workflow", () => {
     for (const [workflowName, parsed] of [
       ["release", workflow],
       ["rollback", rollbackWorkflow],
+      ["acceptance", acceptanceWorkflow],
     ] as const) {
       for (const [jobName, job] of Object.entries(parsed.jobs as Record<string, any>)) {
         for (const candidate of job.steps as Array<Record<string, any>>) {

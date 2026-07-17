@@ -111,16 +111,26 @@ describe('OpenDesign preload facade', () => {
 })
 
 describe('OpenDesign acceptance preload facade', () => {
-  it('invokes only the three fixed acceptance channels without renderer-controlled input', async () => {
+  it('invokes only fixed acceptance channels and passes only closed blackout identities', async () => {
     invoke.mockClear()
     const facade = createOpenDesignAcceptanceFacade({ invoke })
     await facade.getState()
     await facade.updateToRc()
     await facade.rollback()
+    await facade.getBlackoutProxyCapability()
+    await facade.armNextBlackout({ caseId: 'D01', stack: 'new', turnOrdinal: 1 })
+    await facade.takeBlackoutEvidence({ evidenceId: 'evidence-D01-1', caseId: 'D01', turnOrdinal: 1 })
+    await facade.getModuleAgentRuntimeSnapshot()
     expect(invoke.mock.calls).toEqual([
       [OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE],
       [OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC],
       [OPEN_DESIGN_ACCEPTANCE_CHANNELS.ROLLBACK],
+      [OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_BLACKOUT_PROXY_CAPABILITY],
+      [OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_NEXT_BLACKOUT, { caseId: 'D01', stack: 'new', turnOrdinal: 1 }],
+      [OPEN_DESIGN_ACCEPTANCE_CHANNELS.TAKE_BLACKOUT_EVIDENCE, {
+        evidenceId: 'evidence-D01-1', caseId: 'D01', turnOrdinal: 1,
+      }],
+      [OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_MODULE_AGENT_RUNTIME_SNAPSHOT],
     ])
   })
 

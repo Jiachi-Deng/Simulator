@@ -1,0 +1,292 @@
+name: OpenDesign M1 Visual Attestation Producer
+
+on:
+  workflow_dispatch:
+    inputs:
+      machine_run_id:
+        description: Successful OpenDesign M1 Machine Evidence Producer run ID from this exact main commit.
+        required: true
+        type: string
+      decisions_base64:
+        description: Canonical 20-item product-owner Preview decision array encoded as base64. Never include credentials or logs.
+        required: true
+        type: string
+      decisions_sha256:
+        description: SHA-256 of the decoded canonical Preview decision array.
+        required: true
+        type: string
+      confirmation:
+        description: Enter ATTEST_OPEN_DESIGN_M1_20_PREVIEWS.
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: open-design-m1-visual-attestation
+  cancel-in-progress: false
+
+jobs:
+  attest-previews:
+    name: Authenticate machine evidence and seal visual decisions
+    if: >-
+      github.repository == 'Jiachi-Deng/Simulator' &&
+      github.ref == 'refs/heads/main' &&
+      vars.OPEN_DESIGN_M1_VISUAL_ATTESTATION_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: open-design-m1-visual-attestation
+    env:
+      RELEASE_OWNER: Jiachi-Deng
+      RELEASE_REPOSITORY: Simulator
+      MACHINE_ARTIFACT_NAME: open-design-m1-machine-evidence
+      MACHINE_WORKFLOW_PATH: .github/workflows/open-design-m1-machine-evidence.yml
+      VISUAL_ARTIFACT_NAME: open-design-m1-visual-attestation
+      VISUAL_WORKFLOW_PATH: .github/workflows/open-design-m1-visual-attestation.yml
+      MACHINE_RUN_ID: ${{ inputs.machine_run_id }}
+      DECISIONS_BASE64: ${{ inputs.decisions_base64 }}
+      DECISIONS_SHA256: ${{ inputs.decisions_sha256 }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+
+    steps:
+      - name: Checkout exact visual producer authority
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.10"
+
+      - name: Install exact offline validation dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Authenticate exact machine producer run and artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$GITHUB_REPOSITORY" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_RUN_ATTEMPT" = "1"
+          test "$CONFIRMATION" = "ATTEST_OPEN_DESIGN_M1_20_PREVIEWS"
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$MACHINE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          test "$MACHINE_RUN_ID" != "$GITHUB_RUN_ID"
+
+          machine_run=$(gh api "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/runs/$MACHINE_RUN_ID")
+          test "$(jq -r .status <<<"$machine_run")" = completed
+          test "$(jq -r .conclusion <<<"$machine_run")" = success
+          test "$(jq -r .head_branch <<<"$machine_run")" = main
+          test "$(jq -r .head_sha <<<"$machine_run")" = "$GITHUB_SHA"
+          test "$(jq -r .repository.full_name <<<"$machine_run")" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
+          test "$(jq -r .path <<<"$machine_run")" = "$MACHINE_WORKFLOW_PATH"
+          test "$(jq -r .event <<<"$machine_run")" = workflow_dispatch
+          test "$(jq -r .run_attempt <<<"$machine_run")" = 1
+
+          visual_run=$(gh api "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/runs/$GITHUB_RUN_ID")
+          test "$(jq -r .status <<<"$visual_run")" = in_progress
+          test "$(jq -r .head_branch <<<"$visual_run")" = main
+          test "$(jq -r .head_sha <<<"$visual_run")" = "$GITHUB_SHA"
+          test "$(jq -r .repository.full_name <<<"$visual_run")" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
+          test "$(jq -r .path <<<"$visual_run")" = "$VISUAL_WORKFLOW_PATH"
+          test "$(jq -r .event <<<"$visual_run")" = workflow_dispatch
+          test "$(jq -r .run_attempt <<<"$visual_run")" = 1
+          node -e '
+            const machineCompleted = Date.parse(process.argv[1]);
+            const visualCreated = Date.parse(process.argv[2]);
+            if (!Number.isFinite(machineCompleted) || !Number.isFinite(visualCreated)
+              || machineCompleted >= visualCreated) process.exit(1);
+          ' "$(jq -er .updated_at <<<"$machine_run")" "$(jq -er .created_at <<<"$visual_run")"
+
+          machine_jobs=$(gh api \
+            "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/runs/$MACHINE_RUN_ID/attempts/1/jobs?per_page=100")
+          test "$(jq -r '.total_count' <<<"$machine_jobs")" = 1
+          test "$(jq -r '.jobs[0].status' <<<"$machine_jobs")" = completed
+          test "$(jq -r '.jobs[0].conclusion' <<<"$machine_jobs")" = success
+          for required_label in self-hosted macOS ARM64 simulator-open-design-m1; do
+            jq -e --arg label "$required_label" \
+              '.jobs | length == 1 and (.jobs[0].labels | index($label) != null)' <<<"$machine_jobs" >/dev/null
+          done
+
+          artifacts=$(gh api \
+            "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/runs/$MACHINE_RUN_ID/artifacts?per_page=100")
+          test "$(jq -r .total_count <<<"$artifacts")" = 1
+          test "$(jq '[.artifacts[] | select(.expired == false)] | length' <<<"$artifacts")" = 1
+          test "$(jq --arg name "$MACHINE_ARTIFACT_NAME" \
+            '[.artifacts[] | select(.expired == false and .name == $name)] | length' <<<"$artifacts")" = 1
+          artifact=$(jq -ce --arg name "$MACHINE_ARTIFACT_NAME" \
+            '.artifacts[] | select(.expired == false and .name == $name)' <<<"$artifacts")
+          artifact_id=$(jq -er .id <<<"$artifact")
+          [[ "$artifact_id" =~ ^[1-9][0-9]*$ ]]
+          test "$(jq -r .workflow_run.id <<<"$artifact")" = "$MACHINE_RUN_ID"
+
+          root="$RUNNER_TEMP/open-design-m1-visual-attestation"
+          machine_root="$root/machine"
+          archive="$root/machine-evidence.zip"
+          mkdir -m 700 -p "$machine_root"
+          gh api -H "Accept: application/vnd.github+json" \
+            "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/artifacts/$artifact_id/zip" > "$archive"
+          test -s "$archive"
+          test "$(wc -c < "$archive" | tr -d ' ')" -le 104857600
+
+          python3 - "$archive" "$machine_root" <<'PY'
+          import os
+          import stat
+          import sys
+          import zipfile
+          from pathlib import PurePosixPath
+
+          archive, root = sys.argv[1:]
+          maximum_total = 96 * 1024 * 1024
+          maximum_members = 182
+          maximum_directories = 32
+          maximum_path_bytes = 512
+          maximum_path_depth = 8
+
+          def maximum_for(path):
+              if path == "machine-manifest.json": return 64 * 1024
+              if path == "required-ci.json": return 256 * 1024
+              if path == "SHA256SUMS": return 64 * 1024
+              if path.startswith("records/"): return 32 * 1024
+              if path.startswith("events/"): return 256 * 1024
+              if path.startswith("workspace/"): return 64 * 1024
+              if path.startswith("previews/"): return 4 * 1024 * 1024
+              if path.startswith("rollback/") or path.startswith("trust/"): return 256 * 1024
+              raise ValueError("unexpected artifact path")
+
+          seen = set()
+          total = 0
+          files = 0
+          members = 0
+          directories = 0
+          with zipfile.ZipFile(archive) as source:
+              for info in source.infolist():
+                  name = info.filename
+                  raw_path = name[:-1] if name.endswith("/") else name
+                  raw_parts = raw_path.split("/")
+                  path = PurePosixPath(raw_path)
+                  if (not raw_path or "\\" in name or "\x00" in name or name.startswith("/") or
+                          len(raw_path.encode("utf-8")) > maximum_path_bytes or
+                          len(raw_parts) > maximum_path_depth or
+                          any(part in ("", ".", "..") for part in raw_parts) or raw_path in seen):
+                      raise ValueError("unsafe or duplicate artifact path")
+                  seen.add(raw_path)
+                  members += 1
+                  if members > maximum_members:
+                      raise ValueError("artifact contains too many members")
+                  mode = info.external_attr >> 16
+                  file_type = stat.S_IFMT(mode)
+                  if stat.S_ISLNK(mode) or (file_type not in (0, stat.S_IFREG, stat.S_IFDIR)):
+                      raise ValueError("non-regular artifact member")
+                  if info.flag_bits & 1:
+                      raise ValueError("encrypted artifact member")
+                  if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                      raise ValueError("unsupported artifact compression")
+                  destination = os.path.join(root, *path.parts)
+                  if info.is_dir():
+                      directories += 1
+                      if directories > maximum_directories:
+                          raise ValueError("artifact contains too many directories")
+                      os.makedirs(destination, mode=0o700, exist_ok=True)
+                      continue
+                  limit = maximum_for(name)
+                  if info.file_size < 1 or info.file_size > limit:
+                      raise ValueError("artifact member exceeds limit")
+                  total += info.file_size
+                  files += 1
+                  if total > maximum_total or files > 150:
+                      raise ValueError("artifact exceeds fixed closure")
+                  os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
+                  written = 0
+                  with source.open(info) as reader, open(destination, "xb") as writer:
+                      while chunk := reader.read(1024 * 1024):
+                          written += len(chunk)
+                          if written > info.file_size or written > limit:
+                              raise ValueError("artifact member expands beyond declared limit")
+                          writer.write(chunk)
+                  if written != info.file_size or os.path.getsize(destination) != info.file_size:
+                      raise ValueError("artifact member changed during extraction")
+                  os.chmod(destination, 0o600)
+          if files != 150:
+              raise ValueError("artifact does not contain exactly 150 files")
+          PY
+
+          printf 'VISUAL_ROOT=%s\nMACHINE_ROOT=%s\nMACHINE_HEAD_SHA=%s\n' \
+            "$root" "$machine_root" "$GITHUB_SHA" >> "$GITHUB_ENV"
+
+      - name: Decode exact product-owner Preview decisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$DECISIONS_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "${#DECISIONS_BASE64}" -ge 4
+          test "${#DECISIONS_BASE64}" -le 10924
+          [[ "$DECISIONS_BASE64" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]
+          test $((${#DECISIONS_BASE64} % 4)) -eq 0
+
+          decisions_dir="$VISUAL_ROOT/input"
+          decisions="$decisions_dir/visual-decisions.json"
+          mkdir -m 700 "$decisions_dir"
+          printf '%s' "$DECISIONS_BASE64" | base64 --decode > "$decisions"
+          test "$(wc -c < "$decisions" | tr -d ' ')" -le 8192
+          test "$(base64 -w 0 "$decisions")" = "$DECISIONS_BASE64"
+          test "$(sha256sum "$decisions" | awk '{print $1}')" = "$DECISIONS_SHA256"
+          chmod 600 "$decisions"
+          printf 'VISUAL_DECISIONS=%s\n' "$decisions" >> "$GITHUB_ENV"
+
+      - name: Cross-bind and seal exact visual attestation
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          visual_output="$VISUAL_ROOT/output"
+          completed_at=$(date -u +'%Y-%m-%dT%H:%M:%S.000Z')
+          result=$(bun scripts/qa/open-design-m1-visual-attestation.ts produce \
+            --machine-root "$MACHINE_ROOT" \
+            --machine-run-id "$MACHINE_RUN_ID" \
+            --machine-run-attempt 1 \
+            --machine-head-sha "$MACHINE_HEAD_SHA" \
+            --visual-root "$visual_output" \
+            --visual-run-id "$GITHUB_RUN_ID" \
+            --visual-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --visual-head-sha "$GITHUB_SHA" \
+            --decisions "$VISUAL_DECISIONS" \
+            --completed-at "$completed_at")
+          test "$(jq -r .artifactName <<<"$result")" = "$VISUAL_ARTIFACT_NAME"
+          test "$(jq -r .fileCount <<<"$result")" = 2
+          test "$(jq -r .objectPath <<<"$result")" = visual-attestation.json
+          [[ "$(jq -r .sha256 <<<"$result")" =~ ^[0-9a-f]{64}$ ]]
+
+          bun scripts/qa/open-design-m1-visual-attestation.ts validate \
+            --machine-root "$MACHINE_ROOT" \
+            --machine-run-id "$MACHINE_RUN_ID" \
+            --machine-run-attempt 1 \
+            --machine-head-sha "$MACHINE_HEAD_SHA" \
+            --visual-root "$visual_output" \
+            --visual-run-id "$GITHUB_RUN_ID" \
+            --visual-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            --visual-head-sha "$GITHUB_SHA" >/dev/null
+          test "$(find "$visual_output" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 2
+          test "$(find "$visual_output" -mindepth 1 -maxdepth 1 | wc -l | tr -d ' ')" = 2
+          printf 'VISUAL_OUTPUT=%s\n' "$visual_output" >> "$GITHUB_ENV"
+
+      - name: Upload immutable visual attestation
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v6.0.0
+        with:
+          name: open-design-m1-visual-attestation
+          path: ${{ env.VISUAL_OUTPUT }}
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false

@@ -145,6 +145,10 @@ import {
   type OpenDesignAcceptanceIpcRegistration,
 } from './open-design-acceptance'
 import { createOpenDesignMutationGate } from './open-design-mutation-gate'
+import {
+  loadOpenDesignAcceptanceBlackoutProxy,
+  type OpenDesignAcceptanceBlackoutProxy,
+} from './open-design-acceptance-blackout-proxy'
 import { resolveHostModuleStorageRoot } from './host-module-storage-root'
 import {
   createIsolatedHostModuleAgentRuntime,
@@ -285,6 +289,7 @@ let openDesignModuleController: OpenDesignModuleController | null = null
 let openDesignModuleIpc: OpenDesignModuleIpcRegistration | null = null
 let openDesignAcceptanceController: OpenDesignAcceptanceController | null = null
 let openDesignAcceptanceIpc: OpenDesignAcceptanceIpcRegistration | null = null
+let openDesignAcceptanceBlackoutProxy: OpenDesignAcceptanceBlackoutProxy | null = null
 let stopServer: (() => Promise<void>) | null = null
 let embeddedServer: { host: string; port: number } | null = null
 let oauthFlowStore: OAuthFlowStore | null = null
@@ -1145,6 +1150,14 @@ app.whenReady().then(async () => {
           official: openDesignOfficialBootstrap,
         })
         if (openDesignAcceptanceBootstrap.status === 'ready') {
+          try {
+            openDesignAcceptanceBlackoutProxy = loadOpenDesignAcceptanceBlackoutProxy(process.env) ?? null
+          } catch (error) {
+            openDesignAcceptanceBlackoutProxy = null
+            mainLog.info('OpenDesign acceptance blackout proxy is unavailable', {
+              errorType: error instanceof Error ? error.name : typeof error,
+            })
+          }
           openDesignAcceptanceController = new OpenDesignAcceptanceController({
             bootstrap: openDesignAcceptanceBootstrap,
             getRuntime: openDesignAcceptanceRuntimeGate.getRuntime,
@@ -1156,6 +1169,24 @@ app.whenReady().then(async () => {
               ) ?? false,
             },
             mutationGate: openDesignMutationGate,
+            blackoutProxy: openDesignAcceptanceBlackoutProxy ?? undefined,
+            getModuleAgentRuntimeSnapshot: () => {
+              const snapshot = hostModuleAgentRuntime?.debugSnapshot()
+              const sessions = sessionManager?.getModuleAgentSessionResidueSnapshot()
+              if (!snapshot || !sessions) return undefined
+              return Object.freeze({
+                schemaVersion: 1 as const,
+                v1: Object.freeze({
+                  activeRuns: snapshot.v1.activeTurns,
+                  moduleSessions: snapshot.v1.activeSessions,
+                }),
+                v2: Object.freeze({
+                  activeRuns: snapshot.v2.activeRuns,
+                  moduleSessions: snapshot.v2.moduleSessions,
+                }),
+                sessions,
+              })
+            },
           })
         } else if (process.env[OPEN_DESIGN_ACCEPTANCE_ENV] === '1') {
           mainLog.info('OpenDesign acceptance control surface is not ready', {
@@ -1169,6 +1200,8 @@ app.whenReady().then(async () => {
         openDesignAcceptanceIpc?.dispose()
         openDesignAcceptanceIpc = null
         openDesignAcceptanceController = null
+        await openDesignAcceptanceBlackoutProxy?.dispose().catch(() => undefined)
+        openDesignAcceptanceBlackoutProxy = null
       }
 
       try {
@@ -1185,6 +1218,8 @@ app.whenReady().then(async () => {
         openDesignAcceptanceIpc?.dispose()
         openDesignAcceptanceIpc = null
         openDesignAcceptanceController = null
+        await openDesignAcceptanceBlackoutProxy?.dispose().catch(() => undefined)
+        openDesignAcceptanceBlackoutProxy = null
         try {
           // Preserve the normal-startup false reply even if gated handler setup failed.
           openDesignAcceptanceIpc = registerOpenDesignAcceptanceIpc(ipcMain)
@@ -1251,6 +1286,7 @@ app.whenReady().then(async () => {
           sessions: sessionManager,
           workerEntryPath: resolveHostAgentWorkerEntry(app.getAppPath()),
           shimPath: join(app.getAppPath(), 'dist', 'resources', 'host-agent', 'simulator-host-agent.mjs'),
+          acceptanceBlackoutProxy: openDesignAcceptanceBlackoutProxy ?? undefined,
           resolveWorkspaceId: () => {
             const hostWindow = windowManager?.getLastActiveWindow()
             const activeWorkspaceId = hostWindow
@@ -1345,6 +1381,7 @@ app.whenReady().then(async () => {
           // Optional Module Agent teardown must not block the built-in Agent runtime.
         }
         hostModuleAgentRuntime = null
+        await openDesignAcceptanceBlackoutProxy?.dispose().catch(() => undefined)
       }
       if (hostModuleSmokeRequested) {
         const hostWindow = windowManager?.getLastActiveWindow()
@@ -1608,6 +1645,13 @@ async function cleanupBeforeQuit(): Promise<void> {
     mainLog.error('Failed to stop Module Agent runtime:', error)
   } finally {
     hostModuleAgentRuntime = null
+  }
+  try {
+    await openDesignAcceptanceBlackoutProxy?.dispose()
+  } catch (error) {
+    mainLog.error('Failed to stop acceptance blackout proxy:', error)
+  } finally {
+    openDesignAcceptanceBlackoutProxy = null
   }
   try {
     moduleViewManager?.dispose()

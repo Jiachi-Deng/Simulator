@@ -328,6 +328,67 @@ describe('Host Module Agent runtime', () => {
     expect(selectHostAgentProtocolForModule({ id: 'packaged-smoke', version: '1.0.0' })).toBe('v1')
   })
 
+  it('wraps only a v2 acceptance grant with the external proxy and reaps it before releasing the lease', async () => {
+    const temporary = await mkdtemp(join(tmpdir(), 'electron-module-agent-blackout-proxy-'))
+    temporaryRoots.push(temporary)
+    const root = await realpath(temporary)
+    const workspaceRoot = join(root, 'workspace')
+    const workerEntryPath = join(root, 'worker.cjs')
+    const shimPath = join(root, 'simulator-host-agent.mjs')
+    await mkdir(workspaceRoot)
+    await writeFile(workerEntryPath, 'module.exports = {}\n', { mode: 0o644 })
+    await writeFile(shimPath, '#!/usr/bin/env node\n', { mode: 0o755 })
+    await chmod(workerEntryPath, 0o644)
+    await chmod(shimPath, 0o755)
+    const fake = fakeSessions(workspaceRoot)
+    const launcher = new RecoveryWorkerLauncher()
+    const tokenStore = new RecoveryTokenStore()
+    const launches: Array<{ upstreamBaseUrl: string; tokenFile: string }> = []
+    let proxyCleanups = 0
+    const runtime = await createIsolatedHostModuleAgentRuntime({
+      storageRoot: join(root, 'storage'),
+      sessions: fake.sessions,
+      resolveWorkspaceId: () => 'workspace-1',
+      workerEntryPath,
+      shimPath,
+      craftPreemptTimeoutMs: 250,
+      createSupervisor: (onUnexpectedExit) => new HostAgentWorkerSupervisor({
+        launcher, tokenStore, ids: recoveryIds(), onUnexpectedExit,
+      }),
+      acceptanceBlackoutProxy: {
+        async prepareLaunch(input) {
+          launches.push(input)
+          return {
+            url: 'http://127.0.0.1:45555',
+            cleanup: async () => { proxyCleanups += 1 },
+          }
+        },
+      },
+    })
+    const lease = await runtime.prepareLaunch({
+      id: OPEN_DESIGN_MODULE_ID,
+      version: '0.14.6-rc.1',
+      activatedRoot: '/activated/open-design',
+      executable: '/activated/open-design/bin/open-design',
+      endpoint: { host: '127.0.0.1', port: 31_337 },
+      restartCount: 0,
+      signal: new AbortController().signal,
+    } as ModuleDaemonLaunchContext)
+    const connection = launcher.latest('v2').input
+    expect(launches).toHaveLength(1)
+    expect(launches[0]?.upstreamBaseUrl).toMatch(/^http:\/\/127\.0\.0\.1:/)
+    expect(launches[0]?.tokenFile).toBe(connection.tokenFile)
+    expect(lease.environment).toMatchObject({
+      SIMULATOR_HOST_AGENT_URL: 'http://127.0.0.1:45555',
+      SIMULATOR_HOST_AGENT_TOKEN_FILE: connection.tokenFile,
+      SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',
+    })
+    await lease.cleanup('stop')
+    expect(proxyCleanups).toBe(1)
+    await runtime.dispose()
+    expect(proxyCleanups).toBe(1)
+  })
+
   it('serially reaps crashed v2 epochs, permits two fresh launches, and leaves only v2 circuit-open on the third', async () => {
     const temporary = await mkdtemp(join(tmpdir(), 'electron-module-agent-recovery-'))
     temporaryRoots.push(temporary)

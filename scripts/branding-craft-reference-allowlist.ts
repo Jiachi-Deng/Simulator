@@ -170,7 +170,7 @@ export const CRAFT_REFERENCE_ALLOWLIST: CraftReferenceCategory[] = [
   },
   {
     id: 'm1-host-agent-craft-runtime-terminology',
-    reason: 'M1 Host Agent implementation, contract, generated Shim, and focused tests name the embedded Craft runtime only to define priority, lifecycle, and failure-isolation boundaries.',
+    reason: 'M1 Host Agent implementation, contract, generated Shim, focused tests, and the sealed machine acceptance producer name the embedded Craft runtime only to define priority, lifecycle, and failure-isolation boundaries.',
     matches: ({ path, line }) =>
       (path === 'CHANGELOG.md'
         && /Host-owned `simulator-host-agent`|OpenDesign v2.*(?:transient Craft Session|Craft Turn)/.test(line))
@@ -180,6 +180,7 @@ export const CRAFT_REFERENCE_ALLOWLIST: CraftReferenceCategory[] = [
       || /^(?:packages\/host-agent-contract\/(?:schema\/host-agent-v2\.schema\.json|src\/constants\.ts)|packages\/host-agent-run-core\/src\/run-core(?:\.test)?\.ts)$/.test(path)
       || path === 'packages/pi-agent-server/src/file-tool-path-input.ts'
       || /^(?:packages\/server-core\/src\/(?:handlers\/session-manager-interface|sessions\/(?:module-agent-adapter|visible-craft-turn-gate(?:\.test)?|visible-craft-turn-priority\.test))|packages\/shared\/src\/agent\/(?:module-agent-tool-boundary|provider-process-reaper))\.ts$/.test(path)
+      || path === 'scripts/qa/run-open-design-m1-machine-evidence.ts'
       || (path === 'apps/electron/src/main/host-module-coordinator-smoke.ts'
         && [
           'throw new Error(`Visible Craft Host identity changed during ${phase}`)',

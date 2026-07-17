@@ -63,6 +63,11 @@ describe('createManagedSession', () => {
     expect(rendererSession).toBeDefined()
     expect(rendererSession).not.toHaveProperty('moduleAgentRun')
     expect(JSON.stringify(rendererSession)).not.toContain('idempotencyKeyDigest')
+    expect(manager.getModuleAgentSessionResidueSnapshot()).toEqual({
+      hiddenSessions: 1,
+      transientSessions: 1,
+      quarantinedSessions: 0,
+    })
   })
 
   it('atomically persists valid transient Run state transitions', async () => {

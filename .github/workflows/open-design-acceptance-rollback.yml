@@ -36,6 +36,7 @@ jobs:
     if: >-
       github.repository == 'Jiachi-Deng/Simulator' &&
       github.ref == 'refs/heads/main' &&
+      vars.OPEN_DESIGN_ACCEPTANCE_ROLLBACK_ENABLED == 'true' &&
       inputs.debug_enabled == true &&
       inputs.acceptance_approved == true
     runs-on: ubuntu-latest
@@ -47,11 +48,19 @@ jobs:
       RELEASE_REPOSITORY: Simulator
       FROM_TAG: open-design-v0.14.6-rc.1
       TO_TAG: open-design-v0.14.5
+      RC_SOURCE_SHA: 6b39a9bcc0f158645897976e23f334c5cab771f4
       ACCEPTANCE_RUN_ID: ${{ inputs.acceptance_run_id }}
       EXPECTED_ACCEPTANCE_WORKFLOW: .github/workflows/open-design-rc-acceptance.yml
-      EXPECTED_SHA: ${{ github.sha }}
+      EXPECTED_HOST_HEAD_SHA: ${{ github.sha }}
       ROLLBACK_CONFIRMATION: ${{ inputs.rollback_confirmation }}
     steps:
+      - name: Checkout exact Host authority
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
       - name: Validate double-gated rollback evidence
         shell: bash
         env:
@@ -60,13 +69,19 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
           test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HOST_HEAD_SHA"
           test "$ROLLBACK_CONFIRMATION" = "ROLLBACK_OPEN_DESIGN_ACCEPTANCE_TO_0_14_5"
           [[ "$ACCEPTANCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$RC_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+          git fetch --no-tags origin "+refs/tags/$FROM_TAG:refs/tags/$FROM_TAG"
+          test "$(git rev-parse "refs/tags/$FROM_TAG^{commit}")" = "$RC_SOURCE_SHA"
+          git merge-base --is-ancestor "$RC_SOURCE_SHA" "$EXPECTED_HOST_HEAD_SHA"
 
           run_json=$(gh api "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/runs/$ACCEPTANCE_RUN_ID")
           test "$(jq -r .conclusion <<<"$run_json")" = success
           test "$(jq -r .head_branch <<<"$run_json")" = main
-          test "$(jq -r .head_sha <<<"$run_json")" = "$EXPECTED_SHA"
+          test "$(jq -r .head_sha <<<"$run_json")" = "$EXPECTED_HOST_HEAD_SHA"
           test "$(jq -r .repository.full_name <<<"$run_json")" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
           test "$(jq -r .path <<<"$run_json")" = "$EXPECTED_ACCEPTANCE_WORKFLOW"
           test "$(jq -r .event <<<"$run_json")" = workflow_dispatch
@@ -80,16 +95,25 @@ jobs:
             --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
             --name open-design-rc-acceptance-evidence \
             --dir "$acceptance"
-          test "$(find "$acceptance" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 2
+          test "$(find "$acceptance" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 3
           test -f "$acceptance/open-design-rc-acceptance-evidence.json"
+          test -f "$acceptance/open-design-rc-acceptance-intake.json"
           test -f "$acceptance/SHA256SUMS"
+          test "$(wc -l < "$acceptance/SHA256SUMS" | tr -d ' ')" = 2
           grep -Eq '^[0-9a-f]{64}  open-design-rc-acceptance-evidence\.json$' "$acceptance/SHA256SUMS"
+          grep -Eq '^[0-9a-f]{64}  open-design-rc-acceptance-intake\.json$' "$acceptance/SHA256SUMS"
           (cd "$acceptance" && shasum -a 256 -c SHA256SUMS)
           acceptance_json="$acceptance/open-design-rc-acceptance-evidence.json"
-          jq -e --arg repository "$RELEASE_OWNER/$RELEASE_REPOSITORY" --arg sha "$EXPECTED_SHA" '
-            keys == ["blackoutTasksPassed","headSha","hostVersion","newStackConsecutivePassed","oldStackTasksPassed","paidTurns","previewHumanPasses","rcArchiveAsset","rcArchiveSha256","rcCatalogIssuedAt","rcCatalogSequence","rcExtractedManifestSha256","rcTag","rcVersion","repository","requiredCiPassed","rollbackExercisePassed","schemaVersion"] and
-            .schemaVersion == 1 and .repository == $repository and .headSha == $sha and
+          acceptance_intake="$acceptance/open-design-rc-acceptance-intake.json"
+          jq -e --arg repository "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --arg hostHeadSha "$EXPECTED_HOST_HEAD_SHA" --arg rcSourceSha "$RC_SOURCE_SHA" '
+            keys == ["blackoutTasksPassed","evidenceBundleSha256","hostArtifactName","hostArtifactSha256","hostBuildRunId","hostHeadSha","hostVersion","machineEvidence","newStackConsecutivePassed","oldStackTasksPassed","paidTurns","previewHumanPasses","rcArchiveAsset","rcArchiveSha256","rcCatalogIssuedAt","rcCatalogSequence","rcExtractedManifestSha256","rcSourceSha","rcTag","rcVersion","repository","requiredCiPassed","rollbackExercisePassed","schemaVersion","visualEvidence"] and
+            .schemaVersion == 2 and .repository == $repository and
+            .hostHeadSha == $hostHeadSha and .rcSourceSha == $rcSourceSha and
             .hostVersion == "0.12.0" and .rcVersion == "0.14.6-rc.1" and
+            .hostArtifactName == "Simulator-arm64.dmg" and
+            (.hostArtifactSha256 | test("^[0-9a-f]{64}$")) and
+            (.hostBuildRunId | type == "number" and . >= 1 and . <= 9007199254740991 and floor == .) and
             .rcTag == "open-design-v0.14.6-rc.1" and
             .rcArchiveAsset == "org.simulator.open-design-0.14.6-rc.1-darwin-arm64.tar.gz" and
             (.rcArchiveSha256 | test("^[0-9a-f]{64}$")) and
@@ -100,14 +124,34 @@ jobs:
             .blackoutTasksPassed == 20 and .previewHumanPasses == 20 and .paidTurns == 40 and
             .rollbackExercisePassed == true and .requiredCiPassed == true
           ' "$acceptance_json" >/dev/null
+          evidence_bundle_sha=$(shasum -a 256 "$acceptance_intake" | awk '{print $1}')
+          test "$evidence_bundle_sha" = "$(jq -er .evidenceBundleSha256 "$acceptance_json")"
+          jq -e --slurpfile intake "$acceptance_intake" '
+            .machineEvidence == $intake[0].evidence.machineBatch and
+            .visualEvidence == $intake[0].evidence.visualDecisions
+          ' "$acceptance_json" >/dev/null
           rc_archive_sha=$(jq -r .rcArchiveSha256 "$acceptance_json")
           rc_catalog_sequence=$(jq -r .rcCatalogSequence "$acceptance_json")
           rc_catalog_issued_at=$(jq -r .rcCatalogIssuedAt "$acceptance_json")
+          host_artifact_name=$(jq -r .hostArtifactName "$acceptance_json")
+          host_artifact_sha=$(jq -r .hostArtifactSha256 "$acceptance_json")
+          host_build_run_id=$(jq -r .hostBuildRunId "$acceptance_json")
+          machine_evidence=$(jq -c .machineEvidence "$acceptance_json")
+          visual_evidence=$(jq -c .visualEvidence "$acceptance_json")
 
-          from_json=$(gh release view "$FROM_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --json tagName,isDraft,isPrerelease,assets)
+          host_run=$(gh api "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/runs/$host_build_run_id")
+          test "$(jq -r .conclusion <<<"$host_run")" = success
+          test "$(jq -r .head_branch <<<"$host_run")" = main
+          test "$(jq -r .head_sha <<<"$host_run")" = "$EXPECTED_HOST_HEAD_SHA"
+          test "$(jq -r .repository.full_name <<<"$host_run")" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
+          test "$(jq -r .path <<<"$host_run")" = ".github/workflows/engineering-rc.yml"
+          test "$(jq -r .event <<<"$host_run")" = workflow_dispatch
+
+          from_json=$(gh release view "$FROM_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --json tagName,isDraft,isPrerelease,targetCommitish,assets)
           test "$(jq -r .tagName <<<"$from_json")" = "$FROM_TAG"
           test "$(jq -r .isDraft <<<"$from_json")" = false
           test "$(jq -r .isPrerelease <<<"$from_json")" = true
+          test "$(jq -r .targetCommitish <<<"$from_json")" = "$RC_SOURCE_SHA"
           from_assets=$(jq -r '.assets[].name' <<<"$from_json" | LC_ALL=C sort)
           expected_from=$(printf '%s\n' \
             org.simulator.open-design-0.14.6-rc.1-darwin-arm64.tar.gz \
@@ -135,13 +179,25 @@ jobs:
           test "$to_assets" = "$expected_to"
 
           validated_at=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-          jq -n --arg repository "$RELEASE_OWNER/$RELEASE_REPOSITORY" --arg headSha "$EXPECTED_SHA" \
-            --argjson acceptanceRunId "$ACCEPTANCE_RUN_ID" --arg rcArchiveSha256 "$rc_archive_sha" \
+          jq -n --arg repository "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --arg hostHeadSha "$EXPECTED_HOST_HEAD_SHA" --arg rcSourceSha "$RC_SOURCE_SHA" \
+            --arg evidenceBundleSha256 "$evidence_bundle_sha" \
+            --argjson machineEvidence "$machine_evidence" --argjson visualEvidence "$visual_evidence" \
+            --arg hostArtifactName "$host_artifact_name" --arg hostArtifactSha256 "$host_artifact_sha" \
+            --argjson hostBuildRunId "$host_build_run_id" --argjson acceptanceRunId "$ACCEPTANCE_RUN_ID" \
+            --arg rcArchiveSha256 "$rc_archive_sha" \
             --argjson rcCatalogSequence "$rc_catalog_sequence" --arg rcCatalogIssuedAt "$rc_catalog_issued_at" \
             --arg validatedAt "$validated_at" '{
-              schemaVersion: 1,
+              schemaVersion: 2,
               repository: $repository,
-              headSha: $headSha,
+              hostHeadSha: $hostHeadSha,
+              rcSourceSha: $rcSourceSha,
+              evidenceBundleSha256: $evidenceBundleSha256,
+              machineEvidence: $machineEvidence,
+              visualEvidence: $visualEvidence,
+              hostArtifactName: $hostArtifactName,
+              hostArtifactSha256: $hostArtifactSha256,
+              hostBuildRunId: $hostBuildRunId,
               acceptanceRunId: $acceptanceRunId,
               rcTag: "open-design-v0.14.6-rc.1",
               rcArchiveSha256: $rcArchiveSha256,
