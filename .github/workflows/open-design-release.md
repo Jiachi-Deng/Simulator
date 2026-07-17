@@ -38,12 +38,15 @@ Environment that is intentionally enabled:
 
 Protect every Environment according to the repository release policy. Required
 reviewers must be configured for `open-design-prerelease`,
-`open-design-production`, `open-design-rc-acceptance`, and
+`open-design-production`, `open-design-m1-machine-evidence`,
+`open-design-m1-visual-attestation`, `open-design-rc-acceptance`, and
 `open-design-acceptance-rollback`; naming an Environment in YAML does not by
-itself configure reviewer protection. The two acceptance workflows additionally
-require their exact repository enable variables, so a missing Environment
-cannot silently become an enabled gate. Those variables are
-`OPEN_DESIGN_RC_ACCEPTANCE_ENABLED` and
+itself configure reviewer protection. The four acceptance workflows
+additionally require their exact repository enable variables, so a missing
+Environment cannot silently become an enabled gate. Those variables are
+`OPEN_DESIGN_M1_MACHINE_EVIDENCE_ENABLED`,
+`OPEN_DESIGN_M1_VISUAL_ATTESTATION_ENABLED`,
+`OPEN_DESIGN_RC_ACCEPTANCE_ENABLED`, and
 `OPEN_DESIGN_ACCEPTANCE_ROLLBACK_ENABLED`.
 
 Activation order is fail-closed and mandatory: first land the workflow on
@@ -136,12 +139,13 @@ separate immutable source authority at
 stable consumer peels the public RC tag to that commit, requires the GitHub
 Release target to match it, and proves it is an ancestor of the Host SHA. The
 tag is never moved to make the two authorities appear equal. The fixed
-acceptance evidence must prove 20 old-stack
-tasks, a 20-task new-stack consecutive pass, 20 blackout/Preview checks, 40
-paid Turns, Required CI, and the update/rollback exercise. The rollback gate
-downloads and binds that immutable evidence to the RC archive SHA-256 and the
-authenticated RC Catalog `sequence` and canonical `issuedAt`. It also binds the
-exact Host DMG SHA-256 and its successful engineering build run.
+acceptance evidence is composed only from the authenticated machine and visual
+producer artifacts. It must prove 20 old-stack tasks, a 20-task new-stack
+consecutive pass, 20 blackout/Preview checks, exactly 40 paid Turns, Required
+CI, and the update/rollback exercise. The rollback gate downloads and binds
+that immutable final evidence to the RC archive SHA-256 and the authenticated
+RC Catalog `sequence` and canonical `issuedAt`. It also binds the exact Host
+DMG SHA-256 and its successful engineering build run.
 
 For stable promotion, all four public RC assets are required exactly. Because
 the prerelease deliberately omits `open-design-official-channel.json`, the
@@ -261,6 +265,47 @@ draft flag, prerelease flag, and exact asset set. It republishes only an unchang
 exact snapshot; an ambiguous or mismatched state remains hidden and produces an
 explicit manual-recovery warning.
 
+## M1 acceptance evidence pipeline
+
+M1 acceptance is split into three non-substitutable evidence producers before
+the rollback authorization gate. Each stage authenticates the exact successful
+upstream workflow run and artifact instead of accepting caller-supplied hashes
+or local file paths:
+
+1. `open-design-m1-machine-evidence.yml` runs on the protected Apple Silicon
+   self-hosted runner. It installs the exact unsigned Engineering RC artifact,
+   proves that the packaged RC can attach to the external acceptance proxy
+   before any paid Turn, then runs the fixed 20 LKG and 20 RC tasks. The batch
+   stops at the first failure. Each new-stack task must contain a real 65-second
+   business-event blackout with heartbeat continuity and at least one daemon
+   event buffered and replayed afterward; it must also prove file mutation,
+   the actual Preview URL and HTTP 200 result, one terminal state, Craft PID
+   survival, global hidden/transient/quarantined Session cleanup, and descendant
+   process cleanup. Its artifact is an exact 150-file closure named
+   `open-design-m1-machine-evidence`.
+2. `open-design-m1-visual-attestation.yml` has no provider credential or model
+   execution surface. After the product owner has inspected the 20 captured
+   Preview images, it authenticates the exact machine artifact and accepts only
+   20 ordered PASS decisions bound to those cases and images. Its artifact is
+   the exact two-file closure `open-design-m1-visual-attestation`.
+3. `open-design-rc-acceptance.yml` authenticates both producer runs, the exact
+   Host Engineering RC artifact, current-Host Required CI, RC source/tag/assets,
+   LKG, and signed Catalog high-water state. It revalidates both sealed inputs
+   and emits only the exact three-file artifact
+   `open-design-rc-acceptance-evidence`. It does not run a model, infer a visual
+   decision, or accept raw evidence uploaded by the dispatcher.
+
+Activate the stages in that order. Create and API-verify every protected
+Environment first. Refresh stable 0.14.5 and then RC 0.14.6-rc.1 before enabling
+the machine gate. Set only `OPEN_DESIGN_M1_MACHINE_EVIDENCE_ENABLED=true`, run
+and preserve the successful machine run, then set it back to `false`. Enable
+the visual gate only while sealing the already-reviewed decisions; disable it
+after the artifact is created. Finally enable the RC acceptance gate only while
+composing the final evidence, then disable it before Catalog refresh resumes.
+Never enable multiple producer stages merely to shorten the sequence, never
+refresh either Catalog during the paid batch, and never retry within a failed
+40-Turn batch. A repaired new path starts its 20-consecutive-pass count again.
+
 ## Debug and acceptance rollback gate
 
 `open-design-acceptance-rollback.yml` is a manual, read-only authorization and
@@ -282,20 +327,20 @@ public RC tag is independently peeled to its immutable source SHA, which must
 be an ancestor of that Host SHA.
 
 After validation the rollback gate uploads a checksum-protected, non-mutating
-evidence artifact containing the acceptance run ID, Host artifact identity,
-sanitized intake digest, machine/human evidence references, RC source SHA,
-RC archive hash, RC Catalog sequence/issuedAt, and LKG/RC tags. The acceptance
-artifact itself retains the exact sanitized canonical intake plus its derived
-summary and a two-entry checksum manifest. The stable publisher independently
-downloads both evidence artifacts and all four public RC assets; it does not
-trust a manual hash or trust-state input.
+evidence artifact containing the final acceptance run ID, Host artifact
+identity, machine/visual producer references, RC source SHA, RC archive hash,
+RC Catalog sequence/issuedAt, and LKG/RC tags. The final acceptance artifact is
+the exact three-file closure containing the cross-bound summary, producer
+references, and checksum manifest. The stable publisher independently downloads
+both evidence artifacts and all four public RC assets; it does not trust a
+manual hash or trust-state input.
 
 The workflow intentionally cannot edit Releases, Catalogs, channels, or expose
-a normal-user version selector. The actual installed-app exercise must reuse
-the existing Module Coordinator rollback transaction. Wiring that local
-Coordinator call into a packaged debug/acceptance harness crosses this workflow
-scope and remains a runtime integration task; this gate must not be described
-as a completed rollback by itself.
+a normal-user version selector. The actual installed-app update and rollback
+exercise occurs upstream in the machine evidence producer through the existing
+Module Coordinator transaction. This gate independently authenticates that
+sealed evidence and authorizes the stable publisher; it does not itself mutate
+the installed app and must not be described as a second rollback execution.
 
 No real publication should be attempted until the production key, Environment,
 repository enable variable, public redistribution evidence, and a successful
