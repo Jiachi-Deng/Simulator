@@ -52,6 +52,19 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+if [ "$UNSIGNED" = true ]; then
+    # `--unsigned` means no developer identity or notarization credential may
+    # reach any install, build, or packaging subprocess, even when the caller
+    # happens to have release variables exported. electron-builder can still
+    # apply its local arm64 ad-hoc (`-`) signature without these credentials.
+    export CSC_IDENTITY_AUTO_DISCOVERY=false
+    unset CSC_LINK CSC_KEY_PASSWORD CSC_NAME CSC_KEYCHAIN
+    unset CSC_INSTALLER_LINK CSC_INSTALLER_KEY_PASSWORD
+    unset APPLE_SIGNING_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD
+    unset APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER
+    unset APPLE_KEYCHAIN APPLE_KEYCHAIN_PROFILE
+fi
+
 HOST_ARCH=$(uname -m)
 case "$HOST_ARCH" in
     arm64|aarch64) HOST_ARCH="arm64" ;;

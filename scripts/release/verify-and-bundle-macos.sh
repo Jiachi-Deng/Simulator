@@ -90,14 +90,9 @@ verify_app() {
   executable="$app/Contents/MacOS/$executable_name"
   assert_lstat_type "$executable" "regular file" "app executable"
   [[ -x "$executable" ]] || { echo "Missing executable in $app" >&2; exit 1; }
+  bun "$SCRIPT_DIR/verify-packaged-electron-identity.ts" "$app" "$VERSION"
   bun "$SCRIPT_DIR/../packaged-server-resources.ts" --app "$app"
-  bun "$SCRIPT_DIR/verify-macos-signatures.ts" "$app" | tee "$signature_evidence"
-  python3 - "$executable" <<'PY'
-import subprocess, sys
-result = subprocess.run([sys.argv[1], "--version"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
-if result.returncode != 0:
-    raise SystemExit(f"minimal smoke failed ({result.returncode}): {result.stdout.decode(errors='replace')}")
-PY
+  bun "$SCRIPT_DIR/verify-macos-signatures.ts" "$app" "Contents/MacOS/$executable_name" | tee "$signature_evidence"
 }
 
 write_inventory() {

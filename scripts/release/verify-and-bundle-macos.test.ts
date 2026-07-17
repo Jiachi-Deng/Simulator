@@ -48,6 +48,12 @@ describe("macOS RC bundle verification", () => {
     expect(script.match(/== \"\$VERSION\"/g)).toHaveLength(2)
   })
 
+  test("binds the packaged Electron manifest, main entry, and arm64 executable without launching the GUI as a CLI", () => {
+    expect(script).toContain('verify-packaged-electron-identity.ts" "$app" "$VERSION"')
+    expect(script).toContain('verify-macos-signatures.ts" "$app" "Contents/MacOS/$executable_name"')
+    expect(script).not.toContain("--version")
+  })
+
   test("fails closed when packaged Pi or session server resources are incomplete", () => {
     expect(script).toContain('bun "$SCRIPT_DIR/../packaged-server-resources.ts" --app "$app"')
   })

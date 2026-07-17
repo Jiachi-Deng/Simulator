@@ -20,6 +20,19 @@ describe("DMG packaging", () => {
     expect(script).toContain('APP_ROOT="$ELECTRON_DIR/release/mac/Simulator.app"')
   })
 
+  test("prevents unsigned builds from importing signing or notarization credentials", () => {
+    expect(script).toContain("export CSC_IDENTITY_AUTO_DISCOVERY=false")
+    expect(script).toContain("unset CSC_LINK CSC_KEY_PASSWORD CSC_NAME CSC_KEYCHAIN")
+    expect(script).toContain("unset CSC_INSTALLER_LINK CSC_INSTALLER_KEY_PASSWORD")
+    expect(script).toContain("unset APPLE_SIGNING_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD")
+    expect(script).toContain("unset APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER")
+    expect(script).toContain("unset APPLE_KEYCHAIN APPLE_KEYCHAIN_PROFILE")
+    const credentialCleanup = script.indexOf("unset CSC_LINK CSC_KEY_PASSWORD CSC_NAME CSC_KEYCHAIN")
+    expect(credentialCleanup).toBeGreaterThan(-1)
+    expect(credentialCleanup).toBeLessThan(script.indexOf("bun install --frozen-lockfile"))
+    expect(credentialCleanup).toBeLessThan(script.indexOf('npx electron-builder "${BUILDER_ARGS[@]}"'))
+  })
+
   test("verifies packaged Pi and session server resources before accepting the app", () => {
     expect(script).toContain('bun "$ELECTRON_DIR/scripts/validate-assets.ts" --packaged-app "$APP_ROOT"')
     expect(script).toContain('bun "$ROOT_DIR/scripts/packaged-server-resources.ts" --app "$APP_ROOT"')
