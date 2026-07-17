@@ -114,6 +114,15 @@ SHA-256 `1dd67f6ac536b61009410014ceab562bcba24e0d2694e353914915338d0ef0a3`;
 the prerelease refresh does not authorize stable `0.14.6` publication or an
 official-channel switch.
 
+Before a paid RC acceptance window, refresh stable first and prerelease second,
+verify that the RC `sequence` and `issuedAt` are both strictly later than the
+stable values, enable the acceptance refresh freeze immediately, and then read
+and compare both public Catalogs again under that freeze. Equality or reversed
+ordering is a pre-Turn stop condition: disable the freeze, repeat the
+stable-then-prerelease refresh sequence, and never spend a paid Turn until the
+post-freeze comparison passes. The machine evidence producer enforces the same
+strict ordering before it launches the packaged application.
+
 ## Independent verification
 
 Use `production-cli.mjs --verify` with an independently supplied Ed25519 public

@@ -188,6 +188,9 @@ describe("OpenDesign release-track safety", () => {
     expect(productionReleaseGuide).toContain("advances from the\nauthenticated Catalog on its selected stable tag")
     expect(productionReleaseGuide).toContain("takes the highest authenticated `sequence` and `issuedAt` across the\ncurrent RC and stable `0.14.5` Catalogs")
     expect(productionReleaseGuide).not.toContain("Both tracks obtain the highest authenticated cross-track")
+    expect(productionReleaseGuide).toContain("refresh stable first and prerelease second")
+    expect(productionReleaseGuide).toContain("compare both public Catalogs again under that freeze")
+    expect(productionReleaseGuide).toContain("Equality or reversed\nordering is a pre-Turn stop condition")
   })
 
   test("anchors the signing key before source verification and keeps the RC config private", () => {
