@@ -77,7 +77,7 @@ OpenDesign `0.14.5` 已作为冻结旧栈基线公开发布。最终保留的 `b
 
 `development-local-only` 路径仍只供 owner-only 本地验收，必须同时提供 CLI flag 与环境授权，并在 inventory/attestation 中永久标记 `nonPromotable: true`；public validator 会拒绝该 artifact。不能放宽 symlink policy、重新引入任意扁平化，或把本地 staging 冒充公开 RC。
 
-M1 当前发布恢复点是：保持 upstream commit `2225647726d5387bb24e9539fdb577958b6d88c6` 和既有 rights closure 不变，只迁移 Host Agent transport。OpenDesign `0.14.6-rc.1` 必须使用普通 `json-event-stream` Shim、`hostVersionRange >=0.12.0` 和 prerelease track；在确定性门、Level 3 Review 与产品负责人单独批准之前，不得发布 RC、修改稳定 official channel 或替换 `0.14.5` last-known-good。
+M1 当前发布恢复点是：保持 upstream commit `2225647726d5387bb24e9539fdb577958b6d88c6` 和既有 rights closure 不变，只迁移 Host Agent transport。OpenDesign `0.14.6-rc.1` 已作为公开 prerelease 发布；它使用普通 `json-event-stream` Shim、`hostVersionRange >=0.12.0`，固定 archive SHA-256 为 `1dd67f6ac536b61009410014ceab562bcba24e0d2694e353914915338d0ef0a3`。2026-07-17 的 signed Catalog refresh 将 RC sequence 单调推进到 `4`，但 prerelease 仍恰好只有 archive、Catalog、envelope、metadata 四个资产，不发布 `open-design-official-channel.json`。稳定 official channel 继续指向 `0.14.5` sequence `3`；没有独立 Stage C、rollback、人工 Preview 与稳定发布批准，不得发布 `0.14.6` 或替换 last-known-good。
 
 ## Loopback readiness
 

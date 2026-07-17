@@ -82,15 +82,25 @@ or `open-design-official-channel.json`. Replace those three assets on the same
 tag. During GitHub asset replacement, clients must fail closed and retry; never
 extend the TTL or reset the sequence to hide a missed refresh.
 
-The expected GitHub Actions job runs at least every 12 hours, downloads the five
-assets from the fixed tag into a private workspace, obtains the last accepted
-`sequence` and `issuedAt` from trusted CI state, runs refresh dry-run and refresh,
-runs `--verify` against a reconstructed five-file bundle, and only then replaces
+The expected GitHub Actions job runs at least every 12 hours. The stable track
+downloads the five public assets from the fixed tag. A prerelease deliberately
+publishes only four assets and omits `open-design-official-channel.json`; its
+refresh job authenticates the shipped stable authority and the signed RC
+metadata, constructs an owner-only one-run verification config, and deletes it
+without publishing it. Both tracks obtain the highest authenticated cross-track
+`sequence` and `issuedAt`, run refresh dry-run and refresh, run `--verify` against
+a reconstructed five-file private verification bundle, and only then replace
 the three refresh assets. The job must compare the archive SHA-256 before and
 after and must never expose the private key in arguments, logs, artifacts, or
-step outputs. `open-design-official-channel.json` and the archive remain
-unchanged unless a new signed application build intentionally changes the trust
-root or module version.
+step outputs. The stable `open-design-official-channel.json` and both immutable
+archives remain unchanged unless a new signed application build intentionally
+changes the trust root or module version.
+
+As of 2026-07-17, stable `0.14.5` is at Catalog sequence `3`, while public
+prerelease `0.14.6-rc.1` is at sequence `4`. The RC archive remains fixed at
+SHA-256 `1dd67f6ac536b61009410014ceab562bcba24e0d2694e353914915338d0ef0a3`;
+the prerelease refresh does not authorize stable `0.14.6` publication or an
+official-channel switch.
 
 ## Independent verification
 
