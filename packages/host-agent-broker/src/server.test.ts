@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { request as httpRequest } from 'node:http'
-import { connect, type Socket } from 'node:net'
+import { connect, createServer as createNetServer, type Server as NetServer, type Socket } from 'node:net'
 import {
   HOST_AGENT_CONTRACT_VERSION,
   parseHostAgentErrorResponse,
@@ -17,6 +17,8 @@ import type { HostAgentBrokerCoreClient, HostAgentBrokerCoreSubscription } from 
 
 const TOKEN = 'test-token-0123456789-abcdefghijkl'
 const RUN = 'run_00000000000000000000000000000001'
+const ISOLATED_SSE_READY_TIMEOUT_MS = 4_000
+const ISOLATED_SSE_CLAIM_TIMEOUT_MS = 8_000
 
 function snapshot(
   state: HostAgentRunSnapshot['state'] = 'running',
@@ -60,6 +62,7 @@ class FakeCore implements HostAgentBrokerCoreClient {
   getGate?: Promise<void>
   subscribeGate?: Promise<void>
   subscribeStarted?: () => void
+  subscribeFailuresRemaining = 0
   unsubscribeCalls = 0
   unsubscribeFailuresRemaining = 0
   closeGate?: Promise<void>
@@ -85,6 +88,10 @@ class FakeCore implements HostAgentBrokerCoreClient {
   ): Promise<HostAgentBrokerCoreSubscription> {
     this.subscribeStarted?.()
     await this.subscribeGate
+    if (this.subscribeFailuresRemaining > 0) {
+      this.subscribeFailuresRemaining -= 1
+      throw new HostAgentBrokerCoreClientError('BROKER_DISCONNECTED')
+    }
     if (afterSequence !== undefined && afterSequence < this.replayFloor) {
       throw new HostAgentBrokerCoreClientError('REPLAY_UNAVAILABLE')
     }
@@ -132,6 +139,7 @@ class OwnershipCore extends FakeCore {
   createStarted?: () => void
   cancelGate?: Promise<void>
   cancelStarted?: () => void
+  closeEntered?: () => void
   closeFailuresRemaining = 0
 
   override async createRun(key: string, request: CreateHostAgentRunRequest): Promise<HostAgentRunSnapshot> {
@@ -163,6 +171,7 @@ class OwnershipCore extends FakeCore {
   override async closeRun(): Promise<HostAgentRunSnapshot> {
     this.closeCalls += 1
     this.closeStarted = true
+    this.closeEntered?.()
     await this.closeGate
     if (this.closeFailuresRemaining > 0) {
       this.closeFailuresRemaining -= 1
@@ -177,11 +186,47 @@ class OwnershipCore extends FakeCore {
 const servers: HostAgentBrokerServer[] = []
 const sockets: Socket[] = []
 const childClients = new Set<ChildProcessWithoutNullStreams>()
+const fixtureServers = new Set<NetServer>()
+
+function childHasExited(child: ChildProcessWithoutNullStreams): boolean {
+  return typeof child.exitCode === 'number' || typeof child.signalCode === 'string'
+}
+
+function sigkillChild(child: ChildProcessWithoutNullStreams): void {
+  if (child.pid === undefined) throw new Error('SSE fixture child has no process id')
+  try {
+    process.kill(child.pid, 'SIGKILL')
+  } catch (error) {
+    if (!(error instanceof Error && 'code' in error && error.code === 'ESRCH')) throw error
+  }
+}
+
+async function ensureChildExited(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (childHasExited(child)) return
+  let resolveExit!: () => void
+  const exited = new Promise<void>((resolve) => { resolveExit = resolve })
+  child.once('exit', resolveExit)
+  if (childHasExited(child)) {
+    child.off('exit', resolveExit)
+    return
+  }
+  sigkillChild(child)
+  if (childHasExited(child)) {
+    child.off('exit', resolveExit)
+    return
+  }
+  await exited
+}
 
 afterEach(async () => {
-  for (const child of childClients) child.kill('SIGKILL')
+  const children = [...childClients]
   childClients.clear()
+  await Promise.all(children.map(ensureChildExited))
   for (const socket of sockets.splice(0)) socket.destroy()
+  await Promise.all([...fixtureServers].map(async (server) => {
+    fixtureServers.delete(server)
+    await new Promise<void>((resolve) => server.close(() => resolve()))
+  }))
   for (const server of servers.splice(0)) await server.stop().catch(() => undefined)
 })
 
@@ -192,8 +237,51 @@ async function start(core = new FakeCore(), limits: ConstructorParameters<typeof
   return { server, core, address }
 }
 
+async function waitForCondition(label: string, condition: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!condition()) {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for ${label}`)
+    await Bun.sleep(5)
+  }
+}
+
+async function waitForPromise<T>(label: string, promise: Promise<T>, timeoutMs = 2_000): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timeout = setTimeout(() => reject(new Error(`Timed out waiting for ${label}`)), timeoutMs)
+  })
+  try {
+    return await Promise.race([promise, deadline])
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout)
+  }
+}
+
 function headers(extra: Record<string, string> = {}): Record<string, string> {
   return { Authorization: `Bearer ${TOKEN}`, ...extra }
+}
+
+async function transitionClaimedOwnerToDisconnectGrace(
+  core: OwnershipCore,
+  server: HostAgentBrokerServer,
+  url: string,
+): Promise<void> {
+  const unsubscribeTarget = core.unsubscribeCalls + 1
+  core.subscribeFailuresRemaining = 1
+  const failedReconnect = await fetch(`${url}/v2/runs/${RUN}/events`, {
+    headers: headers({ 'Last-Event-ID': '1' }),
+  })
+  if (failedReconnect.status !== 503) throw new Error('Failed reconnect did not report Broker disconnection')
+  const failure = parseHostAgentErrorResponse(await failedReconnect.json())
+  if (failure.error.code !== 'BROKER_DISCONNECTED') throw new Error('Failed reconnect returned the wrong error')
+  await waitForCondition(
+    'disconnected owner grace',
+    () => server.debugSnapshot().reconnectGraceRuns === 1,
+  )
+  await waitForCondition(
+    'failed reconnect subscription cleanup',
+    () => core.unsubscribeCalls >= unsubscribeTarget,
+  )
 }
 
 async function postRun(url: string, body: unknown, key = 'key-1'): Promise<Response> {
@@ -225,6 +313,41 @@ async function rawHttp(
     request.on('error', reject)
     request.end(body)
   })
+}
+
+async function startRawSseSocket(url: string): Promise<Socket> {
+  const endpoint = new URL(url)
+  const socket = connect(Number(endpoint.port), endpoint.hostname)
+  sockets.push(socket)
+  socket.on('error', () => undefined)
+  await new Promise<void>((resolve, reject) => {
+    socket.once('connect', resolve)
+    socket.once('error', reject)
+  })
+  socket.write([
+    `GET ${endpoint.pathname} HTTP/1.1`,
+    `Host: ${endpoint.hostname}:${endpoint.port}`,
+    `Authorization: Bearer ${TOKEN}`,
+    '',
+    '',
+  ].join('\r\n'))
+  await new Promise<void>((resolve, reject) => {
+    let response = ''
+    const timeout = setTimeout(() => reject(new Error('Raw SSE fixture timed out')), 2_000)
+    const onData = (chunk: Buffer): void => {
+      response += chunk.toString('utf8')
+      if (!response.includes('HTTP/1.1 200 OK')) return
+      clearTimeout(timeout)
+      socket.off('data', onData)
+      resolve()
+    }
+    socket.on('data', onData)
+    socket.once('close', () => {
+      clearTimeout(timeout)
+      if (!response.includes('HTTP/1.1 200 OK')) reject(new Error('Raw SSE fixture closed before ready'))
+    })
+  })
+  return socket
 }
 
 interface IsolatedSseClient {
@@ -283,6 +406,7 @@ async function startIsolatedSseClient(
   url: string,
   marker?: string,
   readyOnRequest = false,
+  readyTimeoutMs = ISOLATED_SSE_READY_TIMEOUT_MS,
 ): Promise<IsolatedSseClient> {
   const child = spawn('node', ['--input-type=module', '-e', ISOLATED_SSE_CLIENT_SOURCE], {
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -293,7 +417,10 @@ async function startIsolatedSseClient(
   child.stdout.on('data', (chunk) => { stdout += chunk.toString('utf8') })
   child.stderr.on('data', (chunk) => { stderr += chunk.toString('utf8') })
   const ready = new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(() => reject(new Error('SSE fixture timed out')), 2_000)
+    const timeout = setTimeout(
+      () => reject(new Error('SSE fixture timed out')),
+      readyTimeoutMs,
+    )
     const inspect = (): void => {
       if (!stdout.includes('ready\n')) return
       clearTimeout(timeout)
@@ -304,6 +431,10 @@ async function startIsolatedSseClient(
       clearTimeout(timeout)
       if (!stdout.includes('ready\n')) reject(new Error('SSE fixture exited before ready'))
     })
+    child.once('error', (error) => {
+      clearTimeout(timeout)
+      reject(error)
+    })
   })
   child.stdin.end(JSON.stringify({
     url,
@@ -311,18 +442,47 @@ async function startIsolatedSseClient(
     ...(marker === undefined ? {} : { marker }),
     ...(readyOnRequest ? { readyOnRequest: true } : {}),
   }))
-  await ready
+  try {
+    await ready
+  } catch (error) {
+    await ensureChildExited(child)
+    childClients.delete(child)
+    const detail = `stdout=${JSON.stringify(stdout.slice(0, 256))} stderr=${JSON.stringify(stderr.slice(0, 256))}`
+    throw new Error(`SSE fixture failed before ready: ${detail}`, { cause: error })
+  }
   return { child, output: () => ({ stdout, stderr }) }
 }
 
 async function killIsolatedSseClient(client: IsolatedSseClient): Promise<void> {
-  const exited = new Promise<void>((resolve) => client.child.once('exit', () => resolve()))
-  process.kill(client.child.pid!, 'SIGKILL')
-  await exited
+  if (childHasExited(client.child)) {
+    childClients.delete(client.child)
+    return
+  }
+  await ensureChildExited(client.child)
   childClients.delete(client.child)
 }
 
 describe('HostAgentBrokerServer protocol and security boundary', () => {
+  test('isolated SSE fixture timeout reaps its child without stalling teardown', async () => {
+    const fixtureServer = createNetServer((socket) => sockets.push(socket))
+    fixtureServers.add(fixtureServer)
+    await new Promise<void>((resolve, reject) => {
+      fixtureServer.once('error', reject)
+      fixtureServer.listen(0, '127.0.0.1', () => resolve())
+    })
+    const address = fixtureServer.address()
+    if (!address || typeof address === 'string') throw new Error('Fixture server did not bind TCP')
+    const initialChildren = childClients.size
+
+    await expect(startIsolatedSseClient(
+      `http://127.0.0.1:${address.port}/v2/runs/${RUN}/events`,
+      undefined,
+      false,
+      50,
+    )).rejects.toThrow('SSE fixture failed before ready')
+    expect(childClients.size).toBe(initialChildren)
+  })
+
   test('starts with the default lease limits, binds only IPv4 loopback, and returns secured capabilities', async () => {
     const { address } = await start()
     expect(address.host).toBe('127.0.0.1')
@@ -681,15 +841,15 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
     expect(core.moduleSessions).toBe(0)
   })
 
-  test('reconnects a dead owning stream within its lease using Last-Event-ID', async () => {
+  test('reconnects a disconnected owner with Last-Event-ID before its grace expires', async () => {
     const core = new OwnershipCore()
     core.events.push(event(1))
     const { address, server } = await start(core, {
-      ownershipClaimTimeoutMs: 80,
-      claimedClientDisconnectGraceMs: 40,
-      claimedClientLeaseTimeoutMs: 200,
-      heartbeatIntervalMs: 10,
-      idleTimeoutMs: 100,
+      ownershipClaimTimeoutMs: ISOLATED_SSE_CLAIM_TIMEOUT_MS,
+      claimedClientDisconnectGraceMs: 1_000,
+      claimedClientLeaseTimeoutMs: 5_000,
+      heartbeatIntervalMs: 50,
+      idleTimeoutMs: 1_000,
     })
     expect((await postRun(address.url, {
       contractVersion: 2,
@@ -697,7 +857,10 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
     }, 'claimed-reconnect')).status).toBe(200)
 
     const first = await startIsolatedSseClient(`${address.url}/v2/runs/${RUN}/events`, 'id: 1\n')
-    await killIsolatedSseClient(first)
+    expect(core.cancelCalls).toBe(0)
+    expect(core.activeRuns).toBe(1)
+    expect(core.moduleSessions).toBe(1)
+    await transitionClaimedOwnerToDisconnectGrace(core, server, address.url)
 
     core.emit(event(2))
     const secondController = new AbortController()
@@ -710,9 +873,11 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
     expect(replay).toContain('id: 2\n')
     expect(replay).not.toContain('id: 1\n')
     expect(server.debugSnapshot().reconnectGraceRuns).toBe(0)
+    await killIsolatedSseClient(first)
 
-    // The previous lease timer must not cancel the replacement owner.
-    await Bun.sleep(60)
+    // Cross the old disconnect grace while remaining within the replacement
+    // lease. A stale disconnect timer would cancel here.
+    await Bun.sleep(1_250)
     expect(core.cancelCalls).toBe(0)
     expect(core.closeCalls).toBe(0)
     expect(core.activeRuns).toBe(1)
@@ -735,11 +900,11 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
   test('SIGKILL-equivalent socket loss expires the owner and reaps its hidden Session', async () => {
     const core = new OwnershipCore()
     const { address, server } = await start(core, {
-      ownershipClaimTimeoutMs: 80,
-      claimedClientDisconnectGraceMs: 25,
-      claimedClientLeaseTimeoutMs: 40,
-      heartbeatIntervalMs: 10,
-      idleTimeoutMs: 100,
+      ownershipClaimTimeoutMs: ISOLATED_SSE_CLAIM_TIMEOUT_MS,
+      claimedClientDisconnectGraceMs: 200,
+      claimedClientLeaseTimeoutMs: 500,
+      heartbeatIntervalMs: 25,
+      idleTimeoutMs: 1_000,
     })
     expect((await postRun(address.url, {
       contractVersion: 2,
@@ -750,8 +915,9 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
     // Destroying the only transport models SIGKILL/OOM: no cancel or DELETE
     // request and no Shim catch/finally code can run.
     await killIsolatedSseClient(rawStream)
-    await Bun.sleep(50)
-    for (let attempt = 0; attempt < 100 && core.moduleSessions > 0; attempt += 1) await Bun.sleep(5)
+    // Some kernels surface process death as a half-open stream. The missing
+    // authenticated status heartbeat must still expire the claimed lease.
+    await waitForCondition('SIGKILL Session reap', () => core.moduleSessions === 0)
     expect(core.cancelCalls).toBe(1)
     expect(core.closeCalls).toBe(1)
     expect(core.terminals).toEqual(['interrupted'])
@@ -765,20 +931,24 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
   test('authenticated status heartbeats renew the claimed-client lease without replay', async () => {
     const core = new OwnershipCore()
     const { address } = await start(core, {
-      ownershipClaimTimeoutMs: 100,
-      claimedClientDisconnectGraceMs: 20,
-      claimedClientLeaseTimeoutMs: 45,
-      heartbeatIntervalMs: 10,
-      idleTimeoutMs: 100,
+      ownershipClaimTimeoutMs: ISOLATED_SSE_CLAIM_TIMEOUT_MS,
+      claimedClientDisconnectGraceMs: 200,
+      claimedClientLeaseTimeoutMs: 1_000,
+      heartbeatIntervalMs: 50,
+      idleTimeoutMs: 1_000,
     })
     expect((await postRun(address.url, {
       contractVersion: 2,
       prompt: 'quiet provider turn remains owned',
     }, 'claimed-heartbeat')).status).toBe(200)
     const client = await startIsolatedSseClient(`${address.url}/v2/runs/${RUN}/events`)
+    expect(core.cancelCalls).toBe(0)
+    expect(core.activeRuns).toBe(1)
+    expect(core.moduleSessions).toBe(1)
 
-    for (let heartbeat = 0; heartbeat < 3; heartbeat += 1) {
-      await Bun.sleep(30)
+    // Cross an entire original lease with 10x scheduling margin per renewal.
+    for (let heartbeat = 0; heartbeat < 12; heartbeat += 1) {
+      await Bun.sleep(100)
       const response = await fetch(`${address.url}/v2/runs/${RUN}`, { headers: headers() })
       expect(response.status).toBe(200)
       expect(parseHostAgentRunSnapshot(await response.json()).runHandle).toBe(RUN)
@@ -791,7 +961,7 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
     expect(core.moduleSessions).toBe(1)
 
     await killIsolatedSseClient(client)
-    for (let attempt = 0; attempt < 100 && core.moduleSessions > 0; attempt += 1) await Bun.sleep(5)
+    await waitForCondition('heartbeat owner Session reap', () => core.moduleSessions === 0)
     expect(core.cancelCalls).toBe(1)
     expect(core.closeCalls).toBe(1)
     expect(core.terminals).toEqual(['interrupted'])
@@ -803,11 +973,11 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
   test('terminal status polling cannot renew a stdout-backpressured Shim lease and the Session is reaped', async () => {
     const core = new OwnershipCore()
     const { address, server } = await start(core, {
-      ownershipClaimTimeoutMs: 100,
-      claimedClientDisconnectGraceMs: 20,
-      claimedClientLeaseTimeoutMs: 45,
-      heartbeatIntervalMs: 10,
-      idleTimeoutMs: 100,
+      ownershipClaimTimeoutMs: ISOLATED_SSE_CLAIM_TIMEOUT_MS,
+      claimedClientDisconnectGraceMs: 200,
+      claimedClientLeaseTimeoutMs: 400,
+      heartbeatIntervalMs: 50,
+      idleTimeoutMs: 1_000,
     })
     expect((await postRun(address.url, {
       contractVersion: 2,
@@ -820,13 +990,13 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
     // heartbeat may continue, but terminal GETs cannot extend ownership.
     core.getState = 'completed'
     core.terminals.push('completed')
-    for (let heartbeat = 0; heartbeat < 4; heartbeat += 1) {
-      await Bun.sleep(20)
+    for (let heartbeat = 0; heartbeat < 6; heartbeat += 1) {
+      await Bun.sleep(100)
       const response = await fetch(`${address.url}/v2/runs/${RUN}`, { headers: headers() })
       expect(response.status).toBe(200)
       expect(parseHostAgentRunSnapshot(await response.json()).state).toBe('completed')
     }
-    for (let attempt = 0; attempt < 100 && core.moduleSessions > 0; attempt += 1) await Bun.sleep(5)
+    await waitForCondition('terminal Session reap', () => core.moduleSessions === 0)
 
     expect(core.cancelCalls).toBe(1)
     expect(core.closeCalls).toBe(1)
@@ -840,11 +1010,11 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
   test('a valid snapshot for the wrong Run cannot renew ownership and is rejected at the core boundary', async () => {
     const core = new OwnershipCore()
     const { address, server } = await start(core, {
-      ownershipClaimTimeoutMs: 100,
-      claimedClientDisconnectGraceMs: 20,
-      claimedClientLeaseTimeoutMs: 45,
-      heartbeatIntervalMs: 10,
-      idleTimeoutMs: 100,
+      ownershipClaimTimeoutMs: ISOLATED_SSE_CLAIM_TIMEOUT_MS,
+      claimedClientDisconnectGraceMs: 200,
+      claimedClientLeaseTimeoutMs: 400,
+      heartbeatIntervalMs: 50,
+      idleTimeoutMs: 1_000,
     })
     expect((await postRun(address.url, {
       contractVersion: 2,
@@ -853,13 +1023,13 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
     const client = await startIsolatedSseClient(`${address.url}/v2/runs/${RUN}/events`)
     core.getRunHandle = 'run_ffffffffffffffffffffffffffffffff'
 
-    for (let heartbeat = 0; heartbeat < 4; heartbeat += 1) {
-      await Bun.sleep(20)
+    for (let heartbeat = 0; heartbeat < 6; heartbeat += 1) {
+      await Bun.sleep(100)
       const response = await fetch(`${address.url}/v2/runs/${RUN}`, { headers: headers() })
       expect(response.status).toBe(500)
       expect(parseHostAgentErrorResponse(await response.json()).error.code).toBe('INTERNAL_ERROR')
     }
-    for (let attempt = 0; attempt < 100 && core.moduleSessions > 0; attempt += 1) await Bun.sleep(5)
+    await waitForCondition('wrong-Run Session reap', () => core.moduleSessions === 0)
 
     expect(core.cancelCalls).toBe(1)
     expect(core.closeCalls).toBe(1)
@@ -904,33 +1074,52 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
 
   test('explicit DELETE wins a disconnect timer race without duplicate cleanup', async () => {
     let releaseClose!: () => void
+    let signalCloseEntered!: () => void
+    let closeReleased = false
     const core = new OwnershipCore()
     core.closeGate = new Promise<void>((resolve) => { releaseClose = resolve })
+    const closeEntered = new Promise<void>((resolve) => { signalCloseEntered = resolve })
+    core.closeEntered = signalCloseEntered
+    const releaseCloseOnce = (): void => {
+      if (closeReleased) return
+      closeReleased = true
+      releaseClose()
+    }
     const { address, server } = await start(core, {
-      ownershipClaimTimeoutMs: 100,
-      claimedClientDisconnectGraceMs: 35,
-      claimedClientLeaseTimeoutMs: 100,
-      heartbeatIntervalMs: 10,
-      idleTimeoutMs: 200,
+      ownershipClaimTimeoutMs: ISOLATED_SSE_CLAIM_TIMEOUT_MS,
+      claimedClientDisconnectGraceMs: 1_000,
+      claimedClientLeaseTimeoutMs: 5_000,
+      heartbeatIntervalMs: 50,
+      idleTimeoutMs: 1_000,
     })
-    expect((await postRun(address.url, {
-      contractVersion: 2,
-      prompt: 'timer versus explicit dispose',
-    }, 'delete-timer-race')).status).toBe(200)
-    const stream = await startIsolatedSseClient(`${address.url}/v2/runs/${RUN}/events`)
-    await killIsolatedSseClient(stream)
+    let dispose: Promise<Response> | undefined
+    let stream: Socket | undefined
+    try {
+      expect((await postRun(address.url, {
+        contractVersion: 2,
+        prompt: 'timer versus explicit dispose',
+      }, 'delete-timer-race')).status).toBe(200)
+      stream = await startRawSseSocket(`${address.url}/v2/runs/${RUN}/events`)
+      await transitionClaimedOwnerToDisconnectGrace(core, server, address.url)
 
-    const dispose = fetch(`${address.url}/v2/runs/${RUN}`, { method: 'DELETE', headers: headers() })
-    for (let attempt = 0; attempt < 100 && !core.closeStarted; attempt += 1) await Bun.sleep(1)
-    await Bun.sleep(50)
-    expect(core.cancelCalls).toBe(0)
-    expect(core.closeCalls).toBe(1)
-    releaseClose()
-    expect((await dispose).status).toBe(200)
-    expect(core.closeCalls).toBe(1)
-    expect(core.activeRuns).toBe(0)
-    expect(core.moduleSessions).toBe(0)
-    expect(server.debugSnapshot().unclaimedRuns).toBe(0)
+      dispose = fetch(`${address.url}/v2/runs/${RUN}`, { method: 'DELETE', headers: headers() })
+      await waitForPromise('explicit close entry', closeEntered)
+      // Cross the old disconnect deadline while the explicit close owns
+      // cleanup. The stale timer must not start a second cancel/close path.
+      await Bun.sleep(1_250)
+      expect(core.cancelCalls).toBe(0)
+      expect(core.closeCalls).toBe(1)
+      releaseCloseOnce()
+      expect((await dispose).status).toBe(200)
+      expect(core.closeCalls).toBe(1)
+      expect(core.activeRuns).toBe(0)
+      expect(core.moduleSessions).toBe(0)
+      expect(server.debugSnapshot().unclaimedRuns).toBe(0)
+    } finally {
+      releaseCloseOnce()
+      await dispose?.catch(() => undefined)
+      stream?.destroy()
+    }
   })
 
   test('server stop joins an in-flight explicit DELETE and cannot acknowledge cleanup early', async () => {
@@ -1022,11 +1211,11 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
     const core = new OwnershipCore()
     core.closeFailuresRemaining = 1
     const { address, server } = await start(core, {
-      ownershipClaimTimeoutMs: 100,
-      claimedClientDisconnectGraceMs: 20,
-      claimedClientLeaseTimeoutMs: 40,
-      heartbeatIntervalMs: 10,
-      idleTimeoutMs: 100,
+      ownershipClaimTimeoutMs: ISOLATED_SSE_CLAIM_TIMEOUT_MS,
+      claimedClientDisconnectGraceMs: 200,
+      claimedClientLeaseTimeoutMs: 400,
+      heartbeatIntervalMs: 50,
+      idleTimeoutMs: 1_000,
     })
     expect((await postRun(address.url, {
       contractVersion: 2,
@@ -1039,7 +1228,7 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
     })
     expect(failedDelete.status).toBe(500)
     expect(parseHostAgentErrorResponse(await failedDelete.json()).error.code).toBe('CLEANUP_FAILED')
-    for (let attempt = 0; attempt < 100 && core.moduleSessions > 0; attempt += 1) await Bun.sleep(5)
+    await waitForCondition('failed DELETE lease reap', () => core.moduleSessions === 0)
 
     expect(core.cancelCalls).toBe(1)
     expect(core.closeCalls).toBe(2)
@@ -1058,11 +1247,11 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
     core.cancelStarted = cancelStarted
     core.cancelGate = new Promise<void>((resolve) => { releaseCancel = resolve })
     const { address, server } = await start(core, {
-      ownershipClaimTimeoutMs: 100,
-      claimedClientDisconnectGraceMs: 15,
-      claimedClientLeaseTimeoutMs: 35,
-      heartbeatIntervalMs: 10,
-      idleTimeoutMs: 100,
+      ownershipClaimTimeoutMs: ISOLATED_SSE_CLAIM_TIMEOUT_MS,
+      claimedClientDisconnectGraceMs: 100,
+      claimedClientLeaseTimeoutMs: 1_000,
+      heartbeatIntervalMs: 25,
+      idleTimeoutMs: 1_000,
     })
     expect((await postRun(address.url, {
       contractVersion: 2,
@@ -1126,7 +1315,9 @@ describe('HostAgentBrokerServer protocol and security boundary', () => {
     const started = new Promise<void>((resolve) => { subscribeStarted = resolve })
     core.subscribeStarted = subscribeStarted
     core.unsubscribeFailuresRemaining = 1
-    const { address, server } = await start(core, { ownershipClaimTimeoutMs: 30 })
+    const { address, server } = await start(core, {
+      ownershipClaimTimeoutMs: ISOLATED_SSE_CLAIM_TIMEOUT_MS,
+    })
     expect((await postRun(address.url, {
       contractVersion: 2,
       prompt: 'late MessagePort unsubscribe rejects',
