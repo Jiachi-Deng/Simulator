@@ -22,6 +22,7 @@ describe("OpenDesign release-track safety", () => {
     expect(inputs.release_track.default).toBe("prerelease")
     expect(inputs.module_version.default).toBe("0.14.6-rc.1")
     expect(inputs.release_tag.default).toBe("open-design-v0.14.6-rc.1")
+    expect(workflow.jobs.initial.if).toContain("vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED != 'true'")
 
     const authority = step("initial", "Validate fixed release authority").run
     expect(authority).toContain('test "$RELEASE_TAG" = "open-design-v$MODULE_VERSION"')

@@ -66,6 +66,7 @@ jobs:
     if: >-
       github.repository == 'Jiachi-Deng/Simulator' &&
       github.ref == 'refs/heads/main' &&
+      vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED != 'true' &&
       github.event_name == 'workflow_dispatch' &&
       inputs.operation == 'initial' &&
       ((inputs.release_track == 'prerelease' && vars.OPEN_DESIGN_PRERELEASE_ENABLED == 'true') ||
