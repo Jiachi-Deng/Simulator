@@ -24,10 +24,41 @@ describe('OpenDesign M1 machine evidence workflow', () => {
     expect(job['runs-on']).toEqual(['self-hosted', 'macOS', 'ARM64', 'simulator-open-design-m1'])
     expect(job.environment.name).toBe('open-design-m1-machine-evidence')
     expect(job.if).toContain("vars.OPEN_DESIGN_M1_MACHINE_EVIDENCE_ENABLED == 'true'")
+    expect(job.if).toContain("vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED == 'true'")
     expect(job.if).toContain('github.run_attempt == 1')
     expect(job.if).toContain('inputs.paid_turns_approved == true')
     expect(source).toContain('persist-credentials: false')
     expect(source).toContain('bun install --frozen-lockfile --ignore-scripts')
+    expect(job.env.RC_ACCEPTANCE_FREEZE_ENABLED).toBe('${{ vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED }}')
+    const authority = job.steps.find((step: Record<string, any>) => (
+      step.name === 'Verify protected runner and exact Host build authority'
+    ))
+    expect(authority.run).toContain('test "$RC_ACCEPTANCE_FREEZE_ENABLED" = "true"')
+    expect(runnerSource).toContain("requiredEnv('RC_ACCEPTANCE_FREEZE_ENABLED') !== 'true'")
+  })
+
+  it('fails closed around the paid batch when a Release transaction or Catalog drift exists', () => {
+    expect(runnerSource).toContain("const OPEN_DESIGN_RELEASE_WORKFLOW_PATH = '.github/workflows/open-design-release.yml'")
+    for (const status of ['waiting', 'queued', 'in_progress', 'pending', 'requested']) {
+      expect(runnerSource).toContain(`'${status}'`)
+    }
+    expect(runnerSource).toContain('requireNoOpenDesignReleaseTransaction(token)')
+    expect(runnerSource).toContain('requireReleaseCatalogUnchanged(lkgTrust, await fetchReleaseAuthority(OPEN_DESIGN_LKG_VERSION))')
+    expect(runnerSource).toContain('requireReleaseCatalogUnchanged(rcTrust, await fetchReleaseAuthority(OPEN_DESIGN_RC_VERSION))')
+    const firstPaidBatch = runnerSource.indexOf('await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES')
+    const paidPreflight = runnerSource.lastIndexOf('await requireNoOpenDesignReleaseTransaction(token)', firstPaidBatch)
+    const preflightCatalog = runnerSource.lastIndexOf('requireReleaseCatalogUnchanged(lkgTrust', firstPaidBatch)
+    expect(paidPreflight).toBeGreaterThan(-1)
+    expect(preflightCatalog).toBeGreaterThan(paidPreflight)
+    expect(preflightCatalog).toBeLessThan(firstPaidBatch)
+    const secondPaidBatch = runnerSource.indexOf('await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES', firstPaidBatch + 1)
+    const finalIdle = runnerSource.lastIndexOf('await requireNoOpenDesignReleaseTransaction(token)')
+    const finalCatalog = runnerSource.lastIndexOf('requireReleaseCatalogUnchanged(rcTrust')
+    const seal = runnerSource.indexOf('await sealArtifact({ root: artifactRoot')
+    expect(secondPaidBatch).toBeGreaterThan(firstPaidBatch)
+    expect(finalIdle).toBeGreaterThan(secondPaidBatch)
+    expect(finalCatalog).toBeGreaterThan(finalIdle)
+    expect(finalCatalog).toBeLessThan(seal)
   })
 
   it('runs only the direct real producer and seals the exact artifact', () => {
@@ -92,11 +123,28 @@ describe('OpenDesign M1 machine evidence workflow', () => {
       runnerSource.indexOf("process.stderr.write('OpenDesign M1 machine evidence producer failed closed."),
     )
     expect(failureSeal).toContain('preserveOpenDesignM1FirstFailure(staging, failureArtifactRoot, failureOutputRoot')
+    expect(failureSeal).toContain('await bestEffortFailureCleanup({')
+    expect(failureSeal).toContain('batchProgress.completedCaseCount > 0')
+    expect(failureSeal).toContain('{ completedCaseCount: batchProgress.completedCaseCount, lifecyclePhase }')
+    expect(failureSeal).toContain('cleanup,')
     expect(failureSeal).not.toContain('error.message')
     expect(failureSeal).not.toContain('error.stack')
     expect(failureSeal).not.toContain('String(error)')
     expect(failureSource).toContain('await rename(artifact, output)')
     expect(failureSource).toContain('await rm(staging, { recursive: true, force: true })')
+    const cleanupSource = runnerSource.slice(
+      runnerSource.indexOf('async function bestEffortFailureCleanup'),
+      runnerSource.indexOf('async function sealArtifact'),
+    )
+    expect(cleanupSource).toContain("rendererCall('openDesignModule', 'stop')")
+    expect(cleanupSource).toContain('withDeadline(requireRuntimeCleanup(options.craftCdp, 15_000), 20_000')
+    expect(cleanupSource).toContain('await stopApp(options.app)')
+    expect(cleanupSource).toContain('await reapExactProcessIdentities')
+    expect(cleanupSource).toContain('knownProcessTree?: readonly ProcessIdentity[]')
+    expect(cleanupSource).toContain('ownedModuleProcessesRemaining')
+    expect(failureSeal).toContain('knownProcessTree: [...knownProcessTree.values()]')
+    expect(failureSource).toContain("code: 'LIFECYCLE_VERIFICATION_FAILED'")
+    expect(failureSource).toContain('schemaVersion: 2')
   })
 
   it('downloads the raw Host artifact by ID and safely extracts its exact Engineering RC closure', () => {

@@ -36,6 +36,7 @@ jobs:
     if: >-
       github.repository == 'Jiachi-Deng/Simulator' &&
       github.ref == 'refs/heads/main' &&
+      github.run_attempt == 1 &&
       vars.OPEN_DESIGN_ACCEPTANCE_ROLLBACK_ENABLED == 'true' &&
       inputs.debug_enabled == true &&
       inputs.acceptance_approved == true
@@ -69,6 +70,7 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
           test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_RUN_ATTEMPT" = "1"
           test "$(git rev-parse HEAD)" = "$EXPECTED_HOST_HEAD_SHA"
           test "$ROLLBACK_CONFIRMATION" = "ROLLBACK_OPEN_DESIGN_ACCEPTANCE_TO_0_14_5"
           [[ "$ACCEPTANCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
@@ -85,6 +87,7 @@ jobs:
           test "$(jq -r .repository.full_name <<<"$run_json")" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
           test "$(jq -r .path <<<"$run_json")" = "$EXPECTED_ACCEPTANCE_WORKFLOW"
           test "$(jq -r .event <<<"$run_json")" = workflow_dispatch
+          test "$(jq -r .run_attempt <<<"$run_json")" = "1"
 
           evidence_root="$RUNNER_TEMP/open-design-rollback-gate-evidence"
           acceptance="$evidence_root/acceptance"

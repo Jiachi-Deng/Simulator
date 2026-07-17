@@ -54,7 +54,21 @@ export const OPEN_DESIGN_M1_CASE_FAILURE_PHASES = Object.freeze([
   'record.seal',
 ] as const)
 
+export const OPEN_DESIGN_M1_LIFECYCLE_FAILURE_PHASES = Object.freeze([
+  'transition.to-rc',
+  'rc-batch.preflight',
+  'rollback.exercise',
+  'view.lifecycle',
+  'restart.prepare',
+  'restart.verify',
+  'catalog.freeze-verify',
+  'artifact.seal',
+  'artifact.validate',
+  'artifact.publish',
+] as const)
+
 export type OpenDesignM1CaseFailurePhase = typeof OPEN_DESIGN_M1_CASE_FAILURE_PHASES[number]
+export type OpenDesignM1LifecycleFailurePhase = typeof OPEN_DESIGN_M1_LIFECYCLE_FAILURE_PHASES[number]
 export type OpenDesignM1FailureStack = 'old' | 'new'
 
 export interface OpenDesignM1FirstFailureAuthority {
@@ -78,11 +92,37 @@ export interface OpenDesignM1BatchProgress {
   current?: OpenDesignM1FirstFailureCase
 }
 
+export interface OpenDesignM1FailureCleanupEvidence {
+  readonly moduleStop: 'not-attempted' | 'completed' | 'failed'
+  readonly runtimeSnapshotObserved: boolean
+  readonly runtimeClean: boolean
+  readonly activeRuns: number | null
+  readonly moduleSessions: number | null
+  readonly hiddenSessions: number | null
+  readonly transientSessions: number | null
+  readonly quarantinedSessions: number | null
+  readonly appExit: 'completed' | 'failed'
+  readonly descendantProcessesRemaining: number | null
+  readonly ownedModuleProcessesRemaining: number | null
+}
+
+export type OpenDesignM1FirstFailureProgress =
+  | (OpenDesignM1BatchProgress & {
+      readonly current: OpenDesignM1FirstFailureCase
+      readonly lifecyclePhase?: never
+    })
+  | {
+      readonly completedCaseCount: number
+      readonly current?: never
+      readonly lifecyclePhase: OpenDesignM1LifecycleFailurePhase
+    }
+
 export interface OpenDesignM1FirstFailureInput {
   readonly authority: OpenDesignM1FirstFailureAuthority
   readonly batchStartedAt: number
   readonly failedAt: number
-  readonly progress: OpenDesignM1BatchProgress & { readonly current: OpenDesignM1FirstFailureCase }
+  readonly progress: OpenDesignM1FirstFailureProgress
+  readonly cleanup: OpenDesignM1FailureCleanupEvidence
 }
 
 export interface OpenDesignM1FirstFailureValidationResult {
@@ -162,23 +202,64 @@ function expectedOrdinal(stack: OpenDesignM1FailureStack, caseId: string): { tur
   }
 }
 
+function nullableCount(value: unknown): value is number | null {
+  return value === null || (Number.isSafeInteger(value) && (value as number) >= 0)
+}
+
+function assertCleanupEvidence(cleanup: OpenDesignM1FailureCleanupEvidence): void {
+  if (!['not-attempted', 'completed', 'failed'].includes(cleanup.moduleStop)
+    || typeof cleanup.runtimeSnapshotObserved !== 'boolean'
+    || typeof cleanup.runtimeClean !== 'boolean'
+    || !['completed', 'failed'].includes(cleanup.appExit)
+    || !nullableCount(cleanup.activeRuns)
+    || !nullableCount(cleanup.moduleSessions)
+    || !nullableCount(cleanup.hiddenSessions)
+    || !nullableCount(cleanup.transientSessions)
+    || !nullableCount(cleanup.quarantinedSessions)
+    || !nullableCount(cleanup.descendantProcessesRemaining)
+    || !nullableCount(cleanup.ownedModuleProcessesRemaining)) {
+    throw new TypeError('OpenDesign M1 first-failure cleanup evidence is invalid')
+  }
+  const runtimeCounts = [
+    cleanup.activeRuns,
+    cleanup.moduleSessions,
+    cleanup.hiddenSessions,
+    cleanup.transientSessions,
+    cleanup.quarantinedSessions,
+  ]
+  const allRuntimeCountsAreZero = runtimeCounts.every((count) => count === 0)
+  if (cleanup.runtimeSnapshotObserved !== runtimeCounts.every((count) => count !== null)
+    || (cleanup.runtimeSnapshotObserved && cleanup.runtimeClean !== allRuntimeCountsAreZero)
+    || (!cleanup.runtimeSnapshotObserved && cleanup.runtimeClean)) {
+    throw new TypeError('OpenDesign M1 first-failure runtime cleanup evidence is invalid')
+  }
+}
+
 function assertFailureInput(input: OpenDesignM1FirstFailureInput): void {
   assertAuthority(input.authority)
+  assertCleanupEvidence(input.cleanup)
   if (!Number.isSafeInteger(input.batchStartedAt) || !Number.isSafeInteger(input.failedAt)
     || input.batchStartedAt < 0 || input.failedAt < input.batchStartedAt) {
     throw new TypeError('OpenDesign M1 first-failure timestamps are invalid')
   }
   const failure = input.progress.current
-  if (!['old', 'new'].includes(failure.stack)
-    || !OPEN_DESIGN_M1_CASE_FAILURE_PHASES.includes(failure.phase)
-    || !Number.isSafeInteger(input.progress.completedCaseCount)) {
-    throw new TypeError('OpenDesign M1 first-failure progress is invalid')
-  }
-  const expected = expectedOrdinal(failure.stack, failure.caseId)
-  if (failure.turnOrdinal !== expected.turnOrdinal
-    || failure.caseAttemptOrdinal !== expected.caseAttemptOrdinal
-    || input.progress.completedCaseCount !== failure.caseAttemptOrdinal - 1) {
-    throw new TypeError('OpenDesign M1 first-failure ordering is invalid')
+  if (failure) {
+    if (!['old', 'new'].includes(failure.stack)
+      || !OPEN_DESIGN_M1_CASE_FAILURE_PHASES.includes(failure.phase)
+      || !Number.isSafeInteger(input.progress.completedCaseCount)) {
+      throw new TypeError('OpenDesign M1 first-failure progress is invalid')
+    }
+    const expected = expectedOrdinal(failure.stack, failure.caseId)
+    if (failure.turnOrdinal !== expected.turnOrdinal
+      || failure.caseAttemptOrdinal !== expected.caseAttemptOrdinal
+      || input.progress.completedCaseCount !== failure.caseAttemptOrdinal - 1) {
+      throw new TypeError('OpenDesign M1 first-failure ordering is invalid')
+    }
+  } else if (!OPEN_DESIGN_M1_LIFECYCLE_FAILURE_PHASES.includes(input.progress.lifecyclePhase)
+    || !Number.isSafeInteger(input.progress.completedCaseCount)
+    || input.progress.completedCaseCount < 1
+    || input.progress.completedCaseCount > 40) {
+    throw new TypeError('OpenDesign M1 lifecycle failure progress is invalid')
   }
 }
 
@@ -221,8 +302,9 @@ export async function runTrackedOpenDesignM1Case<T extends { readonly id: string
 function manifestFor(input: OpenDesignM1FirstFailureInput): JsonObject {
   assertFailureInput(input)
   const failure = input.progress.current
+  const paidTurnUpperBound = failure?.caseAttemptOrdinal ?? input.progress.completedCaseCount
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: 'open-design-m1-machine-first-failure',
     repository: REPOSITORY,
     workflowPath: WORKFLOW_PATH,
@@ -242,17 +324,23 @@ function manifestFor(input: OpenDesignM1FirstFailureInput): JsonObject {
       status: 'failed',
       stopOnFailure: true,
       paidTurnBudget: 40,
-      paidTurnUpperBound: failure.caseAttemptOrdinal,
+      paidTurnUpperBound,
       caseAttemptsCompleted: input.progress.completedCaseCount,
     },
-    firstFailure: {
-      code: 'CASE_EXECUTION_FAILED',
-      stack: failure.stack,
-      caseId: failure.caseId,
-      turnOrdinal: failure.turnOrdinal,
-      caseAttemptOrdinal: failure.caseAttemptOrdinal,
-      phase: failure.phase,
-    },
+    firstFailure: failure
+      ? {
+          code: 'CASE_EXECUTION_FAILED',
+          stack: failure.stack,
+          caseId: failure.caseId,
+          turnOrdinal: failure.turnOrdinal,
+          caseAttemptOrdinal: failure.caseAttemptOrdinal,
+          phase: failure.phase,
+        }
+      : {
+          code: 'LIFECYCLE_VERIFICATION_FAILED',
+          phase: input.progress.lifecyclePhase,
+        },
+    cleanup: input.cleanup,
   }
 }
 
@@ -304,8 +392,10 @@ export async function validateOpenDesignM1FirstFailure(
     throw new TypeError('OpenDesign M1 first-failure manifest is not canonical')
   }
   const manifest = objectAt(manifestValue, '$')
-  exactKeys(manifest, ['schemaVersion', 'kind', 'repository', 'workflowPath', 'producer', 'host', 'batch', 'firstFailure'], '$')
-  if (manifest.schemaVersion !== 1 || manifest.kind !== 'open-design-m1-machine-first-failure'
+  exactKeys(manifest, [
+    'schemaVersion', 'kind', 'repository', 'workflowPath', 'producer', 'host', 'batch', 'firstFailure', 'cleanup',
+  ], '$')
+  if (manifest.schemaVersion !== 2 || manifest.kind !== 'open-design-m1-machine-first-failure'
     || manifest.repository !== REPOSITORY || manifest.workflowPath !== WORKFLOW_PATH) {
     throw new TypeError('OpenDesign M1 first-failure manifest identity is invalid')
   }
@@ -335,21 +425,40 @@ export async function validateOpenDesignM1FirstFailure(
   const caseAttemptsCompleted = integerAt(batch, 'caseAttemptsCompleted', '$.batch')
   if (failedAt < startedAt) throw new TypeError('OpenDesign M1 first-failure timeline is invalid')
 
+  const cleanup = objectAt(manifest.cleanup, '$.cleanup')
+  exactKeys(cleanup, [
+    'moduleStop', 'runtimeSnapshotObserved', 'runtimeClean', 'activeRuns', 'moduleSessions',
+    'hiddenSessions', 'transientSessions', 'quarantinedSessions', 'appExit',
+    'descendantProcessesRemaining', 'ownedModuleProcessesRemaining',
+  ], '$.cleanup')
+  assertCleanupEvidence(cleanup as unknown as OpenDesignM1FailureCleanupEvidence)
+
   const firstFailure = objectAt(manifest.firstFailure, '$.firstFailure')
-  exactKeys(firstFailure, ['code', 'stack', 'caseId', 'turnOrdinal', 'caseAttemptOrdinal', 'phase'], '$.firstFailure')
-  const stack = stringAt(firstFailure, 'stack', '$.firstFailure')
-  const caseId = stringAt(firstFailure, 'caseId', '$.firstFailure')
-  const phase = stringAt(firstFailure, 'phase', '$.firstFailure')
-  if (!['old', 'new'].includes(stack) || firstFailure.code !== 'CASE_EXECUTION_FAILED'
-    || !OPEN_DESIGN_M1_CASE_FAILURE_PHASES.includes(phase as OpenDesignM1CaseFailurePhase)) {
-    throw new TypeError('OpenDesign M1 first-failure case identity is invalid')
-  }
-  const expected = expectedOrdinal(stack as OpenDesignM1FailureStack, caseId)
-  if (integerAt(firstFailure, 'turnOrdinal', '$.firstFailure') !== expected.turnOrdinal
-    || integerAt(firstFailure, 'caseAttemptOrdinal', '$.firstFailure') !== expected.caseAttemptOrdinal
-    || paidTurnUpperBound !== expected.caseAttemptOrdinal
-    || caseAttemptsCompleted !== expected.caseAttemptOrdinal - 1) {
-    throw new TypeError('OpenDesign M1 first-failure case ordering is invalid')
+  if (firstFailure.code === 'CASE_EXECUTION_FAILED') {
+    exactKeys(firstFailure, ['code', 'stack', 'caseId', 'turnOrdinal', 'caseAttemptOrdinal', 'phase'], '$.firstFailure')
+    const stack = stringAt(firstFailure, 'stack', '$.firstFailure')
+    const caseId = stringAt(firstFailure, 'caseId', '$.firstFailure')
+    const phase = stringAt(firstFailure, 'phase', '$.firstFailure')
+    if (!['old', 'new'].includes(stack)
+      || !OPEN_DESIGN_M1_CASE_FAILURE_PHASES.includes(phase as OpenDesignM1CaseFailurePhase)) {
+      throw new TypeError('OpenDesign M1 first-failure case identity is invalid')
+    }
+    const expected = expectedOrdinal(stack as OpenDesignM1FailureStack, caseId)
+    if (integerAt(firstFailure, 'turnOrdinal', '$.firstFailure') !== expected.turnOrdinal
+      || integerAt(firstFailure, 'caseAttemptOrdinal', '$.firstFailure') !== expected.caseAttemptOrdinal
+      || paidTurnUpperBound !== expected.caseAttemptOrdinal
+      || caseAttemptsCompleted !== expected.caseAttemptOrdinal - 1) {
+      throw new TypeError('OpenDesign M1 first-failure case ordering is invalid')
+    }
+  } else {
+    exactKeys(firstFailure, ['code', 'phase'], '$.firstFailure')
+    const phase = stringAt(firstFailure, 'phase', '$.firstFailure')
+    if (firstFailure.code !== 'LIFECYCLE_VERIFICATION_FAILED'
+      || !OPEN_DESIGN_M1_LIFECYCLE_FAILURE_PHASES.includes(phase as OpenDesignM1LifecycleFailurePhase)
+      || caseAttemptsCompleted < 1 || caseAttemptsCompleted > 40
+      || paidTurnUpperBound !== caseAttemptsCompleted) {
+      throw new TypeError('OpenDesign M1 lifecycle failure identity is invalid')
+    }
   }
 
   const manifestSha = sha256(manifestSource)

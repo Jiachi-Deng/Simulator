@@ -51,7 +51,9 @@ import {
   preserveOpenDesignM1FirstFailure,
   runTrackedOpenDesignM1Case,
   type OpenDesignM1CaseFailurePhase,
+  type OpenDesignM1FailureCleanupEvidence,
   type OpenDesignM1FirstFailureAuthority,
+  type OpenDesignM1LifecycleFailurePhase,
 } from './open-design-m1-machine-first-failure'
 
 const REAL_OPT_IN = 'packaged-open-design-direct-observation'
@@ -65,6 +67,10 @@ const SHA256 = /^[0-9a-f]{64}$/
 const COMMIT = /^[0-9a-f]{40}$/
 const RELEASE_KEY_ID = 'open-design-release-2026-01'
 const RELEASE_PUBLIC_KEY = 'KvpR89GuQd670SZMZuuR+aK4FUIprxRlqE58K3twQZk='
+const OPEN_DESIGN_RELEASE_WORKFLOW_PATH = '.github/workflows/open-design-release.yml'
+const OPEN_DESIGN_RELEASE_TRANSACTION_STATUSES = Object.freeze([
+  'waiting', 'queued', 'in_progress', 'pending', 'requested',
+] as const)
 export const OPEN_DESIGN_M1_MACHINE_ACCEPTANCE_DESCRIPTOR_CANONICAL_JSON = `${JSON.stringify({
   schemaVersion: 1,
   hostVersion: '0.12.0',
@@ -122,6 +128,18 @@ function sha256(value: Uint8Array | string): string {
 
 function canonical(value: unknown): string { return `${JSON.stringify(value)}\n` }
 function sleep(ms: number): Promise<void> { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)) }
+
+async function withDeadline<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<T>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs)
+  })
+  try {
+    return await Promise.race([operation, deadline])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
 
 function requiredEnv(name: string, pattern?: RegExp): string {
   const value = process.env[name]
@@ -672,13 +690,38 @@ async function openDesignTarget(): Promise<CdpTarget> {
 async function githubJson(path: string, token: string): Promise<any> {
   const response = await fetch(`https://api.github.com${path}`, {
     headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28' },
+    signal: AbortSignal.timeout(30_000),
   })
   if (!response.ok) throw new Error(`GitHub authority request failed: ${response.status}`)
   return response.json()
 }
 
+type GitHubJsonRequest = (path: string, token: string) => Promise<any>
+
+/**
+ * Catalog freeze is meaningful only when the single Release transaction lane is
+ * idle. Query every non-terminal GitHub Actions status independently so a large
+ * completed-run history cannot push an active transaction off a bounded page.
+ */
+export async function requireNoOpenDesignReleaseTransaction(
+  token: string,
+  request: GitHubJsonRequest = githubJson,
+): Promise<void> {
+  const workflow = encodeURIComponent(OPEN_DESIGN_RELEASE_WORKFLOW_PATH)
+  for (const status of OPEN_DESIGN_RELEASE_TRANSACTION_STATUSES) {
+    const result = await request(
+      `/repos/${REPOSITORY}/actions/workflows/${workflow}/runs?status=${status}&per_page=100`,
+      token,
+    )
+    if (!result || !Number.isSafeInteger(result.total_count) || result.total_count !== 0
+      || !Array.isArray(result.workflow_runs) || result.workflow_runs.length !== 0) {
+      throw new Error('OpenDesign Release transaction is not idle')
+    }
+  }
+}
+
 async function downloadCanonicalJson(url: string): Promise<{ bytes: Buffer; value: JsonObject }> {
-  const response = await fetch(url, { redirect: 'follow' })
+  const response = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(30_000) })
   if (!response.ok) throw new Error('Release authority download failed')
   const finalUrl = new URL(response.url)
   if (!['github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com'].includes(finalUrl.hostname)) {
@@ -770,6 +813,20 @@ async function fetchReleaseAuthority(version: '0.14.5' | '0.14.6-rc.1'): Promise
     },
     catalog,
     envelope,
+  }
+}
+
+type ReleaseAuthoritySnapshot = Awaited<ReturnType<typeof fetchReleaseAuthority>>
+
+/** Require exact signed Catalog/envelope bytes and parsed authority to remain frozen. */
+export function requireReleaseCatalogUnchanged(
+  before: ReleaseAuthoritySnapshot,
+  after: ReleaseAuthoritySnapshot,
+): void {
+  if (!before.catalog.bytes.equals(after.catalog.bytes)
+    || !before.envelope.bytes.equals(after.envelope.bytes)
+    || canonical(before.release) !== canonical(after.release)) {
+    throw new Error('OpenDesign Release Catalog changed during paid acceptance')
   }
 }
 
@@ -995,12 +1052,44 @@ async function remainingProcessTreeCount(snapshot: readonly ProcessIdentity[]): 
   return snapshot.filter((entry) => current.get(entry.pid) === entry.commandSha256).length
 }
 
+async function reapExactProcessIdentities(snapshot: readonly ProcessIdentity[]): Promise<number> {
+  const signalRemaining = async (signal: NodeJS.Signals): Promise<void> => {
+    const current = new Map((await processInventory()).map((row) => [row.pid, row.commandSha256]))
+    for (const entry of snapshot) {
+      if (current.get(entry.pid) !== entry.commandSha256) continue
+      try { process.kill(entry.pid, signal) } catch { /* identity already exited */ }
+    }
+  }
+  if (await remainingProcessTreeCount(snapshot) === 0) return 0
+  await signalRemaining('SIGTERM')
+  try {
+    await waitFor('failed-run descendant process TERM cleanup', async () => (
+      await remainingProcessTreeCount(snapshot)
+    ) === 0 ? true : false, 5_000)
+  } catch { /* escalate only the still-matching identities */ }
+  if (await remainingProcessTreeCount(snapshot) !== 0) {
+    await signalRemaining('SIGKILL')
+    try {
+      await waitFor('failed-run descendant process KILL cleanup', async () => (
+        await remainingProcessTreeCount(snapshot)
+      ) === 0 ? true : false, 5_000)
+    } catch { /* return the bounded residual count below */ }
+  }
+  return remainingProcessTreeCount(snapshot)
+}
+
 async function residualOwnedModuleProcessCount(userData: string, proxyScriptPath: string): Promise<number> {
   return (await processInventory()).filter((row) => row.pid !== process.pid && (
     row.command.includes(userData)
     || row.command.includes(proxyScriptPath)
     || row.command.includes('simulator-host-agent.mjs')
   )).length
+}
+
+async function ownedModuleProcessSnapshot(userData: string, proxyScriptPath: string): Promise<ProcessIdentity[]> {
+  return (await processInventory()).filter((row) => row.pid !== process.pid && (
+    row.command.includes(userData) || row.command.includes(proxyScriptPath)
+  )).map(({ pid, commandSha256 }) => ({ pid, commandSha256 }))
 }
 
 async function ownedBlackoutProxyProcessCount(proxyScriptPath: string): Promise<number> {
@@ -1263,16 +1352,136 @@ async function appLaunch(
     env: environment,
     stdout: 'ignore', stderr: 'ignore',
   })
-  await craftTarget()
-  return child
+  try {
+    await craftTarget()
+    return child
+  } catch (error) {
+    try { await stopApp(child) } catch { /* preserve the startup failure */ }
+    throw error
+  }
 }
 
 async function stopApp(child: ReturnType<typeof Bun.spawn>): Promise<void> {
+  if (child.exitCode !== null) return
   child.kill('SIGTERM')
   const result = await Promise.race([child.exited.then(() => true), sleep(10_000).then(() => false)])
   if (!result) {
     child.kill('SIGKILL')
     await child.exited
+  }
+}
+
+async function bestEffortFailureCleanup(options: {
+  app: ReturnType<typeof Bun.spawn>
+  craftCdp?: CdpClient
+  moduleCdp?: CdpClient
+  userData: string
+  proxyScriptPath: string
+  knownProcessTree?: readonly ProcessIdentity[]
+}): Promise<OpenDesignM1FailureCleanupEvidence> {
+  let moduleStop: OpenDesignM1FailureCleanupEvidence['moduleStop'] = 'not-attempted'
+  let runtimeSnapshotObserved = false
+  let runtimeClean = false
+  let activeRuns: number | null = null
+  let moduleSessions: number | null = null
+  let hiddenSessions: number | null = null
+  let transientSessions: number | null = null
+  let quarantinedSessions: number | null = null
+  let appExit: OpenDesignM1FailureCleanupEvidence['appExit'] = 'failed'
+  let descendantProcessesRemaining: number | null = null
+  let ownedModuleProcessesRemaining: number | null = null
+  let processTreeObserved = (options.knownProcessTree?.length ?? 0) > 0
+  const observedProcessTree = new Map<string, ProcessIdentity>(
+    (options.knownProcessTree ?? []).map((entry) => [`${entry.pid}:${entry.commandSha256}`, entry]),
+  )
+  const rememberDescendants = async (): Promise<void> => {
+    try {
+      const descendants = await descendantProcessSnapshot(options.app.pid)
+      processTreeObserved = true
+      for (const entry of descendants) {
+        observedProcessTree.set(`${entry.pid}:${entry.commandSha256}`, entry)
+      }
+    } catch { /* process inventory is recorded as unavailable below */ }
+  }
+
+  await rememberDescendants()
+  if (options.craftCdp) {
+    moduleStop = 'failed'
+    try {
+      const stopped = await withDeadline(
+        options.craftCdp.evaluate(rendererCall('openDesignModule', 'stop')),
+        30_000,
+        'failed-run Module stop',
+      ) as JsonObject | undefined
+      if (!stopped || !['available', 'not-installed'].includes(String(stopped.status))) {
+        throw new Error('failed-run Module stop did not settle')
+      }
+      moduleStop = 'completed'
+    } catch { /* continue to Host termination */ }
+
+    try {
+      await withDeadline(requireRuntimeCleanup(options.craftCdp, 15_000), 20_000, 'failed-run Runtime cleanup')
+      const snapshot = await withDeadline(queryRuntimeCleanup(options.craftCdp), 5_000, 'failed-run Runtime snapshot')
+      runtimeSnapshotObserved = true
+      runtimeClean = runtimeIsClean(snapshot)
+      activeRuns = snapshot.v1.activeRuns + snapshot.v2.activeRuns
+      moduleSessions = snapshot.v1.moduleSessions + snapshot.v2.moduleSessions
+      hiddenSessions = snapshot.sessions.hiddenSessions
+      transientSessions = snapshot.sessions.transientSessions
+      quarantinedSessions = snapshot.sessions.quarantinedSessions
+    } catch {
+      try {
+        const snapshot = await withDeadline(queryRuntimeCleanup(options.craftCdp), 5_000, 'failed-run Runtime snapshot')
+        runtimeSnapshotObserved = true
+        runtimeClean = runtimeIsClean(snapshot)
+        activeRuns = snapshot.v1.activeRuns + snapshot.v2.activeRuns
+        moduleSessions = snapshot.v1.moduleSessions + snapshot.v2.moduleSessions
+        hiddenSessions = snapshot.sessions.hiddenSessions
+        transientSessions = snapshot.sessions.transientSessions
+        quarantinedSessions = snapshot.sessions.quarantinedSessions
+      } catch { /* runtime evidence remains explicitly unavailable */ }
+    }
+  }
+
+  await rememberDescendants()
+  try { options.moduleCdp?.close() } catch { /* process cleanup continues */ }
+  try { options.craftCdp?.close() } catch { /* process cleanup continues */ }
+  try {
+    await stopApp(options.app)
+    appExit = 'completed'
+  } catch { /* exact descendant reaping still runs */ }
+
+  const processTree = [...observedProcessTree.values()]
+  if (processTreeObserved) {
+    try {
+      descendantProcessesRemaining = await reapExactProcessIdentities(processTree)
+    } catch {
+      try { descendantProcessesRemaining = await remainingProcessTreeCount(processTree) } catch { /* unavailable */ }
+    }
+  }
+  try {
+    const owned = await ownedModuleProcessSnapshot(options.userData, options.proxyScriptPath)
+    processTreeObserved = true
+    for (const entry of owned) observedProcessTree.set(`${entry.pid}:${entry.commandSha256}`, entry)
+    descendantProcessesRemaining = await reapExactProcessIdentities([...observedProcessTree.values()])
+    ownedModuleProcessesRemaining = await residualOwnedModuleProcessCount(
+      options.userData,
+      options.proxyScriptPath,
+    )
+  } catch { /* unavailable */ }
+
+  return {
+    moduleStop,
+    runtimeSnapshotObserved,
+    runtimeClean,
+    activeRuns,
+    moduleSessions,
+    hiddenSessions,
+    transientSessions,
+    quarantinedSessions,
+    appExit,
+    descendantProcessesRemaining,
+    ownedModuleProcessesRemaining,
   }
 }
 
@@ -1383,6 +1592,7 @@ async function main(): Promise<void> {
   if (requiredEnv('SIMULATOR_M1_MACHINE_REAL') !== REAL_OPT_IN
     || requiredEnv('PAID_TURNS_APPROVED') !== 'true'
     || requiredEnv('ACCEPTANCE_CONFIRMATION') !== CONFIRMATION
+    || requiredEnv('RC_ACCEPTANCE_FREEZE_ENABLED') !== 'true'
     || requiredEnv('GITHUB_RUN_ATTEMPT') !== '1') throw new TypeError('Machine producer authorization is invalid')
   const runnerTemp = await realpath(requiredEnv('RUNNER_TEMP'))
   const outputRoot = await isolatedPath('M1_EVIDENCE_OUTPUT_ROOT', runnerTemp)
@@ -1401,6 +1611,7 @@ async function main(): Promise<void> {
   const hostHeadSha = requiredEnv('GITHUB_SHA', COMMIT)
   const hostArtifactSha256 = requiredEnv('HOST_ARTIFACT_SHA256', SHA256)
   const token = requiredEnv('GH_TOKEN')
+  await requireNoOpenDesignReleaseTransaction(token)
   const lkgTrust = await fetchReleaseAuthority(OPEN_DESIGN_LKG_VERSION)
   const rcTrust = await fetchReleaseAuthority(OPEN_DESIGN_RC_VERSION)
   const authority: MachineEvidenceAuthority = {
@@ -1469,7 +1680,13 @@ async function main(): Promise<void> {
   let app = await appLaunch(executable, userData, blackoutProxyChild)
   let craftCdp: CdpClient | undefined
   let moduleCdp: CdpClient | undefined
-  let caseFailedAt: number | undefined
+  let producerFailed = false
+  let failedAt: number | undefined
+  let lifecyclePhase: OpenDesignM1LifecycleFailurePhase = 'transition.to-rc'
+  const knownProcessTree = new Map<string, ProcessIdentity>()
+  const rememberProcessTree = (snapshot: readonly ProcessIdentity[]): void => {
+    for (const entry of snapshot) knownProcessTree.set(`${entry.pid}:${entry.commandSha256}`, entry)
+  }
   try {
     const craft = await craftTarget()
     craftCdp = new CdpClient(craft.webSocketDebuggerUrl)
@@ -1493,6 +1710,12 @@ async function main(): Promise<void> {
     await requireOpenDesignHostRuntime(origin)
     const moduleDataRoot = join(userData, 'optional-modules', 'module-data', 'org.simulator.open-design')
     await realpath(moduleDataRoot)
+    // This is the last boundary before the first paid Turn. Re-check the
+    // single release lane and exact signed Catalog bytes after all local
+    // package/module preflights, not merely when the producer process started.
+    await requireNoOpenDesignReleaseTransaction(token)
+    requireReleaseCatalogUnchanged(lkgTrust, await fetchReleaseAuthority(OPEN_DESIGN_LKG_VERSION))
+    requireReleaseCatalogUnchanged(rcTrust, await fetchReleaseAuthority(OPEN_DESIGN_RC_VERSION))
     await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES, craftCdp, async (testCase, index) => {
       await runTrackedOpenDesignM1Case(batchProgress, 'old', testCase, index, async (onPhase) => {
         await executeCase({
@@ -1504,6 +1727,7 @@ async function main(): Promise<void> {
         })
       })
     })
+    lifecyclePhase = 'transition.to-rc'
     state = readyAcceptanceState(
       await craftCdp.evaluate(rendererCall('openDesignAcceptance', 'rollback')),
       OPEN_DESIGN_RC_VERSION,
@@ -1515,6 +1739,7 @@ async function main(): Promise<void> {
     await moduleCdp.connect()
     origin = new URL(module.url).origin
     await requireOpenDesignHostRuntime(origin)
+    lifecyclePhase = 'rc-batch.preflight'
     await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES, craftCdp, async (testCase, index) => {
       await runTrackedOpenDesignM1Case(batchProgress, 'new', testCase, index, async (onPhase) => {
         await executeCase({
@@ -1526,6 +1751,7 @@ async function main(): Promise<void> {
         })
       })
     })
+    lifecyclePhase = 'rollback.exercise'
     readyAcceptanceState(
       await craftCdp.evaluate(rendererCall('openDesignAcceptance', 'rollback')),
       OPEN_DESIGN_LKG_VERSION,
@@ -1536,6 +1762,7 @@ async function main(): Promise<void> {
       OPEN_DESIGN_RC_VERSION,
       OPEN_DESIGN_LKG_VERSION,
     )
+    lifecyclePhase = 'view.lifecycle'
     await craftCdp.evaluate(rendererCall('openDesignModule', 'setViewPresentation', { visible: false }))
     await craftCdp.evaluate(rendererCall('openDesignModule', 'setViewPresentation', { visible: true, bounds: { x: 320, y: 0, width: 1000, height: 800 } }))
     await writeCanonical(artifactRoot, 'rollback/transitions.json', {
@@ -1545,12 +1772,15 @@ async function main(): Promise<void> {
     })
     await craftSnapshot(craftCdp, app.pid)
     await requireRuntimeCleanup(craftCdp, 5_000)
+    lifecyclePhase = 'restart.prepare'
     moduleCdp.close(); moduleCdp = undefined
     craftCdp.close(); craftCdp = undefined
     const preRestartProcessTree = await descendantProcessSnapshot(app.pid)
+    rememberProcessTree(preRestartProcessTree)
     await stopApp(app)
     await requireProcessTreeReaped(preRestartProcessTree)
     app = await appLaunch(executable, userData, blackoutProxyChild)
+    lifecyclePhase = 'restart.verify'
     const restartedCraft = await craftTarget()
     craftCdp = new CdpClient(restartedCraft.webSocketDebuggerUrl)
     await craftCdp.connect()
@@ -1563,6 +1793,7 @@ async function main(): Promise<void> {
     })
     craftCdp.close(); craftCdp = undefined
     const finalProcessTree = await descendantProcessSnapshot(app.pid)
+    rememberProcessTree(finalProcessTree)
     await stopApp(app)
     await requireProcessTreeReaped(finalProcessTree)
     const residual = await remainingProcessTreeCount(finalProcessTree)
@@ -1571,9 +1802,18 @@ async function main(): Promise<void> {
     await writeCanonical(artifactRoot, 'rollback/processes.json', {
       schemaVersion: 1, passed: true, count: 0, observedAt: new Date().toISOString(),
     })
+    lifecyclePhase = 'catalog.freeze-verify'
+    await requireNoOpenDesignReleaseTransaction(token)
+    const finalLkgTrust = await fetchReleaseAuthority(OPEN_DESIGN_LKG_VERSION)
+    const finalRcTrust = await fetchReleaseAuthority(OPEN_DESIGN_RC_VERSION)
+    requireReleaseCatalogUnchanged(lkgTrust, finalLkgTrust)
+    requireReleaseCatalogUnchanged(rcTrust, finalRcTrust)
     const batchCompleted = Date.now()
+    lifecyclePhase = 'artifact.seal'
     await sealArtifact({ root: artifactRoot, authority, requiredCi, lkgTrust, rcTrust, batchStart, batchCompleted })
+    lifecyclePhase = 'artifact.validate'
     const result = await validateOpenDesignM1MachineEvidence(artifactRoot, authority)
+    lifecyclePhase = 'artifact.publish'
     await rename(artifactRoot, outputRoot)
     process.stdout.write(`${canonical({
       status: 'passed', artifactName: OPEN_DESIGN_M1_MACHINE_ARTIFACT_NAME,
@@ -1581,19 +1821,35 @@ async function main(): Promise<void> {
       totalBytes: result.totalBytes, batchDigest: result.batchDigest,
     })}`)
   } catch (error) {
-    if (batchProgress.current) caseFailedAt = Date.now()
+    producerFailed = true
+    failedAt = Date.now()
     throw error
   } finally {
-    try { moduleCdp?.close() } catch { /* cleanup only */ }
-    try { craftCdp?.close() } catch { /* cleanup only */ }
-    try { await stopApp(app) } catch { /* cleanup only */ }
+    const cleanup = producerFailed
+      ? await bestEffortFailureCleanup({
+          app,
+          craftCdp,
+          moduleCdp,
+          userData,
+          proxyScriptPath: blackoutProxyChild.scriptPath,
+          knownProcessTree: [...knownProcessTree.values()],
+        })
+      : undefined
+    if (!producerFailed) {
+      try { moduleCdp?.close() } catch { /* cleanup only */ }
+      try { craftCdp?.close() } catch { /* cleanup only */ }
+      try { await stopApp(app) } catch { /* cleanup only */ }
+    }
     const firstFailure = batchProgress.current
-    if (caseFailedAt !== undefined && firstFailure) {
+    if (failedAt !== undefined && cleanup && (firstFailure || batchProgress.completedCaseCount > 0)) {
       await preserveOpenDesignM1FirstFailure(staging, failureArtifactRoot, failureOutputRoot, {
         authority: failureAuthority,
         batchStartedAt: batchStart,
-        failedAt: caseFailedAt,
-        progress: { completedCaseCount: batchProgress.completedCaseCount, current: firstFailure },
+        failedAt,
+        progress: firstFailure
+          ? { completedCaseCount: batchProgress.completedCaseCount, current: firstFailure }
+          : { completedCaseCount: batchProgress.completedCaseCount, lifecyclePhase },
+        cleanup,
       })
     } else {
       await rm(staging, { recursive: true, force: true })
