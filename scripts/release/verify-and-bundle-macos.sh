@@ -26,7 +26,10 @@ assert_no_updater_metadata() {
   fi
 }
 
+python3 "$SCRIPT_DIR/preflight-macos-release-artifact.py" container-tree "$RELEASE_DIR"
 assert_no_updater_metadata "$RELEASE_DIR" "release directory"
+python3 "$SCRIPT_DIR/preflight-macos-release-artifact.py" dmg "$DMG"
+python3 "$SCRIPT_DIR/preflight-macos-release-artifact.py" zip "$ZIP"
 
 assert_lstat_type() {
   local path=$1
@@ -54,6 +57,7 @@ PY
 }
 
 WORK=$(mktemp -d)
+WORK=$(cd "$WORK" && pwd -P)
 MOUNT="$WORK/mount"
 UNZIP="$WORK/unzip"
 mkdir -p "$MOUNT" "$UNZIP"
@@ -66,6 +70,12 @@ trap cleanup EXIT
 hdiutil verify "$DMG"
 hdiutil attach "$DMG" -nobrowse -readonly -mountpoint "$MOUNT" -quiet
 ditto -x -k "$ZIP" "$UNZIP"
+python3 "$SCRIPT_DIR/preflight-macos-release-artifact.py" container-tree "$MOUNT"
+python3 "$SCRIPT_DIR/preflight-macos-release-artifact.py" container-tree "$UNZIP"
+python3 "$SCRIPT_DIR/verify-macos-container-root.py" dmg "$MOUNT" \
+  "$SCRIPT_DIR/../../apps/electron/resources/dmg-background.tiff" \
+  "$SCRIPT_DIR/../../apps/electron/resources/icon.icns"
+python3 "$SCRIPT_DIR/verify-macos-container-root.py" zip "$UNZIP"
 assert_no_updater_metadata "$MOUNT" "DMG mount root"
 assert_no_updater_metadata "$UNZIP" "ZIP extraction root"
 
@@ -92,6 +102,7 @@ verify_app() {
   [[ -x "$executable" ]] || { echo "Missing executable in $app" >&2; exit 1; }
   bun "$SCRIPT_DIR/verify-packaged-electron-identity.ts" "$app" "$VERSION"
   bun "$SCRIPT_DIR/../packaged-server-resources.ts" --app "$app"
+  "$SCRIPT_DIR/verify-packaged-macos-runtimes.sh" "$app"
   bun "$SCRIPT_DIR/verify-macos-signatures.ts" "$app" "Contents/MacOS/$executable_name" | tee "$signature_evidence"
 }
 
@@ -104,14 +115,14 @@ write_inventory() {
   python3 "$SCRIPT_DIR/write-app-inventory.py" "$app" "$inventory" --transport-canonicalization-policy macos-dmg-zip-v1 --raw-inventory "$raw_inventory" --spdx-files "$checksums" --spdx-package-verification-code "$verification_code"
 }
 
-DMG_APPS=("$MOUNT"/*.app)
-ZIP_APPS=("$UNZIP"/*.app)
-[[ ${#DMG_APPS[@]} -eq 1 ]] || { echo "DMG must contain one app" >&2; exit 1; }
-[[ ${#ZIP_APPS[@]} -eq 1 ]] || { echo "ZIP must contain one app" >&2; exit 1; }
-verify_app "${DMG_APPS[0]}" "$WORK/dmg-signatures.json"
-verify_app "${ZIP_APPS[0]}" "$WORK/zip-signatures.json"
-write_inventory "${DMG_APPS[0]}" "$WORK/dmg-app-inventory.jsonl" "$WORK/dmg-app-inventory.raw.jsonl" "$WORK/dmg-files.sha256" "$WORK/dmg-package-verification-code.txt"
-write_inventory "${ZIP_APPS[0]}" "$WORK/zip-app-inventory.jsonl" "$WORK/zip-app-inventory.raw.jsonl" "$WORK/zip-files.sha256" "$WORK/zip-package-verification-code.txt"
+DMG_APP="$MOUNT/Simulator.app"
+ZIP_APP="$UNZIP/Simulator.app"
+python3 "$SCRIPT_DIR/preflight-macos-release-artifact.py" tree "$DMG_APP"
+python3 "$SCRIPT_DIR/preflight-macos-release-artifact.py" tree "$ZIP_APP"
+verify_app "$DMG_APP" "$WORK/dmg-signatures.json"
+verify_app "$ZIP_APP" "$WORK/zip-signatures.json"
+write_inventory "$DMG_APP" "$WORK/dmg-app-inventory.jsonl" "$WORK/dmg-app-inventory.raw.jsonl" "$WORK/dmg-files.sha256" "$WORK/dmg-package-verification-code.txt"
+write_inventory "$ZIP_APP" "$WORK/zip-app-inventory.jsonl" "$WORK/zip-app-inventory.raw.jsonl" "$WORK/zip-files.sha256" "$WORK/zip-package-verification-code.txt"
 if ! cmp -s "$WORK/dmg-app-inventory.jsonl" "$WORK/zip-app-inventory.jsonl"; then
   echo "DMG and ZIP app filesystem inventories differ" >&2
   diff -u "$WORK/dmg-app-inventory.jsonl" "$WORK/zip-app-inventory.jsonl" >&2 || true
@@ -123,8 +134,8 @@ if ! cmp -s "$WORK/dmg-package-verification-code.txt" "$WORK/zip-package-verific
   exit 1
 fi
 
-mkdir -p "$BUNDLE_DIR"
-find "$BUNDLE_DIR" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
+[[ ! -e "$BUNDLE_DIR" ]] || { echo "Bundle output must start absent: $BUNDLE_DIR" >&2; exit 1; }
+mkdir -m 700 "$BUNDLE_DIR"
 cp "$DMG" "$ZIP" "$BUNDLE_DIR/"
 cp "$WORK/dmg-files.sha256" "$BUNDLE_DIR/packaged-files.sha256"
 cp "$WORK/dmg-app-inventory.jsonl" "$BUNDLE_DIR/app-inventory.jsonl"

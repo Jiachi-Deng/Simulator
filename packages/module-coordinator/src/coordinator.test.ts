@@ -595,7 +595,7 @@ describe('ModuleCoordinator durable checkpoint recovery', () => {
       expect(snapshot.operations).toHaveLength(1)
       expect(snapshot.operations[0]).toMatchObject({ status: 'completed', checkpoint: 'completed' })
       expect(restarted.registry.snapshot().modules[0]).toMatchObject({ activeVersion: '1.0.0' })
-    })
+    }, CRASH_MATRIX_TEST_TIMEOUT_MS)
   }
 })
 

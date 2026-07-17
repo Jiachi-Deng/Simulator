@@ -29,13 +29,17 @@ describe("release operations policy", () => {
   test("the macOS package gate executes packaged identity and signature checks for verifier changes", () => {
     const packageWorkflow = read(".github/workflows/package-macos.yml")
     for (const path of [
+      "apps/electron/build/entitlements.mac.plist",
       "scripts/release/verify-and-bundle-macos.sh",
       "scripts/release/verify-macos-signatures.ts",
       "scripts/release/verify-packaged-electron-identity.ts",
+      "scripts/release/stage-pinned-macos-arm64-runtimes.sh",
+      "scripts/release/verify-packaged-macos-runtimes.sh",
     ]) {
       expect(packageWorkflow).toContain(`- \"${path}\"`)
     }
     expect(packageWorkflow).toContain('verify-packaged-electron-identity.ts "$app_root" "$product_version"')
+    expect(packageWorkflow).toContain('verify-packaged-macos-runtimes.sh "$app_root"')
     expect(packageWorkflow).toContain('"$app_root" "Contents/MacOS/$executable_name"')
     expect(packageWorkflow).toContain(".requiredArm64MachOFileType")
   })
@@ -121,6 +125,9 @@ describe("release operations policy", () => {
 
     expect(operations).toContain("每月依赖与上游审查")
     expect(operations).toContain("Go/No-Go")
+    expect(operations).toContain("orphan attestation")
+    expect(operations).toContain("`gh attestation verify` 单独成功永远不能作为 `Go`")
+    expect(operations).toContain("Artifact ID/service digest")
     expect(disasterRecovery).toContain("每季度至少演练一次")
     expect(disasterRecovery).toContain("Pass/Fail/Not run")
     expect(disasterRecovery).toContain("不得写成已通过")

@@ -89,7 +89,18 @@ gh run watch RUN_ID --repo Jiachi-Deng/Simulator --exit-status
 
 不得在当前 Milestone branch 上直接触发。只有合并后的 `origin/main` 已通过 Required CI、Release skill 已把 `next.md` 归档为 `apps/electron/resources/release-notes/$PRODUCT_VERSION.md`、且产品负责人批准本次 Engineering RC 后才可运行。`scripts/release/engineering-rc.ts` 会拒绝 RC label 与 product version、notes、tag、dirty tree、`bun.lock` 或 `origin/main` source 不一致。
 
+GitHub Attestation 是不可回滚的独立发布边界，不与最终 Engineering RC Artifact 原子提交。workflow 在晚期失败时可能留下仍可验证的 orphan attestation；它只证明指定 digest 的签名声明，不证明整个 run 成功，也不证明最终 Artifact 已上传。同一 digest 经过重试也可能拥有多个有效 attestation。
+
 ## Go/No-Go
+
+Engineering RC 只有同时满足以下条件才能判定 `Go`：
+
+- `attest-and-publish` job 与整个 workflow run 均为 `success`；
+- 同一 run 存在精确名称 `simulator-$RC_LABEL-macos-arm64-unsigned` 的最终 Artifact；
+- evidence 记录 RC label、source SHA、run ID/attempt/conclusion、最终 Artifact ID/service digest、DMG/ZIP SHA-256 与 bytes，以及三项 attestation ID/URL 和 predicate type；
+- 从该最终 Artifact 重新下载后，完整 closure、`SHA256SUMS` 与 DMG/ZIP provenance、ZIP SBOM 三项 attestation policy 全部通过。
+
+`gh attestation verify` 单独成功永远不能作为 `Go`；失败 run 的中间 Artifact 或 orphan attestation 不得复用为后续 RC 证据，修复后必须递增 `rc.N` 重新运行。
 
 以下任一情况直接 `No-Go`：
 
@@ -102,7 +113,7 @@ gh run watch RUN_ID --repo Jiachi-Deng/Simulator --exit-status
 ## 发布后
 
 1. Engineering RC 从 GitHub Actions run 使用 `gh run download RUN_ID --name simulator-$RC_LABEL-macos-arm64-unsigned` 重新下载；稳定版存在后才从公开 GitHub Release 页面下载。不得复用本地 build 输出。
-2. 重新计算 Checksum，验证签名、公证、架构和 SBOM。
+2. 记录 run ID、attempt、conclusion、最终 Artifact ID/service digest，以及 DMG/ZIP SHA-256 与 bytes；重新计算 Checksum，验证签名、公证、架构、SBOM 和三项 attestation policy。
 3. 在干净用户账户完成安装、首次启动、Built-in Agent 与 Module 基础 smoke。
 4. 检查公开构建没有意外嵌入 credential、DSN 或 production updater endpoint。
 5. 记录结果；失败时撤回 Artifact 或发布明确告警，不静默替换同名文件。

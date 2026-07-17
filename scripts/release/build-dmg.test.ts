@@ -39,4 +39,15 @@ describe("DMG packaging", () => {
     expect(script.indexOf('validate-assets.ts')).toBeLessThan(script.indexOf('packaged-server-resources.ts'))
     expect(script.indexOf('packaged-server-resources.ts')).toBeLessThan(script.indexOf('verify-public-build-privacy.ts'))
   })
+
+  test("stages and independently reference-verifies pinned arm64 Bun and uv", () => {
+    expect(script).toContain('"$ROOT_DIR/scripts/release/stage-pinned-macos-arm64-runtimes.sh"')
+    expect(script).toContain('"$ROOT_DIR/scripts/release/verify-packaged-macos-runtimes.sh" "$APP_ROOT"')
+    expect(script.indexOf("stage-pinned-macos-arm64-runtimes.sh")).toBeLessThan(
+      script.indexOf("bun run electron:build"),
+    )
+    expect(script.indexOf('npx electron-builder "${BUILDER_ARGS[@]}"')).toBeLessThan(
+      script.indexOf("verify-packaged-macos-runtimes.sh"),
+    )
+  })
 })
