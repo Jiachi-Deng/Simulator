@@ -66,6 +66,37 @@ describe('OpenDesign M1 first-failure capsule', () => {
     )
   })
 
+  it('seals and validates a true pre-first-paid lifecycle failure with zero completed cases', async () => {
+    const root = await artifactRoot()
+    const result = await writeOpenDesignM1FirstFailure(root, {
+      authority,
+      batchStartedAt: Date.parse('2026-07-17T01:00:00.000Z'),
+      failedAt: Date.parse('2026-07-17T01:00:01.000Z'),
+      progress: { completedCaseCount: 0, lifecyclePhase: 'lkg-batch.preflight' },
+      cleanup: {
+        ...cleanupEvidence,
+        moduleStop: 'not-attempted',
+        runtimeSnapshotObserved: false,
+        runtimeClean: false,
+        activeRuns: null,
+        moduleSessions: null,
+        hiddenSessions: null,
+        transientSessions: null,
+        quarantinedSessions: null,
+      },
+    })
+    await expect(validateOpenDesignM1FirstFailure(root, authority)).resolves.toEqual(result)
+    const manifest = JSON.parse(await readFile(join(root, 'first-failure.json'), 'utf8'))
+    expect(manifest.batch).toMatchObject({
+      caseAttemptsCompleted: 0,
+      paidTurnUpperBound: 0,
+    })
+    expect(manifest.firstFailure).toEqual({
+      code: 'LIFECYCLE_VERIFICATION_FAILED',
+      phase: 'lkg-batch.preflight',
+    })
+  })
+
   it('rehearses a zero-paid first failure, stops later cases, and excludes arbitrary error content', async () => {
     const progress = createOpenDesignM1BatchProgress()
     const invoked: string[] = []

@@ -55,6 +55,8 @@ export const OPEN_DESIGN_M1_CASE_FAILURE_PHASES = Object.freeze([
 ] as const)
 
 export const OPEN_DESIGN_M1_LIFECYCLE_FAILURE_PHASES = Object.freeze([
+  'producer.preflight',
+  'lkg-batch.preflight',
   'transition.to-rc',
   'rc-batch.preflight',
   'rollback.exercise',
@@ -257,7 +259,7 @@ function assertFailureInput(input: OpenDesignM1FirstFailureInput): void {
     }
   } else if (!OPEN_DESIGN_M1_LIFECYCLE_FAILURE_PHASES.includes(input.progress.lifecyclePhase)
     || !Number.isSafeInteger(input.progress.completedCaseCount)
-    || input.progress.completedCaseCount < 1
+    || input.progress.completedCaseCount < 0
     || input.progress.completedCaseCount > 40) {
     throw new TypeError('OpenDesign M1 lifecycle failure progress is invalid')
   }
@@ -455,7 +457,7 @@ export async function validateOpenDesignM1FirstFailure(
     const phase = stringAt(firstFailure, 'phase', '$.firstFailure')
     if (firstFailure.code !== 'LIFECYCLE_VERIFICATION_FAILED'
       || !OPEN_DESIGN_M1_LIFECYCLE_FAILURE_PHASES.includes(phase as OpenDesignM1LifecycleFailurePhase)
-      || caseAttemptsCompleted < 1 || caseAttemptsCompleted > 40
+      || caseAttemptsCompleted < 0 || caseAttemptsCompleted > 40
       || paidTurnUpperBound !== caseAttemptsCompleted) {
       throw new TypeError('OpenDesign M1 lifecycle failure identity is invalid')
     }
