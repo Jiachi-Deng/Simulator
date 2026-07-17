@@ -17,7 +17,9 @@ import {
   OPEN_DESIGN_M1_MACHINE_ACCEPTANCE_DESCRIPTOR_CANONICAL_JSON,
   capturePreviewUrlScreenshot,
   preflightExternalBlackoutProxyChild,
+  requireNoOpenDesignReleaseTransaction,
   requirePreviewHttp200,
+  requireReleaseCatalogUnchanged,
   runFixedFailStopBatch,
   runFixedPaidTurnBatch,
 } from './run-open-design-m1-machine-evidence'
@@ -251,6 +253,51 @@ describe('OpenDesign M1 machine evidence producer contract', () => {
       invoked.push(value)
     })).resolves.toBe(2)
     expect(invoked).toEqual([0, 1])
+  })
+
+  it('requires every non-terminal OpenDesign Release workflow status to be idle', async () => {
+    const requests: string[] = []
+    await requireNoOpenDesignReleaseTransaction('test-token', async (path, token) => {
+      expect(token).toBe('test-token')
+      requests.push(path)
+      return { total_count: 0, workflow_runs: [] }
+    })
+    expect(requests).toHaveLength(5)
+    for (const status of ['waiting', 'queued', 'in_progress', 'pending', 'requested']) {
+      expect(requests.some((path) => path.includes(`status=${status}`))).toBe(true)
+    }
+    expect(requests.every((path) => path.includes(encodeURIComponent('.github/workflows/open-design-release.yml'))))
+      .toBe(true)
+
+    await expect(requireNoOpenDesignReleaseTransaction('test-token', async (path) => (
+      path.includes('status=queued')
+        ? { total_count: 1, workflow_runs: [{ id: 42, status: 'queued' }] }
+        : { total_count: 0, workflow_runs: [] }
+    ))).rejects.toThrow('Release transaction is not idle')
+  })
+
+  it('requires exact Catalog, envelope, and parsed authority stability across the paid batch', () => {
+    const snapshot = (catalogBytes: string, envelopeBytes: string, catalogSequence = 3) => ({
+      catalog: { bytes: Buffer.from(catalogBytes), value: {} },
+      envelope: { bytes: Buffer.from(envelopeBytes), value: {} },
+      release: {
+        archiveSha256: 'a'.repeat(64),
+        catalogIssuedAt: '2026-07-17T00:00:00.000Z',
+        catalogSequence,
+        catalogSha256: sha(catalogBytes),
+        envelopeSha256: sha(envelopeBytes),
+        expiresAt: '2026-07-18T00:00:00.000Z',
+        extractedManifestSha256: 'b'.repeat(64),
+      },
+    })
+    expect(() => requireReleaseCatalogUnchanged(snapshot('catalog', 'envelope'), snapshot('catalog', 'envelope')))
+      .not.toThrow()
+    expect(() => requireReleaseCatalogUnchanged(snapshot('catalog', 'envelope'), snapshot('catalog-drift', 'envelope')))
+      .toThrow('Catalog changed')
+    expect(() => requireReleaseCatalogUnchanged(snapshot('catalog', 'envelope'), snapshot('catalog', 'envelope-drift')))
+      .toThrow('Catalog changed')
+    expect(() => requireReleaseCatalogUnchanged(snapshot('catalog', 'envelope'), snapshot('catalog', 'envelope', 4)))
+      .toThrow('Catalog changed')
   })
 
   it('cancels the Preview HTTP response body after proving status 200', async () => {

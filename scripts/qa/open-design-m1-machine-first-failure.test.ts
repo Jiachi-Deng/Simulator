@@ -35,6 +35,20 @@ const authority: OpenDesignM1FirstFailureAuthority = Object.freeze({
   hostArtifactSha256: 'a'.repeat(64),
 })
 
+const cleanupEvidence = Object.freeze({
+  moduleStop: 'completed' as const,
+  runtimeSnapshotObserved: true,
+  runtimeClean: true,
+  activeRuns: 0,
+  moduleSessions: 0,
+  hiddenSessions: 0,
+  transientSessions: 0,
+  quarantinedSessions: 0,
+  appExit: 'completed' as const,
+  descendantProcessesRemaining: 0,
+  ownedModuleProcessesRemaining: 0,
+})
+
 async function artifactRoot(): Promise<string> {
   const parent = await mkdtemp(join(tmpdir(), 'open-design-m1-first-failure-'))
   roots.push(parent)
@@ -50,6 +64,37 @@ describe('OpenDesign M1 first-failure capsule', () => {
     expect(OPEN_DESIGN_M1_CASES.map((testCase) => testCase.id)).toEqual(
       [...OPEN_DESIGN_M1_FIRST_FAILURE_CASE_IDS],
     )
+  })
+
+  it('seals and validates a true pre-first-paid lifecycle failure with zero completed cases', async () => {
+    const root = await artifactRoot()
+    const result = await writeOpenDesignM1FirstFailure(root, {
+      authority,
+      batchStartedAt: Date.parse('2026-07-17T01:00:00.000Z'),
+      failedAt: Date.parse('2026-07-17T01:00:01.000Z'),
+      progress: { completedCaseCount: 0, lifecyclePhase: 'lkg-batch.preflight' },
+      cleanup: {
+        ...cleanupEvidence,
+        moduleStop: 'not-attempted',
+        runtimeSnapshotObserved: false,
+        runtimeClean: false,
+        activeRuns: null,
+        moduleSessions: null,
+        hiddenSessions: null,
+        transientSessions: null,
+        quarantinedSessions: null,
+      },
+    })
+    await expect(validateOpenDesignM1FirstFailure(root, authority)).resolves.toEqual(result)
+    const manifest = JSON.parse(await readFile(join(root, 'first-failure.json'), 'utf8'))
+    expect(manifest.batch).toMatchObject({
+      caseAttemptsCompleted: 0,
+      paidTurnUpperBound: 0,
+    })
+    expect(manifest.firstFailure).toEqual({
+      code: 'LIFECYCLE_VERIFICATION_FAILED',
+      phase: 'lkg-batch.preflight',
+    })
   })
 
   it('rehearses a zero-paid first failure, stops later cases, and excludes arbitrary error content', async () => {
@@ -81,6 +126,7 @@ describe('OpenDesign M1 first-failure capsule', () => {
       batchStartedAt: Date.parse('2026-07-17T01:00:00.000Z'),
       failedAt: Date.parse('2026-07-17T01:01:00.000Z'),
       progress: { completedCaseCount: progress.completedCaseCount, current: progress.current! },
+      cleanup: cleanupEvidence,
     })
     expect(result.artifactName).toBe(OPEN_DESIGN_M1_FIRST_FAILURE_ARTIFACT_NAME)
     expect(result.fileCount).toBe(2)
@@ -98,6 +144,7 @@ describe('OpenDesign M1 first-failure capsule', () => {
     expect(allEvidence).not.toContain('prompt=')
     expect(allEvidence).not.toContain('environment=')
     expect(allEvidence).not.toContain('log=')
+    expect(allEvidence).not.toMatch(/prompt|error|environment|secret/i)
   })
 
   it('locates the first RC failure after exactly 20 completed LKG fixtures', async () => {
@@ -122,6 +169,7 @@ describe('OpenDesign M1 first-failure capsule', () => {
       batchStartedAt: Date.parse('2026-07-17T01:00:00.000Z'),
       failedAt: Date.parse('2026-07-17T01:20:00.000Z'),
       progress: { completedCaseCount: progress.completedCaseCount, current: progress.current! },
+      cleanup: cleanupEvidence,
     })
     const manifest = JSON.parse(await readFile(join(root, 'first-failure.json'), 'utf8'))
     expect(manifest.batch.caseAttemptsCompleted).toBe(20)
@@ -134,6 +182,46 @@ describe('OpenDesign M1 first-failure capsule', () => {
       caseAttemptOrdinal: 21,
       phase: 'run.await-terminal',
     })
+  })
+
+  it('preserves a bounded lifecycle failure after all 40 cases without arbitrary failure content', async () => {
+    const root = await artifactRoot()
+    const arbitraryFailure = 'SECRET post-batch error prompt=private env=private'
+    await writeOpenDesignM1FirstFailure(root, {
+      authority,
+      batchStartedAt: Date.parse('2026-07-17T01:00:00.000Z'),
+      failedAt: Date.parse('2026-07-17T02:00:00.000Z'),
+      progress: { completedCaseCount: 40, lifecyclePhase: 'catalog.freeze-verify' },
+      cleanup: {
+        moduleStop: 'failed',
+        runtimeSnapshotObserved: true,
+        runtimeClean: false,
+        activeRuns: 1,
+        moduleSessions: 1,
+        hiddenSessions: 1,
+        transientSessions: 1,
+        quarantinedSessions: 0,
+        appExit: 'completed',
+        descendantProcessesRemaining: 0,
+        ownedModuleProcessesRemaining: 0,
+      },
+    })
+    const source = await readFile(join(root, 'first-failure.json'), 'utf8')
+    const manifest = JSON.parse(source)
+    expect(manifest.schemaVersion).toBe(2)
+    expect(manifest.batch).toMatchObject({ caseAttemptsCompleted: 40, paidTurnUpperBound: 40 })
+    expect(manifest.firstFailure).toEqual({
+      code: 'LIFECYCLE_VERIFICATION_FAILED',
+      phase: 'catalog.freeze-verify',
+    })
+    expect(manifest.cleanup).toMatchObject({
+      runtimeClean: false,
+      activeRuns: 1,
+      hiddenSessions: 1,
+    })
+    expect(source).not.toContain(arbitraryFailure)
+    expect(source).not.toMatch(/prompt|error|environment|secret/i)
+    await expect(validateOpenDesignM1FirstFailure(root, authority)).resolves.toMatchObject({ fileCount: 2 })
   })
 
   it('revalidates the capsule through the credential-free workflow CLI', async () => {
@@ -154,6 +242,7 @@ describe('OpenDesign M1 first-failure capsule', () => {
       batchStartedAt: Date.parse('2026-07-17T01:00:00.000Z'),
       failedAt: Date.parse('2026-07-17T01:00:01.000Z'),
       progress: { completedCaseCount: progress.completedCaseCount, current: progress.current! },
+      cleanup: cleanupEvidence,
     })
     const child = Bun.spawn([
       process.execPath,
@@ -207,6 +296,7 @@ describe('OpenDesign M1 first-failure capsule', () => {
       batchStartedAt: Date.parse('2026-07-17T01:00:00.000Z'),
       failedAt: Date.parse('2026-07-17T01:00:01.000Z'),
       progress: { completedCaseCount: progress.completedCaseCount, current: progress.current! },
+      cleanup: cleanupEvidence,
     })
     await expect(lstat(staging)).rejects.toMatchObject({ code: 'ENOENT' })
     await expect(validateOpenDesignM1FirstFailure(output, authority)).resolves.toMatchObject({ fileCount: 2 })
@@ -226,6 +316,7 @@ describe('OpenDesign M1 first-failure capsule', () => {
       batchStartedAt: Date.parse('2026-07-17T01:00:00.000Z'),
       failedAt: Date.parse('2026-07-17T01:00:01.000Z'),
       progress: { completedCaseCount: progress.completedCaseCount, current: progress.current! },
+      cleanup: cleanupEvidence,
     }
 
     const unknownRoot = await artifactRoot()
@@ -234,6 +325,17 @@ describe('OpenDesign M1 first-failure capsule', () => {
     unknownManifest.message = 'must never be accepted'
     await writeFile(join(unknownRoot, 'first-failure.json'), `${JSON.stringify(unknownManifest)}\n`, { mode: 0o600 })
     await expect(validateOpenDesignM1FirstFailure(unknownRoot, authority)).rejects.toThrow('invalid keys')
+
+    const cleanupFieldRoot = await artifactRoot()
+    await writeOpenDesignM1FirstFailure(cleanupFieldRoot, input)
+    const cleanupFieldManifest = JSON.parse(await readFile(join(cleanupFieldRoot, 'first-failure.json'), 'utf8'))
+    cleanupFieldManifest.cleanup.error = 'SECRET prompt and environment content must not be admitted'
+    await writeFile(
+      join(cleanupFieldRoot, 'first-failure.json'),
+      `${JSON.stringify(cleanupFieldManifest)}\n`,
+      { mode: 0o600 },
+    )
+    await expect(validateOpenDesignM1FirstFailure(cleanupFieldRoot, authority)).rejects.toThrow('invalid keys')
 
     const modeRoot = await artifactRoot()
     await writeOpenDesignM1FirstFailure(modeRoot, input)

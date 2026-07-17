@@ -6,6 +6,7 @@ on:
       - .github/actionlint.yaml
       - .github/workflows/engineering-rc.yml
       - .github/workflows/package-macos.yml
+      - .github/workflows/signed-macos-host-acceptance.yml
       - .github/workflows/open-design-production-input.yml
       - .github/workflows/open-design-release.yml
       - .github/workflows/open-design-m1-machine-evidence.yml
@@ -83,7 +84,7 @@ jobs:
 
       - name: Parse release workflow YAML
         run: >-
-          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }' .github/workflows/engineering-rc.yml .github/workflows/package-macos.yml .github/workflows/open-design-production-input.yml .github/workflows/open-design-release.yml .github/workflows/open-design-m1-machine-evidence.yml .github/workflows/open-design-m1-visual-attestation.yml .github/workflows/open-design-rc-acceptance.yml .github/workflows/open-design-acceptance-rollback.yml .github/workflows/release-static-validation.yml
+          ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }' .github/workflows/engineering-rc.yml .github/workflows/package-macos.yml .github/workflows/signed-macos-host-acceptance.yml .github/workflows/open-design-production-input.yml .github/workflows/open-design-release.yml .github/workflows/open-design-m1-machine-evidence.yml .github/workflows/open-design-m1-visual-attestation.yml .github/workflows/open-design-rc-acceptance.yml .github/workflows/open-design-acceptance-rollback.yml .github/workflows/release-static-validation.yml
 
       - name: Validate GitHub Actions schema and expression contexts
         run: >-
@@ -91,6 +92,7 @@ jobs:
           -no-color -shellcheck= -pyflakes=
           .github/workflows/engineering-rc.yml
           .github/workflows/package-macos.yml
+          .github/workflows/signed-macos-host-acceptance.yml
           .github/workflows/open-design-production-input.yml
           .github/workflows/open-design-release.yml
           .github/workflows/open-design-m1-machine-evidence.yml
@@ -109,6 +111,7 @@ jobs:
           paths = [
             ".github/workflows/engineering-rc.yml",
             ".github/workflows/package-macos.yml",
+            ".github/workflows/signed-macos-host-acceptance.yml",
             ".github/workflows/open-design-production-input.yml",
             ".github/workflows/open-design-release.yml",
             ".github/workflows/open-design-m1-machine-evidence.yml",

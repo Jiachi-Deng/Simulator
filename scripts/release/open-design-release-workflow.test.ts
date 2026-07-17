@@ -81,6 +81,14 @@ describe("OpenDesign official release workflow", () => {
     expect(actionReferences.every((reference) => /@[0-9a-f]{40}$/.test(reference))).toBe(true)
   })
 
+  test("accepts only first-attempt acceptance, Host, and rollback producer runs", () => {
+    const evidence = step("initial", "Validate stable acceptance, rollback, and RC closure").run
+    for (const producer of ["acceptance_run", "host_run", "rollback_run"]) {
+      expect(evidence).toContain(`test "$(jq -r .run_attempt <<<"$${producer}")" = "1"`)
+    }
+    expect(evidence.match(/\.run_attempt/g)).toHaveLength(3)
+  })
+
   test("builds the sealed initial input on fixed macOS arm64 authority without release credentials", () => {
     expect(producer.permissions).toEqual({ contents: "read" })
     expect(producer.on.push.branches).toEqual(["main"])

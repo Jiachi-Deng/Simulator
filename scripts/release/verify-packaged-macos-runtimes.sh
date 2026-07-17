@@ -2,8 +2,8 @@
 set -euo pipefail
 umask 077
 
-if [[ $# -ne 1 ]]; then
-  echo "Usage: verify-packaged-macos-runtimes.sh APP_PATH" >&2
+if [[ $# -lt 1 ]]; then
+  echo "Usage: verify-packaged-macos-runtimes.sh APP_PATH [--mode unsigned|developer-id --identity SUBJECT --team-id TEAMID]" >&2
   exit 2
 fi
 if [[ "$(uname -s)" != "Darwin" || "$(uname -m)" != "arm64" ]]; then
@@ -14,6 +14,28 @@ fi
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd "$SCRIPT_DIR/../.." && pwd)
 APP=$1
+shift
+MODE=${SIMULATOR_MACOS_RUNTIME_SIGNATURE_MODE:-unsigned}
+IDENTITY=${SIMULATOR_MACOS_RUNTIME_DEVELOPER_IDENTITY:-}
+TEAM_ID=${SIMULATOR_MACOS_RUNTIME_TEAM_ID:-}
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --mode) [[ $# -ge 2 ]]; MODE=$2; shift 2 ;;
+    --identity) [[ $# -ge 2 ]]; IDENTITY=$2; shift 2 ;;
+    --team-id) [[ $# -ge 2 ]]; TEAM_ID=$2; shift 2 ;;
+    *) echo "Unknown or incomplete runtime verifier argument: $1" >&2; exit 2 ;;
+  esac
+done
+case "$MODE" in
+  unsigned)
+    [[ -z "$IDENTITY" && -z "$TEAM_ID" ]] || { echo "Identity arguments are forbidden in unsigned mode" >&2; exit 2; }
+    ;;
+  developer-id)
+    [[ "$IDENTITY" == "Developer ID Application: "* ]] || { echo "Developer ID mode requires an exact Developer ID Application subject" >&2; exit 2; }
+    [[ "$TEAM_ID" =~ ^[A-Z0-9]{10}$ ]] || { echo "Developer ID mode requires a 10-character Team ID" >&2; exit 2; }
+    ;;
+  *) echo "Unsupported runtime signature mode: $MODE" >&2; exit 2 ;;
+esac
 ENTITLEMENTS="$ROOT_DIR/apps/electron/build/entitlements.mac.plist"
 TRUSTED_BUN="$ROOT_DIR/apps/electron/vendor/bun/bun"
 TRUSTED_UV="$ROOT_DIR/apps/electron/resources/bin/darwin-arm64/uv"
@@ -65,6 +87,7 @@ verify_runtime() {
   local reference_dir="$WORK/$evidence_name-reference"
   local reference="$reference_dir/$identifier_prefix"
   local signature_output identifier packaged_cdhash packaged_cdhash_full reference_output reference_identifier reference_cdhash reference_cdhash_full
+  local packaged_payload reference_payload
 
   python3 - "$packaged" "$relative_path" <<'PY'
 import os
@@ -91,10 +114,25 @@ PY
 
   codesign --verify --strict --verbose=4 "$packaged"
   signature_output=$(codesign -d --verbose=4 "$packaged" 2>&1)
-  [[ "$signature_output" == *$'Signature=adhoc'* ]]
-  [[ "$signature_output" == *$'TeamIdentifier=not set'* ]]
+  if [[ "$MODE" == unsigned ]]; then
+    [[ "$signature_output" == *$'Signature=adhoc'* ]]
+    [[ "$signature_output" == *$'TeamIdentifier=not set'* ]]
+    [[ "$signature_output" == *'flags=0x10002(adhoc,runtime)'* ]]
+  else
+    [[ "$(printf '%s\n' "$signature_output" | sed -n 's/^Authority=//p' | head -n 1)" == "$IDENTITY" ]] || {
+      echo "Developer ID leaf authority mismatch for $relative_path" >&2
+      exit 1
+    }
+    [[ "$(printf '%s\n' "$signature_output" | sed -n 's/^TeamIdentifier=//p')" == "$TEAM_ID" ]] || {
+      echo "Developer ID TeamIdentifier mismatch for $relative_path" >&2
+      exit 1
+    }
+    printf '%s\n' "$signature_output" | grep -Eq '^Timestamp=.+'
+    printf '%s\n' "$signature_output" | grep -Eq '^CodeDirectory .* flags=0x[0-9a-fA-F]+\([^)]*runtime[^)]*\)'
+    ! printf '%s\n' "$signature_output" | grep -Eq '^CodeDirectory .* flags=0x[0-9a-fA-F]+\([^)]*adhoc[^)]*\)'
+    [[ "$signature_output" != *$'Signature=adhoc'* ]]
+  fi
   [[ "$signature_output" == *$'Hash type=sha256'* ]]
-  [[ "$signature_output" == *'flags=0x10002(adhoc,runtime)'* ]]
   identifier=$(printf '%s\n' "$signature_output" | sed -n 's/^Identifier=//p')
   [[ "$identifier" =~ ^${identifier_prefix}-[0-9a-f]{40}$ ]] || {
     echo "Unexpected packaged runtime identifier for $relative_path: $identifier" >&2
@@ -108,33 +146,51 @@ PY
   mkdir -m 700 "$reference_dir"
   cp "$trusted_raw" "$reference"
   chmod 700 "$reference"
+  # The independently derived reference is deliberately always ad-hoc. In
+  # Developer ID mode, a second CMS signature would carry a different secure
+  # timestamp and must never be treated as a stable CDHash oracle.
   codesign --force --sign - --timestamp=none --options runtime \
     --entitlements "$ENTITLEMENTS" "$reference"
   codesign --verify --strict --verbose=4 "$reference"
   reference_output=$(codesign -d --verbose=4 "$reference" 2>&1)
+  [[ "$reference_output" == *$'Signature=adhoc'* ]]
+  [[ "$reference_output" == *$'TeamIdentifier=not set'* ]]
+  [[ "$reference_output" == *'flags=0x10002(adhoc,runtime)'* ]]
   reference_identifier=$(printf '%s\n' "$reference_output" | sed -n 's/^Identifier=//p')
   [[ "$reference_identifier" =~ ^${identifier_prefix}-[0-9a-f]{40}$ ]] || {
     echo "Unexpected independently derived runtime identifier for $relative_path: $reference_identifier" >&2
     exit 1
   }
-  [[ "$reference_identifier" == "$identifier" ]] || {
-    echo "Independently derived identifier mismatch for $relative_path" >&2
-    exit 1
-  }
   reference_cdhash=$(printf '%s\n' "$reference_output" | sed -n 's/^CDHash=//p')
   reference_cdhash_full=$(printf '%s\n' "$reference_output" | sed -n 's/^CandidateCDHashFull sha256=//p')
-  [[ "$reference_cdhash" == "$packaged_cdhash" ]] || {
-    echo "Reference CDHash mismatch for $relative_path" >&2
-    exit 1
-  }
-  [[ "$reference_cdhash_full" == "$packaged_cdhash_full" ]] || {
-    echo "Reference full SHA-256 CDHash mismatch for $relative_path" >&2
-    exit 1
-  }
-  if ! cmp -s "$reference" "$packaged"; then
-    echo "Reference-signed bytes mismatch for $relative_path" >&2
-    shasum -a 256 "$reference" "$packaged" >&2
-    exit 1
+  if [[ "$MODE" == unsigned ]]; then
+    [[ "$reference_identifier" == "$identifier" ]] || {
+      echo "Independently derived identifier mismatch for $relative_path" >&2
+      exit 1
+    }
+    [[ "$reference_cdhash" == "$packaged_cdhash" ]] || {
+      echo "Reference CDHash mismatch for $relative_path" >&2
+      exit 1
+    }
+    [[ "$reference_cdhash_full" == "$packaged_cdhash_full" ]] || {
+      echo "Reference full SHA-256 CDHash mismatch for $relative_path" >&2
+      exit 1
+    }
+    if ! cmp -s "$reference" "$packaged"; then
+      echo "Reference-signed bytes mismatch for $relative_path" >&2
+      shasum -a 256 "$reference" "$packaged" >&2
+      exit 1
+    fi
+  else
+    packaged_payload=$(python3 "$SCRIPT_DIR/compare-macos-app-payloads.py" canonical-macho "$packaged")
+    reference_payload=$(python3 "$SCRIPT_DIR/compare-macos-app-payloads.py" canonical-macho "$reference")
+    [[ "$(jq -r .policy <<<"$packaged_payload")" == "thin-arm64-macho-terminal-code-signature-v1" ]]
+    [[ "$(jq -r .policy <<<"$reference_payload")" == "thin-arm64-macho-terminal-code-signature-v1" ]]
+    if [[ "$(jq -r .canonicalSha256 <<<"$packaged_payload")" != "$(jq -r .canonicalSha256 <<<"$reference_payload")" ]] \
+      || [[ "$(jq -r .canonicalBytes <<<"$packaged_payload")" != "$(jq -r .canonicalBytes <<<"$reference_payload")" ]]; then
+      echo "Canonical LC_CODE_SIGNATURE-normalized pinned runtime payload mismatch for $relative_path" >&2
+      exit 1
+    fi
   fi
   printf '%s\t%s\t%s\n' "$relative_path" "$packaged_cdhash_full" "$(shasum -a 256 "$packaged" | awk '{print $1}')"
 }
@@ -142,4 +198,4 @@ PY
 verify_runtime "Contents/Resources/app/vendor/bun/bun" "$TRUSTED_BUN" "bun" "bun"
 verify_runtime "Contents/Resources/app/resources/bin/darwin-arm64/uv" "$TRUSTED_UV" "uv" "uv"
 verify_runtime "Contents/Resources/app/dist/resources/bin/darwin-arm64/uv" "$TRUSTED_UV" "uv" "dist-uv"
-printf '%s\n' "Packaged macOS runtimes exactly match independently reference-signed pinned inputs."
+printf '%s\n' "Packaged macOS runtimes exactly match independently reference-signed pinned inputs under $MODE policy."

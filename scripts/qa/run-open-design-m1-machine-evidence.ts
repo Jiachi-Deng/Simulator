@@ -51,7 +51,9 @@ import {
   preserveOpenDesignM1FirstFailure,
   runTrackedOpenDesignM1Case,
   type OpenDesignM1CaseFailurePhase,
+  type OpenDesignM1FailureCleanupEvidence,
   type OpenDesignM1FirstFailureAuthority,
+  type OpenDesignM1LifecycleFailurePhase,
 } from './open-design-m1-machine-first-failure'
 
 const REAL_OPT_IN = 'packaged-open-design-direct-observation'
@@ -65,6 +67,10 @@ const SHA256 = /^[0-9a-f]{64}$/
 const COMMIT = /^[0-9a-f]{40}$/
 const RELEASE_KEY_ID = 'open-design-release-2026-01'
 const RELEASE_PUBLIC_KEY = 'KvpR89GuQd670SZMZuuR+aK4FUIprxRlqE58K3twQZk='
+const OPEN_DESIGN_RELEASE_WORKFLOW_PATH = '.github/workflows/open-design-release.yml'
+const OPEN_DESIGN_RELEASE_TRANSACTION_STATUSES = Object.freeze([
+  'waiting', 'queued', 'in_progress', 'pending', 'requested',
+] as const)
 export const OPEN_DESIGN_M1_MACHINE_ACCEPTANCE_DESCRIPTOR_CANONICAL_JSON = `${JSON.stringify({
   schemaVersion: 1,
   hostVersion: '0.12.0',
@@ -113,8 +119,8 @@ type PreviewPageClient = RendererEvaluator & {
   screenshot(): Promise<Buffer>
   close(): void
 }
-type ProcessIdentity = { pid: number; commandSha256: string }
-type ProcessRow = ProcessIdentity & { ppid: number; command: string }
+export type ProcessIdentity = { pid: number; startIdentity: string; commandSha256: string }
+export type ProcessRow = ProcessIdentity & { ppid: number; command: string }
 
 function sha256(value: Uint8Array | string): string {
   return createHash('sha256').update(value).digest('hex')
@@ -122,6 +128,18 @@ function sha256(value: Uint8Array | string): string {
 
 function canonical(value: unknown): string { return `${JSON.stringify(value)}\n` }
 function sleep(ms: number): Promise<void> { return new Promise((resolvePromise) => setTimeout(resolvePromise, ms)) }
+
+async function withDeadline<T>(operation: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const deadline = new Promise<T>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timed out`)), timeoutMs)
+  })
+  try {
+    return await Promise.race([operation, deadline])
+  } finally {
+    if (timer) clearTimeout(timer)
+  }
+}
 
 function requiredEnv(name: string, pattern?: RegExp): string {
   const value = process.env[name]
@@ -139,6 +157,46 @@ function positiveInteger(name: string): number {
 function pathContains(parent: string, candidate: string): boolean {
   const relation = relative(parent, candidate)
   return relation === '' || (relation !== '..' && !relation.startsWith(`..${sep}`) && !isAbsolute(relation))
+}
+
+export function commandContainsBoundedPath(command: string, expectedPath: string): boolean {
+  if (!expectedPath || expectedPath.includes('\0')) return false
+  let offset = 0
+  while (offset <= command.length - expectedPath.length) {
+    const index = command.indexOf(expectedPath, offset)
+    if (index < 0) return false
+    const left = index === 0 ? undefined : command[index - 1]
+    const rightIndex = index + expectedPath.length
+    const right = rightIndex === command.length ? undefined : command[rightIndex]
+    const leftBoundary = left === undefined || /[\s"'=]/u.test(left)
+    const rightBoundary = right === undefined || /[\s"']/u.test(right) || right === sep
+    if (leftBoundary && rightBoundary) return true
+    offset = index + 1
+  }
+  return false
+}
+
+export function selectRecordedProcessIdentities(
+  recorded: readonly ProcessIdentity[],
+  current: readonly ProcessRow[],
+): ProcessIdentity[] {
+  const currentByPid = new Map(current.map((row) => [row.pid, row]))
+  return recorded.filter((identity) => {
+    const row = currentByPid.get(identity.pid)
+    return row?.startIdentity === identity.startIdentity
+      && row.commandSha256 === identity.commandSha256
+  })
+}
+
+export function signalRecordedProcessIdentities(
+  recorded: readonly ProcessIdentity[],
+  current: readonly ProcessRow[],
+  signal: NodeJS.Signals,
+  sendSignal: (pid: number, signal: NodeJS.Signals) => void,
+): ProcessIdentity[] {
+  const selected = selectRecordedProcessIdentities(recorded, current)
+  for (const identity of selected) sendSignal(identity.pid, signal)
+  return selected
 }
 
 async function isolatedPath(name: string, runnerTemp: string): Promise<string> {
@@ -672,13 +730,38 @@ async function openDesignTarget(): Promise<CdpTarget> {
 async function githubJson(path: string, token: string): Promise<any> {
   const response = await fetch(`https://api.github.com${path}`, {
     headers: { Accept: 'application/vnd.github+json', Authorization: `Bearer ${token}`, 'X-GitHub-Api-Version': '2022-11-28' },
+    signal: AbortSignal.timeout(30_000),
   })
   if (!response.ok) throw new Error(`GitHub authority request failed: ${response.status}`)
   return response.json()
 }
 
+type GitHubJsonRequest = (path: string, token: string) => Promise<any>
+
+/**
+ * Catalog freeze is meaningful only when the single Release transaction lane is
+ * idle. Query every non-terminal GitHub Actions status independently so a large
+ * completed-run history cannot push an active transaction off a bounded page.
+ */
+export async function requireNoOpenDesignReleaseTransaction(
+  token: string,
+  request: GitHubJsonRequest = githubJson,
+): Promise<void> {
+  const workflow = encodeURIComponent(OPEN_DESIGN_RELEASE_WORKFLOW_PATH)
+  for (const status of OPEN_DESIGN_RELEASE_TRANSACTION_STATUSES) {
+    const result = await request(
+      `/repos/${REPOSITORY}/actions/workflows/${workflow}/runs?status=${status}&per_page=100`,
+      token,
+    )
+    if (!result || !Number.isSafeInteger(result.total_count) || result.total_count !== 0
+      || !Array.isArray(result.workflow_runs) || result.workflow_runs.length !== 0) {
+      throw new Error('OpenDesign Release transaction is not idle')
+    }
+  }
+}
+
 async function downloadCanonicalJson(url: string): Promise<{ bytes: Buffer; value: JsonObject }> {
-  const response = await fetch(url, { redirect: 'follow' })
+  const response = await fetch(url, { redirect: 'follow', signal: AbortSignal.timeout(30_000) })
   if (!response.ok) throw new Error('Release authority download failed')
   const finalUrl = new URL(response.url)
   if (!['github.com', 'objects.githubusercontent.com', 'release-assets.githubusercontent.com'].includes(finalUrl.hostname)) {
@@ -770,6 +853,20 @@ async function fetchReleaseAuthority(version: '0.14.5' | '0.14.6-rc.1'): Promise
     },
     catalog,
     envelope,
+  }
+}
+
+type ReleaseAuthoritySnapshot = Awaited<ReturnType<typeof fetchReleaseAuthority>>
+
+/** Require exact signed Catalog/envelope bytes and parsed authority to remain frozen. */
+export function requireReleaseCatalogUnchanged(
+  before: ReleaseAuthoritySnapshot,
+  after: ReleaseAuthoritySnapshot,
+): void {
+  if (!before.catalog.bytes.equals(after.catalog.bytes)
+    || !before.envelope.bytes.equals(after.envelope.bytes)
+    || canonical(before.release) !== canonical(after.release)) {
+    throw new Error('OpenDesign Release Catalog changed during paid acceptance')
   }
 }
 
@@ -945,34 +1042,32 @@ async function craftSnapshot(cdp: CdpClient, hostPid: number): Promise<{ mainPid
 
 async function processInventory(): Promise<ProcessRow[]> {
   const output = await new Promise<string>((resolvePromise, reject) => {
-    const child = spawn('/bin/ps', ['-axo', 'pid=,ppid=,command='], { stdio: ['ignore', 'pipe', 'ignore'] })
+    const child = spawn('/bin/ps', ['-axo', 'pid=,ppid=,lstart=,command='], {
+      env: { LC_ALL: 'C', LANG: 'C' },
+      stdio: ['ignore', 'pipe', 'ignore'],
+    })
     const chunks: Buffer[] = []
     child.stdout.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
     child.once('error', reject)
     child.once('close', (code) => code === 0 ? resolvePromise(Buffer.concat(chunks).toString('utf8')) : reject(new Error('ps failed')))
   })
   return output.split('\n').flatMap((line): ProcessRow[] => {
-    const match = /^\s*([1-9][0-9]*)\s+([0-9]+)\s+(.+)$/u.exec(line)
+    const match = /^\s*([1-9][0-9]*)\s+([0-9]+)\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/u.exec(line)
     if (!match) return []
     const pid = Number(match[1])
     const ppid = Number(match[2])
     if (!Number.isSafeInteger(pid) || !Number.isSafeInteger(ppid)) return []
-    return [{ pid, ppid, command: match[3]!, commandSha256: sha256(match[3]!) }]
+    return [{
+      pid,
+      ppid,
+      startIdentity: match[3]!,
+      command: match[4]!,
+      commandSha256: sha256(match[4]!),
+    }]
   })
 }
 
-async function shimProcessCount(): Promise<number> {
-  const output = await new Promise<string>((resolvePromise, reject) => {
-    const child = spawn('/bin/ps', ['-axo', 'command='], { stdio: ['ignore', 'pipe', 'ignore'] })
-    const chunks: Buffer[] = []
-    child.stdout.on('data', (chunk) => chunks.push(Buffer.from(chunk)))
-    child.once('error', reject)
-    child.once('close', (code) => code === 0 ? resolvePromise(Buffer.concat(chunks).toString('utf8')) : reject(new Error('ps failed')))
-  })
-  return output.split('\n').filter((line) => line.includes('simulator-host-agent.mjs')).length
-}
-
-async function descendantProcessSnapshot(rootPid: number): Promise<ProcessIdentity[]> {
+async function descendantProcessRows(rootPid: number): Promise<ProcessRow[]> {
   const rows = await processInventory()
   const descendants = new Set<number>()
   let changed = true
@@ -986,26 +1081,67 @@ async function descendantProcessSnapshot(rootPid: number): Promise<ProcessIdenti
     }
   }
   return rows.filter((row) => descendants.has(row.pid))
-    .map(({ pid, commandSha256 }) => ({ pid, commandSha256 }))
+}
+
+async function descendantProcessSnapshot(rootPid: number): Promise<ProcessIdentity[]> {
+  return (await descendantProcessRows(rootPid))
+    .map(({ pid, startIdentity, commandSha256 }) => ({ pid, startIdentity, commandSha256 }))
     .sort((left, right) => left.pid - right.pid)
 }
 
+function isHostAgentShimCommand(command: string): boolean {
+  return /(?:^|[\s/"'])simulator-host-agent\.mjs(?:$|[\s"'])/u.test(command)
+}
+
 async function remainingProcessTreeCount(snapshot: readonly ProcessIdentity[]): Promise<number> {
-  const current = new Map((await processInventory()).map((row) => [row.pid, row.commandSha256]))
-  return snapshot.filter((entry) => current.get(entry.pid) === entry.commandSha256).length
+  return selectRecordedProcessIdentities(snapshot, await processInventory()).length
+}
+
+async function reapExactProcessIdentities(snapshot: readonly ProcessIdentity[]): Promise<number> {
+  const signalRemaining = async (signal: NodeJS.Signals): Promise<void> => {
+    signalRecordedProcessIdentities(snapshot, await processInventory(), signal, (pid, selectedSignal) => {
+      try { process.kill(pid, selectedSignal) } catch { /* identity already exited */ }
+    })
+  }
+  if (await remainingProcessTreeCount(snapshot) === 0) return 0
+  await signalRemaining('SIGTERM')
+  try {
+    await waitFor('failed-run descendant process TERM cleanup', async () => (
+      await remainingProcessTreeCount(snapshot)
+    ) === 0 ? true : false, 5_000)
+  } catch { /* escalate only the still-matching identities */ }
+  if (await remainingProcessTreeCount(snapshot) !== 0) {
+    await signalRemaining('SIGKILL')
+    try {
+      await waitFor('failed-run descendant process KILL cleanup', async () => (
+        await remainingProcessTreeCount(snapshot)
+      ) === 0 ? true : false, 5_000)
+    } catch { /* return the bounded residual count below */ }
+  }
+  return remainingProcessTreeCount(snapshot)
 }
 
 async function residualOwnedModuleProcessCount(userData: string, proxyScriptPath: string): Promise<number> {
   return (await processInventory()).filter((row) => row.pid !== process.pid && (
-    row.command.includes(userData)
-    || row.command.includes(proxyScriptPath)
-    || row.command.includes('simulator-host-agent.mjs')
+    commandContainsBoundedPath(row.command, userData)
+    || commandContainsBoundedPath(row.command, proxyScriptPath)
   )).length
+}
+
+async function requireDedicatedAcceptanceProcessesAbsent(userData: string, proxyScriptPath: string): Promise<void> {
+  const conflicts = (await processInventory()).filter((row) => row.pid !== process.pid && (
+    commandContainsBoundedPath(row.command, userData)
+    || commandContainsBoundedPath(row.command, proxyScriptPath)
+    || isHostAgentShimCommand(row.command)
+  ))
+  if (conflicts.length !== 0) {
+    throw new Error('Dedicated acceptance profile, blackout proxy, or Host Shim lane is not empty')
+  }
 }
 
 async function ownedBlackoutProxyProcessCount(proxyScriptPath: string): Promise<number> {
   return (await processInventory()).filter((row) => row.pid !== process.pid
-    && row.command.includes(proxyScriptPath)).length
+    && commandContainsBoundedPath(row.command, proxyScriptPath)).length
 }
 
 function readyAcceptanceState(value: unknown, expectedVersion: string, expectedLkg: string | null): JsonObject {
@@ -1094,6 +1230,7 @@ async function executeCase(options: {
   moduleArchiveSha256: string
   turnOrdinal: number
   onPhase: (phase: OpenDesignM1CaseFailurePhase) => void
+  onProcessTreeObserved: (snapshot: readonly ProcessIdentity[]) => void
 }): Promise<void> {
   const { stack, testCase, origin, moduleDataRoot, seedRoot, outputRoot } = options
   const startedAt = Date.now()
@@ -1112,6 +1249,22 @@ async function executeCase(options: {
     : undefined
   options.onPhase('run.start')
   const runId = await startRun(origin, project.projectId, project.conversationId, testCase.prompt)
+  const observeDescendants = async (): Promise<{ all: ProcessIdentity[]; shim: ProcessIdentity[] }> => {
+    const descendants = await descendantProcessRows(options.hostPid)
+    const all = descendants.map(({ pid, startIdentity, commandSha256 }) => ({
+      pid, startIdentity, commandSha256,
+    }))
+    options.onProcessTreeObserved(all)
+    const shim = descendants.filter((row) => isHostAgentShimCommand(row.command))
+      .map(({ pid, startIdentity, commandSha256 }) => ({ pid, startIdentity, commandSha256 }))
+    return { all, shim }
+  }
+  const runOwnedShim = stack === 'new'
+    ? await waitFor('run-owned Shim process observation', async () => {
+        const observed = await observeDescendants()
+        return observed.shim.length === 1 ? observed.shim : false
+      }, 10_000)
+    : (await observeDescendants()).shim
   options.onPhase('run.await-terminal')
   const terminal = await waitForTerminal(origin, runId)
   const terminalObservedAt = terminal.observedAt
@@ -1191,9 +1344,13 @@ async function executeCase(options: {
   const craft = await craftSnapshot(options.craftCdp, options.hostPid)
   options.onPhase('shim.reap')
   const reapStartedAt = Date.now()
-  await waitFor('Shim process cleanup', async () => (await shimProcessCount()) === 0 ? true : false, 10_000)
-    .catch(() => { throw new Error('Shim process remained after Turn') })
-  const shimCount = await shimProcessCount()
+  if (runOwnedShim.length > 0) {
+    await waitFor('run-owned Shim process cleanup', async () => (
+      await remainingProcessTreeCount(runOwnedShim)
+    ) === 0 ? true : false, 10_000)
+      .catch(() => { throw new Error('Shim process remained after Turn') })
+  }
+  const shimCount = await remainingProcessTreeCount(runOwnedShim)
   if (shimCount !== 0) throw new Error('Shim process cleanup observation split')
   const processTreeReapedWithinSeconds = Math.ceil((Date.now() - reapStartedAt) / 1000)
   const completedTerminals = ledger.filter((event) => event.type === 'turn.completed').length
@@ -1263,16 +1420,138 @@ async function appLaunch(
     env: environment,
     stdout: 'ignore', stderr: 'ignore',
   })
-  await craftTarget()
-  return child
+  try {
+    await craftTarget()
+    return child
+  } catch (error) {
+    try { await stopApp(child) } catch { /* preserve the startup failure */ }
+    throw error
+  }
 }
 
 async function stopApp(child: ReturnType<typeof Bun.spawn>): Promise<void> {
+  if (child.exitCode !== null) return
   child.kill('SIGTERM')
   const result = await Promise.race([child.exited.then(() => true), sleep(10_000).then(() => false)])
   if (!result) {
     child.kill('SIGKILL')
     await child.exited
+  }
+}
+
+async function bestEffortFailureCleanup(options: {
+  app?: ReturnType<typeof Bun.spawn>
+  craftCdp?: CdpClient
+  moduleCdp?: CdpClient
+  userData: string
+  proxyScriptPath: string
+  knownProcessTree?: readonly ProcessIdentity[]
+}): Promise<OpenDesignM1FailureCleanupEvidence> {
+  let moduleStop: OpenDesignM1FailureCleanupEvidence['moduleStop'] = 'not-attempted'
+  let runtimeSnapshotObserved = false
+  let runtimeClean = false
+  let activeRuns: number | null = null
+  let moduleSessions: number | null = null
+  let hiddenSessions: number | null = null
+  let transientSessions: number | null = null
+  let quarantinedSessions: number | null = null
+  let appExit: OpenDesignM1FailureCleanupEvidence['appExit'] = options.app ? 'failed' : 'completed'
+  let descendantProcessesRemaining: number | null = null
+  let ownedModuleProcessesRemaining: number | null = null
+  let processTreeObserved = (options.knownProcessTree?.length ?? 0) > 0
+  const observedProcessTree = new Map<string, ProcessIdentity>(
+    (options.knownProcessTree ?? []).map((entry) => [`${entry.pid}:${entry.startIdentity}:${entry.commandSha256}`, entry]),
+  )
+  const rememberDescendants = async (): Promise<void> => {
+    const app = options.app
+    if (!app) return
+    try {
+      const descendants = await descendantProcessSnapshot(app.pid)
+      processTreeObserved = true
+      for (const entry of descendants) {
+        observedProcessTree.set(`${entry.pid}:${entry.startIdentity}:${entry.commandSha256}`, entry)
+      }
+    } catch { /* process inventory is recorded as unavailable below */ }
+  }
+
+  await rememberDescendants()
+  if (options.craftCdp) {
+    moduleStop = 'failed'
+    try {
+      const stopped = await withDeadline(
+        options.craftCdp.evaluate(rendererCall('openDesignModule', 'stop')),
+        30_000,
+        'failed-run Module stop',
+      ) as JsonObject | undefined
+      if (!stopped || !['available', 'not-installed'].includes(String(stopped.status))) {
+        throw new Error('failed-run Module stop did not settle')
+      }
+      moduleStop = 'completed'
+    } catch { /* continue to Host termination */ }
+
+    try {
+      await withDeadline(requireRuntimeCleanup(options.craftCdp, 15_000), 20_000, 'failed-run Runtime cleanup')
+      const snapshot = await withDeadline(queryRuntimeCleanup(options.craftCdp), 5_000, 'failed-run Runtime snapshot')
+      runtimeSnapshotObserved = true
+      runtimeClean = runtimeIsClean(snapshot)
+      activeRuns = snapshot.v1.activeRuns + snapshot.v2.activeRuns
+      moduleSessions = snapshot.v1.moduleSessions + snapshot.v2.moduleSessions
+      hiddenSessions = snapshot.sessions.hiddenSessions
+      transientSessions = snapshot.sessions.transientSessions
+      quarantinedSessions = snapshot.sessions.quarantinedSessions
+    } catch {
+      try {
+        const snapshot = await withDeadline(queryRuntimeCleanup(options.craftCdp), 5_000, 'failed-run Runtime snapshot')
+        runtimeSnapshotObserved = true
+        runtimeClean = runtimeIsClean(snapshot)
+        activeRuns = snapshot.v1.activeRuns + snapshot.v2.activeRuns
+        moduleSessions = snapshot.v1.moduleSessions + snapshot.v2.moduleSessions
+        hiddenSessions = snapshot.sessions.hiddenSessions
+        transientSessions = snapshot.sessions.transientSessions
+        quarantinedSessions = snapshot.sessions.quarantinedSessions
+      } catch { /* runtime evidence remains explicitly unavailable */ }
+    }
+  }
+
+  await rememberDescendants()
+  try { options.moduleCdp?.close() } catch { /* process cleanup continues */ }
+  try { options.craftCdp?.close() } catch { /* process cleanup continues */ }
+  if (options.app) {
+    try {
+      await stopApp(options.app)
+      appExit = 'completed'
+    } catch { /* exact descendant reaping still runs */ }
+  }
+
+  const processTree = [...observedProcessTree.values()]
+  if (processTreeObserved) {
+    try {
+      descendantProcessesRemaining = await reapExactProcessIdentities(processTree)
+    } catch {
+      try { descendantProcessesRemaining = await remainingProcessTreeCount(processTree) } catch { /* unavailable */ }
+    }
+  }
+  try {
+    // Path matches are reporting-only. Only identities captured from the App's
+    // own process ancestry above are ever selected for a signal.
+    ownedModuleProcessesRemaining = await residualOwnedModuleProcessCount(
+      options.userData,
+      options.proxyScriptPath,
+    )
+  } catch { /* unavailable */ }
+
+  return {
+    moduleStop,
+    runtimeSnapshotObserved,
+    runtimeClean,
+    activeRuns,
+    moduleSessions,
+    hiddenSessions,
+    transientSessions,
+    quarantinedSessions,
+    appExit,
+    descendantProcessesRemaining,
+    ownedModuleProcessesRemaining,
   }
 }
 
@@ -1383,101 +1662,117 @@ async function main(): Promise<void> {
   if (requiredEnv('SIMULATOR_M1_MACHINE_REAL') !== REAL_OPT_IN
     || requiredEnv('PAID_TURNS_APPROVED') !== 'true'
     || requiredEnv('ACCEPTANCE_CONFIRMATION') !== CONFIRMATION
+    || requiredEnv('RC_ACCEPTANCE_FREEZE_ENABLED') !== 'true'
     || requiredEnv('GITHUB_RUN_ATTEMPT') !== '1') throw new TypeError('Machine producer authorization is invalid')
   const runnerTemp = await realpath(requiredEnv('RUNNER_TEMP'))
   const outputRoot = await isolatedPath('M1_EVIDENCE_OUTPUT_ROOT', runnerTemp)
   const failureOutputRoot = await isolatedPath('M1_FIRST_FAILURE_OUTPUT_ROOT', runnerTemp)
   const staging = await isolatedPath('M1_MACHINE_WORK_ROOT', runnerTemp)
-  const appBundle = await isolatedPath('M1_PACKAGED_APP_PATH', runnerTemp)
-  const caseArtifactRoot = await isolatedPath('M1_CASE_ARTIFACT_ROOT', runnerTemp)
-  const seedRoot = join(caseArtifactRoot, 'seeds')
-  const executable = join(appBundle, 'Contents', 'MacOS', 'Simulator')
-  const executableStat = await stat(executable)
-  if (!executableStat.isFile() || (executableStat.mode & 0o111) === 0) throw new Error('Packaged Simulator executable is invalid')
-  const blackoutProxyChild: BlackoutProxyChild = {
-    bunPath: await trustedOwnerExecutablePath('M1_BLACKOUT_PROXY_BUN_PATH', true),
-    scriptPath: await trustedOwnerExecutablePath('M1_BLACKOUT_PROXY_SCRIPT_PATH', false),
-  }
   const hostHeadSha = requiredEnv('GITHUB_SHA', COMMIT)
   const hostArtifactSha256 = requiredEnv('HOST_ARTIFACT_SHA256', SHA256)
-  const token = requiredEnv('GH_TOKEN')
-  const lkgTrust = await fetchReleaseAuthority(OPEN_DESIGN_LKG_VERSION)
-  const rcTrust = await fetchReleaseAuthority(OPEN_DESIGN_RC_VERSION)
-  const authority: MachineEvidenceAuthority = {
+  const failureAuthority: OpenDesignM1FirstFailureAuthority = {
     hostHeadSha,
     producerRunId: positiveInteger('GITHUB_RUN_ID'),
     producerRunAttempt: 1,
     hostBuildRunId: positiveInteger('HOST_BUILD_RUN_ID'),
     hostArtifactSha256,
-    lkg: lkgTrust.release,
-    rc: { ...rcTrust.release, sourceSha: OPEN_DESIGN_RC_SOURCE_SHA },
   }
-  if (authority.rc.catalogSequence <= authority.lkg.catalogSequence
-    || Date.parse(authority.rc.catalogIssuedAt) <= Date.parse(authority.lkg.catalogIssuedAt)) {
-    throw new Error('RC Catalog does not advance LKG authority')
-  }
-  const requiredCi = await requiredCiEvidence(hostHeadSha, token)
   await mkdir(staging, { mode: 0o700 })
   await chmod(staging, 0o700)
-  await preflightExternalBlackoutProxyChild(blackoutProxyChild, staging)
-  const userData = resolve(requiredEnv('M1_PACKAGED_PROFILE_ROOT'))
-  const profileParent = await realpath(dirname(userData))
-  if (resolve(profileParent, basename(userData)) !== userData || userData === profileParent) {
-    throw new Error('Packaged acceptance profile path is invalid')
-  }
-  const userDataStat = await lstat(userData)
-  if (!userDataStat.isDirectory() || userDataStat.isSymbolicLink()
-    || (typeof process.getuid === 'function' && userDataStat.uid !== process.getuid())
-    || (userDataStat.mode & 0o077) !== 0) throw new Error('Packaged acceptance profile is not owner-only')
-  const controlDirectory = join(userData, 'open-design-acceptance')
-  await mkdir(controlDirectory, { recursive: true, mode: 0o700 })
-  const controlDirectoryStat = await lstat(controlDirectory)
-  if (!controlDirectoryStat.isDirectory() || controlDirectoryStat.isSymbolicLink()
-    || (typeof process.getuid === 'function' && controlDirectoryStat.uid !== process.getuid())
-    || (controlDirectoryStat.mode & 0o777) !== 0o700
-    || await realpath(controlDirectory) !== controlDirectory) {
-    throw new Error('Packaged acceptance control directory is invalid')
-  }
-  const controlDescriptor = join(controlDirectory, 'rc-control-v1.json')
-  try {
-    const descriptorStat = await lstat(controlDescriptor)
-    if (!descriptorStat.isFile() || descriptorStat.isSymbolicLink() || descriptorStat.nlink !== 1
-      || (typeof process.getuid === 'function' && descriptorStat.uid !== process.getuid())
-      || (descriptorStat.mode & 0o777) !== 0o600 || await realpath(controlDescriptor) !== controlDescriptor
-      || await readFile(controlDescriptor, 'utf8') !== OPEN_DESIGN_M1_MACHINE_ACCEPTANCE_DESCRIPTOR_CANONICAL_JSON) {
-      throw new Error('Existing packaged acceptance descriptor is invalid')
-    }
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
-    await writeFile(controlDescriptor, OPEN_DESIGN_M1_MACHINE_ACCEPTANCE_DESCRIPTOR_CANONICAL_JSON, {
-      mode: 0o600,
-      flag: 'wx',
-    })
-  }
   const artifactRoot = join(staging, 'artifact')
   const failureArtifactRoot = join(staging, 'first-failure')
-  await mkdir(artifactRoot, { mode: 0o700 })
   const batchStart = Date.now()
   const batchProgress = createOpenDesignM1BatchProgress()
-  const failureAuthority: OpenDesignM1FirstFailureAuthority = {
-    hostHeadSha: authority.hostHeadSha,
-    producerRunId: authority.producerRunId,
-    producerRunAttempt: authority.producerRunAttempt,
-    hostBuildRunId: authority.hostBuildRunId,
-    hostArtifactSha256: authority.hostArtifactSha256,
-  }
-  let app = await appLaunch(executable, userData, blackoutProxyChild)
+  let cleanupUserData = join(staging, 'unresolved-profile')
+  let cleanupProxyScriptPath = join(staging, 'unresolved-blackout-proxy')
+  let app: ReturnType<typeof Bun.spawn> | undefined
   let craftCdp: CdpClient | undefined
   let moduleCdp: CdpClient | undefined
-  let caseFailedAt: number | undefined
+  let producerFailed = false
+  let failedAt: number | undefined
+  let lifecyclePhase: OpenDesignM1LifecycleFailurePhase = 'producer.preflight'
+  const knownProcessTree = new Map<string, ProcessIdentity>()
+  const rememberProcessTree = (snapshot: readonly ProcessIdentity[]): void => {
+    for (const entry of snapshot) {
+      knownProcessTree.set(`${entry.pid}:${entry.startIdentity}:${entry.commandSha256}`, entry)
+    }
+  }
   try {
+    const token = requiredEnv('GH_TOKEN')
+    await requireNoOpenDesignReleaseTransaction(token)
+    const lkgTrust = await fetchReleaseAuthority(OPEN_DESIGN_LKG_VERSION)
+    const rcTrust = await fetchReleaseAuthority(OPEN_DESIGN_RC_VERSION)
+    const authority: MachineEvidenceAuthority = {
+      ...failureAuthority,
+      lkg: lkgTrust.release,
+      rc: { ...rcTrust.release, sourceSha: OPEN_DESIGN_RC_SOURCE_SHA },
+    }
+    if (authority.rc.catalogSequence <= authority.lkg.catalogSequence
+      || Date.parse(authority.rc.catalogIssuedAt) <= Date.parse(authority.lkg.catalogIssuedAt)) {
+      throw new Error('RC Catalog does not advance LKG authority')
+    }
+    const requiredCi = await requiredCiEvidence(hostHeadSha, token)
+    const appBundle = await isolatedPath('M1_PACKAGED_APP_PATH', runnerTemp)
+    const caseArtifactRoot = await isolatedPath('M1_CASE_ARTIFACT_ROOT', runnerTemp)
+    const seedRoot = join(caseArtifactRoot, 'seeds')
+    const executable = join(appBundle, 'Contents', 'MacOS', 'Simulator')
+    const executableStat = await stat(executable)
+    if (!executableStat.isFile() || (executableStat.mode & 0o111) === 0) {
+      throw new Error('Packaged Simulator executable is invalid')
+    }
+    cleanupProxyScriptPath = resolve(requiredEnv('M1_BLACKOUT_PROXY_SCRIPT_PATH'))
+    const blackoutProxyChild: BlackoutProxyChild = {
+      bunPath: await trustedOwnerExecutablePath('M1_BLACKOUT_PROXY_BUN_PATH', true),
+      scriptPath: await trustedOwnerExecutablePath('M1_BLACKOUT_PROXY_SCRIPT_PATH', false),
+    }
+    await preflightExternalBlackoutProxyChild(blackoutProxyChild, staging)
+    const userData = resolve(requiredEnv('M1_PACKAGED_PROFILE_ROOT'))
+    cleanupUserData = userData
+    const profileParent = await realpath(dirname(userData))
+    if (resolve(profileParent, basename(userData)) !== userData || userData === profileParent) {
+      throw new Error('Packaged acceptance profile path is invalid')
+    }
+    const userDataStat = await lstat(userData)
+    if (!userDataStat.isDirectory() || userDataStat.isSymbolicLink()
+      || (typeof process.getuid === 'function' && userDataStat.uid !== process.getuid())
+      || (userDataStat.mode & 0o077) !== 0) throw new Error('Packaged acceptance profile is not owner-only')
+    const controlDirectory = join(userData, 'open-design-acceptance')
+    await mkdir(controlDirectory, { recursive: true, mode: 0o700 })
+    const controlDirectoryStat = await lstat(controlDirectory)
+    if (!controlDirectoryStat.isDirectory() || controlDirectoryStat.isSymbolicLink()
+      || (typeof process.getuid === 'function' && controlDirectoryStat.uid !== process.getuid())
+      || (controlDirectoryStat.mode & 0o777) !== 0o700
+      || await realpath(controlDirectory) !== controlDirectory) {
+      throw new Error('Packaged acceptance control directory is invalid')
+    }
+    const controlDescriptor = join(controlDirectory, 'rc-control-v1.json')
+    try {
+      const descriptorStat = await lstat(controlDescriptor)
+      if (!descriptorStat.isFile() || descriptorStat.isSymbolicLink() || descriptorStat.nlink !== 1
+        || (typeof process.getuid === 'function' && descriptorStat.uid !== process.getuid())
+        || (descriptorStat.mode & 0o777) !== 0o600 || await realpath(controlDescriptor) !== controlDescriptor
+        || await readFile(controlDescriptor, 'utf8') !== OPEN_DESIGN_M1_MACHINE_ACCEPTANCE_DESCRIPTOR_CANONICAL_JSON) {
+        throw new Error('Existing packaged acceptance descriptor is invalid')
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error
+      await writeFile(controlDescriptor, OPEN_DESIGN_M1_MACHINE_ACCEPTANCE_DESCRIPTOR_CANONICAL_JSON, {
+        mode: 0o600,
+        flag: 'wx',
+      })
+    }
+    await mkdir(artifactRoot, { mode: 0o700 })
+    // The dedicated profile and proxy lane must be empty before this run owns
+    // any process. A stale or concurrent run is reported and fails closed; it
+    // is never selected for cleanup by a command-line path match.
+    await requireDedicatedAcceptanceProcessesAbsent(userData, blackoutProxyChild.scriptPath)
+    app = await appLaunch(executable, userData, blackoutProxyChild)
     const craft = await craftTarget()
     craftCdp = new CdpClient(craft.webSocketDebuggerUrl)
     await craftCdp.connect()
     const acceptanceAvailable = await craftCdp.evaluate(`Boolean(window.electronAPI?.openDesignAcceptance)`)
     if (acceptanceAvailable !== true) throw new Error('Packaged Host acceptance facade is unavailable')
-    // This runs before installing a Module or spending any paid Turn. Current
-    // Hosts without the gated external-proxy seam fail here and emit no artifact.
+    // This runs before installing a Module or spending any paid Turn.
     await requireExternalBlackoutProxy(craftCdp)
     await requireAuthenticatedCraftRuntime(craftCdp)
     await requireRuntimeCleanup(craftCdp, 1_000)
@@ -1493,17 +1788,26 @@ async function main(): Promise<void> {
     await requireOpenDesignHostRuntime(origin)
     const moduleDataRoot = join(userData, 'optional-modules', 'module-data', 'org.simulator.open-design')
     await realpath(moduleDataRoot)
+    lifecyclePhase = 'lkg-batch.preflight'
+    // This is the last boundary before the first paid Turn. Re-check the
+    // single release lane and exact signed Catalog bytes after all local
+    // package/module preflights, not merely when the producer process started.
+    await requireNoOpenDesignReleaseTransaction(token)
+    requireReleaseCatalogUnchanged(lkgTrust, await fetchReleaseAuthority(OPEN_DESIGN_LKG_VERSION))
+    requireReleaseCatalogUnchanged(rcTrust, await fetchReleaseAuthority(OPEN_DESIGN_RC_VERSION))
     await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES, craftCdp, async (testCase, index) => {
       await runTrackedOpenDesignM1Case(batchProgress, 'old', testCase, index, async (onPhase) => {
         await executeCase({
           stack: 'old', testCase, origin, moduleDataRoot, seedRoot, outputRoot: artifactRoot,
-          craftCdp: craftCdp!, hostPid: app.pid,
+          craftCdp: craftCdp!, hostPid: app!.pid,
           moduleArchiveSha256: authority.lkg.archiveSha256,
           turnOrdinal: index + 1,
           onPhase,
+          onProcessTreeObserved: rememberProcessTree,
         })
       })
     })
+    lifecyclePhase = 'transition.to-rc'
     state = readyAcceptanceState(
       await craftCdp.evaluate(rendererCall('openDesignAcceptance', 'rollback')),
       OPEN_DESIGN_RC_VERSION,
@@ -1515,17 +1819,20 @@ async function main(): Promise<void> {
     await moduleCdp.connect()
     origin = new URL(module.url).origin
     await requireOpenDesignHostRuntime(origin)
+    lifecyclePhase = 'rc-batch.preflight'
     await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES, craftCdp, async (testCase, index) => {
       await runTrackedOpenDesignM1Case(batchProgress, 'new', testCase, index, async (onPhase) => {
         await executeCase({
           stack: 'new', testCase, origin, moduleDataRoot, seedRoot, outputRoot: artifactRoot,
-          craftCdp: craftCdp!, hostPid: app.pid,
+          craftCdp: craftCdp!, hostPid: app!.pid,
           moduleArchiveSha256: authority.rc.archiveSha256,
           turnOrdinal: index + 1,
           onPhase,
+          onProcessTreeObserved: rememberProcessTree,
         })
       })
     })
+    lifecyclePhase = 'rollback.exercise'
     readyAcceptanceState(
       await craftCdp.evaluate(rendererCall('openDesignAcceptance', 'rollback')),
       OPEN_DESIGN_LKG_VERSION,
@@ -1536,6 +1843,7 @@ async function main(): Promise<void> {
       OPEN_DESIGN_RC_VERSION,
       OPEN_DESIGN_LKG_VERSION,
     )
+    lifecyclePhase = 'view.lifecycle'
     await craftCdp.evaluate(rendererCall('openDesignModule', 'setViewPresentation', { visible: false }))
     await craftCdp.evaluate(rendererCall('openDesignModule', 'setViewPresentation', { visible: true, bounds: { x: 320, y: 0, width: 1000, height: 800 } }))
     await writeCanonical(artifactRoot, 'rollback/transitions.json', {
@@ -1543,27 +1851,31 @@ async function main(): Promise<void> {
       restartAndReopenPassed: true,
       transitions: [OPEN_DESIGN_LKG_VERSION, OPEN_DESIGN_RC_VERSION, OPEN_DESIGN_LKG_VERSION, OPEN_DESIGN_RC_VERSION],
     })
-    await craftSnapshot(craftCdp, app.pid)
+    await craftSnapshot(craftCdp, app!.pid)
     await requireRuntimeCleanup(craftCdp, 5_000)
+    lifecyclePhase = 'restart.prepare'
     moduleCdp.close(); moduleCdp = undefined
     craftCdp.close(); craftCdp = undefined
-    const preRestartProcessTree = await descendantProcessSnapshot(app.pid)
-    await stopApp(app)
+    const preRestartProcessTree = await descendantProcessSnapshot(app!.pid)
+    rememberProcessTree(preRestartProcessTree)
+    await stopApp(app!)
     await requireProcessTreeReaped(preRestartProcessTree)
     app = await appLaunch(executable, userData, blackoutProxyChild)
+    lifecyclePhase = 'restart.verify'
     const restartedCraft = await craftTarget()
     craftCdp = new CdpClient(restartedCraft.webSocketDebuggerUrl)
     await craftCdp.connect()
     state = await craftCdp.evaluate(rendererCall('openDesignAcceptance', 'getState'))
     readyAcceptanceState(state, OPEN_DESIGN_RC_VERSION, OPEN_DESIGN_LKG_VERSION)
-    await craftSnapshot(craftCdp, app.pid)
+    await craftSnapshot(craftCdp, app!.pid)
     await requireRuntimeCleanup(craftCdp, 5_000)
     await writeCanonical(artifactRoot, 'rollback/hidden-sessions.json', {
       schemaVersion: 1, passed: true, count: 0, observedAt: new Date().toISOString(),
     })
     craftCdp.close(); craftCdp = undefined
-    const finalProcessTree = await descendantProcessSnapshot(app.pid)
-    await stopApp(app)
+    const finalProcessTree = await descendantProcessSnapshot(app!.pid)
+    rememberProcessTree(finalProcessTree)
+    await stopApp(app!)
     await requireProcessTreeReaped(finalProcessTree)
     const residual = await remainingProcessTreeCount(finalProcessTree)
       + await residualOwnedModuleProcessCount(userData, blackoutProxyChild.scriptPath)
@@ -1571,9 +1883,18 @@ async function main(): Promise<void> {
     await writeCanonical(artifactRoot, 'rollback/processes.json', {
       schemaVersion: 1, passed: true, count: 0, observedAt: new Date().toISOString(),
     })
+    lifecyclePhase = 'catalog.freeze-verify'
+    await requireNoOpenDesignReleaseTransaction(token)
+    const finalLkgTrust = await fetchReleaseAuthority(OPEN_DESIGN_LKG_VERSION)
+    const finalRcTrust = await fetchReleaseAuthority(OPEN_DESIGN_RC_VERSION)
+    requireReleaseCatalogUnchanged(lkgTrust, finalLkgTrust)
+    requireReleaseCatalogUnchanged(rcTrust, finalRcTrust)
     const batchCompleted = Date.now()
+    lifecyclePhase = 'artifact.seal'
     await sealArtifact({ root: artifactRoot, authority, requiredCi, lkgTrust, rcTrust, batchStart, batchCompleted })
+    lifecyclePhase = 'artifact.validate'
     const result = await validateOpenDesignM1MachineEvidence(artifactRoot, authority)
+    lifecyclePhase = 'artifact.publish'
     await rename(artifactRoot, outputRoot)
     process.stdout.write(`${canonical({
       status: 'passed', artifactName: OPEN_DESIGN_M1_MACHINE_ARTIFACT_NAME,
@@ -1581,19 +1902,35 @@ async function main(): Promise<void> {
       totalBytes: result.totalBytes, batchDigest: result.batchDigest,
     })}`)
   } catch (error) {
-    if (batchProgress.current) caseFailedAt = Date.now()
+    producerFailed = true
+    failedAt = Date.now()
     throw error
   } finally {
-    try { moduleCdp?.close() } catch { /* cleanup only */ }
-    try { craftCdp?.close() } catch { /* cleanup only */ }
-    try { await stopApp(app) } catch { /* cleanup only */ }
+    const cleanup = producerFailed
+      ? await bestEffortFailureCleanup({
+          app,
+          craftCdp,
+          moduleCdp,
+          userData: cleanupUserData,
+          proxyScriptPath: cleanupProxyScriptPath,
+          knownProcessTree: [...knownProcessTree.values()],
+        })
+      : undefined
+    if (!producerFailed) {
+      try { moduleCdp?.close() } catch { /* cleanup only */ }
+      try { craftCdp?.close() } catch { /* cleanup only */ }
+      if (app) try { await stopApp(app) } catch { /* cleanup only */ }
+    }
     const firstFailure = batchProgress.current
-    if (caseFailedAt !== undefined && firstFailure) {
+    if (failedAt !== undefined && cleanup) {
       await preserveOpenDesignM1FirstFailure(staging, failureArtifactRoot, failureOutputRoot, {
         authority: failureAuthority,
         batchStartedAt: batchStart,
-        failedAt: caseFailedAt,
-        progress: { completedCaseCount: batchProgress.completedCaseCount, current: firstFailure },
+        failedAt,
+        progress: firstFailure
+          ? { completedCaseCount: batchProgress.completedCaseCount, current: firstFailure }
+          : { completedCaseCount: batchProgress.completedCaseCount, lifecyclePhase },
+        cleanup,
       })
     } else {
       await rm(staging, { recursive: true, force: true })

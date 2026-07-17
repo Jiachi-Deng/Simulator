@@ -65,6 +65,16 @@ if [ "$UNSIGNED" = true ]; then
     unset APPLE_KEYCHAIN APPLE_KEYCHAIN_PROFILE
 fi
 
+# Every DMG produced by this distribution script is a public artifact,
+# regardless of whether it carries a Developer ID signature. Public builds
+# must strip any ambient crash-ingest value and carry an updater-disabled
+# policy. The sentinel makes a missed strip observable in the packaged app
+# without reading or logging the caller's environment.
+PUBLIC_PRIVACY_SENTINEL="SIMULATOR_PUBLIC_BUILD_MUST_STRIP_CRASH_INGEST_2026"
+export SENTRY_ELECTRON_INGEST_URL="$PUBLIC_PRIVACY_SENTINEL"
+export SIMULATOR_PUBLIC_BUILD=1
+export SIMULATOR_DISABLE_UPDATES=1
+
 HOST_ARCH=$(uname -m)
 case "$HOST_ARCH" in
     arm64|aarch64) HOST_ARCH="arm64" ;;
@@ -228,15 +238,7 @@ done
 # 6. Build Electron app
 echo "Building Electron app..."
 cd "$ROOT_DIR"
-if [ "$UNSIGNED" = true ]; then
-    PUBLIC_PRIVACY_SENTINEL="SIMULATOR_PUBLIC_BUILD_MUST_STRIP_CRASH_INGEST_2026"
-    SENTRY_ELECTRON_INGEST_URL="$PUBLIC_PRIVACY_SENTINEL" \
-      SIMULATOR_PUBLIC_BUILD=1 \
-      SIMULATOR_DISABLE_UPDATES=1 \
-      bun run electron:build
-else
-    bun run electron:build
-fi
+bun run electron:build
 
 # 7. Package with electron-builder
 echo "Packaging app with electron-builder..."
@@ -289,11 +291,9 @@ if [ "$ARCH" = "arm64" ]; then
     "$ROOT_DIR/scripts/release/verify-packaged-macos-runtimes.sh" "$APP_ROOT"
 fi
 
-if [ "$UNSIGNED" = true ]; then
-    bun "$ROOT_DIR/scripts/release/verify-public-build-privacy.ts" \
-      "$APP_ROOT" \
-      "$PUBLIC_PRIVACY_SENTINEL"
-fi
+bun "$ROOT_DIR/scripts/release/verify-public-build-privacy.ts" \
+  "$APP_ROOT" \
+  "$PUBLIC_PRIVACY_SENTINEL"
 
 # 8. Verify the DMG was built
 # electron-builder.yml uses artifactName to output: Simulator-${arch}.dmg

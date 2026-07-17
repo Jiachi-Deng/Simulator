@@ -24,9 +24,11 @@ const LOCK_FILE = 'module-coordinator.lock'
 const MAX_STATE_BYTES = 16 * 1024 * 1024
 const NO_FOLLOW = process.platform === 'win32' ? 0 : constants.O_NOFOLLOW
 
+// Windows file identifiers can exceed Number.MAX_SAFE_INTEGER. Keeping the
+// identity as bigint prevents distinct trusted paths from comparing equal.
 interface FilesystemIdentity {
-  readonly dev: number
-  readonly ino: number
+  readonly dev: bigint
+  readonly ino: bigint
 }
 
 interface RootIdentity extends FilesystemIdentity {
@@ -35,7 +37,9 @@ interface RootIdentity extends FilesystemIdentity {
 }
 
 function sameIdentity(left: FilesystemIdentity, right: FilesystemIdentity): boolean {
-  return left.dev === right.dev && left.ino === right.ino
+  // An unavailable zero inode cannot prove identity, so reject it instead of
+  // silently weakening the trusted-root and lstat/open substitution checks.
+  return left.ino !== 0n && left.dev === right.dev && left.ino === right.ino
 }
 
 export type NodeCoordinatorStoreFaultPoint =
@@ -73,7 +77,7 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
     await this.#assertRoot()
     let info
     try {
-      info = await lstat(this.path)
+      info = await lstat(this.path, { bigint: true })
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
         await this.#assertRoot()
@@ -81,7 +85,7 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
       }
       throw error
     }
-    if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_STATE_BYTES) this.#corrupt('state path is not a bounded regular file')
+    if (!info.isFile() || info.isSymbolicLink() || info.size > BigInt(MAX_STATE_BYTES)) this.#corrupt('state path is not a bounded regular file')
     await this.#fault?.('after-state-lstat')
     let handle
     try {
@@ -90,8 +94,8 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
       this.#corrupt(`state file could not be opened safely: ${this.#message(error)}`)
     }
     try {
-      const opened = await handle.stat()
-      if (!opened.isFile() || opened.size > MAX_STATE_BYTES || !sameIdentity(info, opened)) {
+      const opened = await handle.stat({ bigint: true })
+      if (!opened.isFile() || opened.size > BigInt(MAX_STATE_BYTES) || !sameIdentity(info, opened)) {
         this.#corrupt('opened state identity changed after validation')
       }
       const bytes = await handle.readFile()
@@ -130,12 +134,12 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
         await this.#fault?.('after-temp-open')
         await handle.writeFile(serialized)
         await handle.sync()
-        temporaryIdentity = await handle.stat()
+        temporaryIdentity = await handle.stat({ bigint: true })
       } finally {
         await handle.close()
       }
       await this.#assertRoot()
-      const temporaryBeforeRename = await lstat(temporary)
+      const temporaryBeforeRename = await lstat(temporary, { bigint: true })
       if (!temporaryBeforeRename.isFile() || temporaryBeforeRename.isSymbolicLink()
         || !sameIdentity(temporaryIdentity!, temporaryBeforeRename)) {
         this.#corrupt('temporary state identity changed before rename')
@@ -147,7 +151,7 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
       await rename(temporary, this.path)
       temporaryExists = false
       await this.#assertRoot()
-      const committed = await lstat(this.path)
+      const committed = await lstat(this.path, { bigint: true })
       if (!committed.isFile() || committed.isSymbolicLink() || !sameIdentity(temporaryIdentity!, committed)) {
         this.#corrupt('committed state identity changed during rename')
       }
@@ -182,16 +186,16 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
   }
 
   async #directoryIdentity(path: string, enforceOwnerOnly: boolean): Promise<RootIdentity> {
-    let info = await lstat(path)
+    let info = await lstat(path, { bigint: true })
     if (!info.isDirectory() || info.isSymbolicLink()) throw new TypeError('Coordinator trust path must be a real directory')
-    if (typeof process.getuid === 'function' && info.uid !== process.getuid()) {
+    if (typeof process.getuid === 'function' && info.uid !== BigInt(process.getuid())) {
       throw new TypeError('Coordinator trust path must be owned by the host user')
     }
     if (process.platform !== 'win32' && enforceOwnerOnly) {
       await chmod(path, 0o700)
-      info = await lstat(path)
+      info = await lstat(path, { bigint: true })
     }
-    if (process.platform !== 'win32' && (info.mode & 0o077) !== 0) {
+    if (process.platform !== 'win32' && (info.mode & 0o077n) !== 0n) {
       throw new TypeError('Coordinator trusted boundary and descendants must be owner-only')
     }
     const canonical = await realpath(path)
@@ -202,14 +206,14 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
     for (const identity of expected) {
       let info
       try {
-        info = await lstat(identity.path)
+        info = await lstat(identity.path, { bigint: true })
       } catch {
         throw new ModuleCoordinatorError('STORE_CORRUPT', 'Coordinator trusted ancestor changed')
       }
       if (!info.isDirectory() || info.isSymbolicLink() || !sameIdentity(info, identity)
         || (process.platform !== 'win32' && await realpath(identity.path) !== identity.canonical)
-        || (typeof process.getuid === 'function' && info.uid !== process.getuid())
-        || (process.platform !== 'win32' && (info.mode & 0o077) !== 0)) {
+        || (typeof process.getuid === 'function' && info.uid !== BigInt(process.getuid()))
+        || (process.platform !== 'win32' && (info.mode & 0o077n) !== 0n)) {
         throw new ModuleCoordinatorError('STORE_CORRUPT', 'Coordinator trusted ancestor changed')
       }
     }
@@ -258,7 +262,7 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
     let handle
     let beforeOpen
     try {
-      beforeOpen = await lstat(lock)
+      beforeOpen = await lstat(lock, { bigint: true })
       if (!beforeOpen.isFile() || beforeOpen.isSymbolicLink()) this.#corrupt('writer lock is invalid')
       handle = await open(lock, constants.O_RDONLY | NO_FOLLOW)
     } catch (error) {
@@ -266,8 +270,8 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
       this.#corrupt(`writer lock could not be opened safely: ${this.#message(error)}`)
     }
     try {
-      const info = await handle.stat()
-      if (!info.isFile() || info.size > 1_024 || !sameIdentity(beforeOpen, info)) this.#corrupt('writer lock is invalid')
+      const info = await handle.stat({ bigint: true })
+      if (!info.isFile() || info.size > 1_024n || !sameIdentity(beforeOpen, info)) this.#corrupt('writer lock is invalid')
       const parsed = JSON.parse((await handle.readFile()).toString('utf8')) as unknown
       if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) this.#corrupt('writer lock owner is invalid')
       const value = parsed as Record<string, unknown>
@@ -304,10 +308,10 @@ export class NodeFilesystemModuleCoordinatorStore implements ModuleCoordinatorSt
     const lock = join(this.root, LOCK_FILE)
     let handle
     try {
-      const beforeOpen = await lstat(lock)
+      const beforeOpen = await lstat(lock, { bigint: true })
       if (!beforeOpen.isFile() || beforeOpen.isSymbolicLink()) this.#corrupt('writer lock is invalid')
       handle = await open(lock, constants.O_RDONLY | NO_FOLLOW)
-      const opened = await handle.stat()
+      const opened = await handle.stat({ bigint: true })
       if (!sameIdentity(beforeOpen, opened)) this.#corrupt('writer lock identity changed')
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') return

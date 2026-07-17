@@ -10,6 +10,7 @@ describe("release static validation workflow", () => {
     expect(workflow).toContain(".github/actionlint.yaml")
     expect(workflow).toContain(".github/workflows/engineering-rc.yml")
     expect(workflow).toContain(".github/workflows/package-macos.yml")
+    expect(workflow).toContain(".github/workflows/signed-macos-host-acceptance.yml")
     expect(workflow).toContain(".github/workflows/open-design-production-input.yml")
     expect(workflow).toContain(".github/workflows/open-design-m1-machine-evidence.yml")
     expect(workflow).toContain(".github/workflows/open-design-m1-visual-attestation.yml")
@@ -50,9 +51,12 @@ describe("release static validation workflow", () => {
     expect(workflow).not.toContain("actions/attest")
     expect(workflow).not.toContain("actions/upload-artifact")
     expect(actionlintValidation).toContain(".github/workflows/package-macos.yml")
+    expect(actionlintValidation).toContain(".github/workflows/signed-macos-host-acceptance.yml")
     expect(bashValidation).toContain('".github/workflows/engineering-rc.yml"')
     expect(bashValidation).toContain('".github/workflows/package-macos.yml"')
+    expect(bashValidation).toContain('".github/workflows/signed-macos-host-acceptance.yml"')
     expect(workflow.match(/\.github\/workflows\/package-macos\.yml/g)).toHaveLength(4)
+    expect(workflow.match(/\.github\/workflows\/signed-macos-host-acceptance\.yml/g)).toHaveLength(4)
   })
 
   test("checks out read-only authority without persisting the Actions token", () => {

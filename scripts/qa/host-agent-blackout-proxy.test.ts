@@ -4,6 +4,7 @@ import {
   HOST_AGENT_BLACKOUT_HEARTBEAT_MS,
   HOST_AGENT_BLACKOUT_MS,
   HostAgentBlackoutProxy,
+  type HostAgentBlackoutClock,
 } from './host-agent-blackout-proxy'
 
 const TOKEN = 'blackout-test-token-0123456789abcdef'
@@ -63,7 +64,12 @@ async function upstreamServer(terminal: 'completed' | 'failed' | 'hang' | 'late'
 
 async function proxyFor(
   upstream: string,
-  options: { blackoutMs?: number; heartbeatMs?: number; armTimeoutMs?: number } = {},
+  options: {
+    blackoutMs?: number
+    heartbeatMs?: number
+    armTimeoutMs?: number
+    clock?: HostAgentBlackoutClock
+  } = {},
 ): Promise<HostAgentBlackoutProxy> {
   const proxy = new HostAgentBlackoutProxy({
     upstreamBaseUrl: upstream,
@@ -71,11 +77,38 @@ async function proxyFor(
     blackoutMs: options.blackoutMs ?? 80,
     heartbeatMs: options.heartbeatMs ?? 10,
     armTimeoutMs: options.armTimeoutMs ?? 100,
+    clock: options.clock,
     evidenceId: () => 'evidence-D01-1',
   })
   await proxy.start()
   cleanup.push(() => proxy.stop())
   return proxy
+}
+
+function frozenWallClock(nowMs: number): HostAgentBlackoutClock {
+  return {
+    now: () => nowMs,
+    wait: (delayMs, signal) => new Promise<void>((resolve, reject) => {
+      if (signal.aborted) {
+        reject(signal.reason)
+        return
+      }
+      const timer = setTimeout(done, delayMs)
+      const aborted = (): void => {
+        clearTimeout(timer)
+        reject(signal.reason)
+      }
+      function done(): void {
+        signal.removeEventListener('abort', aborted)
+        resolve()
+      }
+      signal.addEventListener('abort', aborted, { once: true })
+    }),
+    setInterval: (callback, delayMs) => setInterval(callback, delayMs),
+    clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
+    setTimeout: (callback, delayMs) => setTimeout(callback, delayMs),
+    clearTimeout: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+  }
 }
 
 async function stream(proxy: HostAgentBlackoutProxy): Promise<{ text: string; firstBusinessAt?: number; heartbeatAt?: number }> {
@@ -161,6 +194,8 @@ describe('Host Agent acceptance blackout proxy', () => {
     expect(Date.parse(evidence.endedAt) - Date.parse(evidence.startedAt)).toBeGreaterThanOrEqual(80)
     expect(evidence.deliveredFrames[evidence.eventSequenceBefore - 1]?.type).toBe('blackout.started')
     expect(evidence.deliveredFrames[evidence.eventSequenceAfter - 1]?.type).toBe('blackout.ended')
+    expect(evidence.deliveredFrames[evidence.eventSequenceBefore - 1]?.at).toBe(evidence.startedAt)
+    expect(evidence.deliveredFrames[evidence.eventSequenceAfter - 1]?.at).toBe(evidence.endedAt)
     expect(evidence.deliveredFrames[evidence.replaySequenceStart - 1]?.type).toBe('run.accepted')
     expect(evidence.deliveredFrames.filter((frame) => frame.type === 'turn.completed')).toHaveLength(1)
     expect(evidence.deliveredFrames.every((frame) => /^[0-9a-f]{64}$/.test(frame.payloadSha256))).toBe(true)
@@ -169,6 +204,33 @@ describe('Host Agent acceptance blackout proxy', () => {
     expect(evidence.deliveredFrames.filter((frame) => frame.business)
       .every((frame) => Date.parse(frame.at) > endedAt)).toBe(true)
     expect(() => proxy.takeBlackoutEvidence({ evidenceId: arm.evidenceId, caseId: 'D01', turnOrdinal: 1 })).toThrow()
+  })
+
+  it('keeps the end boundary authoritative when the wall clock does not tick', async () => {
+    const upstream = await upstreamServer()
+    // Freeze the millisecond wall clock while real timers advance. This
+    // deterministically covers the CI race where the end marker and replay
+    // otherwise share or straddle a coarse wall-clock tick.
+    const proxy = await proxyFor(upstream.url, {
+      blackoutMs: 40,
+      heartbeatMs: 5,
+      clock: frozenWallClock(Date.now()),
+    })
+    const arm = proxy.armNextBlackout({ caseId: 'D01', stack: 'new', turnOrdinal: 1 })
+    const observed = await stream(proxy)
+    expect(observed.firstBusinessAt).toBeGreaterThanOrEqual(30)
+
+    const evidence = proxy.takeBlackoutEvidence({
+      evidenceId: arm.evidenceId,
+      caseId: 'D01',
+      turnOrdinal: 1,
+    })
+    const endBoundary = evidence.deliveredFrames[evidence.eventSequenceAfter - 1]
+    const firstReplay = evidence.deliveredFrames[evidence.replaySequenceStart - 1]
+    expect(Date.parse(evidence.endedAt) - Date.parse(evidence.startedAt)).toBeGreaterThanOrEqual(40)
+    expect(endBoundary?.at).toBe(evidence.endedAt)
+    expect(firstReplay?.business).toBe(true)
+    expect(Date.parse(firstReplay!.at)).toBeGreaterThan(Date.parse(evidence.endedAt))
   })
 
   it('consumes timed-out and duplicate arms without reassigning them', async () => {

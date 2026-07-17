@@ -69,6 +69,7 @@
       },
       "devDependencies": {
         "@aws-sdk/client-s3": "^3.947.0",
+        "@electron/osx-sign": "2.3.0",
         "@electron/packager": "^19.0.1",
         "@rollup/rollup-win32-arm64-msvc": "^4.55.1",
         "@sentry/vite-plugin": "^4.8.0",
@@ -150,6 +151,9 @@
         "@radix-ui/react-label": "^2.1.8",
         "@radix-ui/react-popover": "^1.1.15",
         "@radix-ui/react-switch": "^1.2.6",
+        "@simulator/host-agent-broker": "workspace:*",
+        "@simulator/host-agent-contract": "workspace:*",
+        "@simulator/host-agent-run-core": "workspace:*",
         "@simulator/module-agent-gateway": "workspace:*",
         "@simulator/module-contract": "workspace:*",
         "@simulator/module-coordinator": "workspace:*",

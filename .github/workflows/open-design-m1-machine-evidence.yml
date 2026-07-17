@@ -22,7 +22,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: open-design-m1-machine-evidence
+  group: open-design-release-transaction
   cancel-in-progress: false
 
 jobs:
@@ -33,6 +33,7 @@ jobs:
       github.ref == 'refs/heads/main' &&
       github.run_attempt == 1 &&
       vars.OPEN_DESIGN_M1_MACHINE_EVIDENCE_ENABLED == 'true' &&
+      vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED == 'true' &&
       inputs.paid_turns_approved == true &&
       inputs.acceptance_confirmation == 'RUN_OPEN_DESIGN_M1_40_PAID_TURNS_STOP_ON_FIRST_FAILURE'
     runs-on: [self-hosted, macOS, ARM64, simulator-open-design-m1]
@@ -44,6 +45,7 @@ jobs:
       HOST_BUILD_RUN_ID: ${{ inputs.host_build_run_id }}
       PAID_TURNS_APPROVED: ${{ inputs.paid_turns_approved }}
       ACCEPTANCE_CONFIRMATION: ${{ inputs.acceptance_confirmation }}
+      RC_ACCEPTANCE_FREEZE_ENABLED: ${{ vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED }}
       SIMULATOR_M1_MACHINE_REAL: packaged-open-design-direct-observation
 
     steps:
@@ -72,6 +74,7 @@ jobs:
           test "$GITHUB_RUN_ATTEMPT" = "1"
           test "$PAID_TURNS_APPROVED" = "true"
           test "$ACCEPTANCE_CONFIRMATION" = "RUN_OPEN_DESIGN_M1_40_PAID_TURNS_STOP_ON_FIRST_FAILURE"
+          test "$RC_ACCEPTANCE_FREEZE_ENABLED" = "true"
           test "$(uname -s)" = "Darwin"
           test "$(uname -m)" = "arm64"
           [[ "$HOST_BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]

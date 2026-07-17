@@ -22,6 +22,7 @@ describe("OpenDesign release-track safety", () => {
     expect(inputs.release_track.default).toBe("prerelease")
     expect(inputs.module_version.default).toBe("0.14.6-rc.1")
     expect(inputs.release_tag.default).toBe("open-design-v0.14.6-rc.1")
+    expect(workflow.jobs.initial.if).toContain("vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED != 'true'")
 
     const authority = step("initial", "Validate fixed release authority").run
     expect(authority).toContain('test "$RELEASE_TAG" = "open-design-v$MODULE_VERSION"')
@@ -87,6 +88,9 @@ describe("OpenDesign release-track safety", () => {
     expect(evidence.run).toContain(".github/workflows/open-design-acceptance-rollback.yml")
     expect(evidence.run).toContain("open-design-rc-acceptance-evidence")
     expect(evidence.run).toContain("open-design-rollback-gate-evidence")
+    expect(evidence.run).toContain('test "$(jq -r .run_attempt <<<"$acceptance_run")" = "1"')
+    expect(evidence.run).toContain('test "$(jq -r .run_attempt <<<"$host_run")" = "1"')
+    expect(evidence.run).toContain('test "$(jq -r .run_attempt <<<"$rollback_run")" = "1"')
     expect(evidence.run).toContain(".oldStackTasksPassed == 20")
     expect(evidence.run).toContain(".newStackConsecutivePassed == 20")
     expect(evidence.run).toContain(".paidTurns == 40")

@@ -1,16 +1,31 @@
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { parse } from 'yaml'
+import {
+  commandContainsBoundedPath,
+  signalRecordedProcessIdentities,
+  type ProcessIdentity,
+  type ProcessRow,
+} from '../qa/run-open-design-m1-machine-evidence'
 
 const path = '.github/workflows/open-design-m1-machine-evidence.yml'
 const source = readFileSync(path, 'utf8')
 const runnerSource = readFileSync('scripts/qa/run-open-design-m1-machine-evidence.ts', 'utf8')
 const failureSource = readFileSync('scripts/qa/open-design-m1-machine-first-failure.ts', 'utf8')
 const workflow = parse(source) as Record<string, any>
+const releaseWorkflow = parse(readFileSync('.github/workflows/open-design-release.yml', 'utf8')) as Record<string, any>
 const dispatch = workflow.on.workflow_dispatch
 const job = workflow.jobs['produce-machine-evidence']
 
 describe('OpenDesign M1 machine evidence workflow', () => {
+  it('shares the exact non-cancelling Release transaction lane', () => {
+    expect(workflow.concurrency).toEqual({
+      group: 'open-design-release-transaction',
+      'cancel-in-progress': false,
+    })
+    expect(releaseWorkflow.concurrency).toEqual(workflow.concurrency)
+  })
+
   it('has exactly three non-evidence workflow inputs', () => {
     expect(Object.keys(dispatch.inputs).sort()).toEqual([
       'acceptance_confirmation', 'host_build_run_id', 'paid_turns_approved',
@@ -24,10 +39,41 @@ describe('OpenDesign M1 machine evidence workflow', () => {
     expect(job['runs-on']).toEqual(['self-hosted', 'macOS', 'ARM64', 'simulator-open-design-m1'])
     expect(job.environment.name).toBe('open-design-m1-machine-evidence')
     expect(job.if).toContain("vars.OPEN_DESIGN_M1_MACHINE_EVIDENCE_ENABLED == 'true'")
+    expect(job.if).toContain("vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED == 'true'")
     expect(job.if).toContain('github.run_attempt == 1')
     expect(job.if).toContain('inputs.paid_turns_approved == true')
     expect(source).toContain('persist-credentials: false')
     expect(source).toContain('bun install --frozen-lockfile --ignore-scripts')
+    expect(job.env.RC_ACCEPTANCE_FREEZE_ENABLED).toBe('${{ vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED }}')
+    const authority = job.steps.find((step: Record<string, any>) => (
+      step.name === 'Verify protected runner and exact Host build authority'
+    ))
+    expect(authority.run).toContain('test "$RC_ACCEPTANCE_FREEZE_ENABLED" = "true"')
+    expect(runnerSource).toContain("requiredEnv('RC_ACCEPTANCE_FREEZE_ENABLED') !== 'true'")
+  })
+
+  it('fails closed around the paid batch when a Release transaction or Catalog drift exists', () => {
+    expect(runnerSource).toContain("const OPEN_DESIGN_RELEASE_WORKFLOW_PATH = '.github/workflows/open-design-release.yml'")
+    for (const status of ['waiting', 'queued', 'in_progress', 'pending', 'requested']) {
+      expect(runnerSource).toContain(`'${status}'`)
+    }
+    expect(runnerSource).toContain('requireNoOpenDesignReleaseTransaction(token)')
+    expect(runnerSource).toContain('requireReleaseCatalogUnchanged(lkgTrust, await fetchReleaseAuthority(OPEN_DESIGN_LKG_VERSION))')
+    expect(runnerSource).toContain('requireReleaseCatalogUnchanged(rcTrust, await fetchReleaseAuthority(OPEN_DESIGN_RC_VERSION))')
+    const firstPaidBatch = runnerSource.indexOf('await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES')
+    const paidPreflight = runnerSource.lastIndexOf('await requireNoOpenDesignReleaseTransaction(token)', firstPaidBatch)
+    const preflightCatalog = runnerSource.lastIndexOf('requireReleaseCatalogUnchanged(lkgTrust', firstPaidBatch)
+    expect(paidPreflight).toBeGreaterThan(-1)
+    expect(preflightCatalog).toBeGreaterThan(paidPreflight)
+    expect(preflightCatalog).toBeLessThan(firstPaidBatch)
+    const secondPaidBatch = runnerSource.indexOf('await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES', firstPaidBatch + 1)
+    const finalIdle = runnerSource.lastIndexOf('await requireNoOpenDesignReleaseTransaction(token)')
+    const finalCatalog = runnerSource.lastIndexOf('requireReleaseCatalogUnchanged(rcTrust')
+    const seal = runnerSource.indexOf('await sealArtifact({ root: artifactRoot')
+    expect(secondPaidBatch).toBeGreaterThan(firstPaidBatch)
+    expect(finalIdle).toBeGreaterThan(secondPaidBatch)
+    expect(finalCatalog).toBeGreaterThan(finalIdle)
+    expect(finalCatalog).toBeLessThan(seal)
   })
 
   it('runs only the direct real producer and seals the exact artifact', () => {
@@ -92,11 +138,63 @@ describe('OpenDesign M1 machine evidence workflow', () => {
       runnerSource.indexOf("process.stderr.write('OpenDesign M1 machine evidence producer failed closed."),
     )
     expect(failureSeal).toContain('preserveOpenDesignM1FirstFailure(staging, failureArtifactRoot, failureOutputRoot')
+    expect(failureSeal).toContain('await bestEffortFailureCleanup({')
+    expect(failureSeal).toContain('if (failedAt !== undefined && cleanup)')
+    expect(failureSeal).not.toContain('batchProgress.completedCaseCount > 0')
+    expect(failureSeal).toContain('{ completedCaseCount: batchProgress.completedCaseCount, lifecyclePhase }')
+    expect(failureSeal).toContain('cleanup,')
     expect(failureSeal).not.toContain('error.message')
     expect(failureSeal).not.toContain('error.stack')
     expect(failureSeal).not.toContain('String(error)')
     expect(failureSource).toContain('await rename(artifact, output)')
     expect(failureSource).toContain('await rm(staging, { recursive: true, force: true })')
+    const cleanupSource = runnerSource.slice(
+      runnerSource.indexOf('async function bestEffortFailureCleanup'),
+      runnerSource.indexOf('async function sealArtifact'),
+    )
+    expect(cleanupSource).toContain("rendererCall('openDesignModule', 'stop')")
+    expect(cleanupSource).toContain('withDeadline(requireRuntimeCleanup(options.craftCdp, 15_000), 20_000')
+    expect(cleanupSource).toContain('await stopApp(options.app)')
+    expect(cleanupSource).toContain('await reapExactProcessIdentities')
+    expect(cleanupSource).toContain('knownProcessTree?: readonly ProcessIdentity[]')
+    expect(cleanupSource).toContain('ownedModuleProcessesRemaining')
+    expect(failureSeal).toContain('knownProcessTree: [...knownProcessTree.values()]')
+    expect(failureSource).toContain("code: 'LIFECYCLE_VERIFICATION_FAILED'")
+    expect(failureSource).toContain('schemaVersion: 2')
+  })
+
+  it('protects every capsule-capable producer preflight with the zero-paid catch/finally boundary', () => {
+    const main = runnerSource.slice(runnerSource.indexOf('async function main()'))
+    const stagingEstablished = main.indexOf('await mkdir(staging, { mode: 0o700 })')
+    const scalarAuthority = main.indexOf('const failureAuthority: OpenDesignM1FirstFailureAuthority')
+    const protectedTry = main.indexOf('  try {', main.indexOf('const rememberProcessTree'))
+    const protectedCatch = main.indexOf('\n  } catch (error) {', protectedTry)
+    const protectedFinally = main.indexOf('\n  } finally {', protectedCatch)
+    expect(stagingEstablished).toBeGreaterThan(-1)
+    expect(scalarAuthority).toBeGreaterThan(-1)
+    expect(stagingEstablished).toBeLessThan(protectedTry)
+    expect(scalarAuthority).toBeLessThan(protectedTry)
+    for (const operation of [
+      'await requireNoOpenDesignReleaseTransaction(token)',
+      'await fetchReleaseAuthority(OPEN_DESIGN_LKG_VERSION)',
+      'await fetchReleaseAuthority(OPEN_DESIGN_RC_VERSION)',
+      'await requiredCiEvidence(hostHeadSha, token)',
+      'await preflightExternalBlackoutProxyChild(blackoutProxyChild, staging)',
+      "const userData = resolve(requiredEnv('M1_PACKAGED_PROFILE_ROOT'))",
+      "const controlDescriptor = join(controlDirectory, 'rc-control-v1.json')",
+      "await mkdir(artifactRoot, { mode: 0o700 })",
+      'app = await appLaunch(executable, userData, blackoutProxyChild)',
+      'await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES',
+    ]) {
+      const position = main.indexOf(operation)
+      expect(position, operation).toBeGreaterThan(protectedTry)
+      expect(position, operation).toBeLessThan(protectedCatch)
+    }
+    expect(protectedFinally).toBeGreaterThan(protectedCatch)
+    const finallySource = main.slice(protectedFinally)
+    expect(finallySource).toContain('if (failedAt !== undefined && cleanup)')
+    expect(finallySource).not.toContain('batchProgress.completedCaseCount > 0')
+    expect(main.slice(protectedTry, protectedCatch)).toContain("lifecyclePhase = 'lkg-batch.preflight'")
   })
 
   it('downloads the raw Host artifact by ID and safely extracts its exact Engineering RC closure', () => {
@@ -149,7 +247,7 @@ describe('OpenDesign M1 machine evidence workflow', () => {
     expect(source).toContain('proxy_script=$(realpath scripts/qa/run-host-agent-blackout-proxy.ts)')
     expect(source).toContain('(( (8#$mode & 8#022) == 0 ))')
     expect(runnerSource.indexOf('await preflightExternalBlackoutProxyChild(blackoutProxyChild, staging)'))
-      .toBeLessThan(runnerSource.indexOf('let app = await appLaunch(executable, userData, blackoutProxyChild)'))
+      .toBeLessThan(runnerSource.indexOf('app = await appLaunch(executable, userData, blackoutProxyChild)'))
     const main = runnerSource.slice(runnerSource.indexOf('async function main()'))
     expect(main.indexOf('await preflightRealPackagedV2ProxyAttach({'))
       .toBeLessThan(main.indexOf('await runFixedPaidTurnBatch('))
@@ -191,7 +289,47 @@ describe('OpenDesign M1 machine evidence workflow', () => {
     expect(runnerSource).toContain('await descendantProcessSnapshot(app.pid)')
     expect(runnerSource).toContain('await requireProcessTreeReaped(finalProcessTree)')
     expect(runnerSource).toContain('await residualOwnedModuleProcessCount(userData, blackoutProxyChild.scriptPath)')
-    expect(runnerSource).toContain("spawn('/bin/ps', ['-axo', 'pid=,ppid=,command=']")
+    expect(runnerSource).toContain("spawn('/bin/ps', ['-axo', 'pid=,ppid=,lstart=,command=']")
+    expect(runnerSource).toContain("env: { LC_ALL: 'C', LANG: 'C' }")
+    expect(runnerSource).toContain("waitFor('run-owned Shim process observation'")
+    expect(runnerSource).toContain("waitFor('run-owned Shim process cleanup'")
+    expect(runnerSource).toContain('onProcessTreeObserved: rememberProcessTree')
+    expect(runnerSource).not.toContain('async function shimProcessCount')
+  })
+
+  it('never signals an unrecorded process merely because its command contains the dedicated path', () => {
+    const originalStart = 'Thu Jul 17 01:00:00 2026'
+    const recorded: ProcessIdentity[] = [{ pid: 101, startIdentity: originalStart, commandSha256: 'a'.repeat(64) }]
+    const current: ProcessRow[] = [
+      { pid: 101, ppid: 1, startIdentity: originalStart, command: '/Applications/Simulator.app/Contents/MacOS/Simulator', commandSha256: 'a'.repeat(64) },
+      { pid: 202, ppid: 1, startIdentity: originalStart, command: 'other --user-data-dir=/tmp/m1-profile', commandSha256: 'b'.repeat(64) },
+      { pid: 303, ppid: 1, startIdentity: originalStart, command: 'reused-pid', commandSha256: 'c'.repeat(64) },
+    ]
+    const signalled: Array<{ pid: number; signal: NodeJS.Signals }> = []
+    const selected = signalRecordedProcessIdentities(recorded, current, 'SIGTERM', (pid, signal) => {
+      signalled.push({ pid, signal })
+    })
+    expect(selected).toEqual(recorded)
+    expect(signalled).toEqual([{ pid: 101, signal: 'SIGTERM' }])
+    expect(signalled.some(({ pid }) => pid === 202)).toBe(false)
+    const reusedPidSignals: number[] = []
+    signalRecordedProcessIdentities(recorded, [{
+      ...current[0]!,
+      startIdentity: 'Thu Jul 17 02:00:00 2026',
+    }], 'SIGTERM', (pid) => reusedPidSignals.push(pid))
+    expect(reusedPidSignals).toEqual([])
+    expect(commandContainsBoundedPath(current[1]!.command, '/tmp/m1-profile')).toBe(true)
+    expect(commandContainsBoundedPath('other --user-data-dir=/tmp/m1-profile-suffix', '/tmp/m1-profile')).toBe(false)
+    expect(runnerSource).toContain('await requireDedicatedAcceptanceProcessesAbsent(userData, blackoutProxyChild.scriptPath)')
+    expect(runnerSource.indexOf('await requireDedicatedAcceptanceProcessesAbsent(userData, blackoutProxyChild.scriptPath)'))
+      .toBeLessThan(runnerSource.indexOf('app = await appLaunch(executable, userData, blackoutProxyChild)'))
+    const cleanupSource = runnerSource.slice(
+      runnerSource.indexOf('async function bestEffortFailureCleanup'),
+      runnerSource.indexOf('async function sealArtifact'),
+    )
+    expect(cleanupSource).not.toContain('ownedModuleProcessSnapshot')
+    expect(cleanupSource).not.toContain('row.command.includes(userData)')
+    expect(cleanupSource).not.toContain('row.command.includes(proxyScriptPath)')
   })
 
   it('captures the actual Preview URL in a temporary CDP target and closes every HTTP body', () => {

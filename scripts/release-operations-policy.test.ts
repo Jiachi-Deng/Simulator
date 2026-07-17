@@ -17,12 +17,35 @@ describe("release operations policy", () => {
     ).toBe("")
   })
 
-  test("the public unsigned packaging path explicitly enables public-build stripping", () => {
+  test("every signed or unsigned macOS DMG explicitly enables public-build stripping", () => {
     const buildScript = read("apps/electron/scripts/build-dmg.sh")
+    const mainBuild = read("scripts/electron-build-main.ts")
+    const buildEnvironment = read("scripts/build-environment.ts")
+    const rootPackage = JSON.parse(read("package.json")) as { scripts?: Record<string, string> }
     const packageWorkflow = read(".github/workflows/package-macos.yml")
-    expect(buildScript).toContain("SIMULATOR_PUBLIC_BUILD=1")
-    expect(buildScript).toContain("SIMULATOR_DISABLE_UPDATES=1")
-    expect(buildScript).toContain("verify-public-build-privacy.ts")
+    const publicBuild = buildScript.indexOf("export SIMULATOR_PUBLIC_BUILD=1")
+    const disableUpdates = buildScript.indexOf("export SIMULATOR_DISABLE_UPDATES=1")
+    const build = buildScript.indexOf("bun run electron:build")
+    const packagedPrivacyGate = buildScript.indexOf(
+      'bun "$ROOT_DIR/scripts/release/verify-public-build-privacy.ts"',
+    )
+
+    expect(publicBuild).toBeGreaterThan(-1)
+    expect(disableUpdates).toBeGreaterThan(-1)
+    expect(publicBuild).toBeLessThan(build)
+    expect(disableUpdates).toBeLessThan(build)
+    expect(packagedPrivacyGate).toBeGreaterThan(buildScript.indexOf('require_path "$APP_ROOT"'))
+    expect(buildScript.match(/bun run electron:build/g)).toHaveLength(1)
+    expect(buildScript.match(/verify-public-build-privacy\.ts/g)).toHaveLength(1)
+    expect(buildScript).not.toContain(
+      'if [ "$UNSIGNED" = true ]; then\n    bun "$ROOT_DIR/scripts/release/verify-public-build-privacy.ts"',
+    )
+    expect(rootPackage.scripts?.["electron:build:main"]).toBe("bun run scripts/electron-build-main.ts")
+    expect(mainBuild.indexOf("if (isPublicBuild())")).toBeGreaterThan(-1)
+    expect(mainBuild.indexOf("if (isPublicBuild())")).toBeLessThan(
+      mainBuild.indexOf("readFileSync(envPath"),
+    )
+    expect(buildEnvironment).toContain("return isPublicBuild(env) ? \"\" : (env[variable] ?? \"\")")
     expect(packageWorkflow).toContain('"scripts/release/verify-public-build-privacy.ts"')
   })
 

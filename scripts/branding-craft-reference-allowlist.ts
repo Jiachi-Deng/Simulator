@@ -181,6 +181,7 @@ export const CRAFT_REFERENCE_ALLOWLIST: CraftReferenceCategory[] = [
       || path === 'packages/pi-agent-server/src/file-tool-path-input.ts'
       || /^(?:packages\/server-core\/src\/(?:handlers\/session-manager-interface|sessions\/(?:module-agent-adapter|visible-craft-turn-gate(?:\.test)?|visible-craft-turn-priority\.test))|packages\/shared\/src\/agent\/(?:module-agent-tool-boundary|provider-process-reaper))\.ts$/.test(path)
       || path === 'scripts/qa/run-open-design-m1-machine-evidence.ts'
+      || /^scripts\/qa\/open-design-m1-h1-connection-evidence(?:\.test)?\.ts$/.test(path)
       || (path === 'apps/electron/src/main/host-module-coordinator-smoke.ts'
         && [
           'throw new Error(`Visible Craft Host identity changed during ${phase}`)',

@@ -66,6 +66,7 @@ jobs:
     if: >-
       github.repository == 'Jiachi-Deng/Simulator' &&
       github.ref == 'refs/heads/main' &&
+      vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED != 'true' &&
       github.event_name == 'workflow_dispatch' &&
       inputs.operation == 'initial' &&
       ((inputs.release_track == 'prerelease' && vars.OPEN_DESIGN_PRERELEASE_ENABLED == 'true') ||
@@ -283,6 +284,7 @@ jobs:
           test "$(jq -r .repository.full_name <<<"$acceptance_run")" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
           test "$(jq -r .path <<<"$acceptance_run")" = ".github/workflows/open-design-rc-acceptance.yml"
           test "$(jq -r .event <<<"$acceptance_run")" = workflow_dispatch
+          test "$(jq -r .run_attempt <<<"$acceptance_run")" = "1"
           gh run download "$ACCEPTANCE_RUN_ID" \
             --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
             --name open-design-rc-acceptance-evidence \
@@ -338,6 +340,7 @@ jobs:
           test "$(jq -r .repository.full_name <<<"$host_run")" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
           test "$(jq -r .path <<<"$host_run")" = ".github/workflows/engineering-rc.yml"
           test "$(jq -r .event <<<"$host_run")" = workflow_dispatch
+          test "$(jq -r .run_attempt <<<"$host_run")" = "1"
 
           rollback_run=$(gh api "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/runs/$ROLLBACK_GATE_RUN_ID")
           test "$(jq -r .conclusion <<<"$rollback_run")" = success
@@ -346,6 +349,7 @@ jobs:
           test "$(jq -r .repository.full_name <<<"$rollback_run")" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
           test "$(jq -r .path <<<"$rollback_run")" = ".github/workflows/open-design-acceptance-rollback.yml"
           test "$(jq -r .event <<<"$rollback_run")" = workflow_dispatch
+          test "$(jq -r .run_attempt <<<"$rollback_run")" = "1"
           gh run download "$ROLLBACK_GATE_RUN_ID" \
             --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
             --name open-design-rollback-gate-evidence \

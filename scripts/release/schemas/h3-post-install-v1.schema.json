@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simulator.local/schemas/h3-post-install-v1.schema.json",
+  "title": "Simulator M1 H3 post-install evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "sourceSha",
+    "hostBuildRunId",
+    "artifactName",
+    "artifactId",
+    "artifactDigest",
+    "dmgPath",
+    "dmgBytes",
+    "dmgSha256",
+    "environmentKind",
+    "macOSVersion",
+    "installedPath",
+    "installedAt",
+    "bundleIdentifier",
+    "hostVersion",
+    "appBundleVersion",
+    "canonicalInventorySha256",
+    "installedAppIdentitySha256",
+    "developerIdApplication",
+    "teamId",
+    "deepSignatureValid",
+    "gatekeeperAssessment",
+    "notarization",
+    "stapling",
+    "existingAppBeforeInstall",
+    "backupPath",
+    "backupIdentitySha256",
+    "restoreStatus"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "sourceSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "hostBuildRunId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+    "artifactName": { "type": "string", "pattern": "^simulator-host-(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?-macos-arm64-developer-id-candidate-[0-9a-f]{40}$" },
+    "artifactId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+    "artifactDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "dmgPath": { "type": "string", "pattern": "^/[^\\n\\r]+/Simulator-arm64\\.dmg$" },
+    "dmgBytes": { "type": "integer", "minimum": 1 },
+    "dmgSha256": { "$ref": "#/$defs/sha256" },
+    "environmentKind": { "enum": ["new-standard-user", "clean-vm", "second-mac"] },
+    "macOSVersion": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+(?:\\.[0-9]+)?(?: \\([0-9A-Za-z]+\\))?$" },
+    "installedPath": { "const": "/Applications/Simulator.app" },
+    "installedAt": { "$ref": "#/$defs/canonicalUtc" },
+    "bundleIdentifier": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9.-]+$" },
+    "hostVersion": { "type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?$" },
+    "appBundleVersion": { "type": "string", "pattern": "^[0-9A-Za-z][0-9A-Za-z.-]*$" },
+    "canonicalInventorySha256": { "$ref": "#/$defs/sha256" },
+    "installedAppIdentitySha256": { "$ref": "#/$defs/sha256" },
+    "developerIdApplication": { "type": "string", "pattern": "^Developer ID Application: .+ \\([A-Z0-9]{10}\\)$" },
+    "teamId": { "type": "string", "pattern": "^[A-Z0-9]{10}$" },
+    "deepSignatureValid": { "const": true },
+    "gatekeeperAssessment": { "const": "PASS" },
+    "notarization": { "const": "PASS" },
+    "stapling": { "const": "PASS" },
+    "existingAppBeforeInstall": { "type": "boolean" },
+    "backupPath": {
+      "oneOf": [
+        { "const": "N/A" },
+        { "type": "string", "pattern": "^/[^\\n\\r]+$" }
+      ]
+    },
+    "backupIdentitySha256": {
+      "oneOf": [
+        { "const": "N/A" },
+        { "$ref": "#/$defs/sha256" }
+      ]
+    },
+    "restoreStatus": { "enum": ["NOT NEEDED", "PENDING", "PASS", "FAIL"] }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "canonicalUtc": { "type": "string", "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$" }
+  }
+}
