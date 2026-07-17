@@ -78,6 +78,8 @@ describe('OpenDesign M1 machine evidence workflow', () => {
 
   it('runs only the direct real producer and seals the exact artifact', () => {
     expect(source).toContain('SIMULATOR_M1_MACHINE_REAL: packaged-open-design-direct-observation')
+    expect(source).toContain('bun scripts/qa/generate-open-design-m1-case-artifacts-v2.ts "$case_root"')
+    expect(source).not.toContain('bun scripts/qa/generate-open-design-m1-case-artifacts.ts "$case_root"')
     expect(source).toContain('bun scripts/qa/run-open-design-m1-machine-evidence.ts')
     expect(source).toContain('test "$(jq -er .fileCount')
     expect(source).toContain('= 150')

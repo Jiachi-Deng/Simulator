@@ -3,6 +3,7 @@ import { chmod, lstat, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import {
   OPEN_DESIGN_M1_MACHINE_ARTIFACT_NAME,
+  OPEN_DESIGN_M1_MACHINE_RECORD_MAX_BYTES,
   OPEN_DESIGN_M1_MACHINE_WORKFLOW_PATH,
   type MachineEvidenceAuthority,
   type ReleaseAuthority,
@@ -14,14 +15,16 @@ import {
   type VisualProducerAuthority,
   validateOpenDesignM1VisualAttestation,
 } from './open-design-m1-visual-attestation'
-import { OPEN_DESIGN_M1_CASES } from './open-design-m1-cases'
+import {
+  OPEN_DESIGN_M1_CASES_V2,
+  OPEN_DESIGN_M1_CASE_MANIFEST_V2_SHA256,
+} from './open-design-m1-interaction-vectors'
 import {
   OPEN_DESIGN_ACCEPTANCE_REPOSITORY,
-  OPEN_DESIGN_M1_CASE_MANIFEST_SHA256,
   OPEN_DESIGN_M1_CASE_SEED_CHECKSUMS_SHA256,
   OPEN_DESIGN_RC_SOURCE_SHA,
   type EvidenceObjectRef,
-  validateAndSummarizeOpenDesignRcAcceptanceIntake,
+  validateAndSummarizeOpenDesignM1RcAcceptanceIntakeV2,
 } from './open-design-rc-acceptance-evidence'
 
 export const OPEN_DESIGN_M1_FINAL_ARTIFACT_NAME = 'open-design-rc-acceptance-evidence' as const
@@ -289,12 +292,14 @@ async function composeIntake(
     const indexEntry = objectAt(manifest.records[index], `$machine.records[${index}]`)
     const stack = indexEntry.stack
     if (stack !== 'old' && stack !== 'new') fail(`$machine.records[${index}].stack`)
-    const caseIndex = stack === 'old' ? index : index - OPEN_DESIGN_M1_CASES.length
-    const testCase = OPEN_DESIGN_M1_CASES[caseIndex]
+    const caseIndex = stack === 'old' ? index : index - OPEN_DESIGN_M1_CASES_V2.length
+    const testCase = OPEN_DESIGN_M1_CASES_V2[caseIndex]
     if (!testCase) fail(`$machine.records[${index}].caseId`)
     const recordRef = objectAt(indexEntry.record, `$machine.records[${index}].record`)
     const recordPath = stringAt(recordRef, 'path', `$machine.records[${index}].record`)
-    const record = objectAt(await readCanonicalJson(join(machineRoot, recordPath), 32 * 1024), `$record[${index}]`)
+    const record = objectAt(await readCanonicalJson(
+      join(machineRoot, recordPath), OPEN_DESIGN_M1_MACHINE_RECORD_MAX_BYTES,
+    ), `$record[${index}]`)
     const visualDecision = stack === 'new'
       ? objectAt(decisions[caseIndex], `$visual.decisions[${caseIndex}]`)
       : undefined
@@ -336,7 +341,7 @@ async function composeIntake(
   const host = objectAt(manifest.host, '$machine.host')
   return {
     batch: manifest.batch,
-    caseManifestSha256: OPEN_DESIGN_M1_CASE_MANIFEST_SHA256,
+    caseManifestSha256: OPEN_DESIGN_M1_CASE_MANIFEST_V2_SHA256,
     caseSeedChecksumsSha256: OPEN_DESIGN_M1_CASE_SEED_CHECKSUMS_SHA256,
     evidence: {
       machineBatch: machineRef(authority, 'machine-manifest.json', machineManifestSha256),
@@ -419,7 +424,7 @@ export async function createOpenDesignM1FinalEvidence(
   const visual = await validateOpenDesignM1VisualAttestation(visualRoot, machineRoot, visualAuthority)
   if (visual.machineManifestSha256 !== machine.sha256 || visual.batchDigest !== machine.batchDigest) fail('$crossBinding')
   const intake = await composeIntake(machineRoot, visualRoot, authority, machine.sha256, visual.sha256)
-  const summary = validateAndSummarizeOpenDesignRcAcceptanceIntake(intake, authority.hostHeadSha)
+  const summary = validateAndSummarizeOpenDesignM1RcAcceptanceIntakeV2(intake, authority.hostHeadSha)
   await mkdir(outputRoot, { recursive: false, mode: 0o700 })
   const intakeSource = canonical(intake)
   const summarySource = canonical(summary)

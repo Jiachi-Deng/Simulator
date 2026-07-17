@@ -12,9 +12,20 @@ import {
 } from 'node:fs/promises'
 import { dirname, join, relative, resolve, sep } from 'node:path'
 import {
-  OPEN_DESIGN_M1_CASES,
   type OpenDesignM1Case,
 } from './open-design-m1-cases'
+import {
+  OPEN_DESIGN_M1_CASES_V2,
+  OPEN_DESIGN_M1_CASE_MANIFEST_V2_SHA256,
+  OPEN_DESIGN_M1_CASE_V2_HASHES,
+  OPEN_DESIGN_M1_INTERACTION_VECTORS,
+  OPEN_DESIGN_M1_INTERACTION_VECTORS_CANONICAL_SHA256,
+  type OpenDesignM1CaseV2,
+} from './open-design-m1-interaction-vectors'
+import {
+  createDeterministicOpenDesignM1InteractionEvidenceFixture,
+  validateOpenDesignM1InteractionEvidence,
+} from './open-design-m1-preview-interactions'
 import {
   OPEN_DESIGN_ACCEPTANCE_REPOSITORY,
   OPEN_DESIGN_HOST_ARTIFACT_NAME,
@@ -22,8 +33,6 @@ import {
   OPEN_DESIGN_LKG_ARCHIVE_ASSET,
   OPEN_DESIGN_LKG_TAG,
   OPEN_DESIGN_LKG_VERSION,
-  OPEN_DESIGN_M1_CASE_HASHES,
-  OPEN_DESIGN_M1_CASE_MANIFEST_SHA256,
   OPEN_DESIGN_M1_CASE_SEED_CHECKSUMS_SHA256,
   OPEN_DESIGN_RC_ARCHIVE_ASSET,
   OPEN_DESIGN_RC_SOURCE_SHA,
@@ -37,6 +46,7 @@ export const OPEN_DESIGN_M1_MACHINE_WORKFLOW_PATH =
 export const OPEN_DESIGN_M1_MACHINE_ARTIFACT_NAME = 'open-design-m1-machine-evidence' as const
 export const OPEN_DESIGN_M1_MACHINE_FILE_COUNT = 150 as const
 export const OPEN_DESIGN_M1_MACHINE_MAX_BYTES = 96 * 1024 * 1024
+export const OPEN_DESIGN_M1_MACHINE_RECORD_MAX_BYTES = 384 * 1024
 
 const SHA256 = /^[0-9a-f]{64}$/
 const COMMIT_SHA = /^[0-9a-f]{40}$/
@@ -46,7 +56,7 @@ const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0
 const FILE_LIMITS = Object.freeze({
   manifest: 64 * 1024,
   requiredCi: 64 * 1024,
-  record: 32 * 1024,
+  record: OPEN_DESIGN_M1_MACHINE_RECORD_MAX_BYTES,
   events: 256 * 1024,
   workspace: 64 * 1024,
   preview: 4 * 1024 * 1024,
@@ -168,7 +178,7 @@ export function expectedMachineEvidencePaths(): readonly string[] {
   const paths = [
     'machine-manifest.json',
     'required-ci.json',
-    ...OPEN_DESIGN_M1_CASES.flatMap((testCase) => [
+    ...OPEN_DESIGN_M1_CASES_V2.flatMap((testCase) => [
       `records/old/${testCase.id}.json`,
       `events/old/${testCase.id}.jsonl`,
       `workspace/old/${testCase.id}.json`,
@@ -307,9 +317,11 @@ function validateBatch(value: unknown, path: string): { startedAt: number; compl
 
 function validateCaseAuthority(value: unknown, path: string): void {
   const object = objectAt(value, path)
-  exactKeys(object, ['caseManifestSha256', 'caseSeedChecksumsSha256', 'rcSourceSha'], path)
-  literal(object.caseManifestSha256, OPEN_DESIGN_M1_CASE_MANIFEST_SHA256, `${path}.caseManifestSha256`)
+  exactKeys(object, ['authorityVersion', 'caseManifestSha256', 'caseSeedChecksumsSha256', 'interactionVectorsSha256', 'rcSourceSha'], path)
+  literal(object.authorityVersion, 2, `${path}.authorityVersion`)
+  literal(object.caseManifestSha256, OPEN_DESIGN_M1_CASE_MANIFEST_V2_SHA256, `${path}.caseManifestSha256`)
   literal(object.caseSeedChecksumsSha256, OPEN_DESIGN_M1_CASE_SEED_CHECKSUMS_SHA256, `${path}.caseSeedChecksumsSha256`)
+  literal(object.interactionVectorsSha256, OPEN_DESIGN_M1_INTERACTION_VECTORS_CANONICAL_SHA256, `${path}.interactionVectorsSha256`)
   literal(object.rcSourceSha, OPEN_DESIGN_RC_SOURCE_SHA, `${path}.rcSourceSha`)
 }
 
@@ -354,8 +366,8 @@ function parseFileRef(value: unknown, expectedPath: string, path: string): FileR
 function validateRecordIndex(value: unknown, path: string): RecordIndex[] {
   if (!Array.isArray(value) || value.length !== 40) fail(path)
   const expected = [
-    ...OPEN_DESIGN_M1_CASES.map((testCase) => ({ stack: 'old' as const, testCase })),
-    ...OPEN_DESIGN_M1_CASES.map((testCase) => ({ stack: 'new' as const, testCase })),
+    ...OPEN_DESIGN_M1_CASES_V2.map((testCase) => ({ stack: 'old' as const, testCase })),
+    ...OPEN_DESIGN_M1_CASES_V2.map((testCase) => ({ stack: 'new' as const, testCase })),
   ]
   return value.map((entry, index) => {
     const entryPath = `${path}[${index}]`
@@ -379,6 +391,30 @@ function validateRecordIndex(value: unknown, path: string): RecordIndex[] {
 
 function validateRequiredCiRef(value: unknown, path: string): FileRef {
   return parseFileRef(value, 'required-ci.json', path)
+}
+
+function validateFunctionalComparisons(
+  value: unknown,
+  outcomes: ReadonlyMap<string, string>,
+  path: string,
+): void {
+  if (!Array.isArray(value) || value.length !== OPEN_DESIGN_M1_CASES_V2.length) fail(path)
+  value.forEach((entry, index) => {
+    const testCase = OPEN_DESIGN_M1_CASES_V2[index]!
+    const entryPath = `${path}[${index}]`
+    const object = objectAt(entry, entryPath)
+    exactKeys(object, [
+      'caseId', 'equivalent', 'newNormalizedOutcomeDigest', 'oldNormalizedOutcomeDigest', 'vectorSha256',
+    ], entryPath)
+    literal(object.caseId, testCase.id, `${entryPath}.caseId`)
+    literal(object.vectorSha256, testCase.interactionVectorSha256, `${entryPath}.vectorSha256`)
+    literal(object.equivalent, true, `${entryPath}.equivalent`)
+    const oldDigest = hashAt(object, 'oldNormalizedOutcomeDigest', entryPath)
+    const newDigest = hashAt(object, 'newNormalizedOutcomeDigest', entryPath)
+    literal(oldDigest, outcomes.get(`old:${testCase.id}`), `${entryPath}.oldNormalizedOutcomeDigest`)
+    literal(newDigest, outcomes.get(`new:${testCase.id}`), `${entryPath}.newNormalizedOutcomeDigest`)
+    if (oldDigest !== newDigest) fail(entryPath, 'records a functional mismatch')
+  })
 }
 
 function validateRollbackRef(value: unknown, path: string): Record<string, FileRef> {
@@ -481,8 +517,8 @@ function validateWorkspaceManifest(value: unknown, stack: OpenDesignM1Stack, tes
 function validateRecord(
   value: unknown,
   stack: OpenDesignM1Stack,
-  testCase: OpenDesignM1Case,
-  expectedHash: (typeof OPEN_DESIGN_M1_CASE_HASHES)[number],
+  testCase: OpenDesignM1CaseV2,
+  expectedHash: (typeof OPEN_DESIGN_M1_CASE_V2_HASHES)[number],
   release: ReleaseAuthority,
   batch: { startedAt: number; completedAt: number },
   previousCompletedAt: number,
@@ -490,11 +526,11 @@ function validateRecord(
   workspacePath: string,
   workspaceSha256: string,
   path: string,
-): number {
+): { completedAt: number; normalizedOutcomeDigest: string } {
   const object = objectAt(value, path)
   exactKeys(object, [
     'attemptOrdinal', 'blackout', 'caseId', 'cleanup', 'completedAt', 'craft',
-    'moduleArchiveSha256', 'preview', 'promptSha256', 'seedArchiveSha256', 'stack',
+    'interaction', 'moduleArchiveSha256', 'preview', 'promptSha256', 'seedArchiveSha256', 'stack',
     'startedAt', 'terminal', 'turnCount', 'workspaceManifestPath', 'workspaceManifestSha256',
   ], path)
   literal(object.stack, stack, `${path}.stack`)
@@ -506,6 +542,11 @@ function validateRecord(
   literal(object.moduleArchiveSha256, release.archiveSha256, `${path}.moduleArchiveSha256`)
   literal(object.workspaceManifestPath, workspacePath, `${path}.workspaceManifestPath`)
   literal(object.workspaceManifestSha256, workspaceSha256, `${path}.workspaceManifestSha256`)
+  const interactionVector = OPEN_DESIGN_M1_INTERACTION_VECTORS.find((candidate) => candidate.caseId === testCase.id)
+  if (!interactionVector || testCase.interactionVectorSha256 !== expectedHash.interactionVectorSha256) {
+    fail(`${path}.interaction`, 'does not match fixed-cases/v2 authority')
+  }
+  const interaction = validateOpenDesignM1InteractionEvidence(interactionVector, object.interaction)
   const startedAt = timestampAt(object, 'startedAt', path)
   const completedAt = timestampAt(object, 'completedAt', path)
   if (startedAt < batch.startedAt || startedAt < previousCompletedAt || completedAt <= startedAt
@@ -564,7 +605,7 @@ function validateRecord(
     }
     literal(blackout.eventsLost, 0, `${path}.blackout.eventsLost`)
     literal(blackout.replayComplete, true, `${path}.blackout.replayComplete`)
-    return completedAt
+    return { completedAt, normalizedOutcomeDigest: interaction.normalizedOutcomeDigest }
   }
 
   const blackoutStartedAt = timestampAt(blackout, 'startedAt', `${path}.blackout`)
@@ -608,7 +649,7 @@ function validateRecord(
     actualMaxGap = Math.max(actualMaxGap, heartbeatEvents[index]!.at - heartbeatEvents[index - 1]!.at)
   }
   if (heartbeatMaxGapMs !== actualMaxGap || heartbeatMaxGapMs > 12_000) fail(`${path}.blackout.heartbeatMaxGapMs`)
-  return completedAt
+  return { completedAt, normalizedOutcomeDigest: interaction.normalizedOutcomeDigest }
 }
 
 function validateRollback(value: unknown, kind: 'transitions' | 'processes' | 'hidden-sessions', path: string): void {
@@ -679,10 +720,10 @@ export async function validateOpenDesignM1MachineEvidence(
   const sums = await verifySha256Sums(root, expectedPaths)
   const manifest = objectAt(await readCanonicalJson(root, 'machine-manifest.json'), '$')
   exactKeys(manifest, [
-    'batch', 'batchDigest', 'caseAuthority', 'files', 'host', 'kind', 'lkg', 'producer',
+    'batch', 'batchDigest', 'caseAuthority', 'files', 'functionalComparisons', 'host', 'kind', 'lkg', 'producer',
     'rc', 'records', 'repository', 'requiredCi', 'rollback', 'schemaVersion', 'workflowPath',
   ], '$')
-  literal(manifest.schemaVersion, 1, '$.schemaVersion')
+  literal(manifest.schemaVersion, 2, '$.schemaVersion')
   literal(manifest.kind, 'open-design-m1-machine-evidence', '$.kind')
   literal(manifest.repository, OPEN_DESIGN_ACCEPTANCE_REPOSITORY, '$.repository')
   literal(manifest.workflowPath, OPEN_DESIGN_M1_MACHINE_WORKFLOW_PATH, '$.workflowPath')
@@ -717,13 +758,14 @@ export async function validateOpenDesignM1MachineEvidence(
   await validateTrust(root, authority.rc.envelopeSha256, 'trust/rc-envelope.json')
 
   let previousCompletedAt = batch.startedAt
+  const functionalOutcomes = new Map<string, string>()
   for (const entry of recordIndex) {
-    const testCase = OPEN_DESIGN_M1_CASES.find((candidate) => candidate.id === entry.caseId)!
-    const expectedHash = OPEN_DESIGN_M1_CASE_HASHES.find((candidate) => candidate.id === entry.caseId)!
+    const testCase = OPEN_DESIGN_M1_CASES_V2.find((candidate) => candidate.id === entry.caseId)!
+    const expectedHash = OPEN_DESIGN_M1_CASE_V2_HASHES.find((candidate) => candidate.id === entry.caseId)!
     const ledger = parseEventLedger((await readBounded(root, entry.events.path)).toString('utf8'), entry.events.path)
     const workspace = await readCanonicalJson(root, entry.workspace.path)
     validateWorkspaceManifest(workspace, entry.stack, testCase, entry.workspace.path)
-    previousCompletedAt = validateRecord(
+    const recordResult = validateRecord(
       await readCanonicalJson(root, entry.record.path),
       entry.stack,
       testCase,
@@ -736,6 +778,8 @@ export async function validateOpenDesignM1MachineEvidence(
       entry.workspace.sha256,
       entry.record.path,
     )
+    previousCompletedAt = recordResult.completedAt
+    functionalOutcomes.set(`${entry.stack}:${entry.caseId}`, recordResult.normalizedOutcomeDigest)
     if (entry.preview) {
       const png = await readBounded(root, entry.preview.path)
       if (png.byteLength < PNG_SIGNATURE.byteLength || !png.subarray(0, PNG_SIGNATURE.byteLength).equals(PNG_SIGNATURE)) {
@@ -743,6 +787,7 @@ export async function validateOpenDesignM1MachineEvidence(
       }
     }
   }
+  validateFunctionalComparisons(manifest.functionalComparisons, functionalOutcomes, '$.functionalComparisons')
   const batchDigest = digest(recordIndex.map((entry) => [
     entry.stack, entry.caseId, entry.record.sha256, entry.events.sha256, entry.workspace.sha256,
     entry.preview?.sha256 ?? '-',
@@ -780,8 +825,9 @@ export async function createDeterministicMachineEvidenceFixture(
   let cursor = batchStart
   const records: JsonObject[] = []
   for (const stack of ['old', 'new'] as const) {
-    for (const testCase of OPEN_DESIGN_M1_CASES) {
-      const caseHash = OPEN_DESIGN_M1_CASE_HASHES.find((item) => item.id === testCase.id)!
+    for (const testCase of OPEN_DESIGN_M1_CASES_V2) {
+      const caseHash = OPEN_DESIGN_M1_CASE_V2_HASHES.find((item) => item.id === testCase.id)!
+      const interactionVector = OPEN_DESIGN_M1_INTERACTION_VECTORS.find((item) => item.caseId === testCase.id)!
       const startedAt = cursor
       const ledger: JsonObject[] = []
       const appendEvent = (at: number, source: LedgerEvent['source'], type: string, business: boolean): void => {
@@ -847,6 +893,7 @@ export async function createDeterministicMachineEvidenceFixture(
         },
         completedAt: new Date(cursor).toISOString(),
         craft: { mainPidSurvived: true, stateSplitCount: 0, usableAfterTurn: true },
+        interaction: createDeterministicOpenDesignM1InteractionEvidenceFixture(interactionVector),
         moduleArchiveSha256: (stack === 'old' ? authority.lkg : authority.rc).archiveSha256,
         preview: { httpStatus: 200, requiredContentVerified: true, requiredFilesVerified: true, route: '/' },
         promptSha256: caseHash.promptSha256,
@@ -908,7 +955,7 @@ export async function createDeterministicMachineEvidenceFixture(
   }
   const index = [...records]
   for (const stack of ['old', 'new'] as const) {
-    for (const testCase of OPEN_DESIGN_M1_CASES) {
+    for (const testCase of OPEN_DESIGN_M1_CASES_V2) {
       const lookup = (path: string): FileRef => ({ path, sha256: fileEntries.find((entry) => entry.path === path)!.sha256 })
       index.push({
         stack,
@@ -942,8 +989,19 @@ export async function createDeterministicMachineEvidenceFixture(
       version: stack === 'old' ? OPEN_DESIGN_LKG_VERSION : OPEN_DESIGN_RC_VERSION,
     }
   }
+  const functionalComparisons = OPEN_DESIGN_M1_CASES_V2.map((testCase) => {
+    const vector = OPEN_DESIGN_M1_INTERACTION_VECTORS.find((item) => item.caseId === testCase.id)!
+    const outcome = createDeterministicOpenDesignM1InteractionEvidenceFixture(vector).normalizedOutcomeDigest
+    return {
+      caseId: testCase.id,
+      vectorSha256: testCase.interactionVectorSha256,
+      oldNormalizedOutcomeDigest: outcome,
+      newNormalizedOutcomeDigest: outcome,
+      equivalent: true,
+    }
+  })
   await writeCanonical(join(root, 'machine-manifest.json'), {
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: 'open-design-m1-machine-evidence',
     repository: OPEN_DESIGN_ACCEPTANCE_REPOSITORY,
     workflowPath: OPEN_DESIGN_M1_MACHINE_WORKFLOW_PATH,
@@ -955,8 +1013,10 @@ export async function createDeterministicMachineEvidenceFixture(
     lkg: release('old'),
     rc: release('new'),
     caseAuthority: {
-      caseManifestSha256: OPEN_DESIGN_M1_CASE_MANIFEST_SHA256,
+      authorityVersion: 2,
+      caseManifestSha256: OPEN_DESIGN_M1_CASE_MANIFEST_V2_SHA256,
       caseSeedChecksumsSha256: OPEN_DESIGN_M1_CASE_SEED_CHECKSUMS_SHA256,
+      interactionVectorsSha256: OPEN_DESIGN_M1_INTERACTION_VECTORS_CANONICAL_SHA256,
       rcSourceSha: OPEN_DESIGN_RC_SOURCE_SHA,
     },
     batch: {
@@ -971,6 +1031,7 @@ export async function createDeterministicMachineEvidenceFixture(
       hiddenSessions: ref('rollback/hidden-sessions.json'),
     },
     records: index,
+    functionalComparisons,
     files: fileEntries,
     batchDigest,
   })
@@ -998,7 +1059,7 @@ export const machineEvidenceTestOnly = Object.freeze({
     const manifestPath = join(root, 'machine-manifest.json')
     const manifest = objectAt(JSON.parse(await readFile(manifestPath, 'utf8')), '$')
     for (const stack of ['old', 'new'] as const) {
-      for (const testCase of OPEN_DESIGN_M1_CASES) {
+      for (const testCase of OPEN_DESIGN_M1_CASES_V2) {
         const workspacePath = `workspace/${stack}/${testCase.id}.json`
         const recordPath = `records/${stack}/${testCase.id}.json`
         const record = objectAt(JSON.parse(await readFile(join(root, recordPath), 'utf8')), recordPath)
@@ -1016,7 +1077,7 @@ export const machineEvidenceTestOnly = Object.freeze({
     const lookup = (path: string): FileRef => ({ path, sha256: files.find((entry) => entry.path === path)!.sha256 })
     const index: JsonObject[] = []
     for (const stack of ['old', 'new'] as const) {
-      for (const testCase of OPEN_DESIGN_M1_CASES) {
+      for (const testCase of OPEN_DESIGN_M1_CASES_V2) {
         index.push({
           stack,
           caseId: testCase.id,

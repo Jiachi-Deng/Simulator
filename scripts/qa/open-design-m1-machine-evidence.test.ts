@@ -6,12 +6,18 @@ import { join } from 'node:path'
 import {
   OPEN_DESIGN_M1_MACHINE_ARTIFACT_NAME,
   OPEN_DESIGN_M1_MACHINE_FILE_COUNT,
+  OPEN_DESIGN_M1_MACHINE_RECORD_MAX_BYTES,
   createDeterministicMachineEvidenceFixture,
   expectedMachineEvidencePaths,
   machineEvidenceTestOnly,
   type MachineEvidenceAuthority,
   validateOpenDesignM1MachineEvidence,
 } from './open-design-m1-machine-evidence'
+import {
+  OPEN_DESIGN_M1_CASES_V2,
+  OPEN_DESIGN_M1_INTERACTION_VECTORS,
+} from './open-design-m1-interaction-vectors'
+import { createSchemaMaximumOpenDesignM1InteractionEvidenceFixture } from './open-design-m1-preview-interactions'
 import { OPEN_DESIGN_RC_SOURCE_SHA } from './open-design-rc-acceptance-evidence'
 import {
   OPEN_DESIGN_M1_MACHINE_ACCEPTANCE_DESCRIPTOR_CANONICAL_JSON,
@@ -154,6 +160,26 @@ describe('OpenDesign M1 machine evidence producer contract', () => {
     await expect(validateOpenDesignM1MachineEvidence(root, authority)).rejects.toThrow('$.records[0]')
   })
 
+  it('rejects a forged old/new functional comparison and a record outcome digest mismatch', async () => {
+    const comparisonRoot = await fixture()
+    await machineEvidenceTestOnly.replaceCanonicalJson(comparisonRoot, 'machine-manifest.json', (manifest) => {
+      const comparisons = manifest.functionalComparisons as Array<Record<string, unknown>>
+      comparisons[0]!.newNormalizedOutcomeDigest = 'f'.repeat(64)
+    })
+    await machineEvidenceTestOnly.refreshSums(comparisonRoot)
+    await expect(validateOpenDesignM1MachineEvidence(comparisonRoot, authority))
+      .rejects.toThrow('functionalComparisons[0]')
+
+    const recordRoot = await fixture()
+    await machineEvidenceTestOnly.replaceCanonicalJson(recordRoot, 'records/new/D01.json', (record) => {
+      const interaction = record.interaction as Record<string, unknown>
+      interaction.normalizedOutcomeDigest = 'f'.repeat(64)
+    })
+    await machineEvidenceTestOnly.reseal(recordRoot)
+    await expect(validateOpenDesignM1MachineEvidence(recordRoot, authority))
+      .rejects.toThrow('normalizedOutcomeDigest')
+  })
+
   it('rejects an extra file, a symlink, and a hard-linked artifact member', async () => {
     const extraRoot = await fixture()
     await writeFile(join(extraRoot, 'extra.json'), '{}\n', { mode: 0o600 })
@@ -179,7 +205,7 @@ describe('OpenDesign M1 machine evidence producer contract', () => {
 
   it('rejects oversize class members before parsing and a checksum mutation', async () => {
     const largeRoot = await fixture()
-    await writeFile(join(largeRoot, 'records/old/D01.json'), Buffer.alloc(32 * 1024 + 1, 0x20), { mode: 0o600 })
+    await writeFile(join(largeRoot, 'records/old/D01.json'), Buffer.alloc(384 * 1024 + 1, 0x20), { mode: 0o600 })
     await expect(validateOpenDesignM1MachineEvidence(largeRoot, authority)).rejects.toThrow('file constraints')
 
     const changedRoot = await fixture()
@@ -188,6 +214,40 @@ describe('OpenDesign M1 machine evidence producer contract', () => {
       Buffer.from('changed'),
     ]), { mode: 0o600 })
     await expect(validateOpenDesignM1MachineEvidence(changedRoot, authority)).rejects.toThrow('SHA256SUMS')
+  })
+
+  it('embeds every true schema-maximum interaction in a complete canonical record below the 384 KiB record cap', async () => {
+    const root = await fixture()
+    const interactions = new Map(OPEN_DESIGN_M1_INTERACTION_VECTORS.map((vector) => [
+      vector.caseId,
+      createSchemaMaximumOpenDesignM1InteractionEvidenceFixture(vector),
+    ]))
+    for (const stack of ['old', 'new'] as const) {
+      for (const testCase of OPEN_DESIGN_M1_CASES_V2) {
+        await machineEvidenceTestOnly.replaceCanonicalJson(root, `records/${stack}/${testCase.id}.json`, (record) => {
+          record.interaction = structuredClone(interactions.get(testCase.id)!)
+        })
+      }
+    }
+    await machineEvidenceTestOnly.replaceCanonicalJson(root, 'machine-manifest.json', (manifest) => {
+      const comparisons = manifest.functionalComparisons as Array<Record<string, unknown>>
+      for (const comparison of comparisons) {
+        const interaction = interactions.get(String(comparison.caseId))!
+        comparison.oldNormalizedOutcomeDigest = interaction.normalizedOutcomeDigest
+        comparison.newNormalizedOutcomeDigest = interaction.normalizedOutcomeDigest
+      }
+    })
+    await machineEvidenceTestOnly.reseal(root)
+    await expect(validateOpenDesignM1MachineEvidence(root, authority)).resolves.toMatchObject({ fileCount: 150 })
+    const recordSizes = await Promise.all(OPEN_DESIGN_M1_CASES_V2.map(async (testCase) => ({
+      caseId: testCase.id,
+      bytes: (await readFile(join(root, `records/new/${testCase.id}.json`))).byteLength,
+    })))
+    expect(recordSizes).toHaveLength(20)
+    const worst = recordSizes.sort((left, right) => right.bytes - left.bytes)[0]!
+    expect(worst).toEqual({ caseId: 'F04', bytes: 123_923 })
+    expect(worst.bytes).toBeLessThan(OPEN_DESIGN_M1_MACHINE_RECORD_MAX_BYTES)
+    expect(OPEN_DESIGN_M1_MACHINE_RECORD_MAX_BYTES).toBe(384 * 1024)
   })
 
   it('fails rather than accepting an incomplete fixture directory', async () => {

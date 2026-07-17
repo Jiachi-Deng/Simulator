@@ -1,5 +1,9 @@
 import { createHash } from 'node:crypto'
 import { chmod, readFile, stat, writeFile } from 'node:fs/promises'
+import {
+  OPEN_DESIGN_M1_CASE_MANIFEST_V2_SHA256,
+  OPEN_DESIGN_M1_CASE_V2_HASHES,
+} from './open-design-m1-interaction-vectors'
 
 export const OPEN_DESIGN_ACCEPTANCE_REPOSITORY = 'Jiachi-Deng/Simulator'
 export const OPEN_DESIGN_HOST_VERSION = '0.12.0'
@@ -352,12 +356,17 @@ function validateRecords(
     lkg: { archiveSha256: string; expiresAt: number; issuedAt: number }
     rc: { archiveSha256: string; expiresAt: number; issuedAt: number }
   },
+  caseHashes: readonly {
+    readonly id: string
+    readonly promptSha256: string
+    readonly seedArchiveSha256: string
+  }[],
   path: string,
 ): void {
   if (!Array.isArray(value) || value.length !== 40) fail(path)
   const expected = [
-    ...OPEN_DESIGN_M1_CASE_HASHES.map((testCase) => ({ stack: 'old' as const, testCase })),
-    ...OPEN_DESIGN_M1_CASE_HASHES.map((testCase) => ({ stack: 'new' as const, testCase })),
+    ...caseHashes.map((testCase) => ({ stack: 'old' as const, testCase })),
+    ...caseHashes.map((testCase) => ({ stack: 'new' as const, testCase })),
   ]
   let previousCompletedAt = batch.startedAt
   value.forEach((entry, index) => {
@@ -464,9 +473,17 @@ function validateRollbackExercise(value: unknown, expectedHostHeadSha: string, p
   evidenceRef(evidence.hiddenSessionSnapshot, expectedHostHeadSha, `${path}.evidence.hiddenSessionSnapshot`)
 }
 
-export function validateAndSummarizeOpenDesignRcAcceptanceIntake(
+function validateAndSummarizeOpenDesignRcAcceptanceIntakeWithCaseAuthority(
   value: unknown,
   expectedHostHeadSha: string,
+  caseAuthority: {
+    readonly manifestSha256: string
+    readonly hashes: readonly {
+      readonly id: string
+      readonly promptSha256: string
+      readonly seedArchiveSha256: string
+    }[]
+  },
 ): OpenDesignRcAcceptanceSummaryV2 {
   commit(expectedHostHeadSha, 'expectedHostHeadSha')
   const object = objectAt(value, '$')
@@ -478,7 +495,7 @@ export function validateAndSummarizeOpenDesignRcAcceptanceIntake(
   literal(object.repository, OPEN_DESIGN_ACCEPTANCE_REPOSITORY, '$.repository')
   literal(object.hostHeadSha, expectedHostHeadSha, '$.hostHeadSha')
   literal(object.rcSourceSha, OPEN_DESIGN_RC_SOURCE_SHA, '$.rcSourceSha')
-  literal(object.caseManifestSha256, OPEN_DESIGN_M1_CASE_MANIFEST_SHA256, '$.caseManifestSha256')
+  literal(object.caseManifestSha256, caseAuthority.manifestSha256, '$.caseManifestSha256')
   literal(
     object.caseSeedChecksumsSha256,
     OPEN_DESIGN_M1_CASE_SEED_CHECKSUMS_SHA256,
@@ -491,7 +508,7 @@ export function validateAndSummarizeOpenDesignRcAcceptanceIntake(
   if (rc.catalogSequence <= lkg.catalogSequence || rc.issuedAt <= lkg.issuedAt) fail('$.rc')
   const batch = validateBatch(object.batch, '$.batch')
   if (rc.issuedAt > batch.startedAt || batch.completedAt > rc.expiresAt) fail('$.batch')
-  validateRecords(object.records, batch, { lkg, rc }, '$.records')
+  validateRecords(object.records, batch, { lkg, rc }, caseAuthority.hashes, '$.records')
   validateRequiredCi(object.requiredCi, expectedHostHeadSha, '$.requiredCi')
   validateRollbackExercise(object.rollbackExercise, expectedHostHeadSha, '$.rollbackExercise')
 
@@ -524,6 +541,32 @@ export function validateAndSummarizeOpenDesignRcAcceptanceIntake(
     schemaVersion: 2,
     visualEvidence: authorityEvidence.visualDecisions,
   }
+}
+
+export function validateAndSummarizeOpenDesignRcAcceptanceIntake(
+  value: unknown,
+  expectedHostHeadSha: string,
+): OpenDesignRcAcceptanceSummaryV2 {
+  const candidate = value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as JsonObject).caseManifestSha256
+    : undefined
+  if (candidate === OPEN_DESIGN_M1_CASE_MANIFEST_V2_SHA256) {
+    return validateAndSummarizeOpenDesignM1RcAcceptanceIntakeV2(value, expectedHostHeadSha)
+  }
+  return validateAndSummarizeOpenDesignRcAcceptanceIntakeWithCaseAuthority(value, expectedHostHeadSha, {
+    manifestSha256: OPEN_DESIGN_M1_CASE_MANIFEST_SHA256,
+    hashes: OPEN_DESIGN_M1_CASE_HASHES,
+  })
+}
+
+export function validateAndSummarizeOpenDesignM1RcAcceptanceIntakeV2(
+  value: unknown,
+  expectedHostHeadSha: string,
+): OpenDesignRcAcceptanceSummaryV2 {
+  return validateAndSummarizeOpenDesignRcAcceptanceIntakeWithCaseAuthority(value, expectedHostHeadSha, {
+    manifestSha256: OPEN_DESIGN_M1_CASE_MANIFEST_V2_SHA256,
+    hashes: OPEN_DESIGN_M1_CASE_V2_HASHES,
+  })
 }
 
 function parseCliArguments(arguments_: readonly string[]): {
