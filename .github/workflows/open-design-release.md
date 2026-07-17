@@ -279,7 +279,7 @@ or local file paths:
    stops at the first failure. Each new-stack task must contain a real 65-second
    business-event blackout with heartbeat continuity and at least one daemon
    event buffered and replayed afterward; it must also prove file mutation,
-   the actual Preview URL and HTTP 200 result, one terminal state, Craft PID
+   the actual Preview URL and HTTP 200 result, one terminal state, primary Host PID
    survival, global hidden/transient/quarantined Session cleanup, and descendant
    process cleanup. Its artifact is an exact 150-file closure named
    `open-design-m1-machine-evidence`.

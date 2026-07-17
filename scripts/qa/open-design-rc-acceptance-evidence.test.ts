@@ -299,7 +299,7 @@ describe('OpenDesign RC acceptance evidence validator', () => {
     expectRejected((intake) => { intake.records[1].startedAt = intake.records[0].startedAt })
   })
 
-  test('requires terminal, file, Preview, Craft, cleanup, blackout, and human visual proof', () => {
+  test('requires terminal, file, Preview, Host survival, cleanup, blackout, and human visual proof', () => {
     expectRejected((intake) => { intake.records[0].terminal.status = 'failed' })
     expectRejected((intake) => { intake.records[0].terminal.terminalEventCount = 2 })
     expectRejected((intake) => { intake.records[0].preview.httpStatus = 404 })
