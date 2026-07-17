@@ -35,6 +35,7 @@ const CHECKSUMS_PATH = 'SHA256SUMS' as const
 const MAX_PROOF_BYTES = 16 * 1024
 const MAX_CDP_RESPONSE_BYTES = 256 * 1024
 const SAFE_TARGET_ID = /^[A-Za-z0-9._-]{1,128}$/
+const SAFE_WORKSPACE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
 const execFile = promisify(execFileCallback)
 
 export interface H1ConnectionAuthority {
@@ -332,7 +333,11 @@ function validatedCraftTarget(
       return false
     }
     if (rendererUrl.protocol !== 'file:' || rendererUrl.username || rendererUrl.password
-      || rendererUrl.search || rendererUrl.hash) return false
+      || rendererUrl.hash) return false
+    const workspaceIds = rendererUrl.searchParams.getAll('workspaceId')
+    if (rendererUrl.searchParams.size !== 1 || workspaceIds.length !== 1
+      || !SAFE_WORKSPACE_ID.test(workspaceIds[0]!)
+      || rendererUrl.search !== `?workspaceId=${workspaceIds[0]}`) return false
     let rendererPath: string
     try { rendererPath = fileURLToPath(rendererUrl) } catch { return false }
     if (!rendererPath.startsWith(resourcesRoot) || !rendererPath.endsWith('/dist/renderer/index.html')) return false

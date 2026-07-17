@@ -62,10 +62,12 @@ async function fixture(): Promise<Fixture> {
     profileRealpath: profile,
     cdpPort: 9_451,
   }
+  const rendererUrl = pathToFileURL(join(resources, 'index.html'))
+  rendererUrl.searchParams.set('workspaceId', '221fe607-bb99-a236-3308-f2e0ced471f5')
   const target = {
     id: 'craft-renderer',
     type: 'page',
-    url: pathToFileURL(join(resources, 'index.html')).href,
+    url: rendererUrl.href,
     webSocketDebuggerUrl: `ws://127.0.0.1:${instance.cdpPort}/devtools/page/craft-renderer`,
   }
   const dependencies: H1ConnectionProbeDependencies = {
@@ -207,6 +209,10 @@ describe('OpenDesign M1 H1 dedicated connection evidence', () => {
     expect(await readdir(noTarget.parent)).not.toContain('h1-evidence')
 
     const wrongSocket = await fixture()
+    const wrongSocketRendererUrl = pathToFileURL(join(
+      wrongSocket.appBundle, 'Contents', 'Resources', 'app.asar', 'dist', 'renderer', 'index.html',
+    ))
+    wrongSocketRendererUrl.searchParams.set('workspaceId', 'ws_fixture')
     await expect(createOpenDesignM1H1ConnectionEvidence(
       wrongSocket.outputRoot,
       authority,
@@ -216,9 +222,7 @@ describe('OpenDesign M1 H1 dedicated connection evidence', () => {
         discoverTargets: async () => [{
           id: 'craft-renderer',
           type: 'page',
-          url: pathToFileURL(join(
-            wrongSocket.appBundle, 'Contents', 'Resources', 'app.asar', 'dist', 'renderer', 'index.html',
-          )).href,
+          url: wrongSocketRendererUrl.href,
           webSocketDebuggerUrl: 'ws://127.0.0.1:9999/devtools/page/craft-renderer',
         }],
       },
@@ -241,6 +245,39 @@ describe('OpenDesign M1 H1 dedicated connection evidence', () => {
       { ...cdpFailure.dependencies, readAuthenticatedConnectionsPresent: async () => { throw new Error('offline') } },
     )).rejects.toThrow('offline')
     expect(await readdir(cdpFailure.parent)).not.toContain('h1-evidence')
+  })
+
+  it('requires the packaged renderer canonical single workspaceId query', async () => {
+    const invalidQueries = [
+      '',
+      '?workspace=ws_fixture',
+      '?workspaceId=',
+      '?workspaceId=ws_fixture&debug=1',
+      '?workspaceId=ws_fixture&workspaceId=ws_other',
+      '?workspaceId=../outside',
+      '?workspaceId=ws_fixture#fragment',
+    ]
+    for (const suffix of invalidQueries) {
+      const value = await fixture()
+      const rendererPath = pathToFileURL(join(
+        value.appBundle, 'Contents', 'Resources', 'app.asar', 'dist', 'renderer', 'index.html',
+      )).href
+      await expect(createOpenDesignM1H1ConnectionEvidence(
+        value.outputRoot,
+        authority,
+        value.instance,
+        {
+          ...value.dependencies,
+          discoverTargets: async () => [{
+            id: 'craft-renderer',
+            type: 'page',
+            url: `${rendererPath}${suffix}`,
+            webSocketDebuggerUrl: `ws://127.0.0.1:${value.instance.cdpPort}/devtools/page/craft-renderer`,
+          }],
+        },
+      )).rejects.toThrow('dedicated Craft CDP target')
+      expect(await readdir(value.parent)).not.toContain('h1-evidence')
+    }
   })
 
   it('rejects wrong app, executable, profile, source, build, artifact, PID, and port authorities', async () => {
