@@ -18,6 +18,7 @@ describe("release static validation workflow", () => {
     expect(workflow).toContain("scripts/release/**")
     expect(workflow).toContain("scripts/qa/open-design-rc-acceptance-evidence.test.ts")
     expect(workflow).toContain("scripts/qa/open-design-m1-machine-evidence.test.ts")
+    expect(workflow).toContain("scripts/qa/open-design-m1-machine-first-failure.test.ts")
     expect(workflow).toContain("scripts/qa/open-design-m1-visual-attestation.test.ts")
     expect(workflow).toContain("scripts/qa/open-design-m1-final-evidence.test.ts")
     expect(workflow).toContain("scripts/build-policy.ts")

@@ -5,6 +5,7 @@ import { parse } from 'yaml'
 const path = '.github/workflows/open-design-m1-machine-evidence.yml'
 const source = readFileSync(path, 'utf8')
 const runnerSource = readFileSync('scripts/qa/run-open-design-m1-machine-evidence.ts', 'utf8')
+const failureSource = readFileSync('scripts/qa/open-design-m1-machine-first-failure.ts', 'utf8')
 const workflow = parse(source) as Record<string, any>
 const dispatch = workflow.on.workflow_dispatch
 const job = workflow.jobs['produce-machine-evidence']
@@ -36,6 +37,66 @@ describe('OpenDesign M1 machine evidence workflow', () => {
     expect(source).toContain('= 150')
     expect(source).toContain('name: open-design-m1-machine-evidence')
     expect(source).not.toContain('--fixture')
+  })
+
+  it('uploads only a verified bounded first-failure capsule and still fails the stopped batch', () => {
+    const producer = job.steps.find((step: Record<string, any>) => step.id === 'machine_producer')
+    const verifier = job.steps.find((step: Record<string, any>) => step.id === 'first_failure_verifier')
+    const failureUpload = job.steps.find((step: Record<string, any>) => step.name === 'Upload bounded first-failure capsule')
+    const successUpload = job.steps.find((step: Record<string, any>) => step.name === 'Upload sealed machine evidence')
+    const cleanup = job.steps.find((step: Record<string, any>) => step.name === 'Remove ephemeral packaged and seed inputs')
+    const finalFailure = job.steps.find((step: Record<string, any>) => step.name === 'Fail the stopped batch after preserving first-failure evidence')
+    expect(producer['continue-on-error']).toBe(true)
+    expect(producer.run).toContain('M1_FIRST_FAILURE_OUTPUT_ROOT="$failure_output"')
+    expect(producer.run).toContain('M1_MACHINE_WORK_ROOT="$work_root"')
+    expect(producer.run).toContain("printf 'failure_capsule=%s\\n'")
+    expect(verifier.if).toContain("steps.machine_producer.outcome == 'failure'")
+    expect(verifier.if).toContain("steps.machine_producer.outputs.failure_capsule == 'true'")
+    expect(verifier.run).toContain('bun_path=$(realpath "$(command -v bun)")')
+    expect(verifier.run).toContain('env -i \\')
+    for (const authority of [
+      'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT',
+      'HOST_BUILD_RUN_ID', 'HOST_ARTIFACT_SHA256',
+    ]) expect(verifier.run).toContain(`${authority}="$${authority}"`)
+    expect(verifier.run).toContain('"$bun_path" scripts/qa/verify-open-design-m1-machine-first-failure.ts')
+    const verifierEnvironment = verifier.run.slice(
+      verifier.run.indexOf('env -i'),
+      verifier.run.indexOf('"$bun_path" scripts/qa/verify-open-design-m1-machine-first-failure.ts'),
+    )
+    expect(verifierEnvironment).not.toContain('GH_TOKEN=')
+    expect(verifierEnvironment).not.toContain('GITHUB_TOKEN=')
+    expect(verifierEnvironment).not.toContain('ACTIONS_')
+    expect(verifierEnvironment).not.toContain('RUNNER_')
+    expect(verifier.run).toContain('verify-open-design-m1-machine-first-failure.ts')
+    expect(verifier.run).toContain('= open-design-m1-machine-first-failure')
+    expect(verifier.run).toContain('-le 32768')
+    expect(failureUpload.with).toEqual({
+      name: 'open-design-m1-machine-first-failure',
+      path: '${{ env.M1_FIRST_FAILURE_OUTPUT_ROOT }}/',
+      'if-no-files-found': 'error',
+      'retention-days': 30,
+    })
+    expect(failureUpload.if).toContain("steps.first_failure_verifier.outcome == 'success'")
+    expect(successUpload.if).toContain("steps.machine_producer.outcome == 'success'")
+    expect(successUpload.with.name).toBe('open-design-m1-machine-evidence')
+    expect(failureUpload.with.name).not.toBe(successUpload.with.name)
+    expect(cleanup.if).toBe('always()')
+    expect(cleanup.run).toContain('${M1_MACHINE_WORK_ROOT:-}')
+    expect(cleanup.run).toContain('${M1_FIRST_FAILURE_OUTPUT_ROOT:-}')
+    expect(finalFailure.if).toContain("steps.machine_producer.outcome == 'failure'")
+    expect(job.steps.indexOf(failureUpload)).toBeLessThan(job.steps.indexOf(cleanup))
+    expect(job.steps.indexOf(cleanup)).toBeLessThan(job.steps.indexOf(finalFailure))
+
+    const failureSeal = runnerSource.slice(
+      runnerSource.indexOf('} catch (error) {', runnerSource.indexOf('async function main()')),
+      runnerSource.indexOf("process.stderr.write('OpenDesign M1 machine evidence producer failed closed."),
+    )
+    expect(failureSeal).toContain('preserveOpenDesignM1FirstFailure(staging, failureArtifactRoot, failureOutputRoot')
+    expect(failureSeal).not.toContain('error.message')
+    expect(failureSeal).not.toContain('error.stack')
+    expect(failureSeal).not.toContain('String(error)')
+    expect(failureSource).toContain('await rename(artifact, output)')
+    expect(failureSource).toContain('await rm(staging, { recursive: true, force: true })')
   })
 
   it('downloads the raw Host artifact by ID and safely extracts its exact Engineering RC closure', () => {
