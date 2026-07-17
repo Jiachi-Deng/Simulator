@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
-import { buildMacOsSignatureEvidence, classifyAllowedSignature, parseMachOFileType, requireArm64MachO, verifyMacOsSignatures, type Inspector } from "./verify-macos-signatures"
+import { buildMacOsSignatureEvidence, classifyAllowedSignature, inspectDeveloperIdSignature, parseEntitlements, parseMachOFileType, requireArm64MachO, verifyMacOsSignatures, type Inspector } from "./verify-macos-signatures"
 
 const app = join(import.meta.dir, ".tmp-signatures", "Simulator.app")
 afterEach(() => rmSync(join(import.meta.dir, ".tmp-signatures"), { recursive: true, force: true }))
@@ -58,6 +58,18 @@ describe("unsigned engineering RC signature policy", () => {
     expect(() => verifyMacOsSignatures(app, inspect)).toThrow("Strict ad hoc signature verification failed")
   })
 
+  test("rejects a caller-supplied symlink App root before inspecting code objects", () => {
+    mkdirSync(app, { recursive: true })
+    const alias = join(import.meta.dir, ".tmp-signatures", "Simulator-alias.app")
+    symlinkSync(app, alias)
+    let inspected = false
+    expect(() => verifyMacOsSignatures(alias, () => {
+      inspected = true
+      throw new Error("must not inspect")
+    })).toThrow("real directory")
+    expect(inspected).toBe(false)
+  })
+
   test("emits stable per-object evidence with relative unique paths", () => {
     const first = join(app, "Contents", "Frameworks", "A.dylib")
     const second = join(app, "Contents", "MacOS", "Simulator")
@@ -99,5 +111,186 @@ describe("unsigned engineering RC signature policy", () => {
     })
     expect(() => buildMacOsSignatureEvidence(result, "Contents/MacOS/Simulator")).toThrow("provided together")
     expect(() => buildMacOsSignatureEvidence(result, "", "")).toThrow("must not be empty")
+  })
+})
+
+describe("Developer ID acceptance signature policy", () => {
+  const authority = "Developer ID Application: Example Corporation (ABCDE12345)"
+  const signature = [
+    "Executable=/Applications/Simulator.app/Contents/MacOS/Simulator",
+    `Authority=${authority}`,
+    "Authority=Developer ID Certification Authority",
+    "Authority=Apple Root CA",
+    "Timestamp=Jul 17, 2026 at 12:34:56",
+    "TeamIdentifier=ABCDE12345",
+    "CodeDirectory v=20500 size=472719 flags=0x10000(runtime) hashes=14762+7 location=embedded",
+  ].join("\n")
+  const reviewedEntitlements = {
+    "com.apple.security.cs.allow-jit": true,
+    "com.apple.security.cs.allow-unsigned-executable-memory": true,
+    "com.apple.security.cs.disable-library-validation": true,
+  }
+
+  test("requires exact leaf subject, team, timestamp, and hardened runtime", () => {
+    expect(inspectDeveloperIdSignature(signature, authority, "ABCDE12345")).toEqual({
+      authority,
+      teamIdentifier: "ABCDE12345",
+      timestamped: true,
+      hardenedRuntime: true,
+    })
+    expect(() => inspectDeveloperIdSignature(signature, authority.replace("Example", "Other"), "ABCDE12345")).toThrow("leaf authority")
+    expect(() => inspectDeveloperIdSignature(signature.replace("Timestamp=", "Signed="), authority, "ABCDE12345")).toThrow("timestamp")
+    expect(() => inspectDeveloperIdSignature(signature.replace("(runtime)", "(none)"), authority, "ABCDE12345")).toThrow("hardened runtime")
+    expect(() => inspectDeveloperIdSignature(signature.replace("(runtime)", "(adhoc,runtime)"), authority, "ABCDE12345")).toThrow("ad hoc")
+    expect(() => inspectDeveloperIdSignature(signature, authority, "ZZZZZ99999")).toThrow("TeamIdentifier")
+  })
+
+  test("parses JSON evidence fixtures and empty entitlements", () => {
+    expect(parseEntitlements(JSON.stringify(reviewedEntitlements))).toEqual(reviewedEntitlements)
+    expect(parseEntitlements("Executable=x does not have an entitlements blob")).toEqual({})
+    expect(() => parseEntitlements("not a plist")).toThrow("no plist")
+  })
+
+  test("verifies the app and every nested Mach-O under the parameterized Developer ID policy", () => {
+    const executable = join(app, "Contents", "MacOS", "Simulator")
+    const dylib = join(app, "Contents", "Frameworks", "A.dylib")
+    mkdirSync(join(app, "Contents", "MacOS"), { recursive: true })
+    mkdirSync(join(app, "Contents", "Frameworks"), { recursive: true })
+    writeFileSync(executable, "main")
+    writeFileSync(dylib, "library")
+    const inspect: Inspector = (path) => ({
+      description: path === app ? "bundle" : path === executable ? "Mach-O 64-bit executable arm64" : "Mach-O 64-bit dynamically linked shared library arm64",
+      architectures: path === app ? "" : "arm64",
+      signature,
+      verification: { exitCode: 0, output: "valid" },
+      entitlements: path === dylib ? "" : JSON.stringify({
+        ...reviewedEntitlements,
+        "com.apple.developer.team-identifier": "ABCDE12345",
+        "com.apple.application-identifier": "ABCDE12345.com.example.simulator",
+      }),
+    })
+    const result = verifyMacOsSignatures(app, inspect, {
+      mode: "developer-id",
+      expectedAuthority: authority,
+      expectedTeamIdentifier: "ABCDE12345",
+      expectedBundleIdentifier: "com.example.simulator",
+      actualBundleIdentifier: "com.example.simulator",
+      expectedEntitlements: reviewedEntitlements,
+    })
+    expect(result.kinds).toEqual(["developer-id", "developer-id", "developer-id"])
+    expect(result.objects.every((object) => object.strictVerification.exitCode === 0)).toBe(true)
+    expect(result.objects[0].developerId).toMatchObject({
+      authority,
+      teamIdentifier: "ABCDE12345",
+      timestamped: true,
+      hardenedRuntime: true,
+    })
+    expect(buildMacOsSignatureEvidence(result, undefined, undefined, "developer-id-strict", {
+      authority,
+      teamIdentifier: "ABCDE12345",
+      bundleIdentifier: "com.example.simulator",
+      entitlementsSha256: "a".repeat(64),
+    })).toMatchObject({
+      policy: "developer-id-strict",
+      developerId: {
+        authority,
+        teamIdentifier: "ABCDE12345",
+        bundleIdentifier: "com.example.simulator",
+        entitlementsSha256: "a".repeat(64),
+      },
+    })
+  })
+
+  test("fails closed on Bundle ID, unknown entitlements, missing executable entitlements, and nested identity drift", () => {
+    const executable = join(app, "Contents", "MacOS", "Simulator")
+    mkdirSync(join(app, "Contents", "MacOS"), { recursive: true })
+    writeFileSync(executable, "main")
+    const basePolicy = {
+      mode: "developer-id" as const,
+      expectedAuthority: authority,
+      expectedTeamIdentifier: "ABCDE12345",
+      expectedBundleIdentifier: "com.example.simulator",
+      actualBundleIdentifier: "com.example.simulator",
+      expectedEntitlements: reviewedEntitlements,
+    }
+    const inspector = (entitlements: string, nestedSignature = signature): Inspector => (path) => ({
+      description: path === app ? "bundle" : "Mach-O 64-bit executable arm64",
+      architectures: path === app ? "" : "arm64",
+      signature: path === app ? signature : nestedSignature,
+      verification: { exitCode: 0, output: "valid" },
+      entitlements,
+    })
+    expect(() => verifyMacOsSignatures(app, inspector(JSON.stringify(reviewedEntitlements)), {
+      ...basePolicy,
+      actualBundleIdentifier: "com.attacker.app",
+    })).toThrow("Bundle ID differs")
+    expect(() => verifyMacOsSignatures(app, inspector(JSON.stringify({ ...reviewedEntitlements, "com.apple.security.network.server": true })), basePolicy)).toThrow("Unreviewed entitlement")
+    expect(() => verifyMacOsSignatures(app, inspector(""), basePolicy)).toThrow("Reviewed entitlement")
+    expect(() => verifyMacOsSignatures(app, inspector(JSON.stringify(reviewedEntitlements), signature.replace("ABCDE12345", "ZZZZZ99999")), basePolicy)).toThrow()
+
+    const appIdentityDrift = JSON.stringify({
+      ...reviewedEntitlements,
+      "com.apple.developer.team-identifier": "ABCDE12345",
+      "com.apple.application-identifier": "ABCDE12345.com.example.simulator.helper",
+    })
+    expect(() => verifyMacOsSignatures(app, inspector(appIdentityDrift), basePolicy)).toThrow("application identifier")
+
+    const exactAppIdentity = JSON.stringify({
+      ...reviewedEntitlements,
+      "com.apple.developer.team-identifier": "ABCDE12345",
+      "com.apple.application-identifier": "ABCDE12345.com.example.simulator",
+    })
+    const nestedIdentityInspector: Inspector = (path) => ({
+      description: path === app ? "bundle" : "Mach-O 64-bit executable arm64",
+      architectures: path === app ? "" : "arm64",
+      signature,
+      verification: { exitCode: 0, output: "valid" },
+      entitlements: path === app ? exactAppIdentity : JSON.stringify({
+        ...reviewedEntitlements,
+        "com.apple.developer.team-identifier": "ABCDE12345",
+        "com.apple.application-identifier": "ABCDE12345.com.attacker.app",
+      }),
+    })
+    expect(() => verifyMacOsSignatures(app, nestedIdentityInspector, basePolicy)).toThrow("application identifier")
+    const emptyNestedIdentityInspector: Inspector = (path) => ({
+      description: path === app ? "bundle" : "Mach-O 64-bit executable arm64",
+      architectures: path === app ? "" : "arm64",
+      signature,
+      verification: { exitCode: 0, output: "valid" },
+      entitlements: path === app ? exactAppIdentity : JSON.stringify({
+        ...reviewedEntitlements,
+        "com.apple.developer.team-identifier": "ABCDE12345",
+        "com.apple.application-identifier": "ABCDE12345.com.example.simulator.",
+      }),
+    })
+    expect(() => verifyMacOsSignatures(app, emptyNestedIdentityInspector, basePolicy)).toThrow("application identifier")
+  })
+
+  test("accepts the exact App identity and an anchored nested helper identity", () => {
+    const executable = join(app, "Contents", "MacOS", "Simulator")
+    mkdirSync(join(app, "Contents", "MacOS"), { recursive: true })
+    writeFileSync(executable, "main")
+    const inspect: Inspector = (path) => ({
+      description: path === app ? "bundle" : "Mach-O 64-bit executable arm64",
+      architectures: path === app ? "" : "arm64",
+      signature,
+      verification: { exitCode: 0, output: "valid" },
+      entitlements: JSON.stringify({
+        ...reviewedEntitlements,
+        "com.apple.developer.team-identifier": "ABCDE12345",
+        "com.apple.application-identifier": path === app
+          ? "ABCDE12345.com.example.simulator"
+          : "ABCDE12345.com.example.simulator.helper",
+      }),
+    })
+
+    expect(verifyMacOsSignatures(app, inspect, {
+      mode: "developer-id",
+      expectedAuthority: authority,
+      expectedTeamIdentifier: "ABCDE12345",
+      expectedBundleIdentifier: "com.example.simulator",
+      actualBundleIdentifier: "com.example.simulator",
+      expectedEntitlements: reviewedEntitlements,
+    }).kinds).toEqual(["developer-id", "developer-id"])
   })
 })
