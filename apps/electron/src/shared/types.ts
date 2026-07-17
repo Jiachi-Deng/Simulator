@@ -50,6 +50,7 @@ export type {
 import type { AuthState, SetupNeeds } from '@craft-agent/shared/auth/types';
 import type { AuthType } from '@craft-agent/shared/config/types';
 import type { OpenDesignModuleFacade } from './open-design-module-ipc';
+import type { OpenDesignAcceptanceFacade } from './open-design-acceptance-ipc';
 export type { AuthState, SetupNeeds, AuthType };
 
 // Credential health types
@@ -227,6 +228,8 @@ import type {
 export interface ElectronAPI {
   /** macOS arm64-only fixed IPC facade for the bundled OpenDesign module. */
   openDesignModule?: OpenDesignModuleFacade
+  /** Present only after the packaged Host passes every debug+acceptance startup gate. */
+  openDesignAcceptance?: OpenDesignAcceptanceFacade
 
   // Session management
   getSessions(): Promise<Session[]>

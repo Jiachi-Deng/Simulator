@@ -16,6 +16,7 @@ import {
   createOpenDesignModuleBrowserWindowAdapter,
   reduceOpenDesignModuleState,
   registerOpenDesignModuleIpc,
+  stopOpenDesignModuleWithSafety,
   type OpenDesignModuleClock,
   type OpenDesignModuleHostAdapter,
   type OpenDesignModuleRuntime,
@@ -26,6 +27,10 @@ import {
   OPEN_DESIGN_MODULE_ID,
   type OpenDesignModuleState,
 } from '../../shared/open-design-module-ipc'
+import {
+  createOpenDesignMutationGate,
+  type OpenDesignMutationGate,
+} from '../open-design-mutation-gate'
 
 const MODULE_ID = OPEN_DESIGN_MODULE_ID as ModuleId
 const VERSION = '1.2.3' as ModuleVersion
@@ -338,15 +343,41 @@ function createController(
     getRuntime?: () => OpenDesignModuleRuntimeLookup
     getInstallRequest?: () => ModuleCoordinatorInstallRequest | undefined
     host?: OpenDesignModuleHostAdapter
+    mutationGate?: OpenDesignMutationGate
   } = {},
 ) {
   return new OpenDesignModuleController({
     getRuntime: options.getRuntime ?? (() => ({ status: 'ready', runtime: harness.runtime })),
     getInstallRequest: options.getInstallRequest ?? (() => installRequest()),
     host: options.host ?? harness.host,
+    mutationGate: options.mutationGate ?? createOpenDesignMutationGate(),
     clock: options.clock,
   })
 }
+
+describe('OpenDesignMutationGate', () => {
+  it('hands off to safety waiters FIFO without letting new UI work steal the boundary', async () => {
+    const mutationGate = createOpenDesignMutationGate()
+    const current = mutationGate.tryAcquire('ordinary')!
+    const firstSafety = mutationGate.acquireSafety()
+    const secondSafety = mutationGate.acquireSafety()
+
+    expect(mutationGate.tryAcquire('ordinary')).toBeUndefined()
+    expect(mutationGate.tryAcquire('acceptance')).toBeUndefined()
+    current.release()
+
+    const first = await firstSafety
+    expect(mutationGate.tryAcquire('ordinary')).toBeUndefined()
+    first.release()
+    const second = await secondSafety
+    expect(mutationGate.tryAcquire('acceptance')).toBeUndefined()
+    second.release()
+
+    const uiAfterSafety = mutationGate.tryAcquire('ordinary')
+    expect(uiAfterSafety).toBeDefined()
+    uiAfterSafety?.release()
+  })
+})
 
 describe('reduceOpenDesignModuleState', () => {
   it('applies error > installing > running > available > not-installed priority', () => {
@@ -601,6 +632,45 @@ describe('OpenDesignModuleController', () => {
     controller.dispose()
   })
 
+  it('queues the direct safety stop, blocks UI leases, and releases after success or exception', async () => {
+    const mutationGate = createOpenDesignMutationGate()
+    const activeAcceptance = mutationGate.tryAcquire('acceptance')!
+    const stop = mock(async (request: { operationId: string }) => operationResult('stop', request.operationId))
+    const directStop = stopOpenDesignModuleWithSafety({
+      moduleId: MODULE_ID,
+      operationId: 'direct-safety-stop',
+      mutationGate,
+      getRuntime: () => ({ coordinator: { stop } } as any),
+    })
+
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(stop).not.toHaveBeenCalled()
+    expect(mutationGate.tryAcquire('ordinary')).toBeUndefined()
+    activeAcceptance.release()
+    await directStop
+    expect(stop).toHaveBeenCalledTimes(1)
+
+    const secretFailure = stopOpenDesignModuleWithSafety({
+      moduleId: MODULE_ID,
+      operationId: 'direct-safety-failure',
+      mutationGate,
+      getRuntime: () => ({
+        coordinator: { stop: async () => { throw new Error('/private/secret token=abc') } },
+      } as any),
+    })
+    let error: Error | undefined
+    try {
+      await secretFailure
+    } catch (failure) {
+      error = failure as Error
+    }
+    expect(error?.message).toBe('OpenDesign could not be stopped.')
+    expect(error?.message).not.toContain('/private/secret')
+    const afterFailure = mutationGate.tryAcquire('acceptance')
+    expect(afterFailure).toBeDefined()
+    afterFailure?.release()
+  })
+
   it('stops the daemon and publishes an actionable error after a view crash', async () => {
     const harness = createHarness(true)
     harness.daemon = daemonSnapshot('healthy')
@@ -620,6 +690,57 @@ describe('OpenDesignModuleController', () => {
     })
     expect(harness.emitted.at(-1)).toEqual(state)
     controller.dispose()
+  })
+
+  it('runs lifecycle cleanup after an existing ordinary stop fails instead of treating it as success', async () => {
+    const harness = createHarness(true)
+    harness.daemon = daemonSnapshot('healthy')
+    harness.view = viewSnapshot('attached')
+    const firstStop = deferred<void>()
+    let attempt = 0
+    harness.stopImpl = async (request) => {
+      attempt += 1
+      if (attempt === 1) {
+        await firstStop.promise
+        return operationResult('stop', request.operationId!, false)
+      }
+      harness.daemon = daemonSnapshot('stopped')
+      harness.view = undefined
+      return operationResult('stop', request.operationId!)
+    }
+    const controller = createController(harness)
+
+    const ordinaryStop = controller.stop()
+    await until(() => harness.calls.stop.length === 1)
+    const lifecycleStop = controller.stopForHostView()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(harness.calls.stop).toHaveLength(1)
+
+    firstStop.resolve(undefined)
+    expect(await ordinaryStop).toMatchObject({ status: 'error', errorCode: 'OPEN_DESIGN_STOP_FAILED' })
+    expect(await lifecycleStop).toMatchObject({ status: 'available', daemonState: 'stopped' })
+    expect(harness.calls.stop).toHaveLength(2)
+    controller.dispose()
+  })
+
+  it('rejects rather than silently succeeding when disposed while lifecycle cleanup waits', async () => {
+    const harness = createHarness(true)
+    harness.daemon = daemonSnapshot('healthy')
+    harness.view = viewSnapshot('attached')
+    const mutationGate = createOpenDesignMutationGate()
+    const activeAcceptance = mutationGate.tryAcquire('acceptance')!
+    const controller = createController(harness, { mutationGate })
+
+    const lifecycleStop = controller.stopForHostView()
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    controller.dispose()
+    activeAcceptance.release()
+
+    await expect(lifecycleStop).rejects.toThrow('OpenDesign could not be stopped.')
+    expect(harness.calls.stop).toHaveLength(0)
+    const afterFailure = mutationGate.tryAcquire('ordinary')
+    expect(afterFailure).toBeDefined()
+    afterFailure?.release()
   })
 
   it('rejects host-view cleanup when the coordinator returns a failed stop', async () => {

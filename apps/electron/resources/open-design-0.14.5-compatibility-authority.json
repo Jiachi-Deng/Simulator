@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "authorityId": "open-design-0.14.5-host-0.12.0-darwin-arm64-v1",
+  "host": {
+    "version": "0.12.0",
+    "platform": "darwin-arm64"
+  },
+  "originalHostVersionRange": ">=0.11.1 <0.12.0",
+  "manifest": {
+    "schemaVersion": 1,
+    "id": "org.simulator.open-design",
+    "version": "0.14.5",
+    "artifacts": [
+      {
+        "platform": "darwin-arm64",
+        "url": "https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.5/org.simulator.open-design-0.14.5-darwin-arm64.tar.gz",
+        "sha256": "f883aaedd588c62d8a7ba6a4f94b6e2c8e448f9a8816758d6dbeb468a68d3e09",
+        "entrypoint": "runtime/open-design-launcher",
+        "auxiliaryExecutables": [
+          "runtime/node/bin/node",
+          "runtime/daemon/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper"
+        ]
+      }
+    ],
+    "capabilities": [
+      "host-agent.use",
+      "workspace.read",
+      "workspace.write"
+    ]
+  },
+  "releaseEvidence": {
+    "githubRelease": {
+      "owner": "Jiachi-Deng",
+      "repository": "Simulator",
+      "tag": "open-design-v0.14.5"
+    },
+    "catalogUrl": "https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.5/org.simulator.open-design-0.14.5-catalog-v2-envelope.json",
+    "initialPublishedCatalogSha256": "3832da6574c0eb9808e0b001205318b271996748b39fe2edcb330c5d1c3b4848",
+    "initialPublishedEnvelopeSha256": "caa18a16f1ded49b47ae54fced2dd0afe139571ba503b4c176929b6bc1e24a7c",
+    "archiveSize": 61479889,
+    "extractedManifestSha256": "9897521de3493eb2d35c76ff25cd9b714575024c42efd88ccd614331d5445414",
+    "trustedKey": {
+      "keyId": "open-design-release-2026-01",
+      "publicKey": "KvpR89GuQd670SZMZuuR+aK4FUIprxRlqE58K3twQZk=",
+      "publicKeyRawSha256": "f4e7b85cfa73e1f48caceed15aa5d4d0136a63ac73dcdc495ddee1229f5d0d6d"
+    }
+  },
+  "protocol": "v1",
+  "rationale": "Frozen v1 rollback authority for OpenDesign 0.14.5 only. Initial published catalog and envelope hashes are provenance, not runtime refresh equality gates; runtime catalogs remain subject to Downloader signature verification. The exception does not broaden ordinary semver compatibility or authorize v2, another module, version, host, platform, manifest, artifact, catalog signing key, or unsigned catalog."
+}

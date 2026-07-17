@@ -20,6 +20,10 @@ import {
 } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { HOST_AGENT_SHIM_BOOTSTRAP_PREFIX } from '../../../packages/host-agent-shim/scripts/build'
+import {
+  OPEN_DESIGN_0145_COMPATIBILITY_AUTHORITY_RESOURCE_NAME,
+  OPEN_DESIGN_0145_COMPATIBILITY_AUTHORITY_RESOURCE_SHA256,
+} from '../src/shared/open-design-compatibility-authority-contract'
 
 export { HOST_AGENT_SHIM_BOOTSTRAP_PREFIX }
 
@@ -91,6 +95,55 @@ export function inspectHostAgentArtifact(
     mode,
     size: metadata.size,
   }
+}
+
+export function inspectOpenDesign0145CompatibilityAuthorityArtifact(
+  path: string,
+  label: string,
+  options: { readonly allowRootOwner?: boolean } = {},
+): HostAgentArtifactEvidence {
+  const evidence = inspectHostAgentArtifact(path, label, {
+    executable: false,
+    allowRootOwner: options.allowRootOwner,
+  })
+  if (process.platform !== 'win32' && evidence.mode !== 0o644) {
+    throw new Error(`${label} must use build-resource mode 0644: ${evidence.path}`)
+  }
+  if (evidence.sha256 !== OPEN_DESIGN_0145_COMPATIBILITY_AUTHORITY_RESOURCE_SHA256) {
+    throw new Error(
+      `${label} does not match the pinned compatibility authority: expected sha256=`
+      + `${OPEN_DESIGN_0145_COMPATIBILITY_AUTHORITY_RESOURCE_SHA256}, got sha256=${evidence.sha256}`,
+    )
+  }
+  return evidence
+}
+
+export function copyOpenDesign0145CompatibilityAuthority(
+  sourcePath: string,
+  destinationPath: string,
+): { source: HostAgentArtifactEvidence; destination: HostAgentArtifactEvidence } {
+  const source = inspectOpenDesign0145CompatibilityAuthorityArtifact(
+    sourcePath,
+    'OpenDesign 0.14.5 source compatibility authority',
+  )
+  const destination = resolve(destinationPath)
+  const destinationDirectory = dirname(destination)
+  mkdirSync(destinationDirectory, { recursive: true, mode: 0o755 })
+  assertRealDirectory(destinationDirectory, 'OpenDesign 0.14.5 dist compatibility authority directory')
+  if (existsSync(destination)) {
+    inspectHostAgentArtifact(destination, 'Existing OpenDesign 0.14.5 dist compatibility authority', {
+      executable: false,
+    })
+    rmSync(destination)
+  }
+  copyFileSync(source.path, destination, constants.COPYFILE_EXCL)
+  if (process.platform !== 'win32') chmodSync(destination, source.mode)
+  const copied = inspectOpenDesign0145CompatibilityAuthorityArtifact(
+    destination,
+    'OpenDesign 0.14.5 dist compatibility authority',
+  )
+  assertHostAgentArtifactsMatch(source, copied, 'OpenDesign 0.14.5 source/dist compatibility authority')
+  return { source, destination: copied }
 }
 
 export function assertHostAgentArtifactsMatch(
@@ -179,7 +232,19 @@ export function copyElectronAssets(repositoryRoot: string): void {
   const distResourcesDirectory = join(electronDirectory, 'dist/resources')
   const sourceShim = rebuildHostAgentShim(root)
   const distShimPath = join(distResourcesDirectory, HOST_AGENT_SHIM_RELATIVE_PATH)
+  const sourceCompatibilityAuthorityPath = join(
+    resourcesDirectory,
+    OPEN_DESIGN_0145_COMPATIBILITY_AUTHORITY_RESOURCE_NAME,
+  )
+  const distCompatibilityAuthorityPath = join(
+    distResourcesDirectory,
+    OPEN_DESIGN_0145_COMPATIBILITY_AUTHORITY_RESOURCE_NAME,
+  )
   assertRealDirectory(resourcesDirectory, 'Electron source resource directory')
+  inspectOpenDesign0145CompatibilityAuthorityArtifact(
+    sourceCompatibilityAuthorityPath,
+    'OpenDesign 0.14.5 source compatibility authority',
+  )
   mkdirSync(distResourcesDirectory, { recursive: true, mode: 0o755 })
   assertRealDirectory(distResourcesDirectory, 'Electron dist resource directory')
 
@@ -196,12 +261,19 @@ export function copyElectronAssets(repositoryRoot: string): void {
   // security-sensitive executable. It is copied once with COPYFILE_EXCL below.
   cpSync(resourcesDirectory, distResourcesDirectory, {
     recursive: true,
-    filter: (source) => resolve(source) !== sourceShim.path,
+    filter: (source) => {
+      const normalized = resolve(source)
+      return normalized !== sourceShim.path && normalized !== resolve(sourceCompatibilityAuthorityPath)
+    },
   })
   const copied = copyHostAgentShim(sourceShim.path, distShimPath)
   assertHostAgentArtifactsMatch(sourceShim, copied.destination, 'Host Agent dist shim')
+  copyOpenDesign0145CompatibilityAuthority(
+    sourceCompatibilityAuthorityPath,
+    distCompatibilityAuthorityPath,
+  )
 
-  console.log('✓ Rebuilt Host Agent shim and copied resources/ → dist/resources/')
+  console.log('✓ Rebuilt Host Agent shim and copied pinned resources/ → dist/resources/')
 
   const psParserSource = join(root, 'packages/shared/src/agent/powershell-parser.ps1')
   const psParserDestination = join(distResourcesDirectory, 'powershell-parser.ps1')

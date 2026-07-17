@@ -21,6 +21,7 @@ import {
   type OpenDesignModuleViewBounds,
   type OpenDesignModuleViewPresentation,
 } from '../shared/open-design-module-ipc'
+import type { OpenDesignMutationGate } from './open-design-mutation-gate'
 
 const POLL_INTERVAL_MS = 150
 const VISIBLE_KEEPALIVE_INTERVAL_MS = 60_000
@@ -59,7 +60,15 @@ export interface OpenDesignModuleControllerOptions {
   readonly getRuntime: () => OpenDesignModuleRuntimeLookup
   readonly getInstallRequest: () => Awaitable<ModuleCoordinatorInstallRequest | undefined>
   readonly host: OpenDesignModuleHostAdapter
+  readonly mutationGate: OpenDesignMutationGate
   readonly clock?: OpenDesignModuleClock
+}
+
+export interface OpenDesignSafetyStopOptions {
+  readonly moduleId: ModuleId
+  readonly operationId: string
+  readonly mutationGate: OpenDesignMutationGate
+  readonly getRuntime: () => { readonly coordinator: Pick<ModuleCoordinator, 'stop'> } | undefined
 }
 
 export interface OpenDesignModuleSafeError {
@@ -89,6 +98,36 @@ class OpenDesignModuleControllerError extends Error {
   constructor(readonly code: string, message: string) {
     super(message)
     this.name = 'OpenDesignModuleControllerError'
+  }
+}
+
+/** Safety fallback used before the ordinary controller is available. */
+export async function stopOpenDesignModuleWithSafety(
+  options: OpenDesignSafetyStopOptions,
+): Promise<void> {
+  const mutationLease = await options.mutationGate.acquireSafety()
+  try {
+    try {
+      const runtime = options.getRuntime()
+      if (!runtime) throw new Error('runtime unavailable')
+      const result = await runtime.coordinator.stop({
+        moduleId: options.moduleId,
+        operationId: options.operationId,
+      })
+      if (!result.ok
+        || result.moduleId !== options.moduleId
+        || result.kind !== 'stop'
+        || result.operationId !== options.operationId) {
+        throw new Error('coordinator result mismatch')
+      }
+    } catch {
+      throw new OpenDesignModuleControllerError(
+        'OPEN_DESIGN_STOP_FAILED',
+        'OpenDesign could not be stopped.',
+      )
+    }
+  } finally {
+    mutationLease.release()
   }
 }
 
@@ -247,6 +286,7 @@ export class OpenDesignModuleController {
   readonly #options: OpenDesignModuleControllerOptions
   readonly #clock: OpenDesignModuleClock
   readonly #flights = new Map<OpenDesignModuleAction, Promise<OpenDesignModuleState>>()
+  #safetyStopFlight?: Promise<OpenDesignModuleState>
   #tail: Promise<unknown> = Promise.resolve()
   #activeOperation?: ActiveOperation
   #lastError?: OpenDesignModuleSafeError
@@ -375,13 +415,13 @@ export class OpenDesignModuleController {
   }
 
   /** Single host-view escape hatch; integration should route host.close here instead of destroying the view. */
-  async stopForHostView(): Promise<OpenDesignModuleState> {
-    return this.#stopForLifecycleCleanup()
+  stopForHostView(): Promise<OpenDesignModuleState> {
+    return this.#runSafetyStop()
   }
 
   /** Quarantined renderers must stop their daemon and leave an actionable state. */
   async stopForViewFailure(): Promise<OpenDesignModuleState> {
-    await this.#stopForLifecycleCleanup()
+    await this.#runSafetyStop()
     this.#lastError = {
       code: 'VIEW_CRASHED',
       message: 'The OpenDesign view stopped unexpectedly.',
@@ -391,18 +431,20 @@ export class OpenDesignModuleController {
     return state
   }
 
-  async #stopForLifecycleCleanup(): Promise<OpenDesignModuleState> {
-    const state = await this.stop()
+  #isLifecycleStopped(state: OpenDesignModuleState): boolean {
     const daemonStopped = state.daemonState === undefined || state.daemonState === 'stopped'
     const viewStopped = state.viewState === undefined || state.viewState === 'detached'
     const stateStopped = state.status === 'available' || state.status === 'not-installed'
-    if (!daemonStopped || !viewStopped || !stateStopped) {
+    return daemonStopped && viewStopped && stateStopped
+  }
+
+  #assertLifecycleStopped(state: OpenDesignModuleState): void {
+    if (!this.#isLifecycleStopped(state)) {
       throw new OpenDesignModuleControllerError(
         'OPEN_DESIGN_STOP_FAILED',
         'OpenDesign could not be stopped.',
       )
     }
-    return state
   }
 
   dispose(): void {
@@ -417,19 +459,85 @@ export class OpenDesignModuleController {
     action: OpenDesignModuleAction,
     operation: (runtime: OpenDesignModuleRuntime, operationId: string) => Promise<ModuleCoordinatorOperationResult>,
   ): Promise<OpenDesignModuleState> {
+    const mutationLease = this.#options.mutationGate.tryAcquire('ordinary')
+    if (!mutationLease) return this.#mutationConflictState()
     const existing = this.#flights.get(action)
-    if (existing) return existing
+    if (existing) {
+      mutationLease.release()
+      return existing
+    }
 
-    const operationId = `open-design-${action}-${this.#clock.now().toString(36)}-${randomUUID()}`
+    let operationId: string
+    try {
+      operationId = `open-design-${action}-${this.#clock.now().toString(36)}-${randomUUID()}`
+    } catch {
+      mutationLease.release()
+      return this.#operationSetupFailureState(action)
+    }
     const flight = this.#tail
       .catch(() => undefined)
       .then(() => this.#execute(action, operationId, operation))
+      .finally(() => mutationLease.release())
     this.#tail = flight.catch(() => undefined)
     this.#flights.set(action, flight)
     void flight.finally(() => {
       if (this.#flights.get(action) === flight) this.#flights.delete(action)
     }).catch(() => undefined)
     return flight
+  }
+
+  #runSafetyStop(): Promise<OpenDesignModuleState> {
+    if (this.#safetyStopFlight) return this.#safetyStopFlight
+
+    const flight = (async () => {
+      const mutationLease = await this.#options.mutationGate.acquireSafety()
+      try {
+        const observed = await this.getState()
+        if (this.#isLifecycleStopped(observed)) return observed
+        let operationId: string
+        try {
+          operationId = `open-design-stop-${this.#clock.now().toString(36)}-${randomUUID()}`
+        } catch {
+          const state = await this.#operationSetupFailureState('stop')
+          this.#assertLifecycleStopped(state)
+          return state
+        }
+        const state = await this.#execute('stop', operationId, (runtime, id) => runtime.coordinator.stop({
+          moduleId: OPEN_DESIGN_COORDINATOR_MODULE_ID,
+          operationId: id,
+        }))
+        this.#assertLifecycleStopped(state)
+        return state
+      } finally {
+        mutationLease.release()
+      }
+    })()
+    this.#safetyStopFlight = flight
+    void flight.finally(() => {
+      if (this.#safetyStopFlight === flight) this.#safetyStopFlight = undefined
+    }).catch(() => undefined)
+    return flight
+  }
+
+  #mutationConflictState(): Promise<OpenDesignModuleState> {
+    const state = Object.freeze({
+      status: 'error' as const,
+      errorCode: 'OPEN_DESIGN_MUTATION_CONFLICT',
+      errorMessage: 'Another OpenDesign operation is already in progress.',
+    })
+    this.#emit(state)
+    return Promise.resolve(state)
+  }
+
+  #operationSetupFailureState(action: OpenDesignModuleAction): Promise<OpenDesignModuleState> {
+    const error = failedResultError(action)
+    const state = Object.freeze({
+      status: 'error' as const,
+      errorCode: error.code,
+      errorMessage: error.message,
+    })
+    this.#emit(state)
+    return Promise.resolve(state)
   }
 
   async #execute(

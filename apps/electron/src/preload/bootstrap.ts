@@ -43,8 +43,13 @@ import {
   type OpenDesignModuleState,
   type OpenDesignModuleViewPresentation,
 } from '../shared/open-design-module-ipc'
+import {
+  OPEN_DESIGN_ACCEPTANCE_CHANNELS,
+  type OpenDesignAcceptanceFacade,
+  type OpenDesignAcceptanceState,
+} from '../shared/open-design-acceptance-ipc'
 
-type OpenDesignIpcRenderer = Pick<typeof ipcRenderer, 'invoke' | 'on' | 'removeListener'>
+type OpenDesignIpcRenderer = Pick<typeof ipcRenderer, 'invoke' | 'on' | 'removeListener' | 'sendSync'>
 
 export function createOpenDesignModuleFacade(ipc: OpenDesignIpcRenderer): OpenDesignModuleFacade {
   const invoke = (channel: string): Promise<OpenDesignModuleState> => ipc.invoke(channel)
@@ -66,6 +71,29 @@ export function createOpenDesignModuleFacade(ipc: OpenDesignIpcRenderer): OpenDe
       }
     },
   })
+}
+
+export function createOpenDesignAcceptanceFacade(
+  ipc: Pick<OpenDesignIpcRenderer, 'invoke'>,
+): OpenDesignAcceptanceFacade {
+  const invoke = (channel: string): Promise<OpenDesignAcceptanceState> => ipc.invoke(channel)
+  return Object.freeze({
+    getState: () => invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE),
+    updateToRc: () => invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC),
+    rollback: () => invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.ROLLBACK),
+  })
+}
+
+export function discoverOpenDesignAcceptanceFacade(
+  ipc: Pick<OpenDesignIpcRenderer, 'invoke' | 'sendSync'>,
+): OpenDesignAcceptanceFacade | undefined {
+  try {
+    return ipc.sendSync(OPEN_DESIGN_ACCEPTANCE_CHANNELS.IS_AVAILABLE) === true
+      ? createOpenDesignAcceptanceFacade(ipc)
+      : undefined
+  } catch {
+    return undefined
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -212,6 +240,8 @@ const api = buildClientApi(client, CHANNEL_MAP, (ch) => client.isChannelAvailabl
 
 if (process.platform === 'darwin' && process.arch === 'arm64') {
   ;(api as ElectronAPI).openDesignModule = createOpenDesignModuleFacade(ipcRenderer)
+  const acceptance = discoverOpenDesignAcceptanceFacade(ipcRenderer)
+  if (acceptance) (api as ElectronAPI).openDesignAcceptance = acceptance
 }
 
 // ---------------------------------------------------------------------------

@@ -5,7 +5,9 @@ import {
   assertHostAgentArtifactsMatch,
   HOST_AGENT_SHIM_BOOTSTRAP_PREFIX,
   inspectHostAgentArtifact,
+  inspectOpenDesign0145CompatibilityAuthorityArtifact,
 } from "./copy-assets"
+import { OPEN_DESIGN_0145_COMPATIBILITY_AUTHORITY_RESOURCE_NAME } from "../src/shared/open-design-compatibility-authority-contract"
 
 // Every caller (workspace scripts, DMG packaging, Windows packaging, and
 // direct CI invocation) must validate the same Electron tree regardless of
@@ -48,6 +50,14 @@ for (const asset of requiredAssetDirectories) {
 
 const requiredBuildFiles = [
   { path: "dist/module-view-preload.cjs", description: "isolated module view preload" },
+  {
+    path: `resources/${OPEN_DESIGN_0145_COMPATIBILITY_AUTHORITY_RESOURCE_NAME}`,
+    description: "build-owned OpenDesign 0.14.5 compatibility authority source",
+  },
+  {
+    path: `dist/resources/${OPEN_DESIGN_0145_COMPATIBILITY_AUTHORITY_RESOURCE_NAME}`,
+    description: "build-owned OpenDesign 0.14.5 compatibility authority",
+  },
   { path: "resources/host-agent/simulator-host-agent.mjs", description: "fresh Host Agent v2 CLI shim source artifact" },
   { path: "dist/resources/host-agent/simulator-host-agent.mjs", description: "Host Agent v2 CLI shim" },
   { path: "dist/resources/host-agent/worker.cjs", description: "isolated Host Agent Utility Process" },
@@ -58,6 +68,33 @@ for (const asset of requiredBuildFiles) {
     failures.push(`${asset.path} is missing (${asset.description})`)
   } else if (statSync(asset.path).size === 0) {
     failures.push(`${asset.path} is empty (${asset.description})`)
+  }
+}
+
+const sourceCompatibilityAuthorityPath = `resources/${OPEN_DESIGN_0145_COMPATIBILITY_AUTHORITY_RESOURCE_NAME}`
+const distCompatibilityAuthorityPath = `dist/resources/${OPEN_DESIGN_0145_COMPATIBILITY_AUTHORITY_RESOURCE_NAME}`
+if (existsSync(sourceCompatibilityAuthorityPath) && existsSync(distCompatibilityAuthorityPath)) {
+  try {
+    const source = inspectOpenDesign0145CompatibilityAuthorityArtifact(
+      sourceCompatibilityAuthorityPath,
+      "OpenDesign 0.14.5 source compatibility authority",
+    )
+    const dist = inspectOpenDesign0145CompatibilityAuthorityArtifact(
+      distCompatibilityAuthorityPath,
+      "OpenDesign 0.14.5 dist compatibility authority",
+    )
+    assertHostAgentArtifactsMatch(source, dist, "OpenDesign 0.14.5 source/dist compatibility authority")
+    if (packagedRoot) {
+      const packaged = inspectOpenDesign0145CompatibilityAuthorityArtifact(
+        join(packagedRoot, OPEN_DESIGN_0145_COMPATIBILITY_AUTHORITY_RESOURCE_NAME),
+        "Packaged OpenDesign 0.14.5 compatibility authority",
+        { allowRootOwner: true },
+      )
+      assertHostAgentArtifactsMatch(source, packaged, "Packaged OpenDesign 0.14.5 compatibility authority")
+    }
+    console.log(`OpenDesign 0.14.5 compatibility authority sha256=${source.sha256}`)
+  } catch (error) {
+    failures.push(error instanceof Error ? error.message : String(error))
   }
 }
 

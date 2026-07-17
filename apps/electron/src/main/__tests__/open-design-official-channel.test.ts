@@ -3,7 +3,10 @@ import { generateKeyPairSync } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
-import type { ModuleCoordinatorInstallRequest } from '@simulator/module-coordinator'
+import type {
+  ModuleCoordinatorInstallRequest,
+  ResolvedModuleCoordinatorInstallRequest,
+} from '@simulator/module-coordinator'
 import type { LoadedDevelopmentModuleBundle } from '../development-module-bundle'
 import {
   loadOpenDesignOfficialChannel,
@@ -206,7 +209,7 @@ describe('OpenDesign Host channel selection', () => {
     const official = await loadOpenDesignOfficialChannel({ isPackaged: true, resourcesPath, platform: 'darwin-arm64' })
     if (official.status !== 'ready') throw new Error('Expected official channel fixture')
     const officialHost = selectOpenDesignHostChannel({ status: 'disabled' }, official)
-    const resolved = { catalogUrl: CATALOG_URL } as ModuleCoordinatorInstallRequest
+    const resolved = { catalogUrl: CATALOG_URL } as ResolvedModuleCoordinatorInstallRequest
     const coordinator = { resolveInstallRequest: mock(async () => resolved) }
 
     expect(await resolveOpenDesignHostInstallRequest(officialHost, coordinator)).toBe(resolved)

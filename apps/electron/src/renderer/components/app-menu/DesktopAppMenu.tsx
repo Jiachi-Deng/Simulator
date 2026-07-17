@@ -35,6 +35,11 @@ import type {
   OpenDesignModuleFacade,
   OpenDesignModuleState,
 } from "../../../shared/open-design-module-ipc"
+import type {
+  OpenDesignAcceptanceAction,
+  OpenDesignAcceptanceFacade,
+  OpenDesignAcceptanceState,
+} from "../../../shared/open-design-acceptance-ipc"
 import type { AppMenuProps } from "./types"
 
 type MenuActionHandlers = {
@@ -146,6 +151,7 @@ function unavailableOpenDesignState(): OpenDesignModuleState {
 }
 
 const OPEN_DESIGN_STATE_RETRY_DELAY_MS = 250
+const OPEN_DESIGN_ACCEPTANCE_REFRESH_DELAY_MS = 500
 
 export async function loadOpenDesignStateWithRetry(
   module: Pick<OpenDesignModuleFacade, 'getState'>,
@@ -160,6 +166,46 @@ export async function loadOpenDesignStateWithRetry(
     }
   }
   return unavailableOpenDesignState()
+}
+
+export async function loadOpenDesignAcceptanceStateWithRetry(
+  acceptance: Pick<OpenDesignAcceptanceFacade, 'getState'>,
+  wait: (milliseconds: number) => Promise<void> = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  shouldContinue: () => boolean = () => true,
+): Promise<OpenDesignAcceptanceState | undefined> {
+  while (shouldContinue()) {
+    try {
+      const state = await acceptance.getState()
+      if (state.status !== 'busy' && state.errorCode !== 'ACCEPTANCE_RUNTIME_UNAVAILABLE') return state
+    } catch {
+      // A rejected/removed IPC surface is a hard failure, not startup lag.
+      return undefined
+    }
+    if (shouldContinue()) await wait(OPEN_DESIGN_STATE_RETRY_DELAY_MS)
+  }
+  return undefined
+}
+
+export interface OpenDesignAcceptanceRefreshCoordinator {
+  refresh(): Promise<OpenDesignAcceptanceState | undefined>
+}
+
+/** Coalesces every menu refresh onto one getState request at a time. */
+export function createOpenDesignAcceptanceRefreshCoordinator(
+  acceptance: Pick<OpenDesignAcceptanceFacade, 'getState'>,
+): OpenDesignAcceptanceRefreshCoordinator {
+  let inFlight: Promise<OpenDesignAcceptanceState | undefined> | undefined
+  return Object.freeze({
+    refresh() {
+      if (inFlight) return inFlight
+      const request = acceptance.getState().catch(() => undefined)
+      inFlight = request
+      void request.finally(() => {
+        if (inFlight === request) inFlight = undefined
+      }).catch(() => undefined)
+      return request
+    },
+  })
 }
 
 const roleHandlers: Record<string, () => void> = {
@@ -276,8 +322,16 @@ export function DesktopAppMenu({
   const [isDebugMode, setIsDebugMode] = useState(false)
   const [openDesignState, setOpenDesignState] = useState<OpenDesignModuleState>()
   const [openDesignCommand, setOpenDesignCommand] = useState<OpenDesignMenuCommand>()
-  const openDesignCommandInFlight = useRef(false)
+  const [openDesignAcceptanceState, setOpenDesignAcceptanceState] = useState<OpenDesignAcceptanceState>()
+  const [openDesignAcceptanceCommand, setOpenDesignAcceptanceCommand] = useState<OpenDesignAcceptanceAction>()
+  const openDesignControlInFlight = useRef(false)
+  const openDesignAcceptanceRefreshEpoch = useRef(0)
+  const openDesignAcceptanceRefresh = useRef<{
+    facade: OpenDesignAcceptanceFacade
+    coordinator: OpenDesignAcceptanceRefreshCoordinator
+  }>()
   const openDesignModule = isMac ? window.electronAPI.openDesignModule : undefined
+  const openDesignAcceptance = isMac ? window.electronAPI.openDesignAcceptance : undefined
 
   const newChatHotkey = useActionLabel('app.newChat').hotkey
   const newWindowHotkey = useActionLabel('app.newWindow').hotkey
@@ -312,9 +366,48 @@ export function DesktopAppMenu({
     }
   }, [isDebugMode, openDesignModule])
 
+  useEffect(() => {
+    if (!isDebugMode || !openDesignAcceptance) {
+      setOpenDesignAcceptanceState(undefined)
+      openDesignAcceptanceRefresh.current = undefined
+      return
+    }
+    const refreshEntry = openDesignAcceptanceRefresh.current?.facade === openDesignAcceptance
+      ? openDesignAcceptanceRefresh.current
+      : {
+          facade: openDesignAcceptance,
+          coordinator: createOpenDesignAcceptanceRefreshCoordinator(openDesignAcceptance),
+        }
+    openDesignAcceptanceRefresh.current = refreshEntry
+    let active = true
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const refresh = async () => {
+      const requestEpoch = openDesignAcceptanceRefreshEpoch.current
+      const state = await refreshEntry.coordinator.refresh()
+      if (!active) return
+      if (requestEpoch === openDesignAcceptanceRefreshEpoch.current && !openDesignControlInFlight.current) {
+        if (state?.errorCode !== 'ACCEPTANCE_RUNTIME_UNAVAILABLE') {
+          setOpenDesignAcceptanceState(state)
+        }
+      }
+      if (!state) return
+      const delay = state.status === 'busy' || state.errorCode === 'ACCEPTANCE_RUNTIME_UNAVAILABLE'
+        ? OPEN_DESIGN_STATE_RETRY_DELAY_MS
+        : OPEN_DESIGN_ACCEPTANCE_REFRESH_DELAY_MS
+      timer = setTimeout(() => { void refresh() }, delay)
+    }
+    void refresh()
+    return () => {
+      active = false
+      if (timer) clearTimeout(timer)
+    }
+  }, [isDebugMode, openDesignAcceptance, openDesignState])
+
   const runOpenDesignCommand = async (command: OpenDesignMenuCommand) => {
-    if (!openDesignModule || openDesignCommandInFlight.current) return
-    openDesignCommandInFlight.current = true
+    if (!openDesignModule || openDesignControlInFlight.current
+      || openDesignAcceptanceState?.status === 'busy') return
+    openDesignControlInFlight.current = true
+    openDesignAcceptanceRefreshEpoch.current += 1
     setOpenDesignCommand(command)
     try {
       const state = await openDesignModule[command]()
@@ -322,8 +415,32 @@ export function DesktopAppMenu({
     } catch {
       setOpenDesignState(unavailableOpenDesignState())
     } finally {
-      openDesignCommandInFlight.current = false
+      openDesignAcceptanceRefreshEpoch.current += 1
+      openDesignControlInFlight.current = false
       setOpenDesignCommand(undefined)
+    }
+  }
+
+  const runOpenDesignAcceptanceCommand = async (command: OpenDesignAcceptanceAction) => {
+    if (!openDesignAcceptance || openDesignControlInFlight.current) return
+    const availability = getOpenDesignAcceptanceMenuAvailability(
+      openDesignAcceptanceState,
+      openDesignCommand !== undefined,
+      openDesignState,
+    )
+    if ((command === 'updateToRc' && !availability.updateEnabled)
+      || (command === 'rollback' && !availability.rollbackEnabled)) return
+    openDesignControlInFlight.current = true
+    openDesignAcceptanceRefreshEpoch.current += 1
+    setOpenDesignAcceptanceCommand(command)
+    try {
+      setOpenDesignAcceptanceState(await openDesignAcceptance[command]())
+    } catch {
+      setOpenDesignAcceptanceState(undefined)
+    } finally {
+      openDesignAcceptanceRefreshEpoch.current += 1
+      openDesignControlInFlight.current = false
+      setOpenDesignAcceptanceCommand(undefined)
     }
   }
 
@@ -331,6 +448,11 @@ export function DesktopAppMenu({
     toggleFocusMode: onToggleFocusMode,
     toggleSidebar: onToggleSidebar,
   }
+  const openDesignCommandLocks = getOpenDesignDebugCommandLocks(
+    openDesignCommand,
+    openDesignAcceptanceCommand,
+    openDesignAcceptanceState,
+  )
 
   return (
     <DropdownMenu>
@@ -415,11 +537,20 @@ export function DesktopAppMenu({
           </StyledDropdownMenuSubContent>
         </DropdownMenuSub>
 
-        {isDebugMode && renderDebugSubmenu(t, openDesignModule ? {
-          state: openDesignState,
-          commandInFlight: openDesignCommand !== undefined,
-          onCommand: runOpenDesignCommand,
-        } : undefined)}
+        {isDebugMode && renderDebugSubmenu(
+          t,
+          openDesignModule ? {
+            state: openDesignState,
+            commandInFlight: openDesignCommandLocks.moduleLocked,
+            onCommand: runOpenDesignCommand,
+          } : undefined,
+          openDesignAcceptance ? {
+            state: openDesignAcceptanceState,
+            moduleState: openDesignState,
+            commandInFlight: openDesignCommandLocks.acceptanceLocked,
+            onCommand: runOpenDesignAcceptanceCommand,
+          } : undefined,
+        )}
 
         <StyledDropdownMenuSeparator />
 
@@ -442,6 +573,92 @@ interface OpenDesignDebugMenuProps {
   readonly state: OpenDesignModuleState | undefined
   readonly commandInFlight: boolean
   readonly onCommand: (command: OpenDesignMenuCommand) => void
+}
+
+interface OpenDesignAcceptanceMenuProps {
+  readonly state: OpenDesignAcceptanceState | undefined
+  readonly moduleState: OpenDesignModuleState | undefined
+  readonly commandInFlight: boolean
+  readonly onCommand: (command: OpenDesignAcceptanceAction) => void
+}
+
+export function getOpenDesignDebugCommandLocks(
+  moduleCommand: OpenDesignMenuCommand | undefined,
+  acceptanceCommand: OpenDesignAcceptanceAction | undefined,
+  acceptanceState: OpenDesignAcceptanceState | undefined,
+): { readonly moduleLocked: boolean; readonly acceptanceLocked: boolean } {
+  return {
+    moduleLocked: moduleCommand !== undefined
+      || acceptanceCommand !== undefined
+      || acceptanceState?.status === 'busy',
+    acceptanceLocked: acceptanceCommand !== undefined || moduleCommand !== undefined,
+  }
+}
+
+export function getOpenDesignAcceptanceMenuAvailability(
+  state: OpenDesignAcceptanceState | undefined,
+  commandInFlight = false,
+  moduleState?: OpenDesignModuleState,
+): { readonly updateEnabled: boolean; readonly rollbackEnabled: boolean } {
+  if (!state || commandInFlight || state.status !== 'ready') {
+    return { updateEnabled: false, rollbackEnabled: false }
+  }
+  const baselineInstalled = state.installedVersions.length === 1
+    && state.installedVersions[0] === '0.14.5'
+  const rollbackInstalled = state.installedVersions.length === 2
+    && state.installedVersions[0] === '0.14.5'
+    && state.installedVersions[1] === '0.14.6-rc.1'
+  return {
+    updateEnabled: baselineInstalled
+      && state.activeVersion === '0.14.5' && state.lastKnownGoodVersion === null,
+    rollbackEnabled: moduleState?.status === 'running'
+      && rollbackInstalled && state.running && state.viewAttached && ((
+      state.activeVersion === '0.14.6-rc.1' && state.lastKnownGoodVersion === '0.14.5'
+    ) || (
+      state.activeVersion === '0.14.5' && state.lastKnownGoodVersion === '0.14.6-rc.1'
+    )),
+  }
+}
+
+function renderOpenDesignAcceptanceMenuItems(props: OpenDesignAcceptanceMenuProps): React.ReactNode {
+  const availability = getOpenDesignAcceptanceMenuAvailability(
+    props.state,
+    props.commandInFlight,
+    props.moduleState,
+  )
+  const active = props.state?.activeVersion ?? 'none'
+  const lkg = props.state?.lastKnownGoodVersion ?? 'none'
+  return (
+    <>
+      <StyledDropdownMenuSeparator />
+      <StyledDropdownMenuItem disabled>
+        {props.state?.status === 'busy'
+          ? <Icons.LoaderCircle className="h-3.5 w-3.5 animate-spin" />
+          : <Icons.FlaskConical className="h-3.5 w-3.5" />}
+        Acceptance · active {active} · LKG {lkg}
+      </StyledDropdownMenuItem>
+      {props.state?.errorCode && (
+        <StyledDropdownMenuItem disabled>
+          <Icons.CircleAlert className="h-3.5 w-3.5" />
+          {props.state.errorCode}
+        </StyledDropdownMenuItem>
+      )}
+      <StyledDropdownMenuItem
+        disabled={!availability.updateEnabled}
+        onClick={() => props.onCommand('updateToRc')}
+      >
+        <Icons.PackageOpen className="h-3.5 w-3.5" />
+        Update OpenDesign to fixed RC
+      </StyledDropdownMenuItem>
+      <StyledDropdownMenuItem
+        disabled={!availability.rollbackEnabled}
+        onClick={() => props.onCommand('rollback')}
+      >
+        <Icons.RotateCcw className="h-3.5 w-3.5" />
+        Swap OpenDesign active / LKG
+      </StyledDropdownMenuItem>
+    </>
+  )
 }
 
 function renderOpenDesignMenuItems(
@@ -489,6 +706,7 @@ function renderOpenDesignMenuItems(
 function renderDebugSubmenu(
   t: MenuTranslate,
   openDesign?: OpenDesignDebugMenuProps,
+  acceptance?: OpenDesignAcceptanceMenuProps,
 ): React.ReactNode {
   const SectionIcon = getIcon(DEBUG_MENU.icon)
   return (
@@ -519,6 +737,7 @@ function renderDebugSubmenu(
           )
         })}
         {openDesign && renderOpenDesignMenuItems(t, openDesign)}
+        {acceptance && renderOpenDesignAcceptanceMenuItems(acceptance)}
       </StyledDropdownMenuSubContent>
     </DropdownMenuSub>
   )

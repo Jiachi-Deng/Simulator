@@ -3,6 +3,7 @@ import type { ModuleId } from '@simulator/module-contract'
 import type { HostAgentProtocolPath } from '../host-agent/protocol'
 import type { HostAgentWorkerFailure } from '../host-agent/supervisor'
 import type { HostModuleCoordinatorRuntime } from './host-module-coordinator'
+import type { OpenDesignMutationGate } from './open-design-mutation-gate'
 
 export interface ModuleAgentWorkerRecoveryRequest {
   readonly protocol: HostAgentProtocolPath
@@ -16,6 +17,7 @@ export type ModuleAgentWorkerRecoveryPhase = 'restart' | 'fallback-stop' | 'circ
 export interface ModuleAgentWorkerRecoveryControllerOptions {
   readonly moduleId: ModuleId
   readonly getRuntime: () => HostModuleCoordinatorRuntime | null
+  readonly mutationGate: OpenDesignMutationGate
   readonly isShuttingDown: () => boolean
   readonly protocolForVersion: (version: string) => HostAgentProtocolPath
   readonly createOperationId?: (phase: ModuleAgentWorkerRecoveryPhase) => string
@@ -60,43 +62,51 @@ export class ModuleAgentWorkerRecoveryController {
 
   async #recover(request: ModuleAgentWorkerRecoveryRequest): Promise<void> {
     if (this.#disposed || this.#options.isShuttingDown()) return
-    const runtime = this.#options.getRuntime()
-    if (!runtime) return
-    const daemon = runtime.daemon.get(this.#options.moduleId)
-    if (!daemon || !RECOVERABLE_DAEMON_STATES.has(daemon.state)) return
-
-    let activeProtocol: HostAgentProtocolPath
+    const mutationLease = await this.#options.mutationGate.acquireSafety()
     try {
-      activeProtocol = this.#options.protocolForVersion(daemon.version)
-    } catch {
-      // An unsupported active version must not be restarted with a guessed
-      // contract. Stop the optional path and keep the primary Host alive.
-      await this.#stop(runtime, request, 'circuit-stop')
-      return
-    }
-    if (activeProtocol !== request.protocol) return
+      // State is intentionally read only after acquiring the safety boundary:
+      // an update/rollback may have changed the active daemon while recovery waited.
+      if (this.#disposed || this.#options.isShuttingDown()) return
+      const runtime = this.#options.getRuntime()
+      if (!runtime) return
+      const daemon = runtime.daemon.get(this.#options.moduleId)
+      if (!daemon || !RECOVERABLE_DAEMON_STATES.has(daemon.state)) return
 
-    if (request.circuitOpen) {
-      await this.#stop(runtime, request, 'circuit-stop')
-      return
-    }
+      let activeProtocol: HostAgentProtocolPath
+      try {
+        activeProtocol = this.#options.protocolForVersion(daemon.version)
+      } catch {
+        // An unsupported active version must not be restarted with a guessed
+        // contract. Stop the optional path and keep the primary Host alive.
+        await this.#stop(runtime, request, 'circuit-stop')
+        return
+      }
+      if (activeProtocol !== request.protocol) return
 
-    try {
-      const result = await runtime.coordinator.restart({
-        moduleId: this.#options.moduleId,
-        operationId: this.#operationId('restart'),
-      })
-      if (result.ok || this.#options.isShuttingDown()) return
-      this.#report('restart', request, new Error(result.error ?? 'Module restart failed'))
-    } catch (error) {
-      this.#report('restart', request, error)
-      if (this.#options.isShuttingDown()) return
-    }
+      if (request.circuitOpen) {
+        await this.#stop(runtime, request, 'circuit-stop')
+        return
+      }
 
-    // A failed lease rotation leaves the Module unable to prove which token,
-    // epoch, or provider state it owns. Fail closed by stopping only that
-    // Module; never quit Electron or dispose Craft dependencies here.
-    await this.#stop(runtime, request, 'fallback-stop')
+      try {
+        const result = await runtime.coordinator.restart({
+          moduleId: this.#options.moduleId,
+          operationId: this.#operationId('restart'),
+        })
+        if (result.ok || this.#options.isShuttingDown()) return
+        this.#report('restart', request, new Error(result.error ?? 'Module restart failed'))
+      } catch (error) {
+        this.#report('restart', request, error)
+        if (this.#options.isShuttingDown()) return
+      }
+
+      // A failed lease rotation leaves the Module unable to prove which token,
+      // epoch, or provider state it owns. Fail closed by stopping only that
+      // Module; never quit Electron or dispose primary Host dependencies here.
+      await this.#stop(runtime, request, 'fallback-stop')
+    } finally {
+      mutationLease.release()
+    }
   }
 
   async #stop(

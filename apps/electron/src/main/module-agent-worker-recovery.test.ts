@@ -6,6 +6,10 @@ import {
   ModuleAgentWorkerRecoveryController,
   type ModuleAgentWorkerRecoveryPhase,
 } from './module-agent-worker-recovery'
+import {
+  createOpenDesignMutationGate,
+  type OpenDesignMutationGate,
+} from './open-design-mutation-gate'
 
 const MODULE_ID = 'org.simulator.open-design' as ModuleId
 
@@ -21,7 +25,10 @@ function daemon(
   }
 }
 
-function harness(initial = daemon()) {
+function harness(
+  initial = daemon(),
+  mutationGate: OpenDesignMutationGate = createOpenDesignMutationGate(),
+) {
   let current: ModuleDaemonSnapshot | undefined = initial
   let shuttingDown = false
   const calls: string[] = []
@@ -47,6 +54,7 @@ function harness(initial = daemon()) {
   const controller = new ModuleAgentWorkerRecoveryController({
     moduleId: MODULE_ID,
     getRuntime: () => runtime,
+    mutationGate,
     isShuttingDown: () => shuttingDown,
     protocolForVersion: (version) => version === '0.14.5' ? 'v1' : 'v2',
     createOperationId: (phase) => `${phase}-${++operation}`,
@@ -61,6 +69,7 @@ function harness(initial = daemon()) {
   })
   return {
     controller,
+    mutationGate,
     calls,
     failures,
     request,
@@ -73,6 +82,38 @@ function harness(initial = daemon()) {
 }
 
 describe('ModuleAgentWorkerRecoveryController', () => {
+  it('waits behind an active mutation, blocks new UI leases, and then completes recovery exactly once', async () => {
+    const mutationGate = createOpenDesignMutationGate()
+    const activeAcceptance = mutationGate.tryAcquire('acceptance')!
+    const system = harness(daemon(), mutationGate)
+
+    system.request()
+    await Bun.sleep(0)
+    expect(system.calls).toEqual([])
+    expect(mutationGate.tryAcquire('ordinary')).toBeUndefined()
+    expect(mutationGate.tryAcquire('acceptance')).toBeUndefined()
+
+    activeAcceptance.release()
+    await system.controller.drain()
+    expect(system.calls).toEqual(['restart:restart-1'])
+    const afterRecovery = mutationGate.tryAcquire('ordinary')
+    expect(afterRecovery).toBeDefined()
+    afterRecovery?.release()
+  })
+
+  it('queues a circuit safety stop without running concurrently with the active mutation', async () => {
+    const mutationGate = createOpenDesignMutationGate()
+    const activeOrdinary = mutationGate.tryAcquire('ordinary')!
+    const system = harness(daemon(), mutationGate)
+
+    system.request({ circuitOpen: true })
+    await Bun.sleep(0)
+    expect(system.calls).toEqual([])
+    activeOrdinary.release()
+    await system.controller.drain()
+    expect(system.calls).toEqual(['stop:circuit-stop-1'])
+  })
+
   it('rotates the daemon once after local Worker cleanup and serializes repeated exits', async () => {
     const system = harness()
     let release!: () => void
@@ -153,6 +194,7 @@ describe('ModuleAgentWorkerRecoveryController', () => {
     const controller = new ModuleAgentWorkerRecoveryController({
       moduleId: MODULE_ID,
       getRuntime: () => runtime,
+      mutationGate: createOpenDesignMutationGate(),
       isShuttingDown: () => false,
       protocolForVersion: () => { throw new Error('unsupported') },
       createOperationId: (phase) => phase,

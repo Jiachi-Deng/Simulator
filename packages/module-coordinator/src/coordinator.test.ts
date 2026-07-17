@@ -15,7 +15,7 @@ import { FilesystemModuleRegistryPersistence } from '@simulator/module-registry/
 import { encodeCanonicalCatalog, type TrustedReleaseKey } from '@simulator/module-release-trust'
 import { ModuleCoordinator } from './coordinator.ts'
 import { NodeFilesystemModuleCoordinatorStore } from './node-store.ts'
-import { SimulatedCoordinatorCrash, type ModuleCoordinatorCheckpoint, type ModuleCoordinatorFaultPoint, type ModuleCoordinatorState, type ModuleCoordinatorStore, type ModuleViewSnapshot } from './types.ts'
+import { SimulatedCoordinatorCrash, type ModuleCoordinatorCheckpoint, type ModuleCoordinatorDependencies, type ModuleCoordinatorFaultPoint, type ModuleCoordinatorState, type ModuleCoordinatorStore, type ModuleViewSnapshot } from './types.ts'
 import { ModuleRuntimeUseGate } from './usage-gate.ts'
 import { InMemoryModuleCoordinatorStore } from './testing/memory-store.ts'
 
@@ -31,6 +31,19 @@ const CATALOG_URL = 'https://modules.example.test/catalog.json'
 const ARTIFACT_URL = 'https://modules.example.test/packaged-fake.tar.gz'
 const roots: string[] = []
 const systems: System[] = []
+
+interface CatalogRevision {
+  readonly sequence: number
+  readonly issuedAt: string
+  readonly expiresAt: string
+  readonly artifactSizeDelta?: number
+}
+
+const INITIAL_CATALOG_REVISION: CatalogRevision = {
+  sequence: 1,
+  issuedAt: '2026-07-12T17:00:00.000Z',
+  expiresAt: '2026-07-13T17:00:00.000Z',
+}
 
 function sha256(value: Uint8Array | string): ModuleSha256 {
   return createHash('sha256').update(value).digest('hex') as ModuleSha256
@@ -100,16 +113,17 @@ class FixtureFetch {
   catalogRequests = 0
   artifactRequests = 0
 
-  constructor(readonly wireBytes: Uint8Array, readonly archive: Uint8Array) {}
+  constructor(readonly catalogResponses: readonly Uint8Array[], readonly archive: Uint8Array) {}
 
   async fetch(request: { readonly url: string }) {
     if (request.url === CATALOG_URL) {
       this.catalogRequests += 1
-      if (this.catalogRequests === 1) {
+      const wireBytes = this.catalogResponses[this.catalogRequests - 1]
+      if (wireBytes) {
         return memoryResponse({
           url: CATALOG_URL,
-          headers: { 'content-length': String(this.wireBytes.byteLength), etag: '"packaged-fake-v1"' },
-          chunks: [this.wireBytes],
+          headers: { 'content-length': String(wireBytes.byteLength), etag: `"packaged-fake-v${this.catalogRequests}"` },
+          chunks: [wireBytes],
         })
       }
       return memoryResponse({ status: 304, url: CATALOG_URL })
@@ -176,7 +190,9 @@ class TestViewPort {
   }
 }
 
-async function createFixture(): Promise<PersistentFixture> {
+async function createFixture(
+  revisions: readonly CatalogRevision[] = [INITIAL_CATALOG_REVISION],
+): Promise<PersistentFixture> {
   const root = await mkdtemp(join(tmpdir(), 'simulator-module-coordinator-'))
   roots.push(root)
   const { archive, treeHash } = packagedFakeArchive()
@@ -195,20 +211,28 @@ async function createFixture(): Promise<PersistentFixture> {
     publicKey: Uint8Array.from(publicDer.subarray(publicDer.byteLength - 32)),
     activeFrom: '2026-07-12T00:00:00.000Z',
   }
-  const catalogBytes = encodeCanonicalCatalog({
-    schemaVersion: 2,
-    sequence: 1,
-    issuedAt: '2026-07-12T17:00:00.000Z',
-    expiresAt: '2026-07-13T17:00:00.000Z',
-    releases,
+  const catalogResponses = revisions.map((revision) => {
+    const catalogBytes = encodeCanonicalCatalog({
+      schemaVersion: 2,
+      sequence: revision.sequence,
+      issuedAt: revision.issuedAt,
+      expiresAt: revision.expiresAt,
+      releases: releases.map((release) => ({
+        ...release,
+        artifactSizes: release.artifactSizes.map((artifactSize) => ({
+          ...artifactSize,
+          size: artifactSize.size + (revision.artifactSizeDelta ?? 0),
+        })),
+      })),
+    })
+    return new TextEncoder().encode(JSON.stringify({
+      schemaVersion: 1,
+      keyId: key.keyId,
+      catalogBytes: Buffer.from(catalogBytes).toString('base64'),
+      signature: Buffer.from(sign(null, catalogBytes, pair.privateKey)).toString('base64'),
+    }))
   })
-  const wireBytes = new TextEncoder().encode(JSON.stringify({
-    schemaVersion: 1,
-    keyId: key.keyId,
-    catalogBytes: Buffer.from(catalogBytes).toString('base64'),
-    signature: Buffer.from(sign(null, catalogBytes, pair.privateKey)).toString('base64'),
-  }))
-  const fetch = new FixtureFetch(wireBytes, archive)
+  const fetch = new FixtureFetch(catalogResponses, archive)
   return {
     root,
     treeHash,
@@ -223,12 +247,13 @@ async function createSystem(
   input?: PersistentFixture,
   inputStore?: ModuleCoordinatorStore,
   faultInjector?: (point: ModuleCoordinatorFaultPoint) => void | Promise<void>,
+  downloaderOverride?: ModuleCoordinatorDependencies['downloader'],
 ): Promise<System> {
   const fixture = input ?? await createFixture()
   const store = inputStore ?? fixture.store
   const { root, treeHash, releases, key, fetch } = fixture
   const cacheRoot = join(root, 'cache')
-  const downloader = new ModuleDownloader({
+  const downloader = downloaderOverride ?? new ModuleDownloader({
     fetch,
     cache: new NodeFilesystemModuleDownloaderCache(cacheRoot),
     clock: new ManualClock(NOW),
@@ -311,8 +336,16 @@ describe('ModuleCoordinator packaged fake module E2E', () => {
         format: 'tar.gz',
       },
       hostVersionRange: '>=0.11.0 <0.12.0-0',
+      catalogEvidence: {
+        schemaVersion: 1,
+        sequence: 1,
+        issuedAt: '2026-07-12T17:00:00.000Z',
+        expiresAt: '2026-07-13T17:00:00.000Z',
+        artifactSize: fixture.releases[0]!.artifactSizes[0]!.size,
+      },
     })
     expect(Object.isFrozen(request)).toBe(true)
+    expect(Object.isFrozen(request.catalogEvidence)).toBe(true)
     expect((await system.coordinator.install({ ...request, operationId: 'resolved-install' })).ok).toBe(true)
     // Resolver plus the coordinator's two durable verification checkpoints all
     // use the same downloader/cache; only the first request carries catalog bytes.
@@ -337,6 +370,113 @@ describe('ModuleCoordinator packaged fake module E2E', () => {
 
     expect(result.ok).toBe(false)
     expect(result.error).toContain('signed catalog release')
+    expect(fixture.fetch.artifactRequests).toBe(0)
+  })
+
+  it('rejects validly-shaped Catalog evidence tampering before downloading the artifact', async () => {
+    const fixture = await createFixture()
+    const system = await createSystem(fixture)
+    const request = await system.coordinator.resolveInstallRequest({
+      catalogUrl: CATALOG_URL,
+      moduleId: MODULE_ID as ModuleId,
+      version: '1.0.0' as ModuleVersion,
+    })
+    const cases = [
+      { name: 'artifact-size', evidence: { ...request.catalogEvidence, artifactSize: request.catalogEvidence.artifactSize + 1 } },
+      { name: 'sequence-rollback', evidence: { ...request.catalogEvidence, sequence: request.catalogEvidence.sequence + 1 } },
+      { name: 'issued-at-rollback', evidence: { ...request.catalogEvidence, issuedAt: '2026-07-12T17:30:00.000Z' } },
+      { name: 'same-sequence-expiry', evidence: { ...request.catalogEvidence, expiresAt: '2026-07-13T16:59:59.000Z' } },
+    ] as const
+
+    for (const entry of cases) {
+      const result = await system.coordinator.install({
+        ...request,
+        catalogEvidence: entry.evidence,
+        operationId: `tampered-evidence-${entry.name}`,
+      })
+      expect(result.ok).toBe(false)
+      expect(result.error).toContain('Catalog evidence')
+    }
+    expect(fixture.fetch.artifactRequests).toBe(0)
+  })
+
+  it('accepts a valid higher-sequence Catalog refresh with identical release evidence', async () => {
+    const fixture = await createFixture([
+      INITIAL_CATALOG_REVISION,
+      {
+        sequence: 2,
+        issuedAt: '2026-07-12T17:30:00.000Z',
+        expiresAt: '2026-07-13T17:30:00.000Z',
+      },
+    ])
+    const system = await createSystem(fixture)
+    const request = await system.coordinator.resolveInstallRequest({
+      catalogUrl: CATALOG_URL,
+      moduleId: MODULE_ID as ModuleId,
+      version: '1.0.0' as ModuleVersion,
+    })
+
+    expect((await system.coordinator.install({ ...request, operationId: 'refreshed-evidence-install' })).ok).toBe(true)
+    expect(fixture.fetch.catalogRequests).toBe(3)
+    expect(fixture.fetch.artifactRequests).toBe(1)
+  })
+
+  it('rejects a higher-sequence Catalog refresh whose issuance time did not advance', async () => {
+    const fixture = await createFixture()
+    let catalogRequests = 0
+    let artifactRequests = 0
+    const downloader: ModuleCoordinatorDependencies['downloader'] = {
+      fetchCatalog: async () => ({
+        catalog: {
+          schemaVersion: 2,
+          sequence: ++catalogRequests,
+          issuedAt: INITIAL_CATALOG_REVISION.issuedAt,
+          expiresAt: catalogRequests === 1
+            ? INITIAL_CATALOG_REVISION.expiresAt
+            : '2026-07-13T17:30:00.000Z',
+          releases: fixture.releases,
+        },
+        source: 'network',
+      }),
+      downloadArtifact: async () => {
+        artifactRequests += 1
+        throw new Error('Catalog evidence must fail before artifact download')
+      },
+    }
+    const system = await createSystem(fixture, undefined, undefined, downloader)
+    const request = await system.coordinator.resolveInstallRequest({
+      catalogUrl: CATALOG_URL,
+      moduleId: MODULE_ID as ModuleId,
+      version: '1.0.0' as ModuleVersion,
+    })
+    const result = await system.coordinator.install({ ...request, operationId: 'same-issued-at-refresh' })
+
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('Catalog evidence')
+    expect(catalogRequests).toBe(2)
+    expect(artifactRequests).toBe(0)
+  })
+
+  it('rejects a higher-sequence Catalog refresh that changes the bound artifact size', async () => {
+    const fixture = await createFixture([
+      INITIAL_CATALOG_REVISION,
+      {
+        sequence: 2,
+        issuedAt: '2026-07-12T17:30:00.000Z',
+        expiresAt: '2026-07-13T17:30:00.000Z',
+        artifactSizeDelta: 1,
+      },
+    ])
+    const system = await createSystem(fixture)
+    const request = await system.coordinator.resolveInstallRequest({
+      catalogUrl: CATALOG_URL,
+      moduleId: MODULE_ID as ModuleId,
+      version: '1.0.0' as ModuleVersion,
+    })
+    const result = await system.coordinator.install({ ...request, operationId: 'refreshed-size-mismatch' })
+
+    expect(result.ok).toBe(false)
+    expect(result.error).toContain('Catalog evidence')
     expect(fixture.fetch.artifactRequests).toBe(0)
   })
 
@@ -457,6 +597,76 @@ describe('ModuleCoordinator durable checkpoint recovery', () => {
       expect(restarted.registry.snapshot().modules[0]).toMatchObject({ activeVersion: '1.0.0' })
     })
   }
+})
+
+describe('ModuleCoordinator Catalog evidence durable compatibility', () => {
+  it('recovers a legacy durable install request that predates Catalog evidence', async () => {
+    const fixture = await createFixture()
+    const store = new CrashAfterCheckpointStore(fixture.store)
+    store.arm('intent-recorded', 'legacy-durable-install')
+    const first = await createSystem(fixture, store)
+    await expect(first.coordinator.install({
+      ...first.requestFor('1.0.0'),
+      operationId: 'legacy-durable-install',
+    })).rejects.toBeInstanceOf(SimulatedCoordinatorCrash)
+    await first.coordinator.dispose()
+
+    const persisted = await fixture.store.load()
+    expect(persisted).toBeDefined()
+    expect(Object.hasOwn(persisted!.operations[0]!.request, 'catalogEvidence')).toBe(false)
+
+    const restarted = await createSystem(fixture, store)
+    await restarted.coordinator.recover()
+    expect((await restarted.coordinator.snapshot()).operations[0]).toMatchObject({
+      id: 'legacy-durable-install',
+      checkpoint: 'completed',
+      status: 'completed',
+    })
+  })
+
+  it('strictly parses and fingerprints optional Catalog evidence in durable state', async () => {
+    const fixture = await createFixture()
+    const store = new CrashAfterCheckpointStore(fixture.store)
+    const first = await createSystem(fixture, store)
+    const request = await first.coordinator.resolveInstallRequest({
+      catalogUrl: CATALOG_URL,
+      moduleId: MODULE_ID as ModuleId,
+      version: '1.0.0' as ModuleVersion,
+    })
+    store.arm('intent-recorded', 'evidence-durable-install')
+    await expect(first.coordinator.install({
+      ...request,
+      operationId: 'evidence-durable-install',
+    })).rejects.toBeInstanceOf(SimulatedCoordinatorCrash)
+    await first.coordinator.dispose()
+
+    const persisted = await fixture.store.load()
+    expect(persisted?.operations[0]?.request).toMatchObject({ catalogEvidence: request.catalogEvidence })
+    const mutations: readonly ((evidence: Record<string, unknown>) => void)[] = [
+      (evidence) => { evidence.unexpected = true },
+      (evidence) => { evidence.schemaVersion = 2 },
+      (evidence) => { evidence.sequence = 0 },
+      (evidence) => { evidence.issuedAt = '2026-07-12T17:00:00Z' },
+      (evidence) => { evidence.expiresAt = evidence.issuedAt },
+      (evidence) => { evidence.artifactSize = (evidence.artifactSize as number) + 1 },
+    ]
+    for (const mutate of mutations) {
+      const tampered = structuredClone(persisted!)
+      const evidence = (tampered.operations[0]!.request as unknown as {
+        catalogEvidence: Record<string, unknown>
+      }).catalogEvidence
+      mutate(evidence)
+      await expect(fixture.store.save(tampered)).rejects.toMatchObject({ code: 'STORE_CORRUPT' })
+    }
+
+    const restarted = await createSystem(fixture, store)
+    await restarted.coordinator.recover()
+    expect((await restarted.coordinator.snapshot()).operations[0]).toMatchObject({
+      id: 'evidence-durable-install',
+      checkpoint: 'completed',
+      status: 'completed',
+    })
+  })
 })
 
 const FORWARD_CRASH_MATRIX = {

@@ -4,12 +4,18 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import {
   assertHostAgentArtifactsMatch,
+  copyOpenDesign0145CompatibilityAuthority,
   copyHostAgentShim,
   HOST_AGENT_SHIM_BOOTSTRAP_PREFIX,
   HOST_AGENT_WORKER_MODE,
   inspectHostAgentArtifact,
+  inspectOpenDesign0145CompatibilityAuthorityArtifact,
   normalizeHostAgentWorkerMode,
 } from '../../../scripts/copy-assets'
+import {
+  OPEN_DESIGN_0145_COMPATIBILITY_AUTHORITY_RESOURCE_NAME,
+  OPEN_DESIGN_0145_COMPATIBILITY_AUTHORITY_RESOURCE_SHA256,
+} from '../../shared/open-design-compatibility-authority-contract'
 
 const temporaryRoots: string[] = []
 
@@ -123,5 +129,34 @@ describe('Host Agent executable resource integrity', () => {
     expect(() => assertHostAgentArtifactsMatch(copied.source, changed, 'Packaged Host Agent shim')).toThrow(
       'differs from its build source',
     )
+  })
+})
+
+describe('OpenDesign 0.14.5 compatibility authority resource integrity', () => {
+  it('pins the source resource to its reviewed hash and rejects any copied-byte drift', async () => {
+    const repositoryRoot = resolve(import.meta.dir, '../../../../..')
+    const sourcePath = join(
+      repositoryRoot,
+      'apps/electron/resources',
+      OPEN_DESIGN_0145_COMPATIBILITY_AUTHORITY_RESOURCE_NAME,
+    )
+    const source = inspectOpenDesign0145CompatibilityAuthorityArtifact(
+      sourcePath,
+      'OpenDesign 0.14.5 source compatibility authority',
+    )
+    expect(source.sha256).toBe(OPEN_DESIGN_0145_COMPATIBILITY_AUTHORITY_RESOURCE_SHA256)
+
+    const root = await realpath(await mkdtemp(join(tmpdir(), 'simulator-open-design-compatibility-authority-')))
+    temporaryRoots.push(root)
+    const copiedPath = join(root, OPEN_DESIGN_0145_COMPATIBILITY_AUTHORITY_RESOURCE_NAME)
+    const copied = copyOpenDesign0145CompatibilityAuthority(sourcePath, copiedPath)
+    assertHostAgentArtifactsMatch(source, copied.destination, 'Copied OpenDesign 0.14.5 compatibility authority')
+
+    await writeFile(copiedPath, Buffer.concat([await readFile(copiedPath), Buffer.from('\n')]), { mode: 0o644 })
+    if (process.platform !== 'win32') await chmod(copiedPath, 0o644)
+    expect(() => inspectOpenDesign0145CompatibilityAuthorityArtifact(
+      copiedPath,
+      'Tampered OpenDesign 0.14.5 compatibility authority',
+    )).toThrow('does not match the pinned compatibility authority')
   })
 })

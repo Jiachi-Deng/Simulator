@@ -1,8 +1,10 @@
 import { parseModuleManifest, type ModuleId, type ModuleManifest, type ModuleVersion } from '@simulator/module-contract'
+import { parseModuleCoordinatorCatalogEvidence } from './catalog-evidence.ts'
 import {
   MODULE_COORDINATOR_STATE_SCHEMA_VERSION,
   ModuleCoordinatorError,
   SimulatedCoordinatorCrash,
+  type ModuleCoordinatorCatalogEvidence,
   type ModuleCoordinatorCheckpoint,
   type ModuleCoordinatorDependencies,
   type ModuleCoordinatorEvent,
@@ -17,6 +19,7 @@ import {
   type ModuleCoordinatorSnapshot,
   type ModuleCoordinatorTargetState,
   type ModuleCoordinatorUninstallRequest,
+  type ResolvedModuleCoordinatorInstallRequest,
 } from './types.ts'
 
 const MAX_EVENTS = 256
@@ -105,6 +108,18 @@ function installerErrorCode(error: unknown): string | undefined {
     : undefined
 }
 
+function catalogEvidence(input: unknown): ModuleCoordinatorCatalogEvidence {
+  try {
+    return parseModuleCoordinatorCatalogEvidence(input)
+  } catch (error) {
+    throw new ModuleCoordinatorError(
+      'CATALOG_RELEASE_MISMATCH',
+      'Install request contains invalid verified Catalog evidence',
+      { cause: error },
+    )
+  }
+}
+
 export class ModuleCoordinator {
   readonly #dependencies: ModuleCoordinatorDependencies
   readonly #now: () => number
@@ -138,7 +153,7 @@ export class ModuleCoordinator {
    * Fetches and verifies the catalog through this coordinator's downloader, then
    * binds the exact v2 release metadata into an immutable install request.
    */
-  async resolveInstallRequest(request: ModuleCoordinatorReleaseRequest): Promise<ModuleCoordinatorInstallRequest> {
+  async resolveInstallRequest(request: ModuleCoordinatorReleaseRequest): Promise<ResolvedModuleCoordinatorInstallRequest> {
     await this.#ready
     const catalog = (await this.#dependencies.downloader.fetchCatalog(request.catalogUrl)).catalog
     if (catalog.schemaVersion !== 2) {
@@ -171,6 +186,13 @@ export class ModuleCoordinator {
         format: 'tar.gz',
       }),
       hostVersionRange: release.hostVersionRange,
+      catalogEvidence: Object.freeze({
+        schemaVersion: 1,
+        sequence: catalog.sequence,
+        issuedAt: catalog.issuedAt,
+        expiresAt: catalog.expiresAt,
+        artifactSize: artifactSize.size,
+      }),
     })
   }
 
@@ -584,6 +606,7 @@ export class ModuleCoordinator {
 
   async #verifiedRelease(operation: ModuleCoordinatorOperation): Promise<{ artifact: ModuleManifest['artifacts'][number]; size: number }> {
     const request = operation.request as ModuleCoordinatorInstallRequest
+    const evidence = request.catalogEvidence === undefined ? undefined : catalogEvidence(request.catalogEvidence)
     const parsed = parseModuleManifest(request.descriptor.manifest)
     if (!parsed.ok) throw new ModuleCoordinatorError('CATALOG_RELEASE_MISMATCH', 'Durable descriptor contains an invalid manifest')
     const catalog = await this.#dependencies.downloader.fetchCatalog(request.catalogUrl)
@@ -592,6 +615,22 @@ export class ModuleCoordinator {
     const artifact = release.manifest.artifacts.find((candidate) => candidate.platform === this.#dependencies.platform)
     const size = release.artifactSizes.find((candidate) => candidate.platform === this.#dependencies.platform)?.size
     if (!artifact || size === undefined) throw new ModuleCoordinatorError('ARTIFACT_MISSING', 'Verified catalog has no host artifact')
+    if (evidence) {
+      const current = catalog.catalog
+      if (current.schemaVersion !== 2
+        || size !== evidence.artifactSize
+        || current.sequence < evidence.sequence
+        || Date.parse(current.issuedAt) < Date.parse(evidence.issuedAt)
+        || (current.sequence > evidence.sequence
+          && Date.parse(current.issuedAt) === Date.parse(evidence.issuedAt))
+        || (current.sequence === evidence.sequence
+          && (current.issuedAt !== evidence.issuedAt || current.expiresAt !== evidence.expiresAt))) {
+        throw new ModuleCoordinatorError(
+          'CATALOG_RELEASE_MISMATCH',
+          'Verified Catalog evidence does not match a non-rollback Catalog refresh',
+        )
+      }
+    }
     const descriptorArtifact = request.descriptor.artifact
     if (!sameManifest(release.manifest, parsed.value)
       || artifact.platform !== descriptorArtifact.platform

@@ -120,6 +120,7 @@ import {
   createOpenDesignModuleBrowserWindowAdapter,
   OpenDesignModuleController,
   registerOpenDesignModuleIpc,
+  stopOpenDesignModuleWithSafety,
   type OpenDesignModuleIpcRegistration,
 } from './open-design-module-controller'
 import {
@@ -133,6 +134,17 @@ import {
   type OpenDesignHostChannelBootstrap,
   type OpenDesignOfficialChannelBootstrap,
 } from './open-design-official-channel'
+import { loadOpenDesignCompatibilityAuthority } from './open-design-compatibility-authority'
+import {
+  OPEN_DESIGN_ACCEPTANCE_ENV,
+  OpenDesignAcceptanceController,
+  completeOpenDesignAcceptanceRecovery,
+  createOpenDesignAcceptanceRuntimeGate,
+  loadOpenDesignAcceptance,
+  registerOpenDesignAcceptanceIpc,
+  type OpenDesignAcceptanceIpcRegistration,
+} from './open-design-acceptance'
+import { createOpenDesignMutationGate } from './open-design-mutation-gate'
 import { resolveHostModuleStorageRoot } from './host-module-storage-root'
 import {
   createIsolatedHostModuleAgentRuntime,
@@ -256,6 +268,10 @@ let sessionManager: SessionManager | null = null
 let browserPaneManager: BrowserPaneManager | null = null
 let moduleViewManager: ModuleViewManager | null = null
 let hostModuleCoordinator: HostModuleCoordinatorRuntime | null = null
+const openDesignMutationGate = createOpenDesignMutationGate()
+const openDesignAcceptanceRuntimeGate = createOpenDesignAcceptanceRuntimeGate(
+  () => hostModuleCoordinator ?? undefined,
+)
 let hostModuleAgentRuntime: IsolatedHostModuleAgentRuntime | null = null
 let moduleAgentWorkerRecovery: ModuleAgentWorkerRecoveryController | null = null
 let moduleInfrastructureShuttingDown = false
@@ -267,6 +283,8 @@ let openDesignHostChannel: OpenDesignHostChannelBootstrap = Object.freeze({
 })
 let openDesignModuleController: OpenDesignModuleController | null = null
 let openDesignModuleIpc: OpenDesignModuleIpcRegistration | null = null
+let openDesignAcceptanceController: OpenDesignAcceptanceController | null = null
+let openDesignAcceptanceIpc: OpenDesignAcceptanceIpcRegistration | null = null
 let stopServer: (() => Promise<void>) | null = null
 let embeddedServer: { host: string; port: number } | null = null
 let oauthFlowStore: OAuthFlowStore | null = null
@@ -1071,41 +1089,137 @@ app.whenReady().then(async () => {
     // Create initial windows (restores from saved state or opens first workspace)
     // In headless mode the server runs without any UI — skip window creation.
     if (!isHeadless) {
-      await createInitialWindows()
-      openDesignDevelopmentBootstrap = await loadOpenDesignDevelopmentBootstrap({
-        argv: process.argv,
-        platform: currentModulePlatform(),
+      let openDesignOfficialBootstrap: OpenDesignOfficialChannelBootstrap = Object.freeze({
+        status: 'not-ready',
+        errorCode: 'OFFICIAL_CHANNEL_NOT_INITIALIZED',
+        errorMessage: 'The OpenDesign official channel is not ready.',
       })
-      if (openDesignDevelopmentBootstrap.status === 'not-ready') {
-        mainLog.error('OpenDesign development bundle bootstrap failed', {
-          errorCode: openDesignDevelopmentBootstrap.errorCode,
+      try {
+        openDesignDevelopmentBootstrap = await loadOpenDesignDevelopmentBootstrap({
+          argv: process.argv,
+          platform: currentModulePlatform(),
+        })
+        if (openDesignDevelopmentBootstrap.status === 'not-ready') {
+          mainLog.error('OpenDesign development bundle bootstrap failed', {
+            errorCode: openDesignDevelopmentBootstrap.errorCode,
+          })
+        }
+        openDesignOfficialBootstrap = openDesignDevelopmentBootstrap.status === 'disabled'
+          ? await loadOpenDesignOfficialChannel({
+              isPackaged: app.isPackaged,
+              resourcesPath: process.resourcesPath,
+              platform: currentModulePlatform(),
+            })
+          : Object.freeze({
+              status: 'not-ready',
+              errorCode: 'OFFICIAL_CHANNEL_BYPASSED_FOR_DEVELOPMENT',
+              errorMessage: 'The OpenDesign official channel is not ready.',
+            })
+        openDesignHostChannel = selectOpenDesignHostChannel(
+          openDesignDevelopmentBootstrap,
+          openDesignOfficialBootstrap,
+        )
+        if (openDesignDevelopmentBootstrap.status === 'disabled' && openDesignHostChannel.status === 'not-ready') {
+          mainLog.info('OpenDesign official channel is not ready', { errorCode: openDesignHostChannel.errorCode })
+        }
+      } catch (error) {
+        openDesignHostChannel = Object.freeze({
+          status: 'not-ready',
+          errorCode: 'OPEN_DESIGN_PRE_WINDOW_BOOTSTRAP_FAILED',
+          errorMessage: 'The optional OpenDesign channel is not ready.',
+        })
+        mainLog.error('Optional OpenDesign pre-window bootstrap was contained', {
+          errorType: error instanceof Error ? error.name : typeof error,
         })
       }
-      const openDesignOfficialBootstrap: OpenDesignOfficialChannelBootstrap = openDesignDevelopmentBootstrap.status === 'disabled'
-        ? await loadOpenDesignOfficialChannel({
-            isPackaged: app.isPackaged,
-            resourcesPath: process.resourcesPath,
-            platform: currentModulePlatform(),
+
+      try {
+        const openDesignAcceptanceBootstrap = await loadOpenDesignAcceptance({
+          isPackaged: app.isPackaged,
+          hostVersion: app.getVersion(),
+          platform: currentModulePlatform(),
+          argv: process.argv,
+          env: process.env,
+          userDataRoot: app.getPath('userData'),
+          development: openDesignDevelopmentBootstrap,
+          official: openDesignOfficialBootstrap,
+        })
+        if (openDesignAcceptanceBootstrap.status === 'ready') {
+          openDesignAcceptanceController = new OpenDesignAcceptanceController({
+            bootstrap: openDesignAcceptanceBootstrap,
+            getRuntime: openDesignAcceptanceRuntimeGate.getRuntime,
+            host: {
+              isAllowedSender: (sender) => windowManager?.getAllWindows().some(
+                ({ window }) => !window.isDestroyed()
+                  && !window.webContents.isDestroyed()
+                  && window.webContents === sender,
+              ) ?? false,
+            },
+            mutationGate: openDesignMutationGate,
           })
-        : Object.freeze({
-            status: 'not-ready',
-            errorCode: 'OFFICIAL_CHANNEL_BYPASSED_FOR_DEVELOPMENT',
-            errorMessage: 'The OpenDesign official channel is not ready.',
+        } else if (process.env[OPEN_DESIGN_ACCEPTANCE_ENV] === '1') {
+          mainLog.info('OpenDesign acceptance control surface is not ready', {
+            errorCode: openDesignAcceptanceBootstrap.errorCode,
           })
-      openDesignHostChannel = selectOpenDesignHostChannel(
-        openDesignDevelopmentBootstrap,
-        openDesignOfficialBootstrap,
-      )
-      if (openDesignDevelopmentBootstrap.status === 'disabled' && openDesignHostChannel.status === 'not-ready') {
-        mainLog.info('OpenDesign official channel is not ready', { errorCode: openDesignHostChannel.errorCode })
+        }
+      } catch (error) {
+        mainLog.error('OpenDesign acceptance control surface is unavailable', {
+          errorType: error instanceof Error ? error.name : typeof error,
+        })
+        openDesignAcceptanceIpc?.dispose()
+        openDesignAcceptanceIpc = null
+        openDesignAcceptanceController = null
       }
+
+      try {
+        // Every preload receives one immediate availability reply. Invoke handlers
+        // remain absent unless every startup gate produced the fixed controller.
+        openDesignAcceptanceIpc = registerOpenDesignAcceptanceIpc(
+          ipcMain,
+          openDesignAcceptanceController ?? undefined,
+        )
+      } catch (error) {
+        mainLog.error('OpenDesign acceptance IPC registration was contained', {
+          errorType: error instanceof Error ? error.name : typeof error,
+        })
+        openDesignAcceptanceIpc?.dispose()
+        openDesignAcceptanceIpc = null
+        openDesignAcceptanceController = null
+        try {
+          // Preserve the normal-startup false reply even if gated handler setup failed.
+          openDesignAcceptanceIpc = registerOpenDesignAcceptanceIpc(ipcMain)
+        } catch (fallbackError) {
+          mainLog.error('OpenDesign acceptance availability reply is unavailable', {
+            errorType: fallbackError instanceof Error ? fallbackError.name : typeof fallbackError,
+          })
+        }
+      }
+
+      // Optional Module and acceptance bootstrap failures are contained before
+      // this point so they cannot prevent the primary Host window from opening.
+      await createInitialWindows()
       const developmentBundle = openDesignHostChannel.status === 'ready' && openDesignHostChannel.source === 'development'
         ? openDesignHostChannel.bundle
         : undefined
       const officialChannel = openDesignHostChannel.status === 'ready' && openDesignHostChannel.source === 'official'
         ? openDesignHostChannel.channel
         : undefined
+      const openDesignCompatibilityAuthority = await loadOpenDesignCompatibilityAuthority({
+        isPackaged: app.isPackaged,
+        resourcesPath: process.resourcesPath,
+        hostVersion: app.getVersion(),
+        platform: currentModulePlatform(),
+      })
+      if (app.isPackaged && openDesignCompatibilityAuthority.status === 'not-ready') {
+        // A missing or tampered rollback authority disables only the pinned
+        // 0.14.5 compatibility path. The primary Host and compatible modules stay available.
+        mainLog.warn('OpenDesign 0.14.5 compatibility authority is unavailable', {
+          errorCode: openDesignCompatibilityAuthority.errorCode,
+        })
+      }
+      const hostModuleSmokeRequested = isHostModuleCoordinatorSmokeRequested()
       try {
+        const markOpenDesignCoordinatorRecovered = openDesignAcceptanceRuntimeGate.beginRecovery()
         const moduleStorageRoot = resolveHostModuleStorageRoot({
           userDataRoot: app.getPath('userData'),
           smokeRoot: getHostModuleCoordinatorSmokeRoot(),
@@ -1116,6 +1230,7 @@ app.whenReady().then(async () => {
         moduleAgentWorkerRecovery = new ModuleAgentWorkerRecoveryController({
           moduleId: OPEN_DESIGN_MODULE_ID as ModuleId,
           getRuntime: () => hostModuleCoordinator,
+          mutationGate: openDesignMutationGate,
           isShuttingDown: () => moduleInfrastructureShuttingDown,
           protocolForVersion: (version) => selectHostAgentProtocolForModule({
             id: OPEN_DESIGN_MODULE_ID,
@@ -1153,13 +1268,12 @@ app.whenReady().then(async () => {
           onWorkerRecoveryNeeded: (request) => moduleAgentWorkerRecovery?.request(request),
         })
         const stopOpenDesignDirectly = async (moduleId: ModuleId, reason: 'host-close' | 'view-failure') => {
-          const runtime = hostModuleCoordinator
-          if (!runtime) throw new Error('OpenDesign coordinator is unavailable')
-          const result = await runtime.coordinator.stop({
+          await stopOpenDesignModuleWithSafety({
             moduleId,
             operationId: `open-design-${reason}-${Date.now().toString(36)}-${randomUUID()}`,
+            mutationGate: openDesignMutationGate,
+            getRuntime: () => hostModuleCoordinator ?? undefined,
           })
-          if (!result.ok) throw new Error('OpenDesign coordinator stop failed')
         }
         hostModuleCoordinator = createHostModuleCoordinator({
           root: moduleStorageRoot,
@@ -1172,6 +1286,9 @@ app.whenReady().then(async () => {
           moduleViewManager,
           hostWindow: () => windowManager?.getLastActiveWindow() ?? undefined,
           fetch: developmentBundle?.fetchAdapter,
+          registryCompatibilityExceptions: openDesignCompatibilityAuthority.status === 'ready'
+            ? [openDesignCompatibilityAuthority.compatibilityException]
+            : [],
           prepareModuleAgentLaunch: (context) => {
             const runtime = hostModuleAgentRuntime
             if (!runtime) throw new Error('Module Agent runtime is unavailable')
@@ -1196,9 +1313,20 @@ app.whenReady().then(async () => {
             mainLog.error('Module view failure cleanup failed', { moduleId })
           },
         })
-        await hostModuleCoordinator.coordinator.recover()
+        const coordinatorRecoveryLease = await openDesignMutationGate.acquireSafety()
+        try {
+          await hostModuleCoordinator.coordinator.recover()
+        } finally {
+          coordinatorRecoveryLease.release()
+        }
+        completeOpenDesignAcceptanceRecovery(
+          openDesignAcceptanceRuntimeGate,
+          markOpenDesignCoordinatorRecovered,
+          hostModuleSmokeRequested,
+        )
       } catch (error) {
-        if (isHostModuleCoordinatorSmokeRequested()) throw error
+        openDesignAcceptanceRuntimeGate.reset()
+        if (hostModuleSmokeRequested) throw error
         mainLog.error('Optional Module coordinator is unavailable', {
           errorType: error instanceof Error ? error.name : typeof error,
         })
@@ -1218,7 +1346,7 @@ app.whenReady().then(async () => {
         }
         hostModuleAgentRuntime = null
       }
-      if (isHostModuleCoordinatorSmokeRequested()) {
+      if (hostModuleSmokeRequested) {
         const hostWindow = windowManager?.getLastActiveWindow()
         const smokeRuntime = hostModuleCoordinator
         const smokeAgentRuntime = hostModuleAgentRuntime
@@ -1233,6 +1361,7 @@ app.whenReady().then(async () => {
           serverHost: embeddedServer.host,
           serverPort: embeddedServer.port,
           moduleAgentRuntime: smokeAgentRuntime,
+          mutationGate: openDesignMutationGate,
         })
         return
       }
@@ -1264,6 +1393,7 @@ app.whenReady().then(async () => {
           hostModuleCoordinator?.coordinator,
         ),
         host: hostAdapter,
+        mutationGate: openDesignMutationGate,
       })
       try {
         openDesignModuleIpc = registerOpenDesignModuleIpc(ipcMain, openDesignModuleController)
@@ -1415,11 +1545,15 @@ async function cleanupBeforeQuit(): Promise<void> {
   // Ensure Cmd+Q/app quit bypasses layered window close interception (Cmd+W behavior).
   windowManager?.setAppQuitting(true)
   moduleInfrastructureShuttingDown = true
+  openDesignAcceptanceRuntimeGate.close()
   moduleAgentWorkerRecovery?.dispose()
   await moduleAgentWorkerRecovery?.drain()
   moduleAgentWorkerRecovery = null
 
   setOpenDesignModuleEscapeHandler(null)
+  openDesignAcceptanceIpc?.dispose()
+  openDesignAcceptanceIpc = null
+  openDesignAcceptanceController = null
   openDesignModuleIpc?.dispose()
   openDesignModuleIpc = null
   openDesignModuleController?.dispose()

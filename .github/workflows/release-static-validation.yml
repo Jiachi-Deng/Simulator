@@ -66,6 +66,33 @@ jobs:
         run: >-
           ruby -e 'require "yaml"; ARGV.each { |path| YAML.safe_load(File.read(path), aliases: true) }' .github/workflows/engineering-rc.yml .github/workflows/open-design-production-input.yml .github/workflows/open-design-release.yml .github/workflows/open-design-acceptance-rollback.yml .github/workflows/release-static-validation.yml
 
+      - name: Validate embedded release workflow Bash
+        shell: bash
+        run: |
+          ruby <<'RUBY'
+          require "open3"
+          require "yaml"
+
+          paths = [
+            ".github/workflows/open-design-production-input.yml",
+            ".github/workflows/open-design-release.yml",
+            ".github/workflows/open-design-acceptance-rollback.yml",
+          ]
+          paths.each do |path|
+            workflow = YAML.safe_load(File.read(path), aliases: true)
+            workflow.fetch("jobs").each do |job_name, job|
+              job.fetch("steps", []).each do |step|
+                next unless step["shell"] == "bash" && step["run"].is_a?(String)
+
+                _stdout, stderr, status = Open3.capture3("bash", "-n", stdin_data: step.fetch("run"))
+                next if status.success?
+
+                abort("#{path}/#{job_name}/#{step.fetch("name", "unnamed")}: #{stderr}")
+              end
+            end
+          end
+          RUBY
+
       - name: Parse release shell scripts
         run: find scripts/release -type f -name '*.sh' -print0 | xargs -0 -r -n1 bash -n
 
