@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 import { Buffer } from "node:buffer"
 import { readFileSync, writeFileSync } from "node:fs"
 import { basename } from "node:path"
+import { TextDecoder } from "node:util"
 
 interface LockedPackage { name: string; version: string }
 interface PackagedFile { path: string; sha256: string }
@@ -17,6 +18,14 @@ function isSafePackagedPath(path: string): boolean {
     && !/[\u0000-\u001f\u007f]/u.test(path)
     && !path.split("/").some((part) => !part || part === "." || part === "..")
     && Buffer.from(path, "utf8").toString("utf8") === path
+}
+
+function decodePackagedFileChecksums(content: Uint8Array): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(content)
+  } catch {
+    throw new Error("Packaged file checksums must be valid UTF-8")
+  }
 }
 
 export function packagesFromBunLock(content: string): LockedPackage[] {
@@ -157,7 +166,7 @@ if (import.meta.main) {
   }
   const spdx = generateSpdx(
     readFileSync(lockPath, "utf8"),
-    readFileSync(inventoryPath, "utf8"),
+    decodePackagedFileChecksums(readFileSync(inventoryPath)),
     readFileSync(packageVerificationCodePath, "utf8"),
     version,
     sourceSha,

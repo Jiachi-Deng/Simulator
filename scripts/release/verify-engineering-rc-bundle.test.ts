@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test"
+import { Buffer } from "node:buffer"
 import { createHash } from "node:crypto"
 import { mkdirSync, readFileSync, rmSync, symlinkSync, truncateSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
@@ -178,6 +179,24 @@ describe("Engineering RC bundle closure", () => {
   test("rejects UTF-16-sorted paths that are not in canonical UTF-8 byte order", async () => {
     makeBundle("pre", ["Contents/\u{1f600}.txt", "Contents/\u{e000}.txt"])
     await expect(verify("pre")).rejects.toThrow("canonical UTF-8 byte order")
+  })
+
+  test("rejects invalid raw UTF-8 in packaged-files.sha256", async () => {
+    makeBundle("pre")
+    writeFileSync(join(root, "packaged-files.sha256"), Buffer.concat([
+      Buffer.from(`${"c".repeat(64)}  Contents/`, "utf8"),
+      Buffer.from([0x80]),
+      Buffer.from("\n", "utf8"),
+    ]))
+    await expect(verify("pre")).rejects.toThrow("packaged-files.sha256 must be valid UTF-8")
+
+    makeBundle("pre")
+    const canonical = readFileSync(join(root, "packaged-files.sha256"))
+    writeFileSync(join(root, "packaged-files.sha256"), Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      canonical,
+    ]))
+    await expect(verify("pre")).rejects.toThrow("packaged-files.sha256 contains an unsafe entry")
   })
 
   test("rejects an unexpected artifact member", async () => {

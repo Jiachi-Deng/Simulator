@@ -2,6 +2,7 @@ import { createHash } from "node:crypto"
 import { Buffer } from "node:buffer"
 import { createReadStream, lstatSync, readFileSync, readdirSync, realpathSync, statSync } from "node:fs"
 import { basename, join, relative, resolve } from "node:path"
+import { TextDecoder } from "node:util"
 
 export type EngineeringRcBundlePhase = "pre" | "final"
 
@@ -37,6 +38,15 @@ const MAXIMUM_TOTAL_BYTES = 3 * 1024 * 1024 * 1024
 
 function compareUtf8Bytes(left: string, right: string): number {
   return Buffer.compare(Buffer.from(left, "utf8"), Buffer.from(right, "utf8"))
+}
+
+function readStrictUtf8(path: string, label: string): string {
+  const content = readFileSync(path)
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(content)
+  } catch {
+    throw new Error(`${label} must be valid UTF-8`)
+  }
 }
 
 interface VerificationOptions {
@@ -229,7 +239,7 @@ function assertSpdx(root: string, options: VerificationOptions): void {
     throw new Error("SPDX Simulator package authority is invalid")
   }
 
-  const checksumsContent = readFileSync(join(root, "packaged-files.sha256"), "utf8")
+  const checksumsContent = readStrictUtf8(join(root, "packaged-files.sha256"), "packaged-files.sha256")
   if (!checksumsContent.endsWith("\n") || checksumsContent.includes("\r")) {
     throw new Error("packaged-files.sha256 must be canonical LF-terminated text")
   }
