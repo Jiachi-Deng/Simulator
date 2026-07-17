@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test"
-import { readFileSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
 import { EMBEDDED_BUILD_VARIABLES, embeddedBuildValue } from "./build-environment"
 
@@ -38,6 +38,41 @@ describe("release operations policy", () => {
     expect(packageWorkflow).toContain('verify-packaged-electron-identity.ts "$app_root" "$product_version"')
     expect(packageWorkflow).toContain('"$app_root" "Contents/MacOS/$executable_name"')
     expect(packageWorkflow).toContain(".requiredArm64MachOFileType")
+  })
+
+  test("the pull-request package gate can only use the arm64 ad-hoc signing fallback", () => {
+    const buildScript = read("apps/electron/scripts/build-dmg.sh")
+    const packageWorkflow = read(".github/workflows/package-macos.yml")
+    const buildStepStart = packageWorkflow.indexOf("- name: Build unsigned arm64 package")
+    const verifyStepStart = packageWorkflow.indexOf("- name: Verify artifact and architecture")
+
+    expect(buildStepStart).toBeGreaterThan(-1)
+    expect(verifyStepStart).toBeGreaterThan(buildStepStart)
+    const buildStep = packageWorkflow.slice(buildStepStart, verifyStepStart)
+    expect(buildStep).toContain('CSC_FOR_PULL_REQUEST: "true"')
+    expect(buildStep).toContain('CSC_IDENTITY_AUTO_DISCOVERY: "false"')
+    expect(packageWorkflow.match(/CSC_FOR_PULL_REQUEST/g)).toHaveLength(1)
+    expect(buildStep).toContain("electron:dist:unsigned:mac:arm64")
+    expect(buildScript).toContain("export CSC_IDENTITY_AUTO_DISCOVERY=false")
+    expect(buildScript).toContain("unset CSC_LINK CSC_KEY_PASSWORD CSC_NAME CSC_KEYCHAIN")
+    expect(buildScript).toContain("unset CSC_INSTALLER_LINK CSC_INSTALLER_KEY_PASSWORD")
+    expect(buildScript).toContain(
+      "unset APPLE_SIGNING_IDENTITY APPLE_ID APPLE_TEAM_ID APPLE_APP_SPECIFIC_PASSWORD",
+    )
+    expect(buildScript).toContain("unset APPLE_API_KEY APPLE_API_KEY_ID APPLE_API_ISSUER")
+    expect(buildScript).toContain("unset APPLE_KEYCHAIN APPLE_KEYCHAIN_PROFILE")
+    expect(packageWorkflow).toContain(
+      "all(.objects[]; .kind == \"adhoc\" and .strictVerification.exitCode == 0)",
+    )
+
+    expect(packageWorkflow).toContain("permissions:\n  contents: read")
+    expect(packageWorkflow).toContain("persist-credentials: false")
+    expect(packageWorkflow).not.toContain("pull_request_target")
+    expect(packageWorkflow).not.toContain("environment:")
+    expect(packageWorkflow).not.toContain("id-token: write")
+    expect(packageWorkflow).not.toContain("secrets.")
+    expect(packageWorkflow).toContain('- "apps/electron/electron-builder.env"')
+    expect(existsSync(join(root, "apps/electron/electron-builder.env"))).toBe(false)
   })
 
   test("public policy documents remain discoverable and contain no invented contact", () => {
