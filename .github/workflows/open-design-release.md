@@ -283,6 +283,13 @@ or local file paths:
    survival, global hidden/transient/quarantined Session cleanup, and descendant
    process cleanup. Its artifact is an exact 150-file closure named
    `open-design-m1-machine-evidence`.
+   If a case fails, the successful closure is never created. The failed run may
+   instead upload the separately validated two-file
+   `open-design-m1-machine-first-failure` capsule. It contains only fixed
+   run/Host identity, stack, case, phase, ordered counters and hashes; it never
+   contains prompts, account data, environment values, raw logs, transcripts or
+   arbitrary exception text. This diagnostic capsule cannot satisfy any
+   downstream acceptance input, and the workflow remains failed after upload.
 2. `open-design-m1-visual-attestation.yml` has no provider credential or model
    execution surface. After the product owner has inspected the 20 captured
    Preview images, it authenticates the exact machine artifact and accepts only

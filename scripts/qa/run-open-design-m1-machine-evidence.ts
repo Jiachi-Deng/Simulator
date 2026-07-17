@@ -8,7 +8,6 @@ import {
   chmod,
   lstat,
   mkdir,
-  mkdtemp,
   readFile,
   readdir,
   realpath,
@@ -47,6 +46,13 @@ import {
   type OpenDesignM1Stack,
   validateOpenDesignM1MachineEvidence,
 } from './open-design-m1-machine-evidence'
+import {
+  createOpenDesignM1BatchProgress,
+  preserveOpenDesignM1FirstFailure,
+  runTrackedOpenDesignM1Case,
+  type OpenDesignM1CaseFailurePhase,
+  type OpenDesignM1FirstFailureAuthority,
+} from './open-design-m1-machine-first-failure'
 
 const REAL_OPT_IN = 'packaged-open-design-direct-observation'
 const CONFIRMATION = 'RUN_OPEN_DESIGN_M1_40_PAID_TURNS_STOP_ON_FIRST_FAILURE'
@@ -1087,25 +1093,36 @@ async function executeCase(options: {
   hostPid: number
   moduleArchiveSha256: string
   turnOrdinal: number
+  onPhase: (phase: OpenDesignM1CaseFailurePhase) => void
 }): Promise<void> {
   const { stack, testCase, origin, moduleDataRoot, seedRoot, outputRoot } = options
   const startedAt = Date.now()
+  options.onPhase('project.create')
   const project = await createProject(origin, testCase)
+  options.onPhase('project.locate')
   const workspace = await findProjectDirectory(moduleDataRoot, project.projectId)
+  options.onPhase('seed.verify')
   const seed = join(seedRoot, `${testCase.id}.tar.gz`)
   if (sha256(await readFile(seed)) !== testCase.seedArchiveSha256) throw new Error('Seed archive authority mismatch')
+  options.onPhase('seed.extract')
   await tar.x({ cwd: workspace, file: seed, strip: 1, preserveOwner: false })
+  options.onPhase('blackout.arm')
   const blackoutEvidenceId = stack === 'new'
     ? await armExternalBlackoutProxy(options.craftCdp, testCase.id, options.turnOrdinal)
     : undefined
+  options.onPhase('run.start')
   const runId = await startRun(origin, project.projectId, project.conversationId, testCase.prompt)
+  options.onPhase('run.await-terminal')
   const terminal = await waitForTerminal(origin, runId)
   const terminalObservedAt = terminal.observedAt
+  options.onPhase('runtime.cleanup')
   const cleanup = await requireRuntimeCleanup(options.craftCdp, 5_000)
+  options.onPhase('events.read')
   const rawEvents = await rawRunEvents(terminal.status, moduleDataRoot)
   let blackout: JsonObject
   let ledger: Array<JsonObject & { sequence: number }>
   if (stack === 'new') {
+    options.onPhase('blackout.collect')
     if (!blackoutEvidenceId) throw new Error('External blackout evidence ID is missing')
     const proxyEvidence = await waitFor('terminal Host blackout evidence', async () => {
       try {
@@ -1150,23 +1167,29 @@ async function executeCase(options: {
       replaySequenceStart: null, required: false, startedAt: null,
     }
   }
+  options.onPhase('events.seal')
   const eventsPath = `events/${stack}/${testCase.id}.jsonl`
   await mkdir(dirname(join(outputRoot, eventsPath)), { recursive: true, mode: 0o700 })
   await writeFile(join(outputRoot, eventsPath), `${ledger.map((event) => JSON.stringify(event)).join('\n')}\n`, { mode: 0o600 })
 
+  options.onPhase('preview.verify')
   const previewUrl = presentationUrl(rawEvents, testCase.previewRoute)
   await requirePreviewHttp200(previewUrl)
+  options.onPhase('workspace.verify')
   const workspaceValue = await workspaceManifest(workspace, stack, testCase)
   const workspacePath = `workspace/${stack}/${testCase.id}.json`
   await writeCanonical(outputRoot, workspacePath, workspaceValue)
   const workspaceManifestSha256 = sha256(await readFile(join(outputRoot, workspacePath)))
   if (stack === 'new') {
+    options.onPhase('preview.capture')
     const screenshot = await capturePreviewUrlScreenshot(previewUrl)
     const screenshotPath = `previews/new/${testCase.id}.png`
     await mkdir(dirname(join(outputRoot, screenshotPath)), { recursive: true, mode: 0o700 })
     await writeFile(join(outputRoot, screenshotPath), screenshot, { mode: 0o600 })
   }
+  options.onPhase('craft.verify')
   const craft = await craftSnapshot(options.craftCdp, options.hostPid)
+  options.onPhase('shim.reap')
   const reapStartedAt = Date.now()
   await waitFor('Shim process cleanup', async () => (await shimProcessCount()) === 0 ? true : false, 10_000)
     .catch(() => { throw new Error('Shim process remained after Turn') })
@@ -1184,6 +1207,7 @@ async function executeCase(options: {
   if (stateSplitCount !== 0) throw new Error('Module and Craft state observations are split')
   const completedAt = Date.now()
   const caseHash = OPEN_DESIGN_M1_CASE_HASHES.find((item) => item.id === testCase.id)!
+  options.onPhase('record.seal')
   await writeCanonical(outputRoot, `records/${stack}/${testCase.id}.json`, {
     attemptOrdinal: 1,
     blackout,
@@ -1362,6 +1386,8 @@ async function main(): Promise<void> {
     || requiredEnv('GITHUB_RUN_ATTEMPT') !== '1') throw new TypeError('Machine producer authorization is invalid')
   const runnerTemp = await realpath(requiredEnv('RUNNER_TEMP'))
   const outputRoot = await isolatedPath('M1_EVIDENCE_OUTPUT_ROOT', runnerTemp)
+  const failureOutputRoot = await isolatedPath('M1_FIRST_FAILURE_OUTPUT_ROOT', runnerTemp)
+  const staging = await isolatedPath('M1_MACHINE_WORK_ROOT', runnerTemp)
   const appBundle = await isolatedPath('M1_PACKAGED_APP_PATH', runnerTemp)
   const caseArtifactRoot = await isolatedPath('M1_CASE_ARTIFACT_ROOT', runnerTemp)
   const seedRoot = join(caseArtifactRoot, 'seeds')
@@ -1391,7 +1417,7 @@ async function main(): Promise<void> {
     throw new Error('RC Catalog does not advance LKG authority')
   }
   const requiredCi = await requiredCiEvidence(hostHeadSha, token)
-  const staging = await mkdtemp(join(runnerTemp, 'open-design-m1-machine-staging-'))
+  await mkdir(staging, { mode: 0o700 })
   await chmod(staging, 0o700)
   await preflightExternalBlackoutProxyChild(blackoutProxyChild, staging)
   const userData = resolve(requiredEnv('M1_PACKAGED_PROFILE_ROOT'))
@@ -1429,11 +1455,21 @@ async function main(): Promise<void> {
     })
   }
   const artifactRoot = join(staging, 'artifact')
+  const failureArtifactRoot = join(staging, 'first-failure')
   await mkdir(artifactRoot, { mode: 0o700 })
   const batchStart = Date.now()
+  const batchProgress = createOpenDesignM1BatchProgress()
+  const failureAuthority: OpenDesignM1FirstFailureAuthority = {
+    hostHeadSha: authority.hostHeadSha,
+    producerRunId: authority.producerRunId,
+    producerRunAttempt: authority.producerRunAttempt,
+    hostBuildRunId: authority.hostBuildRunId,
+    hostArtifactSha256: authority.hostArtifactSha256,
+  }
   let app = await appLaunch(executable, userData, blackoutProxyChild)
   let craftCdp: CdpClient | undefined
   let moduleCdp: CdpClient | undefined
+  let caseFailedAt: number | undefined
   try {
     const craft = await craftTarget()
     craftCdp = new CdpClient(craft.webSocketDebuggerUrl)
@@ -1458,11 +1494,14 @@ async function main(): Promise<void> {
     const moduleDataRoot = join(userData, 'optional-modules', 'module-data', 'org.simulator.open-design')
     await realpath(moduleDataRoot)
     await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES, craftCdp, async (testCase, index) => {
-      await executeCase({
-        stack: 'old', testCase, origin, moduleDataRoot, seedRoot, outputRoot: artifactRoot,
-        craftCdp: craftCdp!, hostPid: app.pid,
-        moduleArchiveSha256: authority.lkg.archiveSha256,
-        turnOrdinal: index + 1,
+      await runTrackedOpenDesignM1Case(batchProgress, 'old', testCase, index, async (onPhase) => {
+        await executeCase({
+          stack: 'old', testCase, origin, moduleDataRoot, seedRoot, outputRoot: artifactRoot,
+          craftCdp: craftCdp!, hostPid: app.pid,
+          moduleArchiveSha256: authority.lkg.archiveSha256,
+          turnOrdinal: index + 1,
+          onPhase,
+        })
       })
     })
     state = readyAcceptanceState(
@@ -1477,11 +1516,14 @@ async function main(): Promise<void> {
     origin = new URL(module.url).origin
     await requireOpenDesignHostRuntime(origin)
     await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES, craftCdp, async (testCase, index) => {
-      await executeCase({
-        stack: 'new', testCase, origin, moduleDataRoot, seedRoot, outputRoot: artifactRoot,
-        craftCdp: craftCdp!, hostPid: app.pid,
-        moduleArchiveSha256: authority.rc.archiveSha256,
-        turnOrdinal: index + 1,
+      await runTrackedOpenDesignM1Case(batchProgress, 'new', testCase, index, async (onPhase) => {
+        await executeCase({
+          stack: 'new', testCase, origin, moduleDataRoot, seedRoot, outputRoot: artifactRoot,
+          craftCdp: craftCdp!, hostPid: app.pid,
+          moduleArchiveSha256: authority.rc.archiveSha256,
+          turnOrdinal: index + 1,
+          onPhase,
+        })
       })
     })
     readyAcceptanceState(
@@ -1538,11 +1580,24 @@ async function main(): Promise<void> {
       objectPath: result.objectPath, sha256: result.sha256, fileCount: result.fileCount,
       totalBytes: result.totalBytes, batchDigest: result.batchDigest,
     })}`)
+  } catch (error) {
+    if (batchProgress.current) caseFailedAt = Date.now()
+    throw error
   } finally {
-    moduleCdp?.close()
-    craftCdp?.close()
+    try { moduleCdp?.close() } catch { /* cleanup only */ }
+    try { craftCdp?.close() } catch { /* cleanup only */ }
     try { await stopApp(app) } catch { /* cleanup only */ }
-    if (artifactRoot !== outputRoot) await rm(staging, { recursive: true, force: true })
+    const firstFailure = batchProgress.current
+    if (caseFailedAt !== undefined && firstFailure) {
+      await preserveOpenDesignM1FirstFailure(staging, failureArtifactRoot, failureOutputRoot, {
+        authority: failureAuthority,
+        batchStartedAt: batchStart,
+        failedAt: caseFailedAt,
+        progress: { completedCaseCount: batchProgress.completedCaseCount, current: firstFailure },
+      })
+    } else {
+      await rm(staging, { recursive: true, force: true })
+    }
   }
 }
 

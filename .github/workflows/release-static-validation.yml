@@ -19,6 +19,7 @@ on:
       - scripts/qa/open-design-rc-acceptance-evidence.test.ts
       - scripts/qa/open-design-m1-*.ts
       - scripts/qa/run-open-design-m1-machine-evidence.ts
+      - scripts/qa/verify-open-design-m1-machine-first-failure.ts
       - scripts/build-policy.ts
       - scripts/build-policy.test.ts
       - scripts/build-environment.ts
@@ -73,6 +74,7 @@ jobs:
       - name: Run release unit tests
         run: >-
           bun test scripts/release/*.test.ts
+          scripts/qa/open-design-m1-machine-first-failure.test.ts
           scripts/qa/open-design-m1-machine-evidence.test.ts
           scripts/qa/open-design-m1-visual-attestation.test.ts
           scripts/qa/open-design-m1-final-evidence.test.ts

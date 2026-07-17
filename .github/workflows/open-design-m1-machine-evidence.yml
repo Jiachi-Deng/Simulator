@@ -283,20 +283,71 @@ jobs:
           printf 'M1_BLACKOUT_PROXY_SCRIPT_PATH=%s\n' "$proxy_script" >> "$GITHUB_ENV"
 
       - name: Run 20 LKG and 20 RC real Tasks with direct observation
+        id: machine_producer
+        continue-on-error: true
         shell: bash
         run: |
           set -euo pipefail
           umask 077
           output="$RUNNER_TEMP/open-design-m1-machine-evidence"
-          test ! -e "$output"
+          failure_output="$RUNNER_TEMP/open-design-m1-machine-first-failure"
+          work_root="$RUNNER_TEMP/open-design-m1-machine-work-$GITHUB_RUN_ID"
           printf 'M1_EVIDENCE_OUTPUT_ROOT=%s\n' "$output" >> "$GITHUB_ENV"
-          M1_EVIDENCE_OUTPUT_ROOT="$output" bun scripts/qa/run-open-design-m1-machine-evidence.ts \
+          printf 'M1_FIRST_FAILURE_OUTPUT_ROOT=%s\n' "$failure_output" >> "$GITHUB_ENV"
+          printf 'M1_MACHINE_WORK_ROOT=%s\n' "$work_root" >> "$GITHUB_ENV"
+          test ! -e "$output"
+          test ! -e "$failure_output"
+          test ! -e "$work_root"
+          set +e
+          M1_EVIDENCE_OUTPUT_ROOT="$output" \
+            M1_FIRST_FAILURE_OUTPUT_ROOT="$failure_output" \
+            M1_MACHINE_WORK_ROOT="$work_root" \
+            bun scripts/qa/run-open-design-m1-machine-evidence.ts \
             > "$RUNNER_TEMP/open-design-m1-machine-result.json"
+          producer_status=$?
+          set -e
+          failure_capsule=false
+          if [ -d "$failure_output" ]; then failure_capsule=true; fi
+          printf 'failure_capsule=%s\n' "$failure_capsule" >> "$GITHUB_OUTPUT"
+          if [ "$producer_status" -ne 0 ]; then exit "$producer_status"; fi
           test "$(jq -er .status "$RUNNER_TEMP/open-design-m1-machine-result.json")" = passed
           test "$(jq -er .artifactName "$RUNNER_TEMP/open-design-m1-machine-result.json")" = open-design-m1-machine-evidence
           test "$(jq -er .fileCount "$RUNNER_TEMP/open-design-m1-machine-result.json")" = 150
 
+      - name: Recheck bounded first-failure capsule
+        id: first_failure_verifier
+        if: ${{ always() && steps.machine_producer.outcome == 'failure' && steps.machine_producer.outputs.failure_capsule == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          bun_path=$(realpath "$(command -v bun)")
+          test -x "$bun_path"
+          env -i \
+            GITHUB_SHA="$GITHUB_SHA" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" \
+            GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
+            HOST_BUILD_RUN_ID="$HOST_BUILD_RUN_ID" \
+            HOST_ARTIFACT_SHA256="$HOST_ARTIFACT_SHA256" \
+            "$bun_path" scripts/qa/verify-open-design-m1-machine-first-failure.ts \
+            "$M1_FIRST_FAILURE_OUTPUT_ROOT" \
+            > "$RUNNER_TEMP/open-design-m1-machine-first-failure-result.json"
+          test "$(jq -er .status "$RUNNER_TEMP/open-design-m1-machine-first-failure-result.json")" = failed
+          test "$(jq -er .artifactName "$RUNNER_TEMP/open-design-m1-machine-first-failure-result.json")" = open-design-m1-machine-first-failure
+          test "$(jq -er .fileCount "$RUNNER_TEMP/open-design-m1-machine-first-failure-result.json")" = 2
+          test "$(jq -er .totalBytes "$RUNNER_TEMP/open-design-m1-machine-first-failure-result.json")" -le 32768
+
+      - name: Upload bounded first-failure capsule
+        if: ${{ always() && steps.machine_producer.outcome == 'failure' && steps.machine_producer.outputs.failure_capsule == 'true' && steps.first_failure_verifier.outcome == 'success' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: open-design-m1-machine-first-failure
+          path: ${{ env.M1_FIRST_FAILURE_OUTPUT_ROOT }}/
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Recheck sealed artifact inventory
+        if: ${{ steps.machine_producer.outcome == 'success' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -310,6 +361,7 @@ jobs:
             "$manifest_sha" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload sealed machine evidence
+        if: ${{ steps.machine_producer.outcome == 'success' }}
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: open-design-m1-machine-evidence
@@ -327,6 +379,17 @@ jobs:
             "$RUNNER_TEMP/open-design-m1-host-bundle.zip" \
             "$RUNNER_TEMP/open-design-m1-mount" \
             "$RUNNER_TEMP/open-design-m1-packaged" \
-            "$RUNNER_TEMP/open-design-m1-cases"; do
+            "$RUNNER_TEMP/open-design-m1-cases" \
+            "${M1_MACHINE_WORK_ROOT:-}" \
+            "${M1_EVIDENCE_OUTPUT_ROOT:-}" \
+            "${M1_FIRST_FAILURE_OUTPUT_ROOT:-}" \
+            "$RUNNER_TEMP/open-design-m1-machine-result.json" \
+            "$RUNNER_TEMP/open-design-m1-machine-first-failure-result.json"; do
+            if [ -z "$path" ]; then continue; fi
             if [ -e "$path" ]; then rm -rf -- "$path"; fi
           done
+
+      - name: Fail the stopped batch after preserving first-failure evidence
+        if: ${{ always() && steps.machine_producer.outcome == 'failure' }}
+        shell: bash
+        run: exit 1
