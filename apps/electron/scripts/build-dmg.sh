@@ -101,29 +101,28 @@ echo "Installing dependencies..."
 cd "$ROOT_DIR"
 bun install --frozen-lockfile
 
-# 3. Download Bun binary with checksum verification
-echo "Downloading Bun ${BUN_VERSION} for darwin-${ARCH}..."
-mkdir -p "$ELECTRON_DIR/vendor/bun"
-BUN_DOWNLOAD="bun-darwin-$([ "$ARCH" = "arm64" ] && echo "aarch64" || echo "x64")"
-
-# Create temp directory to avoid race conditions
-TEMP_DIR=$(mktemp -d)
-trap "rm -rf $TEMP_DIR" EXIT
-
-# Download binary and checksums
-curl -fSL "https://github.com/oven-sh/bun/releases/download/${BUN_VERSION}/${BUN_DOWNLOAD}.zip" -o "$TEMP_DIR/${BUN_DOWNLOAD}.zip"
-curl -fSL "https://github.com/oven-sh/bun/releases/download/${BUN_VERSION}/SHASUMS256.txt" -o "$TEMP_DIR/SHASUMS256.txt"
-
-# Verify checksum
-echo "Verifying checksum..."
-cd "$TEMP_DIR"
-grep "${BUN_DOWNLOAD}.zip" SHASUMS256.txt | shasum -a 256 -c -
-cd - > /dev/null
-
-# Extract and install
-unzip -o "$TEMP_DIR/${BUN_DOWNLOAD}.zip" -d "$TEMP_DIR"
-cp "$TEMP_DIR/${BUN_DOWNLOAD}/bun" "$ELECTRON_DIR/vendor/bun/"
-chmod +x "$ELECTRON_DIR/vendor/bun/bun"
+# 3. Stage packaged runtimes. macOS arm64 is the supported Engineering RC
+# target, so both Bun and uv are bound to repository-pinned transport and raw
+# binary SHA-256 trust anchors. x64 retains the existing compatibility path and
+# is not an M1 release target.
+if [ "$ARCH" = "arm64" ]; then
+    "$ROOT_DIR/scripts/release/stage-pinned-macos-arm64-runtimes.sh"
+else
+    echo "Downloading Bun ${BUN_VERSION} for darwin-${ARCH}..."
+    mkdir -p "$ELECTRON_DIR/vendor/bun"
+    BUN_DOWNLOAD="bun-darwin-x64"
+    TEMP_DIR=$(mktemp -d)
+    trap 'rm -rf "$TEMP_DIR"' EXIT
+    curl -fSL "https://github.com/oven-sh/bun/releases/download/${BUN_VERSION}/${BUN_DOWNLOAD}.zip" -o "$TEMP_DIR/${BUN_DOWNLOAD}.zip"
+    curl -fSL "https://github.com/oven-sh/bun/releases/download/${BUN_VERSION}/SHASUMS256.txt" -o "$TEMP_DIR/SHASUMS256.txt"
+    (
+        cd "$TEMP_DIR"
+        grep "${BUN_DOWNLOAD}.zip" SHASUMS256.txt | shasum -a 256 -c -
+    )
+    unzip -o "$TEMP_DIR/${BUN_DOWNLOAD}.zip" -d "$TEMP_DIR"
+    cp "$TEMP_DIR/${BUN_DOWNLOAD}/bun" "$ELECTRON_DIR/vendor/bun/"
+    chmod +x "$ELECTRON_DIR/vendor/bun/bun"
+fi
 
 # 4. Copy SDK from root node_modules (monorepo hoisting)
 # Note: The SDK is hoisted to root node_modules by the package manager.
@@ -286,6 +285,9 @@ fi
 require_path "$APP_ROOT" "app bundle" "electron-builder did not create the expected app."
 bun "$ELECTRON_DIR/scripts/validate-assets.ts" --packaged-app "$APP_ROOT"
 bun "$ROOT_DIR/scripts/packaged-server-resources.ts" --app "$APP_ROOT"
+if [ "$ARCH" = "arm64" ]; then
+    "$ROOT_DIR/scripts/release/verify-packaged-macos-runtimes.sh" "$APP_ROOT"
+fi
 
 if [ "$UNSIGNED" = true ]; then
     bun "$ROOT_DIR/scripts/release/verify-public-build-privacy.ts" \

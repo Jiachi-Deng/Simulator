@@ -26,15 +26,21 @@ describe("release static validation workflow", () => {
   })
 
   test("only runs static tests, YAML, shell, and diff checks", () => {
+    const parsed = Bun.YAML.parse(workflow) as Record<string, any>
+    const bashValidation = parsed.jobs["release-static-validation"].steps.find(
+      (candidate: Record<string, any>) => candidate.name === "Validate embedded release workflow Bash",
+    ).run
     expect(workflow).toContain("bun test scripts/release/*.test.ts")
     expect(workflow).toContain("YAML.safe_load(File.read")
     expect(workflow).toContain("Validate embedded release workflow Bash")
     expect(workflow).toContain('Open3.capture3("bash", "-n"')
     expect(workflow).toContain("bash -n")
+    expect(workflow).toContain('shell == "bash" || (shell.nil? && !runner.include?("windows"))')
     expect(workflow).toContain("git diff --check")
     expect(workflow).not.toContain("electron:dist")
     expect(workflow).not.toContain("actions/attest")
     expect(workflow).not.toContain("actions/upload-artifact")
+    expect(bashValidation).toContain('".github/workflows/engineering-rc.yml"')
   })
 
   test("checks out read-only authority without persisting the Actions token", () => {

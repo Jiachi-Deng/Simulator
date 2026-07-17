@@ -6,6 +6,7 @@ on:
       - ".github/workflows/package-macos.yml"
       - "apps/electron/electron-builder.yml"
       - "apps/electron/electron-builder.env"
+      - "apps/electron/build/entitlements.mac.plist"
       - "apps/electron/scripts/build-dmg.sh"
       - "apps/electron/scripts/afterPack.cjs"
       - "apps/electron/resources/**"
@@ -16,6 +17,8 @@ on:
       - "scripts/release/verify-and-bundle-macos.sh"
       - "scripts/release/verify-macos-signatures.ts"
       - "scripts/release/verify-packaged-electron-identity.ts"
+      - "scripts/release/stage-pinned-macos-arm64-runtimes.sh"
+      - "scripts/release/verify-packaged-macos-runtimes.sh"
       - "scripts/release/verify-public-build-privacy.ts"
       - "scripts/release/write-app-inventory.py"
       - "package.json"
@@ -119,6 +122,7 @@ jobs:
           product_version=$(node -p "require('./apps/electron/package.json').version")
           executable_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_root/Contents/Info.plist")
           bun scripts/release/verify-packaged-electron-identity.ts "$app_root" "$product_version"
+          scripts/release/verify-packaged-macos-runtimes.sh "$app_root"
           bun scripts/release/verify-macos-signatures.ts \
             "$app_root" "Contents/MacOS/$executable_name" \
             > apps/electron/release/package-signatures.json

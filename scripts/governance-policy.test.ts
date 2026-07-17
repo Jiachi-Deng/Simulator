@@ -40,6 +40,8 @@ describe("governance documentation contract", () => {
     expect(policy).toContain("通过 catalog 分发和安装的 Module artifact 拥有独立 SemVer")
     expect(policy).toContain("`packages/module-*` 实现 package")
     expect(policy).toContain("production updater disabled")
+    expect(policy).toContain("Attestation、最终 Artifact、tag、GitHub Release 和 update-feed 是非原子的独立发布边界")
+    expect(policy).toContain("成功的 run ID/attempt")
     expect(rcValidator).toContain("origin/main tip")
     expect(rcValidator).toContain("-rc\\.([1-9]\\d*)")
     expect(operations).toContain("必须从受保护的 `origin/main` tip 构建")

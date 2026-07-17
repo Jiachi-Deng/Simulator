@@ -36,6 +36,8 @@ RC label 必须使用 `X.Y.Z-rc.N`，且其 `X.Y.Z` 必须与 Host product versi
 
 当前 workflow 只生成工程验证 artifact，不会自动创建 tag、GitHub Release、Module prerelease 或修改稳定 official channel。正式发布仍受签名、公证、托管、OpenDesign 独立发布审批和 Go/No-Go 决策约束。
 
+Attestation、最终 Artifact、tag、GitHub Release 和 update-feed 是非原子的独立发布边界；重试可以为同一 digest 产生多个有效 attestation。Engineering RC 的身份必须同时绑定 RC label、source SHA、成功的 run ID/attempt，以及该 run 最终 Artifact 的 ID 和 service digest，不能由 attestation 是否存在或是否唯一决定。
+
 ## Tags 与 Release
 
 候选 tag 使用 `vX.Y.Z-rc.N`，稳定 tag 使用 `vX.Y.Z`。tag 必须指向已经完成 Required CI 的 commit，并且创建后不可移动。GitHub Release、更新 metadata 和公开下载必须引用已经验证的同一 artifact digest。

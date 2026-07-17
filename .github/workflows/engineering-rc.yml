@@ -12,55 +12,75 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: read
-  id-token: write
-  attestations: write
-  artifact-metadata: write
+permissions: {}
 
 concurrency:
   group: engineering-rc-${{ inputs.rc_label }}-${{ inputs.source_sha }}
   cancel-in-progress: false
 
 jobs:
-  unsigned-arm64:
-    name: Unsigned macOS arm64 engineering RC
+  build-unsigned-arm64:
+    name: Build unsigned macOS arm64 engineering RC
     runs-on: macos-15
     timeout-minutes: 60
+    permissions: {}
+    outputs:
+      input_artifact_id: ${{ steps.upload_input.outputs.artifact-id }}
+      input_artifact_digest: ${{ steps.upload_input.outputs.artifact-digest }}
+      input_dmg_sha256: ${{ steps.stage_input.outputs.dmg_sha256 }}
+      input_zip_sha256: ${{ steps.stage_input.outputs.zip_sha256 }}
+      input_dmg_bytes: ${{ steps.stage_input.outputs.dmg_bytes }}
+      input_zip_bytes: ${{ steps.stage_input.outputs.zip_bytes }}
     env:
-      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RC_LABEL: ${{ inputs.rc_label }}
       SOURCE_SHA: ${{ inputs.source_sha }}
       SIMULATOR_DISABLE_UPDATES: "1"
+      TMPDIR: ${{ runner.temp }}
 
     steps:
-      - name: Checkout exact source SHA
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-        with:
-          ref: ${{ inputs.source_sha }}
-          fetch-depth: 0
-
-      - name: Fetch and verify origin main
+      - name: Checkout exact public main without a token
         shell: bash
         run: |
           set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "Jiachi-Deng/Simulator"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_SHA" = "$SOURCE_SHA"
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "source_sha must be a full lowercase commit SHA"; exit 1; }
-          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          test -z "$(find . -mindepth 1 -maxdepth 1 -print -quit)"
+          git init .
+          git remote add origin https://github.com/Jiachi-Deng/Simulator.git
+          git fetch --no-tags --depth=1 origin "+refs/heads/main:refs/remotes/origin/main"
           git fetch --tags origin
+          git checkout --detach "$SOURCE_SHA"
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
-          git merge-base --is-ancestor "$SOURCE_SHA" refs/remotes/origin/main
-          test "$SOURCE_SHA" = "$(git rev-parse refs/remotes/origin/main)"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_SHA"
 
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
-        with:
-          bun-version: "1.3.10"
+      - name: Install digest-pinned Bun
+        run: scripts/release/install-pinned-bun-macos.sh
 
-      - name: Install uv
-        uses: astral-sh/setup-uv@11f9893b081a58869d3b5fccaea48c9e9e46f990 # v8.3.2
-        with:
-          version: "0.11.28"
-          enable-cache: false
+      - name: Stage digest-pinned packaged runtime references
+        run: scripts/release/stage-pinned-macos-arm64-runtimes.sh
+
+      - name: Stage pinned ripgrep postinstall asset
+        shell: bash
+        env:
+          RIPGREP_PACKAGE_VERSION: "1.17.1"
+          RIPGREP_ASSET_NAME: "ripgrep-v15.0.1-aarch64-apple-darwin.tar.gz"
+          RIPGREP_ASSET_URL: "https://github.com/microsoft/ripgrep-prebuilt/releases/download/v15.0.1/ripgrep-v15.0.1-aarch64-apple-darwin.tar.gz"
+          RIPGREP_ASSET_SHA256: "2fa16464fd8638588a67c7fc172d3c4b57fbdc65dff366e10b0b0e90734628a6"
+        run: |
+          set -euo pipefail
+          cache_dir="${TMPDIR%/}/vscode-ripgrep-cache-${RIPGREP_PACKAGE_VERSION}"
+          asset_path="$cache_dir/$RIPGREP_ASSET_NAME"
+          mkdir -p "$cache_dir"
+          download_path=$(mktemp "$cache_dir/.ripgrep-download.XXXXXX")
+          trap 'rm -f "$download_path"' EXIT
+          curl --proto '=https' --tlsv1.2 --fail --location \
+            --retry 3 --retry-all-errors --silent --show-error \
+            "$RIPGREP_ASSET_URL" --output "$download_path"
+          printf '%s  %s\n' "$RIPGREP_ASSET_SHA256" "$download_path" | shasum -a 256 -c -
+          test "$(tar -tzf "$download_path")" = "rg"
+          mv "$download_path" "$asset_path"
 
       - name: Validate RC contract
         shell: bash
@@ -89,42 +109,578 @@ jobs:
           bun run electron:dist:unsigned:mac:arm64
 
       - name: Stage clean owner-only verification input
+        id: stage_input
         shell: bash
         run: |
           set -euo pipefail
-          CLEAN_INPUT=$(mktemp -d "$RUNNER_TEMP/engineering-rc-input.XXXXXX")
-          chmod 700 "$CLEAN_INPUT"
+          CLEAN_INPUT="$RUNNER_TEMP/engineering-rc-input"
+          test ! -e "$CLEAN_INPUT"
+          mkdir -m 700 "$CLEAN_INPUT"
           bun scripts/release/stage-engineering-rc-input.ts apps/electron/release "$CLEAN_INPUT" > engineering-rc-input.json
+          dmg_sha256=$(jq -er '.files[] | select(.name == "Simulator-arm64.dmg") | .sha256' engineering-rc-input.json)
+          zip_sha256=$(jq -er '.files[] | select(.name == "Simulator-arm64.zip") | .sha256' engineering-rc-input.json)
+          dmg_bytes=$(jq -er '.files[] | select(.name == "Simulator-arm64.dmg") | .size' engineering-rc-input.json)
+          zip_bytes=$(jq -er '.files[] | select(.name == "Simulator-arm64.zip") | .size' engineering-rc-input.json)
+          [[ "$dmg_sha256" =~ ^[0-9a-f]{64}$ && "$zip_sha256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$dmg_bytes" =~ ^[1-9][0-9]*$ && "$zip_bytes" =~ ^[1-9][0-9]*$ ]]
+          printf 'dmg_sha256=%s\nzip_sha256=%s\ndmg_bytes=%s\nzip_bytes=%s\n' \
+            "$dmg_sha256" "$zip_sha256" "$dmg_bytes" "$zip_bytes" >> "$GITHUB_OUTPUT"
           printf 'ENGINEERING_RC_INPUT=%s\n' "$CLEAN_INPUT" >> "$GITHUB_ENV"
 
-      - name: Verify unsigned artifacts and create bundle
-        shell: bash
-        run: scripts/release/verify-and-bundle-macos.sh "$PRODUCT_VERSION" "$ENGINEERING_RC_INPUT" engineering-rc-bundle
+      - name: Upload isolated Engineering RC input
+        id: upload_input
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: engineering-rc-input-${{ inputs.rc_label }}-${{ inputs.source_sha }}
+          path: ${{ runner.temp }}/engineering-rc-input/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
 
-      - name: Generate packaged-file SPDX SBOM
+  verify-unsigned-arm64:
+    name: Verify unsigned macOS arm64 engineering RC
+    needs: build-unsigned-arm64
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions: {}
+    outputs:
+      verified_artifact_id: ${{ steps.upload_verified.outputs.artifact-id }}
+      verified_artifact_digest: ${{ steps.upload_verified.outputs.artifact-digest }}
+    env:
+      RC_LABEL: ${{ inputs.rc_label }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      INPUT_ARTIFACT_ID: ${{ needs.build-unsigned-arm64.outputs.input_artifact_id }}
+      INPUT_ARTIFACT_DIGEST: ${{ needs.build-unsigned-arm64.outputs.input_artifact_digest }}
+      SIMULATOR_DISABLE_UPDATES: "1"
+      TMPDIR: ${{ runner.temp }}
+
+    steps:
+      - name: Checkout exact public verification source without a token
         shell: bash
         run: |
           set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "Jiachi-Deng/Simulator"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_SHA" = "$SOURCE_SHA"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RC_LABEL" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.([1-9][0-9]*)$ ]]
+          test -z "$(find . -mindepth 1 -maxdepth 1 -print -quit)"
+          git init .
+          git remote add origin https://github.com/Jiachi-Deng/Simulator.git
+          git fetch --no-tags --depth=1 origin "+refs/heads/main:refs/remotes/origin/main"
+          git fetch --tags origin
+          git checkout --detach "$SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_SHA"
+          ! git show-ref --verify --quiet "refs/tags/$RC_LABEL"
+          ! git show-ref --verify --quiet "refs/tags/v$RC_LABEL"
+          PRODUCT_VERSION=${RC_LABEL%-rc.*}
+          printf 'PRODUCT_VERSION=%s\n' "$PRODUCT_VERSION" >> "$GITHUB_ENV"
+
+      - name: Install digest-pinned Bun for isolated verification
+        run: scripts/release/install-pinned-bun-macos.sh
+
+      - name: Stage digest-pinned packaged runtime references for isolated verification
+        run: scripts/release/stage-pinned-macos-arm64-runtimes.sh
+
+      - name: Validate verification source without dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun scripts/release/engineering-rc.ts --label "$RC_LABEL" --ref "$SOURCE_SHA" \
+            > "$RUNNER_TEMP/engineering-rc-validation.json"
+          test "$(jq -er 'select(.ok == true) | .productVersion' "$RUNNER_TEMP/engineering-rc-validation.json")" = "$PRODUCT_VERSION"
+
+      - name: Prepare owner-only raw input directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw_root="$RUNNER_TEMP/engineering-rc-input-raw"
+          test ! -e "$raw_root"
+          mkdir -m 700 "$raw_root"
+
+      - name: Download exact raw Engineering RC build input
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build-unsigned-arm64.outputs.input_artifact_id }}
+          path: ${{ runner.temp }}/engineering-rc-input-raw
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Bind and safely extract Engineering RC build input
+        shell: bash
+        env:
+          EXPECTED_ARTIFACT_ID: ${{ needs.build-unsigned-arm64.outputs.input_artifact_id }}
+          EXPECTED_ARTIFACT_DIGEST: ${{ needs.build-unsigned-arm64.outputs.input_artifact_digest }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$EXPECTED_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          entries=()
+          raw_root="$RUNNER_TEMP/engineering-rc-input-raw"
+          test "$(stat -f %Lp "$raw_root")" = 700
+          test "$(stat -f %u "$raw_root")" = "$(id -u)"
+          while IFS= read -r -d '' entry; do entries+=("$entry"); done \
+            < <(find "$raw_root" -mindepth 1 -maxdepth 1 -print0)
+          test "${#entries[@]}" = 1
+          archive=${entries[0]}
+          test -f "$archive"
+          test ! -L "$archive"
+          test "$(stat -f %l "$archive")" = 1
+          chmod 600 "$archive"
+          test "$(stat -f %Lp "$archive")" = 600
+          test "$(stat -f %u "$archive")" = "$(id -u)"
+          archive_size=$(stat -f %z "$archive")
+          test "$archive_size" -gt 0
+          test "$archive_size" -le 2147483648
+          actual_digest=$(shasum -a 256 "$archive" | awk '{print $1}')
+          test "$actual_digest" = "$EXPECTED_ARTIFACT_DIGEST"
+          input_root="$RUNNER_TEMP/engineering-rc-input"
+          mkdir -m 700 "$input_root"
+          python3 scripts/release/extract-engineering-rc-artifact.py \
+            input "$archive" "$input_root" > "$RUNNER_TEMP/engineering-rc-extraction.json"
+
+      - name: Independently verify artifacts and build trusted evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          input_root="$RUNNER_TEMP/engineering-rc-input"
+          scripts/release/verify-and-bundle-macos.sh \
+            "$PRODUCT_VERSION" "$input_root" engineering-rc-bundle
+          evidence_input=$(mktemp -d "$RUNNER_TEMP/engineering-rc-evidence-input.XXXXXX")
+          chmod 700 "$evidence_input"
+          bun scripts/release/stage-engineering-rc-input.ts \
+            "$input_root" "$evidence_input" > "$RUNNER_TEMP/engineering-rc-input.json"
           CREATED=$(git show -s --format=%cI "$SOURCE_SHA")
-          bun scripts/release/generate-spdx.ts bun.lock engineering-rc-bundle/packaged-files.sha256 engineering-rc-bundle/package-verification-code.txt engineering-rc-bundle/sbom.spdx.json "$PRODUCT_VERSION" "$SOURCE_SHA" "$CREATED"
+          bun scripts/release/generate-spdx.ts \
+            bun.lock engineering-rc-bundle/packaged-files.sha256 \
+            engineering-rc-bundle/package-verification-code.txt \
+            engineering-rc-bundle/sbom.spdx.json "$PRODUCT_VERSION" "$SOURCE_SHA" "$CREATED"
           cp "apps/electron/resources/release-notes/$PRODUCT_VERSION.md" engineering-rc-bundle/RELEASE_NOTES.md
-          cp engineering-rc-validation.json engineering-rc-bundle/rc-validation.json
-          cp engineering-rc-input.json engineering-rc-bundle/verification-input.json
+          cp "$RUNNER_TEMP/engineering-rc-validation.json" engineering-rc-bundle/rc-validation.json
+          cp "$RUNNER_TEMP/engineering-rc-input.json" engineering-rc-bundle/verification-input.json
           jq -n \
             --arg rcLabel "$RC_LABEL" \
             --arg productVersion "$PRODUCT_VERSION" \
             --arg sourceSha "$SOURCE_SHA" \
-            '{schemaVersion: 1, rcLabel: $rcLabel, productVersion: $productVersion, sourceSha: $sourceSha, signed: false, channel: "engineering-rc"}' \
+            --arg inputArtifactId "$INPUT_ARTIFACT_ID" \
+            --arg inputArtifactDigest "$INPUT_ARTIFACT_DIGEST" \
+            '{schemaVersion: 1, rcLabel: $rcLabel, productVersion: $productVersion, sourceSha: $sourceSha, inputArtifactId: $inputArtifactId, inputArtifactDigest: $inputArtifactDigest, signed: false, channel: "engineering-rc"}' \
             > engineering-rc-bundle/bundle-metadata.json
           bun scripts/release/verify-bundle-policy.ts engineering-rc-bundle
 
-      - name: Attest DMG and ZIP with SPDX SBOM
+      - name: Revalidate pre-attestation bundle closure
+        run: >-
+          bun scripts/release/verify-engineering-rc-bundle.ts pre
+          engineering-rc-bundle "$RC_LABEL" "$PRODUCT_VERSION" "$SOURCE_SHA"
+          "$INPUT_ARTIFACT_ID" "$INPUT_ARTIFACT_DIGEST"
+
+      - name: Upload isolated verified pre-attestation bundle
+        id: upload_verified
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: engineering-rc-verified-${{ inputs.rc_label }}-${{ inputs.source_sha }}
+          path: engineering-rc-bundle/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  derive-zip-sbom:
+    name: Independently derive ZIP SBOM evidence
+    needs: build-unsigned-arm64
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions: {}
+    outputs:
+      zip_sbom_artifact_id: ${{ steps.upload_zip_sbom.outputs.artifact-id }}
+      zip_sbom_artifact_digest: ${{ steps.upload_zip_sbom.outputs.artifact-digest }}
+    env:
+      RC_LABEL: ${{ inputs.rc_label }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      INPUT_ARTIFACT_ID: ${{ needs.build-unsigned-arm64.outputs.input_artifact_id }}
+      INPUT_ARTIFACT_DIGEST: ${{ needs.build-unsigned-arm64.outputs.input_artifact_digest }}
+      INPUT_ZIP_SHA256: ${{ needs.build-unsigned-arm64.outputs.input_zip_sha256 }}
+      INPUT_ZIP_BYTES: ${{ needs.build-unsigned-arm64.outputs.input_zip_bytes }}
+      TMPDIR: ${{ runner.temp }}
+
+    steps:
+      - name: Checkout exact public SBOM source without a token
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "Jiachi-Deng/Simulator"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_SHA" = "$SOURCE_SHA"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RC_LABEL" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.([1-9][0-9]*)$ ]]
+          test -z "$(find . -mindepth 1 -maxdepth 1 -print -quit)"
+          git init .
+          git remote add origin https://github.com/Jiachi-Deng/Simulator.git
+          git fetch --no-tags --depth=1 origin "+refs/heads/main:refs/remotes/origin/main"
+          git fetch --tags origin
+          git checkout --detach "$SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_SHA"
+          ! git show-ref --verify --quiet "refs/tags/$RC_LABEL"
+          ! git show-ref --verify --quiet "refs/tags/v$RC_LABEL"
+          PRODUCT_VERSION=${RC_LABEL%-rc.*}
+          printf 'PRODUCT_VERSION=%s\n' "$PRODUCT_VERSION" >> "$GITHUB_ENV"
+
+      - name: Install digest-pinned Bun for independent SBOM derivation
+        run: scripts/release/install-pinned-bun-macos.sh
+
+      - name: Revalidate SBOM derivation contract without dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun scripts/release/engineering-rc.ts --label "$RC_LABEL" --ref "$SOURCE_SHA" \
+            > "$RUNNER_TEMP/engineering-rc-sbom-validation.json"
+          test "$(jq -er 'select(.ok == true) | .productVersion' "$RUNNER_TEMP/engineering-rc-sbom-validation.json")" = "$PRODUCT_VERSION"
+
+      - name: Prepare owner-only raw SBOM input directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw_root="$RUNNER_TEMP/engineering-rc-sbom-input-raw"
+          test ! -e "$raw_root"
+          mkdir -m 700 "$raw_root"
+
+      - name: Download exact raw Engineering RC input for independent SBOM derivation
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build-unsigned-arm64.outputs.input_artifact_id }}
+          path: ${{ runner.temp }}/engineering-rc-sbom-input-raw
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Bind and safely extract independent SBOM input
+        shell: bash
+        env:
+          EXPECTED_ARTIFACT_ID: ${{ needs.build-unsigned-arm64.outputs.input_artifact_id }}
+          EXPECTED_ARTIFACT_DIGEST: ${{ needs.build-unsigned-arm64.outputs.input_artifact_digest }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$EXPECTED_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          entries=()
+          raw_root="$RUNNER_TEMP/engineering-rc-sbom-input-raw"
+          test "$(stat -f %Lp "$raw_root")" = 700
+          test "$(stat -f %u "$raw_root")" = "$(id -u)"
+          while IFS= read -r -d '' entry; do entries+=("$entry"); done \
+            < <(find "$raw_root" -mindepth 1 -maxdepth 1 -print0)
+          test "${#entries[@]}" = 1
+          archive=${entries[0]}
+          test -f "$archive"
+          test ! -L "$archive"
+          test "$(stat -f %l "$archive")" = 1
+          chmod 600 "$archive"
+          test "$(stat -f %Lp "$archive")" = 600
+          test "$(stat -f %u "$archive")" = "$(id -u)"
+          archive_size=$(stat -f %z "$archive")
+          test "$archive_size" -gt 0
+          test "$archive_size" -le 2147483648
+          actual_digest=$(shasum -a 256 "$archive" | awk '{print $1}')
+          test "$actual_digest" = "$EXPECTED_ARTIFACT_DIGEST"
+          input_root="$RUNNER_TEMP/engineering-rc-sbom-input"
+          test ! -e "$input_root"
+          mkdir -m 700 "$input_root"
+          python3 scripts/release/extract-engineering-rc-artifact.py \
+            input "$archive" "$input_root" > "$RUNNER_TEMP/engineering-rc-sbom-extraction.json"
+          test "$(shasum -a 256 "$input_root/Simulator-arm64.zip" | awk '{print $1}')" = "$INPUT_ZIP_SHA256"
+          test "$(stat -f %z "$input_root/Simulator-arm64.zip")" = "$INPUT_ZIP_BYTES"
+
+      - name: Derive exact ZIP SBOM evidence without native DMG parsing
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          output_root="$GITHUB_WORKSPACE/engineering-rc-zip-sbom"
+          test ! -e "$output_root"
+          mkdir -m 700 "$output_root"
+          python3 scripts/release/verify-zip-spdx-evidence.py derive \
+            "$RUNNER_TEMP/engineering-rc-sbom-input/Simulator-arm64.zip" "$output_root"
+          CREATED=$(git show -s --format=%cI "$SOURCE_SHA")
+          bun scripts/release/generate-spdx.ts \
+            bun.lock "$output_root/packaged-files.sha256" \
+            "$output_root/package-verification-code.txt" "$output_root/sbom.spdx.json" \
+            "$PRODUCT_VERSION" "$SOURCE_SHA" "$CREATED"
+          chmod 600 "$output_root/sbom.spdx.json"
+          jq -n \
+            --arg rcLabel "$RC_LABEL" \
+            --arg productVersion "$PRODUCT_VERSION" \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg inputArtifactId "$INPUT_ARTIFACT_ID" \
+            --arg inputArtifactDigest "$INPUT_ARTIFACT_DIGEST" \
+            --arg inputZipSha256 "$INPUT_ZIP_SHA256" \
+            --argjson inputZipBytes "$INPUT_ZIP_BYTES" \
+            '{schemaVersion: 1, rcLabel: $rcLabel, productVersion: $productVersion, sourceSha: $sourceSha, inputArtifactId: $inputArtifactId, inputArtifactDigest: $inputArtifactDigest, inputZipSha256: $inputZipSha256, inputZipBytes: $inputZipBytes}' \
+            > "$output_root/zip-sbom-lineage.json"
+          chmod 600 "$output_root/zip-sbom-lineage.json"
+          test "$(find "$output_root" -mindepth 1 -maxdepth 1 -type f | wc -l | tr -d ' ')" = 4
+          test "$(find "$output_root" -mindepth 1 -maxdepth 1 ! -type f -print -quit)" = ""
+
+      - name: Upload isolated independent ZIP SBOM closure
+        id: upload_zip_sbom
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: engineering-rc-zip-sbom-${{ inputs.rc_label }}-${{ inputs.source_sha }}
+          path: engineering-rc-zip-sbom/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+  attest-and-publish:
+    name: Attest and publish engineering RC
+    needs: [build-unsigned-arm64, verify-unsigned-arm64, derive-zip-sbom]
+    runs-on: macos-15
+    timeout-minutes: 20
+    permissions:
+      actions: read
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      RC_LABEL: ${{ inputs.rc_label }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      INPUT_ARTIFACT_ID: ${{ needs.build-unsigned-arm64.outputs.input_artifact_id }}
+      INPUT_ARTIFACT_DIGEST: ${{ needs.build-unsigned-arm64.outputs.input_artifact_digest }}
+      INPUT_DMG_SHA256: ${{ needs.build-unsigned-arm64.outputs.input_dmg_sha256 }}
+      INPUT_ZIP_SHA256: ${{ needs.build-unsigned-arm64.outputs.input_zip_sha256 }}
+      INPUT_DMG_BYTES: ${{ needs.build-unsigned-arm64.outputs.input_dmg_bytes }}
+      INPUT_ZIP_BYTES: ${{ needs.build-unsigned-arm64.outputs.input_zip_bytes }}
+
+    steps:
+      - name: Checkout exact attestation authority
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Revalidate exact attestation authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "Jiachi-Deng/Simulator"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_SHA" = "$SOURCE_SHA"
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RC_LABEL" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.([1-9][0-9]*)$ ]]
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_SHA"
+          git fetch --tags origin
+          ! git show-ref --verify --quiet "refs/tags/$RC_LABEL"
+          ! git show-ref --verify --quiet "refs/tags/v$RC_LABEL"
+          PRODUCT_VERSION=${RC_LABEL%-rc.*}
+          printf 'PRODUCT_VERSION=%s\n' "$PRODUCT_VERSION" >> "$GITHUB_ENV"
+
+      - name: Install digest-pinned Bun attestation authority
+        run: scripts/release/install-pinned-bun-macos.sh
+
+      - name: Revalidate RC contract without dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$TRUSTED_BUN" scripts/release/engineering-rc.ts --label "$RC_LABEL" --ref "$SOURCE_SHA" \
+            > "$RUNNER_TEMP/engineering-rc-validation.json"
+          test "$(jq -er 'select(.ok == true) | .productVersion' "$RUNNER_TEMP/engineering-rc-validation.json")" = "$PRODUCT_VERSION"
+
+      - name: Prepare owner-only raw artifact directories
+        shell: bash
+        run: |
+          set -euo pipefail
+          for raw_root in \
+            "$RUNNER_TEMP/engineering-rc-original-raw" \
+            "$RUNNER_TEMP/engineering-rc-verified-raw" \
+            "$RUNNER_TEMP/engineering-rc-zip-sbom-raw"; do
+            test ! -e "$raw_root"
+            mkdir -m 700 "$raw_root"
+          done
+
+      - name: Download exact raw original Engineering RC input
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.build-unsigned-arm64.outputs.input_artifact_id }}
+          path: ${{ runner.temp }}/engineering-rc-original-raw
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Download exact raw verified pre-attestation bundle
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.verify-unsigned-arm64.outputs.verified_artifact_id }}
+          path: ${{ runner.temp }}/engineering-rc-verified-raw
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Download exact raw independent ZIP SBOM closure
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ needs.derive-zip-sbom.outputs.zip_sbom_artifact_id }}
+          path: ${{ runner.temp }}/engineering-rc-zip-sbom-raw
+          skip-decompress: true
+          digest-mismatch: error
+
+      - name: Bind and safely extract original Engineering RC input
+        shell: bash
+        env:
+          EXPECTED_ARTIFACT_ID: ${{ needs.build-unsigned-arm64.outputs.input_artifact_id }}
+          EXPECTED_ARTIFACT_DIGEST: ${{ needs.build-unsigned-arm64.outputs.input_artifact_digest }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$EXPECTED_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          entries=()
+          raw_root="$RUNNER_TEMP/engineering-rc-original-raw"
+          test "$(stat -f %Lp "$raw_root")" = 700
+          test "$(stat -f %u "$raw_root")" = "$(id -u)"
+          while IFS= read -r -d '' entry; do entries+=("$entry"); done \
+            < <(find "$raw_root" -mindepth 1 -maxdepth 1 -print0)
+          test "${#entries[@]}" = 1
+          archive=${entries[0]}
+          test -f "$archive"
+          test ! -L "$archive"
+          test "$(stat -f %l "$archive")" = 1
+          chmod 600 "$archive"
+          test "$(stat -f %Lp "$archive")" = 600
+          test "$(stat -f %u "$archive")" = "$(id -u)"
+          archive_size=$(stat -f %z "$archive")
+          test "$archive_size" -gt 0
+          test "$archive_size" -le 2147483648
+          actual_digest=$(shasum -a 256 "$archive" | awk '{print $1}')
+          test "$actual_digest" = "$EXPECTED_ARTIFACT_DIGEST"
+          original_root="$RUNNER_TEMP/engineering-rc-original-input"
+          test ! -e "$original_root"
+          mkdir -m 700 "$original_root"
+          python3 scripts/release/extract-engineering-rc-artifact.py \
+            input "$archive" "$original_root" > "$RUNNER_TEMP/engineering-rc-original-extraction.json"
+
+      - name: Bind and safely extract verified pre-attestation bundle
+        shell: bash
+        env:
+          EXPECTED_ARTIFACT_ID: ${{ needs.verify-unsigned-arm64.outputs.verified_artifact_id }}
+          EXPECTED_ARTIFACT_DIGEST: ${{ needs.verify-unsigned-arm64.outputs.verified_artifact_digest }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$EXPECTED_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          entries=()
+          raw_root="$RUNNER_TEMP/engineering-rc-verified-raw"
+          test "$(stat -f %Lp "$raw_root")" = 700
+          test "$(stat -f %u "$raw_root")" = "$(id -u)"
+          while IFS= read -r -d '' entry; do entries+=("$entry"); done \
+            < <(find "$raw_root" -mindepth 1 -maxdepth 1 -print0)
+          test "${#entries[@]}" = 1
+          archive=${entries[0]}
+          test -f "$archive"
+          test ! -L "$archive"
+          test "$(stat -f %l "$archive")" = 1
+          chmod 600 "$archive"
+          test "$(stat -f %Lp "$archive")" = 600
+          test "$(stat -f %u "$archive")" = "$(id -u)"
+          archive_size=$(stat -f %z "$archive")
+          test "$archive_size" -gt 0
+          test "$archive_size" -le 2147483648
+          actual_digest=$(shasum -a 256 "$archive" | awk '{print $1}')
+          test "$actual_digest" = "$EXPECTED_ARTIFACT_DIGEST"
+          bundle_root="$GITHUB_WORKSPACE/engineering-rc-bundle"
+          test ! -e "$bundle_root"
+          mkdir -m 700 "$bundle_root"
+          python3 scripts/release/extract-engineering-rc-artifact.py \
+            pre "$archive" "$bundle_root" > "$RUNNER_TEMP/engineering-rc-verified-extraction.json"
+
+      - name: Bind and safely extract independent ZIP SBOM closure
+        shell: bash
+        env:
+          EXPECTED_ARTIFACT_ID: ${{ needs.derive-zip-sbom.outputs.zip_sbom_artifact_id }}
+          EXPECTED_ARTIFACT_DIGEST: ${{ needs.derive-zip-sbom.outputs.zip_sbom_artifact_digest }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$EXPECTED_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$EXPECTED_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          entries=()
+          raw_root="$RUNNER_TEMP/engineering-rc-zip-sbom-raw"
+          test "$(stat -f %Lp "$raw_root")" = 700
+          test "$(stat -f %u "$raw_root")" = "$(id -u)"
+          while IFS= read -r -d '' entry; do entries+=("$entry"); done \
+            < <(find "$raw_root" -mindepth 1 -maxdepth 1 -print0)
+          test "${#entries[@]}" = 1
+          archive=${entries[0]}
+          test -f "$archive"
+          test ! -L "$archive"
+          test "$(stat -f %l "$archive")" = 1
+          chmod 600 "$archive"
+          test "$(stat -f %Lp "$archive")" = 600
+          test "$(stat -f %u "$archive")" = "$(id -u)"
+          archive_size=$(stat -f %z "$archive")
+          test "$archive_size" -gt 0
+          test "$archive_size" -le 268435456
+          actual_digest=$(shasum -a 256 "$archive" | awk '{print $1}')
+          test "$actual_digest" = "$EXPECTED_ARTIFACT_DIGEST"
+          sbom_root="$GITHUB_WORKSPACE/engineering-rc-zip-sbom-authority"
+          test ! -e "$sbom_root"
+          mkdir -m 700 "$sbom_root"
+          python3 scripts/release/extract-engineering-rc-artifact.py \
+            zip-sbom "$archive" "$sbom_root" > "$RUNNER_TEMP/engineering-rc-zip-sbom-extraction.json"
+
+      - name: Bind verified subjects byte-for-byte to original build output
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$INPUT_DMG_SHA256" =~ ^[0-9a-f]{64}$ && "$INPUT_ZIP_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$INPUT_DMG_BYTES" =~ ^[1-9][0-9]*$ && "$INPUT_ZIP_BYTES" =~ ^[1-9][0-9]*$ ]]
+          cmp -s "$RUNNER_TEMP/engineering-rc-original-input/Simulator-arm64.dmg" engineering-rc-bundle/Simulator-arm64.dmg
+          cmp -s "$RUNNER_TEMP/engineering-rc-original-input/Simulator-arm64.zip" engineering-rc-bundle/Simulator-arm64.zip
+          test "$(shasum -a 256 engineering-rc-bundle/Simulator-arm64.dmg | awk '{print $1}')" = "$INPUT_DMG_SHA256"
+          test "$(shasum -a 256 engineering-rc-bundle/Simulator-arm64.zip | awk '{print $1}')" = "$INPUT_ZIP_SHA256"
+          test "$(stat -f %z engineering-rc-bundle/Simulator-arm64.dmg)" = "$INPUT_DMG_BYTES"
+          test "$(stat -f %z engineering-rc-bundle/Simulator-arm64.zip)" = "$INPUT_ZIP_BYTES"
+
+      - name: Revalidate verified pre-attestation bundle closure
+        run: >-
+          "$TRUSTED_BUN" scripts/release/verify-engineering-rc-bundle.ts pre
+          engineering-rc-bundle "$RC_LABEL" "$PRODUCT_VERSION" "$SOURCE_SHA"
+          "$INPUT_ARTIFACT_ID" "$INPUT_ARTIFACT_DIGEST"
+
+      - name: Bind ZIP SBOM to independent derivation and exact source lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          authority=engineering-rc-zip-sbom-authority
+          jq -e \
+            --arg rcLabel "$RC_LABEL" \
+            --arg productVersion "$PRODUCT_VERSION" \
+            --arg sourceSha "$SOURCE_SHA" \
+            --arg inputArtifactId "$INPUT_ARTIFACT_ID" \
+            --arg inputArtifactDigest "$INPUT_ARTIFACT_DIGEST" \
+            --arg inputZipSha256 "$INPUT_ZIP_SHA256" \
+            --argjson inputZipBytes "$INPUT_ZIP_BYTES" \
+            'keys == ["inputArtifactDigest", "inputArtifactId", "inputZipBytes", "inputZipSha256", "productVersion", "rcLabel", "schemaVersion", "sourceSha"] and .schemaVersion == 1 and .rcLabel == $rcLabel and .productVersion == $productVersion and .sourceSha == $sourceSha and .inputArtifactId == $inputArtifactId and .inputArtifactDigest == $inputArtifactDigest and .inputZipSha256 == $inputZipSha256 and .inputZipBytes == $inputZipBytes' \
+            "$authority/zip-sbom-lineage.json" >/dev/null
+          cmp -s "$authority/packaged-files.sha256" engineering-rc-bundle/packaged-files.sha256
+          cmp -s "$authority/package-verification-code.txt" engineering-rc-bundle/package-verification-code.txt
+          cmp -s "$authority/sbom.spdx.json" engineering-rc-bundle/sbom.spdx.json
+          reconstructed="$RUNNER_TEMP/engineering-rc-reconstructed-sbom.spdx.json"
+          test ! -e "$reconstructed"
+          CREATED=$(git show -s --format=%cI "$SOURCE_SHA")
+          "$TRUSTED_BUN" scripts/release/generate-spdx.ts \
+            bun.lock engineering-rc-bundle/packaged-files.sha256 \
+            engineering-rc-bundle/package-verification-code.txt \
+            "$reconstructed" "$PRODUCT_VERSION" "$SOURCE_SHA" "$CREATED"
+          chmod 600 "$reconstructed"
+          cmp -s "$reconstructed" "$authority/sbom.spdx.json"
+
+      - name: Attest ZIP with independently derived SPDX SBOM
         id: attest_sbom
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.0.0
         with:
-          subject-path: |
-            engineering-rc-bundle/Simulator-arm64.dmg
-            engineering-rc-bundle/Simulator-arm64.zip
+          subject-path: engineering-rc-bundle/Simulator-arm64.zip
           sbom-path: engineering-rc-bundle/sbom.spdx.json
 
       - name: Attest DMG and ZIP build provenance
@@ -135,7 +691,7 @@ jobs:
             engineering-rc-bundle/Simulator-arm64.dmg
             engineering-rc-bundle/Simulator-arm64.zip
 
-      - name: Save attestation bundles and finalize checksums
+      - name: Save attestation bundles
         env:
           SBOM_ATTESTATION_BUNDLE: ${{ steps.attest_sbom.outputs.bundle-path }}
           PROVENANCE_ATTESTATION_BUNDLE: ${{ steps.attest_provenance.outputs.bundle-path }}
@@ -144,14 +700,34 @@ jobs:
           mkdir -p engineering-rc-bundle/attestations
           cp "$SBOM_ATTESTATION_BUNDLE" engineering-rc-bundle/attestations/sbom.sigstore.json
           cp "$PROVENANCE_ATTESTATION_BUNDLE" engineering-rc-bundle/attestations/provenance.sigstore.json
-          bun scripts/release/verify-bundle-policy.ts engineering-rc-bundle
+          "$TRUSTED_BUN" scripts/release/verify-bundle-policy.ts engineering-rc-bundle
+
+      - name: Verify saved attestation bundles cryptographically
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          scripts/release/verify-engineering-rc-attestations.sh
+          engineering-rc-bundle "$SOURCE_SHA"
+          "$RUNNER_TEMP/engineering-rc-attestation-verification"
+
+      - name: Finalize checksums after attestation verification
+        shell: bash
+        run: |
+          set -euo pipefail
           (
             cd engineering-rc-bundle
             find . -type f ! -name SHA256SUMS -print | LC_ALL=C sort | sed 's#^./##' | xargs shasum -a 256 > SHA256SUMS
           )
 
+      - name: Validate final bundle closure
+        run: >-
+          "$TRUSTED_BUN" scripts/release/verify-engineering-rc-bundle.ts final
+          engineering-rc-bundle "$RC_LABEL" "$PRODUCT_VERSION" "$SOURCE_SHA"
+          "$INPUT_ARTIFACT_ID" "$INPUT_ARTIFACT_DIGEST"
+
       - name: Upload engineering RC bundle
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: simulator-${{ inputs.rc_label }}-macos-arm64-unsigned
           path: engineering-rc-bundle/

@@ -89,6 +89,7 @@ jobs:
           require "yaml"
 
           paths = [
+            ".github/workflows/engineering-rc.yml",
             ".github/workflows/open-design-production-input.yml",
             ".github/workflows/open-design-release.yml",
             ".github/workflows/open-design-m1-machine-evidence.yml",
@@ -100,7 +101,10 @@ jobs:
             workflow = YAML.safe_load(File.read(path), aliases: true)
             workflow.fetch("jobs").each do |job_name, job|
               job.fetch("steps", []).each do |step|
-                next unless step["shell"] == "bash" && step["run"].is_a?(String)
+                next unless step["run"].is_a?(String)
+                shell = step["shell"]
+                runner = job.fetch("runs-on", "").to_s.downcase
+                next unless shell == "bash" || (shell.nil? && !runner.include?("windows"))
 
                 _stdout, stderr, status = Open3.capture3("bash", "-n", stdin_data: step.fetch("run"))
                 next if status.success?

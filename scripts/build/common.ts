@@ -34,7 +34,7 @@ export interface BuildConfig {
  * Update this when upgrading Bun. Check latest at: https://github.com/oven-sh/bun/releases
  * This should match or be close to the version used in CI (setup-bun action).
  */
-export const BUN_VERSION = 'bun-v1.3.9';
+export const BUN_VERSION = 'bun-v1.3.10';
 
 /**
  * uv version to bundle with the app.
