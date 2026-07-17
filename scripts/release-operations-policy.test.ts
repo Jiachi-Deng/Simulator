@@ -128,6 +128,8 @@ describe("release operations policy", () => {
     expect(operations).toContain("orphan attestation")
     expect(operations).toContain("`gh attestation verify` 单独成功永远不能作为 `Go`")
     expect(operations).toContain("Artifact ID/service digest")
+    expect(operations).toContain("两份 attestation record")
+    expect(operations).toContain("三项 subject-policy verification")
     expect(disasterRecovery).toContain("每季度至少演练一次")
     expect(disasterRecovery).toContain("Pass/Fail/Not run")
     expect(disasterRecovery).toContain("不得写成已通过")

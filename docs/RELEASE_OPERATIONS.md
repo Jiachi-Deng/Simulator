@@ -97,7 +97,7 @@ Engineering RC 只有同时满足以下条件才能判定 `Go`：
 
 - `attest-and-publish` job 与整个 workflow run 均为 `success`；
 - 同一 run 存在精确名称 `simulator-$RC_LABEL-macos-arm64-unsigned` 的最终 Artifact；
-- evidence 记录 RC label、source SHA、run ID/attempt/conclusion、最终 Artifact ID/service digest、DMG/ZIP SHA-256 与 bytes，以及三项 attestation ID/URL 和 predicate type；
+- evidence 记录 RC label、source SHA、run ID/attempt/conclusion、最终 Artifact ID/service digest、DMG/ZIP SHA-256 与 bytes，以及两份 attestation record 的 ID/URL/predicate type；另行记录 DMG provenance、ZIP provenance、ZIP SBOM 三项 subject-policy verification 结果；
 - 从该最终 Artifact 重新下载后，完整 closure、`SHA256SUMS` 与 DMG/ZIP provenance、ZIP SBOM 三项 attestation policy 全部通过。
 
 `gh attestation verify` 单独成功永远不能作为 `Go`；失败 run 的中间 Artifact 或 orphan attestation 不得复用为后续 RC 证据，修复后必须递增 `rc.N` 重新运行。
