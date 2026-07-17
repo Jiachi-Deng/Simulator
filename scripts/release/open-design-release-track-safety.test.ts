@@ -56,7 +56,8 @@ describe("OpenDesign release-track safety", () => {
     expect(publish).not.toContain("open-design-v0.14.5")
     expect(productionReleaseGuide).toContain("prerelease `0.14.6-rc.1` uploads exactly the archive, Catalog, envelope, and")
     expect(productionReleaseGuide).toContain("is never published, and is never copied into")
-    expect(productionReleaseGuide).toContain("Only a stable publication may promote its official-channel config")
+    expect(productionReleaseGuide).toContain("Only a stable publication may publish its official-channel config")
+    expect(productionReleaseGuide).toContain("Host `0.12.0` source prebinds the exact future `0.14.6` stable identity")
   })
 
   test("requires stable enablement, an exact confirmation, and the protected stable environment", () => {
@@ -119,6 +120,10 @@ describe("OpenDesign release-track safety", () => {
     const verify = step("initial", "Verify initial bundle before publication").run
     expect(verify).toContain('shasum -a 256 "$INITIAL_OUTPUT/$ARCHIVE_ASSET"')
     expect(verify).toContain('= "$ACCEPTED_RC_ARCHIVE_SHA256"')
+    expect(verify).toContain("bun scripts/release/open-design-official-channel-bytes.ts")
+    expect(verify).toContain('cmp "$SOURCE_AUTHORITY_CONFIG" "$INITIAL_OUTPUT/$CONFIG_ASSET"')
+    expect(readFileSync(join(root, "scripts/release/open-design-official-channel-bytes.ts"), "utf8"))
+      .toContain("source.equals(generated)")
   })
 
   test("derives RC and stable Catalog state strictly above authenticated predecessors", () => {

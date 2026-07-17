@@ -18,14 +18,14 @@ import { OPEN_DESIGN_MODULE_ID } from '../../shared/open-design-module-ipc'
 
 const roots: string[] = []
 const CATALOG_URL = 'https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.5/open-design-catalog.json'
-const OFFICIAL_CATALOG_URL = 'https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.5/org.simulator.open-design-0.14.5-catalog-v2-envelope.json'
+const OFFICIAL_CATALOG_URL = 'https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.6/org.simulator.open-design-0.14.6-catalog-v2-envelope.json'
 const OFFICIAL_RESOURCE_PATH = join(import.meta.dir, '..', '..', '..', 'resources', 'open-design-official-channel.json')
 const OFFICIAL_RESOURCE = {
   catalogUrl: OFFICIAL_CATALOG_URL,
   githubRelease: {
     owner: 'Jiachi-Deng',
     repository: 'Simulator',
-    tag: 'open-design-v0.14.5',
+    tag: 'open-design-v0.14.6',
   },
   moduleId: OPEN_DESIGN_MODULE_ID,
   platform: 'darwin-arm64',
@@ -36,7 +36,7 @@ const OFFICIAL_RESOURCE = {
     keyId: 'open-design-release-2026-01',
     publicKey: 'KvpR89GuQd670SZMZuuR+aK4FUIprxRlqE58K3twQZk=',
   }],
-  version: '0.14.5',
+  version: '0.14.6',
 }
 
 function publicKeyBase64(): string {
@@ -101,7 +101,7 @@ describe('loadOpenDesignOfficialChannel', () => {
         releaseRequest: {
           catalogUrl: OFFICIAL_CATALOG_URL,
           moduleId: OPEN_DESIGN_MODULE_ID,
-          version: '0.14.5',
+          version: '0.14.6',
         },
       },
     })
