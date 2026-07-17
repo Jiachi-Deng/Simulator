@@ -43,6 +43,8 @@ describe("release operations policy", () => {
   test("the pull-request package gate can only use the arm64 ad-hoc signing fallback", () => {
     const buildScript = read("apps/electron/scripts/build-dmg.sh")
     const packageWorkflow = read(".github/workflows/package-macos.yml")
+    const packageJson = JSON.parse(read("package.json")) as { dependencies?: Record<string, string> }
+    const lockfile = read("bun.lock")
     const buildStepStart = packageWorkflow.indexOf("- name: Build unsigned arm64 package")
     const verifyStepStart = packageWorkflow.indexOf("- name: Verify artifact and architecture")
 
@@ -71,8 +73,24 @@ describe("release operations policy", () => {
     expect(packageWorkflow).not.toContain("environment:")
     expect(packageWorkflow).not.toContain("id-token: write")
     expect(packageWorkflow).not.toContain("secrets.")
+    expect(packageWorkflow).not.toContain("GITHUB_TOKEN")
+    expect(packageWorkflow).not.toContain("github.token")
+    expect(packageWorkflow).not.toContain("GH_TOKEN")
     expect(packageWorkflow).toContain('- "apps/electron/electron-builder.env"')
     expect(existsSync(join(root, "apps/electron/electron-builder.env"))).toBe(false)
+
+    expect(packageJson.dependencies?.["@vscode/ripgrep"]).toBe("^1.17.1")
+    expect(lockfile).toContain('"@vscode/ripgrep": ["@vscode/ripgrep@1.17.1"')
+    expect(packageWorkflow).toContain('RIPGREP_PACKAGE_VERSION: "1.17.1"')
+    expect(packageWorkflow).toContain(
+      'RIPGREP_ASSET_URL: "https://github.com/microsoft/ripgrep-prebuilt/releases/download/v15.0.1/ripgrep-v15.0.1-aarch64-apple-darwin.tar.gz"',
+    )
+    expect(packageWorkflow).toContain(
+      'RIPGREP_ASSET_SHA256: "2fa16464fd8638588a67c7fc172d3c4b57fbdc65dff366e10b0b0e90734628a6"',
+    )
+    expect(packageWorkflow).toContain('TMPDIR: ${{ runner.temp }}')
+    expect(packageWorkflow).toContain('test "$(tar -tzf "$download_path")" = "rg"')
+    expect(packageWorkflow).not.toContain("api.github.com")
   })
 
   test("public policy documents remain discoverable and contain no invented contact", () => {

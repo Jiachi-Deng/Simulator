@@ -46,12 +46,35 @@ jobs:
         with:
           bun-version: "1.3.10"
 
+      - name: Stage pinned ripgrep postinstall asset
+        shell: bash
+        env:
+          TMPDIR: ${{ runner.temp }}
+          RIPGREP_PACKAGE_VERSION: "1.17.1"
+          RIPGREP_ASSET_NAME: "ripgrep-v15.0.1-aarch64-apple-darwin.tar.gz"
+          RIPGREP_ASSET_URL: "https://github.com/microsoft/ripgrep-prebuilt/releases/download/v15.0.1/ripgrep-v15.0.1-aarch64-apple-darwin.tar.gz"
+          RIPGREP_ASSET_SHA256: "2fa16464fd8638588a67c7fc172d3c4b57fbdc65dff366e10b0b0e90734628a6"
+        run: |
+          set -euo pipefail
+          cache_dir="${TMPDIR%/}/vscode-ripgrep-cache-${RIPGREP_PACKAGE_VERSION}"
+          asset_path="$cache_dir/$RIPGREP_ASSET_NAME"
+          mkdir -p "$cache_dir"
+          download_path=$(mktemp "$cache_dir/.ripgrep-download.XXXXXX")
+          trap 'rm -f "$download_path"' EXIT
+          curl --proto '=https' --tlsv1.2 --fail --location \
+            --retry 3 --retry-all-errors --silent --show-error \
+            "$RIPGREP_ASSET_URL" --output "$download_path"
+          printf '%s  %s\n' "$RIPGREP_ASSET_SHA256" "$download_path" | shasum -a 256 -c -
+          test "$(tar -tzf "$download_path")" = "rg"
+          mv "$download_path" "$asset_path"
+
       - name: Build unsigned arm64 package
         # electron-builder otherwise suppresses every signing path for pull_request
         # builds, leaving the modified Electron bundle with stale signature metadata.
         # This build step receives no persisted repository credential or release
         # secret. The unsigned script clears signing inputs, so only ad-hoc (`-`) remains.
         env:
+          TMPDIR: ${{ runner.temp }}
           CSC_FOR_PULL_REQUEST: "true"
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
         run: |
