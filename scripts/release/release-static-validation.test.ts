@@ -7,6 +7,7 @@ const workflow = readFileSync(join(import.meta.dir, "../../.github/workflows/rel
 describe("release static validation workflow", () => {
   test("runs on pull requests that can affect RC, updater, or build-policy behavior", () => {
     expect(workflow).toContain("pull_request:")
+    expect(workflow).toContain(".github/actionlint.yaml")
     expect(workflow).toContain(".github/workflows/engineering-rc.yml")
     expect(workflow).toContain(".github/workflows/open-design-production-input.yml")
     expect(workflow).toContain(".github/workflows/open-design-m1-machine-evidence.yml")
@@ -32,6 +33,9 @@ describe("release static validation workflow", () => {
     ).run
     expect(workflow).toContain("bun test scripts/release/*.test.ts")
     expect(workflow).toContain("YAML.safe_load(File.read")
+    expect(workflow).toContain("github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106")
+    expect(workflow).toContain("Validate GitHub Actions schema and expression contexts")
+    expect(workflow).toContain("-shellcheck= -pyflakes=")
     expect(workflow).toContain("Validate embedded release workflow Bash")
     expect(workflow).toContain('Open3.capture3("bash", "-n"')
     expect(workflow).toContain("bash -n")

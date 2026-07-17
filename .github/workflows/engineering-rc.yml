@@ -35,7 +35,6 @@ jobs:
       RC_LABEL: ${{ inputs.rc_label }}
       SOURCE_SHA: ${{ inputs.source_sha }}
       SIMULATOR_DISABLE_UPDATES: "1"
-      TMPDIR: ${{ runner.temp }}
 
     steps:
       - name: Checkout exact public main without a token
@@ -54,6 +53,15 @@ jobs:
           git checkout --detach "$SOURCE_SHA"
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_SHA"
+
+      - name: Bind temporary directory to runner-owned root
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$RUNNER_TEMP"
+          test ! -L "$RUNNER_TEMP"
+          test "$(stat -f %u "$RUNNER_TEMP")" = "$(id -u)"
+          printf 'TMPDIR=%s\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Install digest-pinned Bun
         run: scripts/release/install-pinned-bun-macos.sh
@@ -152,7 +160,6 @@ jobs:
       INPUT_ARTIFACT_ID: ${{ needs.build-unsigned-arm64.outputs.input_artifact_id }}
       INPUT_ARTIFACT_DIGEST: ${{ needs.build-unsigned-arm64.outputs.input_artifact_digest }}
       SIMULATOR_DISABLE_UPDATES: "1"
-      TMPDIR: ${{ runner.temp }}
 
     steps:
       - name: Checkout exact public verification source without a token
@@ -176,6 +183,15 @@ jobs:
           ! git show-ref --verify --quiet "refs/tags/v$RC_LABEL"
           PRODUCT_VERSION=${RC_LABEL%-rc.*}
           printf 'PRODUCT_VERSION=%s\n' "$PRODUCT_VERSION" >> "$GITHUB_ENV"
+
+      - name: Bind temporary directory to runner-owned root
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$RUNNER_TEMP"
+          test ! -L "$RUNNER_TEMP"
+          test "$(stat -f %u "$RUNNER_TEMP")" = "$(id -u)"
+          printf 'TMPDIR=%s\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Install digest-pinned Bun for isolated verification
         run: scripts/release/install-pinned-bun-macos.sh
@@ -302,7 +318,6 @@ jobs:
       INPUT_ARTIFACT_DIGEST: ${{ needs.build-unsigned-arm64.outputs.input_artifact_digest }}
       INPUT_ZIP_SHA256: ${{ needs.build-unsigned-arm64.outputs.input_zip_sha256 }}
       INPUT_ZIP_BYTES: ${{ needs.build-unsigned-arm64.outputs.input_zip_bytes }}
-      TMPDIR: ${{ runner.temp }}
 
     steps:
       - name: Checkout exact public SBOM source without a token
@@ -326,6 +341,15 @@ jobs:
           ! git show-ref --verify --quiet "refs/tags/v$RC_LABEL"
           PRODUCT_VERSION=${RC_LABEL%-rc.*}
           printf 'PRODUCT_VERSION=%s\n' "$PRODUCT_VERSION" >> "$GITHUB_ENV"
+
+      - name: Bind temporary directory to runner-owned root
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -d "$RUNNER_TEMP"
+          test ! -L "$RUNNER_TEMP"
+          test "$(stat -f %u "$RUNNER_TEMP")" = "$(id -u)"
+          printf 'TMPDIR=%s\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
 
       - name: Install digest-pinned Bun for independent SBOM derivation
         run: scripts/release/install-pinned-bun-macos.sh

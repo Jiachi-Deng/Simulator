@@ -83,6 +83,18 @@ describe("engineering RC workflow contract", () => {
     expect(workflow).not.toContain("astral-sh/setup-uv@")
   })
 
+  test("binds TMPDIR at step runtime without using an unavailable job-level runner context", () => {
+    for (const job of [build, verify, derive]) {
+      expect(job.env).not.toHaveProperty("TMPDIR")
+      const bind = String(namedStep(job, "Bind temporary directory to runner-owned root").run)
+      expect(bind).toContain('test -d "$RUNNER_TEMP"')
+      expect(bind).toContain('test ! -L "$RUNNER_TEMP"')
+      expect(bind).toContain('test "$(stat -f %u "$RUNNER_TEMP")" = "$(id -u)"')
+      expect(bind).toContain("printf 'TMPDIR=%s\\n' \"$RUNNER_TEMP\" >> \"$GITHUB_ENV\"")
+    }
+    expect(workflow).not.toContain("TMPDIR: ${{ runner.temp }}")
+  })
+
   test("lets only no-permission jobs parse native DMG or original inner ZIP contents", () => {
     expect(verifySource).toContain("verify-and-bundle-macos.sh")
     expect(deriveSource).toContain("verify-zip-spdx-evidence.py derive")
