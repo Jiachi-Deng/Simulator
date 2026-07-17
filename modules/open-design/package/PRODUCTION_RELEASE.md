@@ -13,9 +13,17 @@ marker and pass the repository's complete redistribution-rights validator.
 
 Run `--dry-run` first without `--output` or any private-key option. A successful
 build writes one deterministic `.tar.gz`, a canonical Catalog v2, its signed
-wire envelope, `open-design-official-channel.json`, and release metadata. Upload
-those files to the exact tag named in the command; do not use a mutable
-`latest/download` URL.
+wire envelope, `open-design-official-channel.json`, and release metadata into a
+private verification bundle. Public upload is track-specific; do not use a
+mutable `latest/download` URL:
+
+- prerelease `0.14.6-rc.1` uploads exactly the archive, Catalog, envelope, and
+  metadata to its exact tag. Its generated official-channel config remains an
+  owner-only verification input, is never published, and is never copied into
+  the Host application;
+- stable `0.14.5` or separately approved `0.14.6` uploads the five-file public
+  closure. Only a stable publication may promote its official-channel config
+  into a newly built Host application.
 
 Build and verify require `--module-version`. The only accepted identities are
 `0.14.5`, `0.14.6-rc.1`, and `0.14.6`; each must use the exact tag
@@ -24,7 +32,8 @@ use `--host-version-range '>=0.12.0'`. Refresh defaults to the frozen `0.14.5`
 identity for compatibility, but automation should pass `--module-version`
 explicitly so filenames and verification cannot drift across releases.
 
-The generated Host configuration is a build input, not user data. Copy:
+For an explicitly approved stable publication, the generated Host
+configuration is a build input, not user data. Copy:
 
 ```text
 <publisher-output>/open-design-official-channel.json
@@ -33,7 +42,8 @@ The generated Host configuration is a build input, not user data. Copy:
 ```
 
 The second step is performed by `apps/electron/scripts/copy-assets.ts`. The
-publisher intentionally does not modify `apps/**`.
+publisher intentionally does not modify `apps/**`. Never perform this copy for
+a prerelease config; prerelease verification uses its private one-run copy only.
 
 ## Catalog refresh requirement
 
@@ -83,18 +93,20 @@ tag. During GitHub asset replacement, clients must fail closed and retry; never
 extend the TTL or reset the sequence to hide a missed refresh.
 
 The expected GitHub Actions job runs at least every 12 hours. The stable track
-downloads the five public assets from the fixed tag. A prerelease deliberately
+downloads the five public assets from the fixed tag and advances from the
+authenticated Catalog on its selected stable tag. A prerelease deliberately
 publishes only four assets and omits `open-design-official-channel.json`; its
 refresh job authenticates the shipped stable authority and the signed RC
-metadata, constructs an owner-only one-run verification config, and deletes it
-without publishing it. Both tracks obtain the highest authenticated cross-track
-`sequence` and `issuedAt`, run refresh dry-run and refresh, run `--verify` against
-a reconstructed five-file private verification bundle, and only then replace
-the three refresh assets. The job must compare the archive SHA-256 before and
-after and must never expose the private key in arguments, logs, artifacts, or
-step outputs. The stable `open-design-official-channel.json` and both immutable
-archives remain unchanged unless a new signed application build intentionally
-changes the trust root or module version.
+metadata, takes the highest authenticated `sequence` and `issuedAt` across the
+current RC and stable `0.14.5` Catalogs, constructs an owner-only one-run
+verification config, and deletes it without publishing it. Both tracks run
+refresh dry-run and refresh, run `--verify` against a reconstructed five-file
+private verification bundle, and only then replace the three refresh assets.
+The job must compare the archive SHA-256 before and after and must never expose
+the private key in arguments, logs, artifacts, or step outputs. The stable
+`open-design-official-channel.json` and both immutable archives remain unchanged
+unless a new signed application build intentionally changes the trust root or
+module version.
 
 As of 2026-07-17, stable `0.14.5` is at Catalog sequence `3`, while public
 prerelease `0.14.6-rc.1` is at sequence `4`. The RC archive remains fixed at
