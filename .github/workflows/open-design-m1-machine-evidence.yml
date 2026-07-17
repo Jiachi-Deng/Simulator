@@ -1,0 +1,332 @@
+name: OpenDesign M1 Machine Evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      host_build_run_id:
+        description: Successful Engineering RC Bundle run ID for the exact main SHA.
+        required: true
+        type: string
+      paid_turns_approved:
+        description: Approve exactly 40 paid real-model Turns; the producer stops on the first failure.
+        required: true
+        default: false
+        type: boolean
+      acceptance_confirmation:
+        description: Enter RUN_OPEN_DESIGN_M1_40_PAID_TURNS_STOP_ON_FIRST_FAILURE.
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: open-design-m1-machine-evidence
+  cancel-in-progress: false
+
+jobs:
+  produce-machine-evidence:
+    name: Produce sealed real OpenDesign machine evidence
+    if: >-
+      github.repository == 'Jiachi-Deng/Simulator' &&
+      github.ref == 'refs/heads/main' &&
+      github.run_attempt == 1 &&
+      vars.OPEN_DESIGN_M1_MACHINE_EVIDENCE_ENABLED == 'true' &&
+      inputs.paid_turns_approved == true &&
+      inputs.acceptance_confirmation == 'RUN_OPEN_DESIGN_M1_40_PAID_TURNS_STOP_ON_FIRST_FAILURE'
+    runs-on: [self-hosted, macOS, ARM64, simulator-open-design-m1]
+    timeout-minutes: 360
+    environment:
+      name: open-design-m1-machine-evidence
+    env:
+      GH_TOKEN: ${{ github.token }}
+      HOST_BUILD_RUN_ID: ${{ inputs.host_build_run_id }}
+      PAID_TURNS_APPROVED: ${{ inputs.paid_turns_approved }}
+      ACCEPTANCE_CONFIRMATION: ${{ inputs.acceptance_confirmation }}
+      SIMULATOR_M1_MACHINE_REAL: packaged-open-design-direct-observation
+
+    steps:
+      - name: Checkout exact main authority
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.10"
+
+      - name: Install exact producer dependencies
+        run: bun install --frozen-lockfile --ignore-scripts
+
+      - name: Verify protected runner and exact Host build authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$GITHUB_REPOSITORY" = "Jiachi-Deng/Simulator"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$GITHUB_RUN_ATTEMPT" = "1"
+          test "$PAID_TURNS_APPROVED" = "true"
+          test "$ACCEPTANCE_CONFIRMATION" = "RUN_OPEN_DESIGN_M1_40_PAID_TURNS_STOP_ON_FIRST_FAILURE"
+          test "$(uname -s)" = "Darwin"
+          test "$(uname -m)" = "arm64"
+          [[ "$HOST_BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$GITHUB_SHA" = "$(git rev-parse refs/remotes/origin/main)"
+
+          host_run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$HOST_BUILD_RUN_ID")
+          test "$(jq -r .conclusion <<<"$host_run")" = success
+          test "$(jq -r .head_branch <<<"$host_run")" = main
+          test "$(jq -r .head_sha <<<"$host_run")" = "$GITHUB_SHA"
+          test "$(jq -r .repository.full_name <<<"$host_run")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r .path <<<"$host_run")" = ".github/workflows/engineering-rc.yml"
+          test "$(jq -r .event <<<"$host_run")" = workflow_dispatch
+          test "$(jq -r .run_attempt <<<"$host_run")" = "1"
+
+          artifacts=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$HOST_BUILD_RUN_ID/artifacts?per_page=100")
+          artifact_count=$(jq '[.artifacts[] | select(.expired == false and (.name | test("^simulator-0\\.12\\.0-rc\\.[1-9][0-9]*-macos-arm64-unsigned$")))] | length' <<<"$artifacts")
+          test "$artifact_count" = "1"
+          artifact=$(jq -ce '.artifacts[] | select(.expired == false and (.name | test("^simulator-0\\.12\\.0-rc\\.[1-9][0-9]*-macos-arm64-unsigned$")))' <<<"$artifacts")
+          artifact_name=$(jq -er .name <<<"$artifact")
+          artifact_id=$(jq -er .id <<<"$artifact")
+          artifact_size=$(jq -er .size_in_bytes <<<"$artifact")
+          [[ "$artifact_id" =~ ^[1-9][0-9]*$ ]]
+          [[ "$artifact_size" =~ ^[1-9][0-9]*$ ]]
+          test "$artifact_size" -le 2147483648
+          test "$(jq -r .workflow_run.id <<<"$artifact")" = "$HOST_BUILD_RUN_ID"
+          printf 'HOST_ARTIFACT_NAME=%s\n' "$artifact_name" >> "$GITHUB_ENV"
+          printf 'HOST_ARTIFACT_ID=%s\n' "$artifact_id" >> "$GITHUB_ENV"
+
+          profile_root="$HOME/Library/Application Support/Simulator M1 Acceptance Runner"
+          test -d "$profile_root"
+          test ! -L "$profile_root"
+          test "$(stat -f %Su "$profile_root")" = "$(id -un)"
+          test "$(stat -f %Lp "$profile_root")" = "700"
+          printf 'M1_PACKAGED_PROFILE_ROOT=%s\n' "$profile_root" >> "$GITHUB_ENV"
+
+      - name: Download and stage exact packaged Simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          archive="$RUNNER_TEMP/open-design-m1-host-bundle.zip"
+          host_bundle="$RUNNER_TEMP/open-design-m1-host-bundle"
+          mount_root="$RUNNER_TEMP/open-design-m1-mount"
+          packaged_root="$RUNNER_TEMP/open-design-m1-packaged"
+          mkdir -m 700 "$host_bundle" "$mount_root" "$packaged_root"
+          gh api -H "Accept: application/vnd.github+json" \
+            "repos/$GITHUB_REPOSITORY/actions/artifacts/$HOST_ARTIFACT_ID/zip" > "$archive"
+          test -s "$archive"
+          test "$(wc -c < "$archive" | tr -d ' ')" -le 2147483648
+
+          python3 - "$archive" "$host_bundle" <<'PY'
+          import hashlib
+          import os
+          import re
+          import stat
+          import sys
+          import zipfile
+
+          archive, root = sys.argv[1:]
+          expected_files = {
+              "RELEASE_NOTES.md",
+              "SHA256SUMS",
+              "Simulator-arm64.dmg",
+              "Simulator-arm64.zip",
+              "app-inventory.jsonl",
+              "attestations/provenance.sigstore.json",
+              "attestations/sbom.sigstore.json",
+              "bundle-metadata.json",
+              "dmg-app-inventory.raw.jsonl",
+              "dmg-signatures.json",
+              "package-verification-code.txt",
+              "packaged-files.sha256",
+              "rc-validation.json",
+              "sbom.spdx.json",
+              "transport-normalization-policy.json",
+              "verification-input.json",
+              "zip-app-inventory.raw.jsonl",
+              "zip-signatures.json",
+          }
+          expected_directories = {"attestations/"}
+          maximum_total = 3 * 1024 * 1024 * 1024
+
+          def maximum_for(path):
+              if path in {"Simulator-arm64.dmg", "Simulator-arm64.zip"}:
+                  return 1280 * 1024 * 1024
+              if path in {"app-inventory.jsonl", "dmg-app-inventory.raw.jsonl", "zip-app-inventory.raw.jsonl"}:
+                  return 256 * 1024 * 1024
+              if path == "sbom.spdx.json":
+                  return 128 * 1024 * 1024
+              if path == "SHA256SUMS":
+                  return 64 * 1024
+              return 32 * 1024 * 1024
+
+          seen = set()
+          extracted = set()
+          total = 0
+          with zipfile.ZipFile(archive) as source:
+              for info in source.infolist():
+                  name = info.filename
+                  if (not name or "\\" in name or "\x00" in name or name.startswith("/")
+                          or any(part in ("", ".", "..") for part in name.rstrip("/").split("/"))
+                          or name in seen):
+                      raise ValueError("unsafe or duplicate Host artifact path")
+                  seen.add(name)
+                  mode = info.external_attr >> 16
+                  kind = stat.S_IFMT(mode)
+                  if stat.S_ISLNK(mode) or kind not in (0, stat.S_IFREG, stat.S_IFDIR):
+                      raise ValueError("non-regular Host artifact member")
+                  if info.flag_bits & 1:
+                      raise ValueError("encrypted Host artifact member")
+                  if info.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED):
+                      raise ValueError("unsupported Host artifact compression")
+                  if info.is_dir():
+                      if name not in expected_directories:
+                          raise ValueError("unexpected Host artifact directory")
+                      os.makedirs(os.path.join(root, name.rstrip("/")), mode=0o700, exist_ok=True)
+                      continue
+                  if name not in expected_files:
+                      raise ValueError("unexpected Host artifact file")
+                  limit = maximum_for(name)
+                  if info.file_size < 1 or info.file_size > limit:
+                      raise ValueError("Host artifact member exceeds limit")
+                  total += info.file_size
+                  if total > maximum_total:
+                      raise ValueError("Host artifact exceeds total limit")
+                  destination = os.path.join(root, *name.split("/"))
+                  os.makedirs(os.path.dirname(destination), mode=0o700, exist_ok=True)
+                  written = 0
+                  with source.open(info) as reader, open(destination, "xb") as writer:
+                      while chunk := reader.read(1024 * 1024):
+                          written += len(chunk)
+                          if written > info.file_size or written > limit:
+                              raise ValueError("Host artifact expands beyond declared limit")
+                          writer.write(chunk)
+                  if written != info.file_size or os.path.getsize(destination) != info.file_size:
+                      raise ValueError("Host artifact member changed during extraction")
+                  os.chmod(destination, 0o600)
+                  extracted.add(name)
+
+          if extracted != expected_files or not seen.issubset(expected_files | expected_directories):
+              raise ValueError("Host artifact does not match the exact Engineering RC closure")
+
+          sums_path = os.path.join(root, "SHA256SUMS")
+          with open(sums_path, "r", encoding="utf-8", newline="") as handle:
+              sums_source = handle.read()
+          if not sums_source.endswith("\n"):
+              raise ValueError("Host SHA256SUMS is not canonical")
+          expected_sums = sorted(expected_files - {"SHA256SUMS"})
+          lines = sums_source[:-1].split("\n")
+          if len(lines) != len(expected_sums):
+              raise ValueError("Host SHA256SUMS count is invalid")
+          for line, expected_path in zip(lines, expected_sums):
+              match = re.fullmatch(r"([0-9a-f]{64})  ([A-Za-z0-9][A-Za-z0-9._/-]*)", line)
+              if not match or match.group(2) != expected_path:
+                  raise ValueError("Host SHA256SUMS order or path is invalid")
+              digest = hashlib.sha256()
+              with open(os.path.join(root, expected_path), "rb") as handle:
+                  while chunk := handle.read(1024 * 1024):
+                      digest.update(chunk)
+              if digest.hexdigest() != match.group(1):
+                  raise ValueError("Host artifact checksum mismatch")
+          PY
+
+          dmg="$host_bundle/Simulator-arm64.dmg"
+          test -f "$dmg"
+          test ! -L "$dmg"
+          host_sha=$(shasum -a 256 "$dmg" | awk '{print $1}')
+          [[ "$host_sha" =~ ^[0-9a-f]{64}$ ]]
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount_root" "$dmg" >/dev/null
+          trap 'hdiutil detach "$mount_root" >/dev/null 2>&1 || true' EXIT
+          test -d "$mount_root/Simulator.app"
+          ditto "$mount_root/Simulator.app" "$packaged_root/Simulator.app"
+          hdiutil detach "$mount_root" >/dev/null
+          trap - EXIT
+          test -x "$packaged_root/Simulator.app/Contents/MacOS/Simulator"
+          printf 'HOST_ARTIFACT_SHA256=%s\n' "$host_sha" >> "$GITHUB_ENV"
+          printf 'M1_PACKAGED_APP_PATH=%s\n' "$packaged_root/Simulator.app" >> "$GITHUB_ENV"
+
+      - name: Generate fixed M1 seed authority
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          case_root="$RUNNER_TEMP/open-design-m1-cases"
+          bun scripts/qa/generate-open-design-m1-case-artifacts.ts "$case_root"
+          printf 'M1_CASE_ARTIFACT_ROOT=%s\n' "$case_root" >> "$GITHUB_ENV"
+
+      - name: Pin trusted external blackout proxy child
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          proxy_bun=$(realpath "$(command -v bun)")
+          proxy_script=$(realpath scripts/qa/run-host-agent-blackout-proxy.ts)
+          test -f "$proxy_bun"
+          test -x "$proxy_bun"
+          test -f "$proxy_script"
+          test ! -L "$proxy_bun"
+          test ! -L "$proxy_script"
+          for trusted_path in "$proxy_bun" "$proxy_script"; do
+            owner_uid=$(stat -f %u "$trusted_path")
+            test "$owner_uid" = "$(id -u)" || test "$owner_uid" = "0"
+            mode=$(stat -f %Lp "$trusted_path")
+            (( (8#$mode & 8#022) == 0 ))
+          done
+          printf 'M1_BLACKOUT_PROXY_BUN_PATH=%s\n' "$proxy_bun" >> "$GITHUB_ENV"
+          printf 'M1_BLACKOUT_PROXY_SCRIPT_PATH=%s\n' "$proxy_script" >> "$GITHUB_ENV"
+
+      - name: Run 20 LKG and 20 RC real Tasks with direct observation
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          output="$RUNNER_TEMP/open-design-m1-machine-evidence"
+          test ! -e "$output"
+          printf 'M1_EVIDENCE_OUTPUT_ROOT=%s\n' "$output" >> "$GITHUB_ENV"
+          M1_EVIDENCE_OUTPUT_ROOT="$output" bun scripts/qa/run-open-design-m1-machine-evidence.ts \
+            > "$RUNNER_TEMP/open-design-m1-machine-result.json"
+          test "$(jq -er .status "$RUNNER_TEMP/open-design-m1-machine-result.json")" = passed
+          test "$(jq -er .artifactName "$RUNNER_TEMP/open-design-m1-machine-result.json")" = open-design-m1-machine-evidence
+          test "$(jq -er .fileCount "$RUNNER_TEMP/open-design-m1-machine-result.json")" = 150
+
+      - name: Recheck sealed artifact inventory
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(find "$M1_EVIDENCE_OUTPUT_ROOT" -type f | wc -l | tr -d ' ')" = "150"
+          test "$(find "$M1_EVIDENCE_OUTPUT_ROOT" -type l | wc -l | tr -d ' ')" = "0"
+          total_bytes=$(find "$M1_EVIDENCE_OUTPUT_ROOT" -type f -exec stat -f %z {} \; | awk '{sum += $1} END {print sum + 0}')
+          test "$total_bytes" -le $((96 * 1024 * 1024))
+          manifest_sha=$(shasum -a 256 "$M1_EVIDENCE_OUTPUT_ROOT/machine-manifest.json" | awk '{print $1}')
+          test "$manifest_sha" = "$(jq -er .sha256 "$RUNNER_TEMP/open-design-m1-machine-result.json")"
+          printf '### OpenDesign M1 machine evidence\n\n- Files: 150\n- Manifest SHA-256: `%s`\n' \
+            "$manifest_sha" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload sealed machine evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: open-design-m1-machine-evidence
+          path: ${{ env.M1_EVIDENCE_OUTPUT_ROOT }}/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Remove ephemeral packaged and seed inputs
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          for path in \
+            "$RUNNER_TEMP/open-design-m1-host-bundle" \
+            "$RUNNER_TEMP/open-design-m1-host-bundle.zip" \
+            "$RUNNER_TEMP/open-design-m1-mount" \
+            "$RUNNER_TEMP/open-design-m1-packaged" \
+            "$RUNNER_TEMP/open-design-m1-cases"; do
+            if [ -e "$path" ]; then rm -rf -- "$path"; fi
+          done
