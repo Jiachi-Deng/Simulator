@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -19,6 +19,7 @@ import {
 } from './open-design-m1-final-evidence'
 import { OPEN_DESIGN_M1_CASES } from './open-design-m1-cases'
 import { OPEN_DESIGN_ACCEPTANCE_REPOSITORY, OPEN_DESIGN_RC_SOURCE_SHA } from './open-design-rc-acceptance-evidence'
+import { verifyOpenDesignAcceptanceArtifact } from '../release/verify-open-design-acceptance-artifact'
 
 const roots: string[] = []
 const canonical = (value: unknown): string => `${JSON.stringify(value)}\n`
@@ -156,7 +157,39 @@ describe('OpenDesign M1 final evidence composer', () => {
       requiredCiPassed: true,
       rollbackExercisePassed: true,
     })
+    const acceptanceRoot = await realpath(value.outputRoot)
+    const binding = verifyOpenDesignAcceptanceArtifact(
+      acceptanceRoot,
+      machineAuthority.hostHeadSha,
+      machineAuthority.hostBuildRunId.toString(),
+      machineAuthority.hostArtifactSha256,
+      { runId: '9003', artifactId: '9004', artifactDigest: `sha256:${'f'.repeat(64)}` },
+    )
+    expect(binding).toMatchObject({
+      artifactName: OPEN_DESIGN_M1_FINAL_ARTIFACT_NAME,
+      machineRunId: '9001',
+      runId: '9003',
+      visualRunId: '9002',
+    })
+    expect(() => verifyOpenDesignAcceptanceArtifact(
+      acceptanceRoot,
+      machineAuthority.hostHeadSha,
+      '8002',
+      machineAuthority.hostArtifactSha256,
+      { runId: '9003', artifactId: '9004', artifactDigest: `sha256:${'f'.repeat(64)}` },
+    )).toThrow('exact Engineering RC')
     expect((await stat(join(value.outputRoot, 'open-design-rc-acceptance-evidence.json'))).mode & 0o777).toBe(0o600)
+    await writeFile(
+      join(value.outputRoot, 'open-design-rc-acceptance-evidence.json'),
+      Buffer.from([0x7b, 0x22, 0x78, 0x22, 0x3a, 0xff, 0x7d, 0x0a]),
+    )
+    expect(() => verifyOpenDesignAcceptanceArtifact(
+      acceptanceRoot,
+      machineAuthority.hostHeadSha,
+      machineAuthority.hostBuildRunId.toString(),
+      machineAuthority.hostArtifactSha256,
+      { runId: '9003', artifactId: '9004', artifactDigest: `sha256:${'f'.repeat(64)}` },
+    )).toThrow('valid UTF-8')
   })
 
   test('rejects visual substitution even when the two-file visual artifact is resealed', async () => {

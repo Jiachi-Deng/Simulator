@@ -52,6 +52,11 @@ SIGNED_HOST_FINAL_FILES = SIGNED_HOST_PRE_FILES | {
     "SHA256SUMS",
     "attestations/provenance.sigstore.json",
 }
+OPEN_DESIGN_ACCEPTANCE_FILES = {
+    "SHA256SUMS",
+    "open-design-rc-acceptance-evidence.json",
+    "open-design-rc-acceptance-intake.json",
+}
 MAXIMUM_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 MAXIMUM_SIGNED_HOST_ARCHIVE_BYTES = 4 * 1024 * 1024 * 1024
 MAXIMUM_TOTAL_BYTES = 3 * 1024 * 1024 * 1024
@@ -86,8 +91,8 @@ def require_empty_owner_directory(path: str) -> None:
 
 
 def extract(phase: str, archive: str, destination: str) -> dict:
-    if phase not in {"input", "pre", "final", "zip-sbom", "signed-host-pre", "signed-host-final"}:
-        raise ValueError("Phase must be input, pre, final, zip-sbom, signed-host-pre, or signed-host-final")
+    if phase not in {"input", "pre", "final", "zip-sbom", "signed-host-pre", "signed-host-final", "open-design-acceptance"}:
+        raise ValueError("Phase must be input, pre, final, zip-sbom, signed-host-pre, signed-host-final, or open-design-acceptance")
     archive = os.path.abspath(archive)
     destination = os.path.abspath(destination)
     if phase == "input":
@@ -98,6 +103,8 @@ def extract(phase: str, archive: str, destination: str) -> dict:
         expected_files = SIGNED_HOST_PRE_FILES
     elif phase == "signed-host-final":
         expected_files = SIGNED_HOST_FINAL_FILES
+    elif phase == "open-design-acceptance":
+        expected_files = OPEN_DESIGN_ACCEPTANCE_FILES
     else:
         expected_files = BASE_FILES | (ATTESTATION_FILES if phase == "final" else set())
     # upload-artifact archives regular files only; nested parents are materialized safely here.
@@ -196,7 +203,7 @@ def extract(phase: str, archive: str, destination: str) -> dict:
 
 def main() -> int:
     if len(sys.argv) != 4:
-        raise ValueError("Usage: extract-engineering-rc-artifact.py input|pre|final|zip-sbom|signed-host-pre|signed-host-final ARCHIVE EMPTY_DESTINATION")
+        raise ValueError("Usage: extract-engineering-rc-artifact.py input|pre|final|zip-sbom|signed-host-pre|signed-host-final|open-design-acceptance ARCHIVE EMPTY_DESTINATION")
     print(json.dumps(extract(sys.argv[1], sys.argv[2], sys.argv[3]), sort_keys=True))
     return 0
 

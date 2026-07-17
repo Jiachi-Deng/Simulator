@@ -30,12 +30,19 @@ describe("dormant signed macOS Host acceptance workflow", () => {
     expect(buildJob.if).toContain("github.run_attempt == 1")
     expect(buildJob.if).toContain("inputs.acceptance_approved == true")
     expect(buildJob.if).toContain("vars.SIMULATOR_SIGNED_HOST_ACCEPTANCE_ENABLED == 'true'")
+    expect(buildJob.if).toContain("vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED == 'true'")
     expect(buildJob.environment.name).toBe("signed-host-acceptance")
     expect(buildJob["runs-on"]).toBe("macos-15")
     expect(finalizerJob.needs).toBe("build-signed-candidate")
     expect(finalizerJob.if).toContain("needs.build-signed-candidate.result == 'success'")
+    expect(finalizerJob.if).toContain("vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED == 'true'")
     expect(finalizerJob.environment).toBeUndefined()
-    expect(workflow.concurrency).toEqual({ group: "signed-macos-host-acceptance", "cancel-in-progress": false })
+    expect(workflow.concurrency).toEqual({ group: "open-design-release-transaction", "cancel-in-progress": false })
+    expect(buildJob.env.RC_ACCEPTANCE_FREEZE_ENABLED).toBe("${{ vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED }}")
+    expect(finalizerJob.env.RC_ACCEPTANCE_FREEZE_ENABLED).toBe("${{ vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED }}")
+    expect(buildJob.env.SIMULATOR_DISABLE_UPDATES).toBe("1")
+    expect(finalizerJob.env.SIMULATOR_DISABLE_UPDATES).toBe("1")
+    expect(finalizerJob["timeout-minutes"]).toBe(60)
   })
 
   test("parameterizes authority values and requires every Apple secret without setting a formal identity in source", () => {
@@ -67,8 +74,9 @@ describe("dormant signed macOS Host acceptance workflow", () => {
       ".github/workflows/engineering-rc.yml", ".head_sha", ".head_branch", ".run_attempt", ".conclusion",
       ".workflow_run.id", ".workflow_run.head_sha", ".digest", ".expired",
     ]) expect(baseline).toContain(value)
-    expect(Object.keys(dispatch.inputs)).toHaveLength(8)
+    expect(Object.keys(dispatch.inputs)).toHaveLength(9)
     expect(dispatch.inputs.engineering_rc_authority.required).toBe(true)
+    expect(dispatch.inputs.open_design_acceptance_authority.required).toBe(true)
     expect(authority).toContain('keys == ["artifactDigest","artifactId","dmgSha256","rcLabel","runId","zipSha256"]')
     const download = buildStep("Download exact authenticated Engineering RC Artifact")
     expect(download.with["artifact-ids"]).toBe("${{ steps.authority.outputs.artifact_id }}")
@@ -80,6 +88,36 @@ describe("dormant signed macOS Host acceptance workflow", () => {
     const baselineExtraction = reverify.indexOf('ditto -x -k "$root/Simulator-arm64.zip"')
     expect(baselinePreflight).toBeGreaterThanOrEqual(0)
     expect(baselinePreflight).toBeLessThan(baselineExtraction)
+  })
+
+  test("requires the completed 40-Turn and H2 acceptance Artifact for the same exact Engineering RC before secrets", () => {
+    const authority = buildStep("Revalidate exact source, inputs, and dormant gate").run
+    expect(authority).toContain('test "$RC_ACCEPTANCE_FREEZE_ENABLED" = "true"')
+    expect(authority).toContain('keys == ["artifactDigest","artifactId","runId"]')
+    const authenticate = buildStep("Authenticate exact successful final OpenDesign acceptance run and Artifact").run
+    for (const value of [
+      ".github/workflows/open-design-rc-acceptance.yml", ".head_sha", ".run_attempt", ".conclusion",
+      ".workflow_run.id", ".workflow_run.head_sha", ".digest", ".expired",
+    ]) expect(authenticate).toContain(value)
+    const download = buildStep("Download exact raw final OpenDesign acceptance Artifact")
+    expect(download.with["artifact-ids"]).toBe("${{ steps.authority.outputs.acceptance_artifact_id }}")
+    expect(download.with["run-id"]).toBe("${{ steps.authority.outputs.acceptance_run_id }}")
+    expect(download.with["skip-decompress"]).toBe(true)
+    expect(download.with["digest-mismatch"]).toBe("error")
+    const bindStep = buildStep("Bind completed OpenDesign acceptance to the exact Engineering RC")
+    const bind = bindStep.run
+    expect(bind).toContain("open-design-acceptance")
+    expect(bind).toContain("verify-open-design-acceptance-artifact.ts")
+    expect(bind).toContain('"$ENGINEERING_RC_RUN_ID" "$ENGINEERING_RC_DMG_SHA256"')
+    const secretGate = buildStep("Require all Apple credential secrets without displaying values")
+    expect(buildJob.steps.indexOf(bindStep)).toBeLessThan(buildJob.steps.indexOf(secretGate))
+    const finalizerAuthority = finalizerStep("Revalidate finalizer authority and exact pre-attestation Artifact API identity").run
+    expect(finalizerAuthority).toContain(".github/workflows/open-design-rc-acceptance.yml")
+    expect(finalizerAuthority).toContain('test "$RC_ACCEPTANCE_FREEZE_ENABLED" = "true"')
+    const finalizerDownload = finalizerStep("Download exact raw final OpenDesign acceptance Artifact for finalizer")
+    expect(finalizerDownload.with["skip-decompress"]).toBe(true)
+    expect(finalizerStep("Independently rebind final OpenDesign acceptance before OIDC finalization").run)
+      .toContain("verify-open-design-acceptance-artifact.ts")
   })
 
   test("notarizes and staples the App before transport packaging, then separately notarizes and staples the final DMG", () => {
@@ -171,7 +209,43 @@ describe("dormant signed macOS Host acceptance workflow", () => {
     expect(extraction).toContain("signed-host-pre")
     expect(extraction).toContain("signed-host-candidate.ts validate-pre")
     expect(extraction).toContain(".engineeringRc == $expectedRc")
+    expect(extraction).toContain(".openDesignAcceptance == $expectedAcceptance")
     expect(extraction).toContain(".identity ==")
+  })
+
+  test("rejects arbitrary Candidate bytes with self-consistent producer JSON before OIDC attestation", () => {
+    const authority = finalizerStep("Revalidate finalizer authority and exact pre-attestation Artifact API identity").run
+    for (const value of [
+      ".github/workflows/engineering-rc.yml", ".workflow_run.id", ".workflow_run.head_sha",
+      ".run_attempt", ".conclusion", ".digest", ".expired",
+    ]) expect(authority).toContain(value)
+    const baselineDownload = finalizerStep("Download exact raw Engineering RC Artifact for finalizer")
+    expect(baselineDownload.with["artifact-ids"]).toBe("${{ fromJSON(inputs.engineering_rc_authority).artifactId }}")
+    expect(baselineDownload.with["run-id"]).toBe("${{ fromJSON(inputs.engineering_rc_authority).runId }}")
+    expect(baselineDownload.with["skip-decompress"]).toBe(true)
+    expect(baselineDownload.with["digest-mismatch"]).toBe("error")
+    const baseline = finalizerStep("Independently establish the exact Engineering RC payload baseline")
+    for (const value of [
+      "extract-engineering-rc-artifact.py", "verify-engineering-rc-bundle.ts",
+      "verify-engineering-rc-attestations.sh", "preflight-macos-release-artifact.py zip",
+    ]) expect(baseline.run).toContain(value)
+    const direct = finalizerStep("Independently verify actual Candidate containers before OIDC attestation")
+    for (const value of [
+      "preflight-macos-release-artifact.py dmg", "hdiutil verify", "stapler validate", "spctl --assess",
+      "hdiutil attach", "preflight-macos-release-artifact.py zip", "ditto -x -k",
+      "verify-macos-container-root.py dmg", "verify-macos-container-root.py zip",
+      "compare-macos-app-payloads.py", "verify-macos-signatures.ts", "verify-packaged-macos-runtimes.sh",
+      "verify-public-build-privacy.ts", "updates-disabled.ts", 'cmp -s "$report" "$candidate/$kind-signatures.json"',
+      'cmp -s "$RUNNER_TEMP/finalizer-payload-equivalence.json" "$candidate/payload-equivalence.json"',
+    ]) expect(direct.run).toContain(value)
+    const install = finalizerStep("Install locked independent verification inputs")
+    const extraction = finalizerStep("Bind, safely extract, and revalidate the exact pre-attestation closure")
+    const attest = finalizerStep("Attest exact final DMG and ZIP provenance without Apple credentials")
+    expect(finalizerJob.steps.indexOf(baselineDownload)).toBeLessThan(finalizerJob.steps.indexOf(baseline))
+    expect(finalizerJob.steps.indexOf(baseline)).toBeLessThan(finalizerJob.steps.indexOf(extraction))
+    expect(finalizerJob.steps.indexOf(extraction)).toBeLessThan(finalizerJob.steps.indexOf(install))
+    expect(finalizerJob.steps.indexOf(install)).toBeLessThan(finalizerJob.steps.indexOf(direct))
+    expect(finalizerJob.steps.indexOf(direct)).toBeLessThan(finalizerJob.steps.indexOf(attest))
   })
 
   test("uploads the exact signed Candidate name/closure with strict manifest and OIDC provenance", () => {

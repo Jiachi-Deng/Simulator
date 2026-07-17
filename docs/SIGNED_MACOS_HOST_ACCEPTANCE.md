@@ -9,18 +9,23 @@ The workflow is manually dispatched from the exact current `main` commit. It can
 - the dispatch ref and requested source SHA are the current remote `main` SHA;
 - `github.run_attempt` is exactly `1`;
 - repository variable `SIMULATOR_SIGNED_HOST_ACCEPTANCE_ENABLED` is exactly `true`;
+- the OpenDesign acceptance freeze `OPEN_DESIGN_RC_ACCEPTANCE_ENABLED` remains exactly `true`, and the workflow shares the `open-design-release-transaction` lane with Catalog release/refresh;
 - the `signed-host-acceptance` protected Environment admits the job;
+- an exact successful first-attempt `open-design-rc-acceptance.yml` run and its non-expired final Artifact are supplied and authenticated;
 - all Apple credential secret names are present;
 - expected Developer ID Application subject, Team ID, Bundle ID, and the unsigned baseline DMG SHA-256 are supplied explicitly.
 
-The repository does not define the production certificate subject or Team ID. Although the exact artifact already carries a Bundle ID from `electron-builder.yml`, this workflow neither hard-codes nor infers which Bundle ID is finally approved: the expected certificate subject, Team ID, and Bundle ID are dispatch parameters, the supplied Bundle ID must equal the exact artifact's actual Bundle ID, and all three values become non-secret provenance. Apple credentials are written only to an owner-only temporary keychain/key file and are never printed. The signing job destroys them before it invokes `upload-artifact`; a second idempotent `always()` cleanup is only the failure fallback.
+The final OpenDesign acceptance Artifact is downloaded as a raw digest-bound ZIP, safely extracted as an exact three-file closure, and its summary is regenerated from the complete intake. That regenerated evidence must prove 40 paid Turns, 20 consecutive new-stack passes, 20 human Preview passes, Required CI and rollback; its Host build run ID, Host SHA, and DMG SHA-256 must match the same exact Engineering RC selected for signing. The second OIDC job independently repeats this authentication and cross-binding before attestation.
 
-The protected signing/notarization job has read-only repository permissions and no OIDC permission. It hands off an exact secret-free pre-attestation closure to a second job. The second job has no protected Environment and no Apple secret references; it authenticates the current workflow run and exact Artifact ID/name/API digest, downloads the raw Artifact ZIP, verifies the raw SHA-256, safely extracts an exact closure, and only then receives `id-token: write` / `attestations: write` to create provenance.
+The repository does not define the production certificate subject or Team ID. Although the exact artifact already carries a Bundle ID from `electron-builder.yml`, this workflow neither hard-codes nor infers which Bundle ID is finally approved: the expected certificate subject, Team ID, and Bundle ID are dispatch parameters, the supplied Bundle ID must equal the exact artifact's actual Bundle ID, and all three values become non-secret provenance. Apple credentials are not exposed to any step until the Engineering RC and final OpenDesign acceptance evidence have both been authenticated and cross-bound. They are then written only to an owner-only temporary keychain/key file and are never printed. The signing job destroys them before it invokes `upload-artifact`; a second idempotent `always()` cleanup is only the failure fallback.
+
+The protected signing/notarization job has read-only repository permissions and no OIDC permission. It hands off an exact secret-free pre-attestation closure to a second job. The second job has no protected Environment and no Apple secret references; it authenticates the current workflow run and exact Artifact ID/name/API digest, downloads the raw Artifact ZIP, verifies the raw SHA-256, and safely extracts an exact closure. Before invoking `actions/attest`, that second job also independently downloads and verifies the exact Engineering RC, mounts the Candidate DMG, extracts the Candidate ZIP, directly reruns signature, Gatekeeper, stapler, pinned-runtime, privacy and updater checks, and recomputes both payload-equivalence reports against the Engineering RC. Producer-generated JSON is therefore evidence to compare, not the finalizer's trust root.
 
 ## Build and notarization order
 
 ```text
-exact main source + authenticated Engineering RC App bytes
+exact main + authenticated Engineering RC + regenerated 40-Turn/H2 acceptance evidence
+  -> prove acceptance Host run/DMG/source equals the Engineering RC
   -> re-sign that exact App with Developer ID (no payload rebuild)
   -> verify every nested Mach-O + entitlements + pinned runtimes
   -> notarize App archive -> staple and validate App
@@ -49,7 +54,7 @@ No verifier infers or accepts an Apple identity from ambient Keychain state.
 
 ## Evidence boundary
 
-The final Artifact contains signed-only checksums, a strict manifest, a local provenance record, signature reports, notarization result summaries, a combined report that independently binds both the DMG-extracted and ZIP-extracted App to the same Engineering RC payload, and an OIDC attestation bundle. All transport digests are calculated after app and DMG stapling.
+The final Artifact contains signed-only checksums, a strict manifest, a local provenance record, the exact final OpenDesign acceptance run/Artifact/summary reference, signature reports, notarization result summaries, a combined report that independently binds both the DMG-extracted and ZIP-extracted App to the same Engineering RC payload, and an OIDC attestation bundle. All transport digests are calculated after app and DMG stapling.
 
 H3 post-install evidence is a separate owner-only JSON record generated on the clean installation environment. Its schema contains only product identity, Artifact lineage, OS version, installed path, machine-derived verification decisions, and backup/restore state. It rejects unknown fields, non-canonical timestamps, non-absolute paths, non-SHA-256 digests, negative verification results, and secret-shaped keys.
 

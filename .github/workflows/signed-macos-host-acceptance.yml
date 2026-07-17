@@ -24,6 +24,10 @@ on:
         description: Exact JSON object with rcLabel, runId, artifactId, artifactDigest, dmgSha256, and zipSha256.
         type: string
         required: true
+      open_design_acceptance_authority:
+        description: Exact JSON object with the successful final OpenDesign acceptance runId, artifactId, and artifactDigest.
+        type: string
+        required: true
       expected_developer_id_application:
         description: Exact non-secret Developer ID Application certificate subject.
         type: string
@@ -42,7 +46,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: signed-macos-host-acceptance
+  group: open-design-release-transaction
   cancel-in-progress: false
 
 jobs:
@@ -55,7 +59,8 @@ jobs:
       github.run_attempt == 1 &&
       inputs.acceptance_approved == true &&
       inputs.acceptance_confirmation == 'BUILD_SIGNED_MACOS_HOST_CANDIDATE' &&
-      vars.SIMULATOR_SIGNED_HOST_ACCEPTANCE_ENABLED == 'true'
+      vars.SIMULATOR_SIGNED_HOST_ACCEPTANCE_ENABLED == 'true' &&
+      vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED == 'true'
     environment:
       name: signed-host-acceptance
     permissions:
@@ -72,10 +77,13 @@ jobs:
       SOURCE_SHA: ${{ inputs.source_sha }}
       HOST_VERSION: ${{ inputs.host_version }}
       ENGINEERING_RC_AUTHORITY: ${{ inputs.engineering_rc_authority }}
+      OPEN_DESIGN_ACCEPTANCE_AUTHORITY: ${{ inputs.open_design_acceptance_authority }}
       EXPECTED_AUTHORITY: ${{ inputs.expected_developer_id_application }}
       EXPECTED_TEAM_ID: ${{ inputs.expected_team_id }}
       EXPECTED_BUNDLE_ID: ${{ inputs.expected_bundle_id }}
       SIGNED_ACCEPTANCE_ENABLED: ${{ vars.SIMULATOR_SIGNED_HOST_ACCEPTANCE_ENABLED }}
+      RC_ACCEPTANCE_FREEZE_ENABLED: ${{ vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED }}
+      SIMULATOR_DISABLE_UPDATES: "1"
 
     steps:
       - name: Checkout exact main authority
@@ -94,16 +102,21 @@ jobs:
           test "$GITHUB_REF" = "refs/heads/main"
           test "$GITHUB_RUN_ATTEMPT" = "1"
           test "$SIGNED_ACCEPTANCE_ENABLED" = "true"
+          test "$RC_ACCEPTANCE_FREEZE_ENABLED" = "true"
           test "$GITHUB_SHA" = "$SOURCE_SHA"
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$HOST_VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?$ ]]
           jq -e 'type == "object" and keys == ["artifactDigest","artifactId","dmgSha256","rcLabel","runId","zipSha256"] and all(.[]; type == "string")' <<<"$ENGINEERING_RC_AUTHORITY" >/dev/null
+          jq -e 'type == "object" and keys == ["artifactDigest","artifactId","runId"] and all(.[]; type == "string")' <<<"$OPEN_DESIGN_ACCEPTANCE_AUTHORITY" >/dev/null
           ENGINEERING_RC_LABEL=$(jq -er .rcLabel <<<"$ENGINEERING_RC_AUTHORITY")
           ENGINEERING_RC_RUN_ID=$(jq -er .runId <<<"$ENGINEERING_RC_AUTHORITY")
           ENGINEERING_RC_ARTIFACT_ID=$(jq -er .artifactId <<<"$ENGINEERING_RC_AUTHORITY")
           ENGINEERING_RC_ARTIFACT_DIGEST=$(jq -er .artifactDigest <<<"$ENGINEERING_RC_AUTHORITY")
           ENGINEERING_RC_DMG_SHA256=$(jq -er .dmgSha256 <<<"$ENGINEERING_RC_AUTHORITY")
           ENGINEERING_RC_ZIP_SHA256=$(jq -er .zipSha256 <<<"$ENGINEERING_RC_AUTHORITY")
+          OPEN_DESIGN_ACCEPTANCE_RUN_ID=$(jq -er .runId <<<"$OPEN_DESIGN_ACCEPTANCE_AUTHORITY")
+          OPEN_DESIGN_ACCEPTANCE_ARTIFACT_ID=$(jq -er .artifactId <<<"$OPEN_DESIGN_ACCEPTANCE_AUTHORITY")
+          OPEN_DESIGN_ACCEPTANCE_ARTIFACT_DIGEST=$(jq -er .artifactDigest <<<"$OPEN_DESIGN_ACCEPTANCE_AUTHORITY")
           [[ "$ENGINEERING_RC_LABEL" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.([1-9][0-9]*)$ ]]
           test "${ENGINEERING_RC_LABEL%-rc.*}" = "$HOST_VERSION"
           [[ "$ENGINEERING_RC_RUN_ID" =~ ^[1-9][0-9]*$ ]]
@@ -111,6 +124,10 @@ jobs:
           [[ "$ENGINEERING_RC_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
           [[ "$ENGINEERING_RC_DMG_SHA256" =~ ^[0-9a-f]{64}$ ]]
           [[ "$ENGINEERING_RC_ZIP_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$OPEN_DESIGN_ACCEPTANCE_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$OPEN_DESIGN_ACCEPTANCE_ARTIFACT_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$OPEN_DESIGN_ACCEPTANCE_ARTIFACT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$OPEN_DESIGN_ACCEPTANCE_RUN_ID" != "$ENGINEERING_RC_RUN_ID"
           [[ "$EXPECTED_AUTHORITY" == "Developer ID Application: "*" ($EXPECTED_TEAM_ID)" ]]
           [[ "$EXPECTED_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]
           [[ "$EXPECTED_BUNDLE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9.-]+$ ]]
@@ -118,31 +135,19 @@ jobs:
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           test "$(git rev-parse refs/remotes/origin/main)" = "$SOURCE_SHA"
-          for name in ENGINEERING_RC_LABEL ENGINEERING_RC_RUN_ID ENGINEERING_RC_ARTIFACT_ID ENGINEERING_RC_ARTIFACT_DIGEST ENGINEERING_RC_DMG_SHA256 ENGINEERING_RC_ZIP_SHA256; do
+          for name in ENGINEERING_RC_LABEL ENGINEERING_RC_RUN_ID ENGINEERING_RC_ARTIFACT_ID ENGINEERING_RC_ARTIFACT_DIGEST ENGINEERING_RC_DMG_SHA256 ENGINEERING_RC_ZIP_SHA256 OPEN_DESIGN_ACCEPTANCE_RUN_ID OPEN_DESIGN_ACCEPTANCE_ARTIFACT_ID OPEN_DESIGN_ACCEPTANCE_ARTIFACT_DIGEST; do
             printf '%s=%s\n' "$name" "${!name}" >> "$GITHUB_ENV"
           done
           printf 'artifact_id=%s\n' "$ENGINEERING_RC_ARTIFACT_ID" >> "$GITHUB_OUTPUT"
           printf 'run_id=%s\n' "$ENGINEERING_RC_RUN_ID" >> "$GITHUB_OUTPUT"
+          printf 'acceptance_artifact_id=%s\n' "$OPEN_DESIGN_ACCEPTANCE_ARTIFACT_ID" >> "$GITHUB_OUTPUT"
+          printf 'acceptance_run_id=%s\n' "$OPEN_DESIGN_ACCEPTANCE_RUN_ID" >> "$GITHUB_OUTPUT"
           candidate_name="simulator-host-${HOST_VERSION}-macos-arm64-developer-id-candidate-${SOURCE_SHA}"
           pre_artifact_name="signed-host-pre-attestation-${SOURCE_SHA}-${GITHUB_RUN_ID}"
           printf 'SIGNED_CANDIDATE_NAME=%s\n' "$candidate_name" >> "$GITHUB_ENV"
           printf 'candidate_name=%s\n' "$candidate_name" >> "$GITHUB_OUTPUT"
           printf 'pre_artifact_name=%s\n' "$pre_artifact_name" >> "$GITHUB_OUTPUT"
           printf 'TMPDIR=%s\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
-
-      - name: Require all Apple credential secrets without displaying values
-        shell: bash
-        env:
-          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
-          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
-          APPLE_NOTARY_API_KEY_BASE64: ${{ secrets.APPLE_NOTARY_API_KEY_BASE64 }}
-          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
-        run: |
-          set -euo pipefail
-          for name in APPLE_DEVELOPER_ID_P12_BASE64 APPLE_DEVELOPER_ID_P12_PASSWORD APPLE_NOTARY_API_KEY_BASE64 APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER_ID; do
-            test -n "${!name:-}" || { echo "Required signed Host Environment secret is absent: $name" >&2; exit 1; }
-          done
 
       - name: Authenticate exact successful Engineering RC run and Artifact
         shell: bash
@@ -168,6 +173,29 @@ jobs:
           test "$(jq -r .expired <<<"$artifact_json")" = "false"
           test "$(jq -r .size_in_bytes <<<"$artifact_json")" -gt 0
 
+      - name: Authenticate exact successful final OpenDesign acceptance run and Artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          run_json=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$OPEN_DESIGN_ACCEPTANCE_RUN_ID")
+          test "$(jq -r .repository.full_name <<<"$run_json")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r .path <<<"$run_json")" = ".github/workflows/open-design-rc-acceptance.yml"
+          test "$(jq -r .event <<<"$run_json")" = "workflow_dispatch"
+          test "$(jq -r .head_branch <<<"$run_json")" = "main"
+          test "$(jq -r .head_sha <<<"$run_json")" = "$SOURCE_SHA"
+          test "$(jq -r .run_attempt <<<"$run_json")" = "1"
+          test "$(jq -r .status <<<"$run_json")" = "completed"
+          test "$(jq -r .conclusion <<<"$run_json")" = "success"
+          artifact_json=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$OPEN_DESIGN_ACCEPTANCE_ARTIFACT_ID")
+          test "$(jq -r .workflow_run.id <<<"$artifact_json")" = "$OPEN_DESIGN_ACCEPTANCE_RUN_ID"
+          test "$(jq -r .workflow_run.head_sha <<<"$artifact_json")" = "$SOURCE_SHA"
+          test "$(jq -r .name <<<"$artifact_json")" = "open-design-rc-acceptance-evidence"
+          test "$(jq -r .digest <<<"$artifact_json")" = "$OPEN_DESIGN_ACCEPTANCE_ARTIFACT_DIGEST"
+          test "$(jq -r .expired <<<"$artifact_json")" = "false"
+          test "$(jq -r .size_in_bytes <<<"$artifact_json")" -gt 0
+
       - name: Download exact authenticated Engineering RC Artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -177,10 +205,61 @@ jobs:
           repository: Jiachi-Deng/Simulator
           run-id: ${{ steps.authority.outputs.run_id }}
 
+      - name: Prepare owner-only raw OpenDesign acceptance directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw_root="$RUNNER_TEMP/open-design-acceptance-raw"
+          test ! -e "$raw_root"
+          mkdir -m 700 "$raw_root"
+
+      - name: Download exact raw final OpenDesign acceptance Artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ steps.authority.outputs.acceptance_artifact_id }}
+          path: ${{ runner.temp }}/open-design-acceptance-raw
+          skip-decompress: true
+          digest-mismatch: error
+          github-token: ${{ github.token }}
+          repository: Jiachi-Deng/Simulator
+          run-id: ${{ steps.authority.outputs.acceptance_run_id }}
+
       - name: Setup pinned Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: "1.3.10"
+
+      - name: Bind completed OpenDesign acceptance to the exact Engineering RC
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          raw_root="$RUNNER_TEMP/open-design-acceptance-raw"
+          test "$(stat -f %Lp "$raw_root")" = 700
+          test "$(stat -f %u "$raw_root")" = "$(id -u)"
+          entries=()
+          while IFS= read -r -d '' entry; do entries+=("$entry"); done \
+            < <(find "$raw_root" -mindepth 1 -maxdepth 1 -print0)
+          test "${#entries[@]}" = 1
+          archive=${entries[0]}
+          test -f "$archive"
+          test ! -L "$archive"
+          test "$(stat -f %l "$archive")" = 1
+          test "$(stat -f %u "$archive")" = "$(id -u)"
+          chmod 600 "$archive"
+          test "$(shasum -a 256 "$archive" | awk '{print $1}')" = "${OPEN_DESIGN_ACCEPTANCE_ARTIFACT_DIGEST#sha256:}"
+          acceptance="$RUNNER_TEMP/open-design-acceptance"
+          test ! -e "$acceptance"
+          mkdir -m 700 "$acceptance"
+          python3 scripts/release/extract-engineering-rc-artifact.py \
+            open-design-acceptance "$archive" "$acceptance" > "$RUNNER_TEMP/open-design-acceptance-extraction.json"
+          binding=$(bun scripts/release/verify-open-design-acceptance-artifact.ts \
+            "$acceptance" "$SOURCE_SHA" "$ENGINEERING_RC_RUN_ID" "$ENGINEERING_RC_DMG_SHA256" \
+            "$OPEN_DESIGN_ACCEPTANCE_RUN_ID" "$OPEN_DESIGN_ACCEPTANCE_ARTIFACT_ID" \
+            "$OPEN_DESIGN_ACCEPTANCE_ARTIFACT_DIGEST")
+          test "$(jq -er .artifactName <<<"$binding")" = "open-design-rc-acceptance-evidence"
+          test "$(jq -er .runId <<<"$binding")" = "$OPEN_DESIGN_ACCEPTANCE_RUN_ID"
+          printf 'OPEN_DESIGN_ACCEPTANCE_BINDING=%s\n' "$binding" >> "$GITHUB_ENV"
 
       - name: Reverify Engineering RC closure, provenance, and exact baseline bytes
         shell: bash
@@ -217,6 +296,20 @@ jobs:
           set -euo pipefail
           bun install --frozen-lockfile --ignore-scripts
           scripts/release/stage-pinned-macos-arm64-runtimes.sh
+
+      - name: Require all Apple credential secrets without displaying values
+        shell: bash
+        env:
+          APPLE_DEVELOPER_ID_P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12_BASE64 }}
+          APPLE_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+          APPLE_NOTARY_API_KEY_BASE64: ${{ secrets.APPLE_NOTARY_API_KEY_BASE64 }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          set -euo pipefail
+          for name in APPLE_DEVELOPER_ID_P12_BASE64 APPLE_DEVELOPER_ID_P12_PASSWORD APPLE_NOTARY_API_KEY_BASE64 APPLE_NOTARY_KEY_ID APPLE_NOTARY_ISSUER_ID; do
+            test -n "${!name:-}" || { echo "Required signed Host Environment secret is absent: $name" >&2; exit 1; }
+          done
 
       - name: Import Developer ID certificate and App Store Connect key into owner-only runner state
         shell: bash
@@ -413,6 +506,7 @@ jobs:
             --arg artifactName "simulator-${ENGINEERING_RC_LABEL}-macos-arm64-unsigned" \
             --arg dmgSha256 "$ENGINEERING_RC_DMG_SHA256" --arg zipSha256 "$ENGINEERING_RC_ZIP_SHA256" \
             '{rcLabel:$rcLabel,runId:$runId,artifactId:$artifactId,artifactDigest:$artifactDigest,artifactName:$artifactName,dmgSha256:$dmgSha256,zipSha256:$zipSha256}')
+          open_design_acceptance=$(jq -ce . <<<"$OPEN_DESIGN_ACCEPTANCE_BINDING")
           identity=$(jq -n --arg bundleIdentifier "$EXPECTED_BUNDLE_ID" --arg developerIdApplication "$EXPECTED_AUTHORITY" \
             --arg teamId "$EXPECTED_TEAM_ID" --arg entitlementsSha256 "$(shasum -a 256 apps/electron/build/entitlements.mac.plist | awk '{print $1}')" \
             '{bundleIdentifier:$bundleIdentifier,developerIdApplication:$developerIdApplication,teamId:$teamId,entitlementsSha256:$entitlementsSha256}')
@@ -421,10 +515,11 @@ jobs:
           zip_record=$(file_record "$candidate/Simulator-arm64.zip" Simulator-arm64.zip)
           equivalence_record=$(file_record "$candidate/payload-equivalence.json" payload-equivalence.json)
           jq -n --arg sourceSha "$SOURCE_SHA" --arg hostVersion "$HOST_VERSION" --arg createdAt "$created_at" \
-            --argjson workflow "$workflow" --argjson engineeringRc "$engineering_rc" --argjson identity "$identity" \
+            --argjson workflow "$workflow" --argjson engineeringRc "$engineering_rc" \
+            --argjson openDesignAcceptance "$open_design_acceptance" --argjson identity "$identity" \
             --arg dmgSha256 "$(jq -r .sha256 <<<"$dmg_record")" --arg zipSha256 "$(jq -r .sha256 <<<"$zip_record")" \
             --arg payloadEquivalenceSha256 "$(jq -r .sha256 <<<"$equivalence_record")" \
-            '{schemaVersion:1,kind:"simulator-macos-arm64-developer-id-candidate-provenance",repository:"Jiachi-Deng/Simulator",sourceSha:$sourceSha,hostVersion:$hostVersion,workflow:$workflow,engineeringRc:$engineeringRc,identity:$identity,signed:true,createdAt:$createdAt,outputs:{dmgSha256:$dmgSha256,zipSha256:$zipSha256,payloadEquivalenceSha256:$payloadEquivalenceSha256}}' \
+            '{schemaVersion:1,kind:"simulator-macos-arm64-developer-id-candidate-provenance",repository:"Jiachi-Deng/Simulator",sourceSha:$sourceSha,hostVersion:$hostVersion,workflow:$workflow,engineeringRc:$engineeringRc,openDesignAcceptance:$openDesignAcceptance,identity:$identity,signed:true,createdAt:$createdAt,outputs:{dmgSha256:$dmgSha256,zipSha256:$zipSha256,payloadEquivalenceSha256:$payloadEquivalenceSha256}}' \
             > "$candidate/signed-host-provenance.json"
           provenance_record=$(file_record "$candidate/signed-host-provenance.json" signed-host-provenance.json)
           dmg_signatures_record=$(file_record "$candidate/dmg-signatures.json" dmg-signatures.json)
@@ -442,10 +537,11 @@ jobs:
             --argjson provenance "$provenance_record" --argjson h3PostInstallSchema "$h3_record" \
             '{dmg:$dmg,zip:$zip,payloadEquivalence:$payloadEquivalence,dmgSignatures:$dmgSignatures,zipSignatures:$zipSignatures,appNotarization:$appNotarization,dmgNotarization:$dmgNotarization,provenance:$provenance,h3PostInstallSchema:$h3PostInstallSchema}')
           jq -n --arg sourceSha "$SOURCE_SHA" --arg hostVersion "$HOST_VERSION" --arg artifactName "$SIGNED_CANDIDATE_NAME" \
-            --argjson workflow "$workflow" --argjson engineeringRc "$engineering_rc" --argjson identity "$identity" \
+            --argjson workflow "$workflow" --argjson engineeringRc "$engineering_rc" \
+            --argjson openDesignAcceptance "$open_design_acceptance" --argjson identity "$identity" \
             --argjson appNotary "$app_notary" --argjson dmgNotary "$dmg_notary" \
             --argjson payloadEquivalence "$payload_equivalence" --argjson files "$files" \
-            '{schemaVersion:1,kind:"simulator-macos-arm64-developer-id-candidate",repository:"Jiachi-Deng/Simulator",sourceSha:$sourceSha,hostVersion:$hostVersion,artifactName:$artifactName,workflow:$workflow,engineeringRc:$engineeringRc,identity:$identity,notarization:{app:$appNotary,dmg:$dmgNotary},gatekeeper:{app:"PASS",dmg:"PASS"},payloadEquivalence:$payloadEquivalence,files:$files}' \
+            '{schemaVersion:1,kind:"simulator-macos-arm64-developer-id-candidate",repository:"Jiachi-Deng/Simulator",sourceSha:$sourceSha,hostVersion:$hostVersion,artifactName:$artifactName,workflow:$workflow,engineeringRc:$engineeringRc,openDesignAcceptance:$openDesignAcceptance,identity:$identity,notarization:{app:$appNotary,dmg:$dmgNotary},gatekeeper:{app:"PASS",dmg:"PASS"},payloadEquivalence:$payloadEquivalence,files:$files}' \
             > "$RUNNER_TEMP/signed-host-manifest-input.json"
           bun scripts/release/signed-host-candidate.ts generate "$RUNNER_TEMP/signed-host-manifest-input.json" "$candidate/signed-host-manifest.json"
 
@@ -519,18 +615,20 @@ jobs:
       github.run_attempt == 1 &&
       inputs.acceptance_approved == true &&
       inputs.acceptance_confirmation == 'BUILD_SIGNED_MACOS_HOST_CANDIDATE' &&
-      vars.SIMULATOR_SIGNED_HOST_ACCEPTANCE_ENABLED == 'true'
+      vars.SIMULATOR_SIGNED_HOST_ACCEPTANCE_ENABLED == 'true' &&
+      vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED == 'true'
     permissions:
       actions: read
       attestations: write
       contents: read
       id-token: write
     runs-on: macos-15
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       SOURCE_SHA: ${{ inputs.source_sha }}
       HOST_VERSION: ${{ inputs.host_version }}
       ENGINEERING_RC_AUTHORITY: ${{ inputs.engineering_rc_authority }}
+      OPEN_DESIGN_ACCEPTANCE_AUTHORITY: ${{ inputs.open_design_acceptance_authority }}
       EXPECTED_AUTHORITY: ${{ inputs.expected_developer_id_application }}
       EXPECTED_TEAM_ID: ${{ inputs.expected_team_id }}
       EXPECTED_BUNDLE_ID: ${{ inputs.expected_bundle_id }}
@@ -538,6 +636,8 @@ jobs:
       PRE_ARTIFACT_DIGEST: ${{ needs.build-signed-candidate.outputs.pre_artifact_digest }}
       PRE_ARTIFACT_NAME: ${{ needs.build-signed-candidate.outputs.pre_artifact_name }}
       SIGNED_CANDIDATE_NAME: ${{ needs.build-signed-candidate.outputs.candidate_name }}
+      RC_ACCEPTANCE_FREEZE_ENABLED: ${{ vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED }}
+      SIMULATOR_DISABLE_UPDATES: "1"
 
     steps:
       - name: Checkout exact attestation authority
@@ -561,12 +661,34 @@ jobs:
           test "$GITHUB_REPOSITORY" = "Jiachi-Deng/Simulator"
           test "$GITHUB_REF" = "refs/heads/main"
           test "$GITHUB_RUN_ATTEMPT" = "1"
+          test "$RC_ACCEPTANCE_FREEZE_ENABLED" = "true"
           test "$GITHUB_SHA" = "$SOURCE_SHA"
           [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
           [[ "$EXPECTED_AUTHORITY" == "Developer ID Application: "*" ($EXPECTED_TEAM_ID)" ]]
           [[ "$EXPECTED_TEAM_ID" =~ ^[A-Z0-9]{10}$ ]]
           [[ "$EXPECTED_BUNDLE_ID" =~ ^[A-Za-z0-9][A-Za-z0-9.-]+$ ]]
           jq -e 'type == "object" and keys == ["artifactDigest","artifactId","dmgSha256","rcLabel","runId","zipSha256"] and all(.[]; type == "string")' <<<"$ENGINEERING_RC_AUTHORITY" >/dev/null
+          jq -e 'type == "object" and keys == ["artifactDigest","artifactId","runId"] and all(.[]; type == "string")' <<<"$OPEN_DESIGN_ACCEPTANCE_AUTHORITY" >/dev/null
+          engineering_rc_label=$(jq -er .rcLabel <<<"$ENGINEERING_RC_AUTHORITY")
+          engineering_rc_run_id=$(jq -er .runId <<<"$ENGINEERING_RC_AUTHORITY")
+          engineering_rc_artifact_id=$(jq -er .artifactId <<<"$ENGINEERING_RC_AUTHORITY")
+          engineering_rc_artifact_digest=$(jq -er .artifactDigest <<<"$ENGINEERING_RC_AUTHORITY")
+          engineering_rc_dmg_sha256=$(jq -er .dmgSha256 <<<"$ENGINEERING_RC_AUTHORITY")
+          engineering_rc_zip_sha256=$(jq -er .zipSha256 <<<"$ENGINEERING_RC_AUTHORITY")
+          acceptance_run_id=$(jq -er .runId <<<"$OPEN_DESIGN_ACCEPTANCE_AUTHORITY")
+          acceptance_artifact_id=$(jq -er .artifactId <<<"$OPEN_DESIGN_ACCEPTANCE_AUTHORITY")
+          acceptance_artifact_digest=$(jq -er .artifactDigest <<<"$OPEN_DESIGN_ACCEPTANCE_AUTHORITY")
+          [[ "$engineering_rc_label" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)-rc\.([1-9][0-9]*)$ ]]
+          test "${engineering_rc_label%-rc.*}" = "$HOST_VERSION"
+          [[ "$engineering_rc_run_id" =~ ^[1-9][0-9]*$ ]]
+          [[ "$engineering_rc_artifact_id" =~ ^[1-9][0-9]*$ ]]
+          [[ "$engineering_rc_artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$engineering_rc_dmg_sha256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$engineering_rc_zip_sha256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$acceptance_run_id" =~ ^[1-9][0-9]*$ ]]
+          [[ "$acceptance_artifact_id" =~ ^[1-9][0-9]*$ ]]
+          [[ "$acceptance_artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          test "$engineering_rc_run_id" != "$acceptance_run_id"
           test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
           test "$HOST_VERSION" = "$(node -p "require('./apps/electron/package.json').version")"
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
@@ -589,9 +711,147 @@ jobs:
           test "$(jq -r .digest <<<"$artifact_json")" = "sha256:${PRE_ARTIFACT_DIGEST}"
           test "$(jq -r .expired <<<"$artifact_json")" = "false"
           test "$(jq -r .size_in_bytes <<<"$artifact_json")" -gt 0
+          engineering_rc_run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$engineering_rc_run_id")
+          test "$(jq -r .repository.full_name <<<"$engineering_rc_run")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r .path <<<"$engineering_rc_run")" = ".github/workflows/engineering-rc.yml"
+          test "$(jq -r .event <<<"$engineering_rc_run")" = "workflow_dispatch"
+          test "$(jq -r .head_branch <<<"$engineering_rc_run")" = "main"
+          test "$(jq -r .head_sha <<<"$engineering_rc_run")" = "$SOURCE_SHA"
+          test "$(jq -r .run_attempt <<<"$engineering_rc_run")" = "1"
+          test "$(jq -r .status <<<"$engineering_rc_run")" = "completed"
+          test "$(jq -r .conclusion <<<"$engineering_rc_run")" = "success"
+          engineering_rc_artifact=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$engineering_rc_artifact_id")
+          test "$(jq -r .workflow_run.id <<<"$engineering_rc_artifact")" = "$engineering_rc_run_id"
+          test "$(jq -r .workflow_run.head_sha <<<"$engineering_rc_artifact")" = "$SOURCE_SHA"
+          test "$(jq -r .name <<<"$engineering_rc_artifact")" = "simulator-${engineering_rc_label}-macos-arm64-unsigned"
+          test "$(jq -r .digest <<<"$engineering_rc_artifact")" = "$engineering_rc_artifact_digest"
+          test "$(jq -r .expired <<<"$engineering_rc_artifact")" = "false"
+          test "$(jq -r .size_in_bytes <<<"$engineering_rc_artifact")" -gt 0
+          acceptance_run=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$acceptance_run_id")
+          test "$(jq -r .repository.full_name <<<"$acceptance_run")" = "$GITHUB_REPOSITORY"
+          test "$(jq -r .path <<<"$acceptance_run")" = ".github/workflows/open-design-rc-acceptance.yml"
+          test "$(jq -r .event <<<"$acceptance_run")" = "workflow_dispatch"
+          test "$(jq -r .head_branch <<<"$acceptance_run")" = "main"
+          test "$(jq -r .head_sha <<<"$acceptance_run")" = "$SOURCE_SHA"
+          test "$(jq -r .run_attempt <<<"$acceptance_run")" = "1"
+          test "$(jq -r .status <<<"$acceptance_run")" = "completed"
+          test "$(jq -r .conclusion <<<"$acceptance_run")" = "success"
+          acceptance_artifact=$(gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$acceptance_artifact_id")
+          test "$(jq -r .workflow_run.id <<<"$acceptance_artifact")" = "$acceptance_run_id"
+          test "$(jq -r .workflow_run.head_sha <<<"$acceptance_artifact")" = "$SOURCE_SHA"
+          test "$(jq -r .name <<<"$acceptance_artifact")" = "open-design-rc-acceptance-evidence"
+          test "$(jq -r .digest <<<"$acceptance_artifact")" = "$acceptance_artifact_digest"
+          test "$(jq -r .expired <<<"$acceptance_artifact")" = "false"
+          test "$(jq -r .size_in_bytes <<<"$acceptance_artifact")" -gt 0
+          acceptance_raw_root="$RUNNER_TEMP/open-design-acceptance-finalizer-raw"
+          acceptance_root="$RUNNER_TEMP/open-design-acceptance-finalizer"
+          test ! -e "$acceptance_raw_root"
+          test ! -e "$acceptance_root"
+          mkdir -m 700 "$acceptance_raw_root" "$acceptance_root"
+          engineering_rc_raw_root="$RUNNER_TEMP/engineering-rc-finalizer-raw"
+          test ! -e "$engineering_rc_raw_root"
+          mkdir -m 700 "$engineering_rc_raw_root"
           raw_root="$RUNNER_TEMP/signed-host-pre-raw"
           test ! -e "$raw_root"
           mkdir -m 700 "$raw_root"
+
+      - name: Download exact raw Engineering RC Artifact for finalizer
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ fromJSON(inputs.engineering_rc_authority).artifactId }}
+          path: ${{ runner.temp }}/engineering-rc-finalizer-raw
+          skip-decompress: true
+          digest-mismatch: error
+          github-token: ${{ github.token }}
+          repository: Jiachi-Deng/Simulator
+          run-id: ${{ fromJSON(inputs.engineering_rc_authority).runId }}
+
+      - name: Independently establish the exact Engineering RC payload baseline
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          raw_root="$RUNNER_TEMP/engineering-rc-finalizer-raw"
+          test "$(stat -f %Lp "$raw_root")" = 700
+          test "$(stat -f %u "$raw_root")" = "$(id -u)"
+          entries=()
+          while IFS= read -r -d '' entry; do entries+=("$entry"); done \
+            < <(find "$raw_root" -mindepth 1 -maxdepth 1 -print0)
+          test "${#entries[@]}" = 1
+          archive=${entries[0]}
+          test -f "$archive"
+          test ! -L "$archive"
+          test "$(stat -f %l "$archive")" = 1
+          test "$(stat -f %u "$archive")" = "$(id -u)"
+          chmod 600 "$archive"
+          engineering_rc_digest=$(jq -er .artifactDigest <<<"$ENGINEERING_RC_AUTHORITY")
+          test "$(shasum -a 256 "$archive" | awk '{print $1}')" = "${engineering_rc_digest#sha256:}"
+          root="$RUNNER_TEMP/engineering-rc-finalizer"
+          test ! -e "$root"
+          mkdir -m 700 "$root"
+          python3 scripts/release/extract-engineering-rc-artifact.py \
+            final "$archive" "$root" > "$RUNNER_TEMP/engineering-rc-finalizer-extraction.json"
+          metadata="$root/bundle-metadata.json"
+          input_id=$(jq -er .inputArtifactId "$metadata")
+          input_digest=$(jq -er .inputArtifactDigest "$metadata")
+          engineering_rc_label=$(jq -er .rcLabel <<<"$ENGINEERING_RC_AUTHORITY")
+          bun scripts/release/verify-engineering-rc-bundle.ts final "$root" \
+            "$engineering_rc_label" "$HOST_VERSION" "$SOURCE_SHA" "$input_id" "$input_digest"
+          scripts/release/verify-engineering-rc-attestations.sh \
+            "$root" "$SOURCE_SHA" "$RUNNER_TEMP/engineering-rc-finalizer-attestation-verification"
+          test "$(shasum -a 256 "$root/Simulator-arm64.dmg" | awk '{print $1}')" = \
+            "$(jq -er .dmgSha256 <<<"$ENGINEERING_RC_AUTHORITY")"
+          test "$(shasum -a 256 "$root/Simulator-arm64.zip" | awk '{print $1}')" = \
+            "$(jq -er .zipSha256 <<<"$ENGINEERING_RC_AUTHORITY")"
+          baseline="$RUNNER_TEMP/engineering-rc-finalizer-app"
+          test ! -e "$baseline"
+          mkdir -m 700 "$baseline"
+          python3 scripts/release/preflight-macos-release-artifact.py zip "$root/Simulator-arm64.zip"
+          ditto -x -k "$root/Simulator-arm64.zip" "$baseline"
+          python3 scripts/release/preflight-macos-release-artifact.py tree "$baseline/Simulator.app"
+          printf 'FINALIZER_BASELINE_APP=%s\n' "$baseline/Simulator.app" >> "$GITHUB_ENV"
+
+      - name: Download exact raw final OpenDesign acceptance Artifact for finalizer
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          artifact-ids: ${{ fromJSON(inputs.open_design_acceptance_authority).artifactId }}
+          path: ${{ runner.temp }}/open-design-acceptance-finalizer-raw
+          skip-decompress: true
+          digest-mismatch: error
+          github-token: ${{ github.token }}
+          repository: Jiachi-Deng/Simulator
+          run-id: ${{ fromJSON(inputs.open_design_acceptance_authority).runId }}
+
+      - name: Independently rebind final OpenDesign acceptance before OIDC finalization
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          raw_root="$RUNNER_TEMP/open-design-acceptance-finalizer-raw"
+          test "$(stat -f %Lp "$raw_root")" = 700
+          test "$(stat -f %u "$raw_root")" = "$(id -u)"
+          entries=()
+          while IFS= read -r -d '' entry; do entries+=("$entry"); done \
+            < <(find "$raw_root" -mindepth 1 -maxdepth 1 -print0)
+          test "${#entries[@]}" = 1
+          archive=${entries[0]}
+          test -f "$archive"
+          test ! -L "$archive"
+          test "$(stat -f %l "$archive")" = 1
+          chmod 600 "$archive"
+          acceptance_digest=$(jq -er .artifactDigest <<<"$OPEN_DESIGN_ACCEPTANCE_AUTHORITY")
+          test "$(shasum -a 256 "$archive" | awk '{print $1}')" = "${acceptance_digest#sha256:}"
+          acceptance="$RUNNER_TEMP/open-design-acceptance-finalizer"
+          python3 scripts/release/extract-engineering-rc-artifact.py \
+            open-design-acceptance "$archive" "$acceptance" > "$RUNNER_TEMP/open-design-acceptance-finalizer-extraction.json"
+          binding=$(bun scripts/release/verify-open-design-acceptance-artifact.ts \
+            "$acceptance" "$SOURCE_SHA" "$(jq -er .runId <<<"$ENGINEERING_RC_AUTHORITY")" \
+            "$(jq -er .dmgSha256 <<<"$ENGINEERING_RC_AUTHORITY")" \
+            "$(jq -er .runId <<<"$OPEN_DESIGN_ACCEPTANCE_AUTHORITY")" \
+            "$(jq -er .artifactId <<<"$OPEN_DESIGN_ACCEPTANCE_AUTHORITY")" "$acceptance_digest")
+          printf 'FINALIZER_OPEN_DESIGN_ACCEPTANCE_BINDING=%s\n' "$binding" >> "$GITHUB_ENV"
 
       - name: Download exact raw pre-attestation Candidate Artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -635,11 +895,91 @@ jobs:
             "$candidate" "$SOURCE_SHA" "$GITHUB_RUN_ID" "$SIGNED_CANDIDATE_NAME"
           expected_rc=$(jq -c --arg artifactName "simulator-$(jq -r .rcLabel <<<"$ENGINEERING_RC_AUTHORITY")-macos-arm64-unsigned" \
             '. + {artifactName:$artifactName}' <<<"$ENGINEERING_RC_AUTHORITY")
+          expected_acceptance=$(jq -ce . <<<"$FINALIZER_OPEN_DESIGN_ACCEPTANCE_BINDING")
           entitlements_sha=$(shasum -a 256 apps/electron/build/entitlements.mac.plist | awk '{print $1}')
-          jq -e --argjson expectedRc "$expected_rc" --arg authority "$EXPECTED_AUTHORITY" \
+          jq -e --argjson expectedRc "$expected_rc" --argjson expectedAcceptance "$expected_acceptance" --arg authority "$EXPECTED_AUTHORITY" \
             --arg teamId "$EXPECTED_TEAM_ID" --arg bundleId "$EXPECTED_BUNDLE_ID" --arg entitlementsSha "$entitlements_sha" \
-            '.engineeringRc == $expectedRc and .identity == {bundleIdentifier:$bundleId,developerIdApplication:$authority,teamId:$teamId,entitlementsSha256:$entitlementsSha}' \
+            '.engineeringRc == $expectedRc and .openDesignAcceptance == $expectedAcceptance and .identity == {bundleIdentifier:$bundleId,developerIdApplication:$authority,teamId:$teamId,entitlementsSha256:$entitlementsSha}' \
             "$candidate/signed-host-manifest.json" >/dev/null
+
+      - name: Install locked independent verification inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          bun install --frozen-lockfile --ignore-scripts
+          scripts/release/stage-pinned-macos-arm64-runtimes.sh
+
+      - name: Independently verify actual Candidate containers before OIDC attestation
+        shell: bash
+        env:
+          SIMULATOR_MACOS_RUNTIME_SIGNATURE_MODE: developer-id
+          SIMULATOR_MACOS_RUNTIME_DEVELOPER_IDENTITY: ${{ inputs.expected_developer_id_application }}
+          SIMULATOR_MACOS_RUNTIME_TEAM_ID: ${{ inputs.expected_team_id }}
+        run: |
+          set -euo pipefail
+          umask 077
+          candidate="$GITHUB_WORKSPACE/signed-host-candidate"
+          dmg="$candidate/Simulator-arm64.dmg"
+          zip="$candidate/Simulator-arm64.zip"
+          test -d "$FINALIZER_BASELINE_APP"
+          test ! -L "$FINALIZER_BASELINE_APP"
+          python3 scripts/release/preflight-macos-release-artifact.py dmg "$dmg"
+          hdiutil verify "$dmg"
+          xcrun stapler validate "$dmg"
+          spctl --assess --type open --context context:primary-signature --verbose=4 "$dmg"
+          mount="$RUNNER_TEMP/finalizer-candidate-dmg-mount"
+          unzip="$RUNNER_TEMP/finalizer-candidate-zip-extract"
+          test ! -e "$mount"
+          test ! -e "$unzip"
+          mkdir -m 700 "$mount" "$unzip"
+          cleanup_mount() { hdiutil detach "$mount" -quiet 2>/dev/null || true; }
+          trap cleanup_mount EXIT
+          hdiutil attach "$dmg" -nobrowse -readonly -mountpoint "$mount" -quiet
+          python3 scripts/release/preflight-macos-release-artifact.py zip "$zip"
+          ditto -x -k "$zip" "$unzip"
+          python3 scripts/release/preflight-macos-release-artifact.py tree "$mount/Simulator.app"
+          python3 scripts/release/preflight-macos-release-artifact.py tree "$unzip/Simulator.app"
+          python3 scripts/release/verify-macos-container-root.py dmg "$mount" \
+            apps/electron/resources/dmg-background.tiff apps/electron/resources/icon.icns
+          python3 scripts/release/verify-macos-container-root.py zip "$unzip"
+          python3 scripts/release/compare-macos-app-payloads.py "$FINALIZER_BASELINE_APP" \
+            "$mount/Simulator.app" "$RUNNER_TEMP/finalizer-dmg-payload-equivalence.json"
+          python3 scripts/release/compare-macos-app-payloads.py "$FINALIZER_BASELINE_APP" \
+            "$unzip/Simulator.app" "$RUNNER_TEMP/finalizer-zip-payload-equivalence.json"
+          cmp -s "$RUNNER_TEMP/finalizer-dmg-payload-equivalence.json" \
+            "$RUNNER_TEMP/finalizer-zip-payload-equivalence.json" || {
+              echo "Finalizer DMG and ZIP payload-equivalence evidence differs" >&2
+              exit 1
+            }
+          jq -n --slurpfile dmg "$RUNNER_TEMP/finalizer-dmg-payload-equivalence.json" \
+            --slurpfile zip "$RUNNER_TEMP/finalizer-zip-payload-equivalence.json" \
+            --arg canonicalInventorySha256 "$(jq -r .baselineCanonicalInventorySha256 "$RUNNER_TEMP/finalizer-dmg-payload-equivalence.json")" \
+            --argjson normalizedMachOFiles "$(jq -r .normalizedMachOFiles "$RUNNER_TEMP/finalizer-dmg-payload-equivalence.json")" \
+            '{schemaVersion:1,equivalent:true,policy:"macos-dual-container-app-payload-equivalence-v1",canonicalInventorySha256:$canonicalInventorySha256,normalizedMachOFiles:$normalizedMachOFiles,containers:{dmg:$dmg[0],zip:$zip[0]}}' \
+            > "$RUNNER_TEMP/finalizer-payload-equivalence.json"
+          cmp -s "$RUNNER_TEMP/finalizer-payload-equivalence.json" "$candidate/payload-equivalence.json" || {
+            echo "Finalizer recomputed payload-equivalence evidence differs from Candidate closure" >&2
+            exit 1
+          }
+          for kind in dmg zip; do
+            if [[ "$kind" == dmg ]]; then app="$mount/Simulator.app"; else app="$unzip/Simulator.app"; fi
+            executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Contents/Info.plist")
+            report="$RUNNER_TEMP/finalizer-$kind-signatures.json"
+            bun scripts/release/verify-macos-signatures.ts "$app" "Contents/MacOS/$executable" \
+              --mode developer-id --authority "$EXPECTED_AUTHORITY" --team-id "$EXPECTED_TEAM_ID" \
+              --bundle-id "$EXPECTED_BUNDLE_ID" --entitlements apps/electron/build/entitlements.mac.plist \
+              > "$report"
+            cmp -s "$report" "$candidate/$kind-signatures.json" || {
+              echo "Finalizer recomputed $kind signature evidence differs from Candidate closure" >&2
+              exit 1
+            }
+            scripts/release/verify-packaged-macos-runtimes.sh "$app" --mode developer-id \
+              --identity "$EXPECTED_AUTHORITY" --team-id "$EXPECTED_TEAM_ID"
+            xcrun stapler validate "$app"
+            spctl --assess --type execute --verbose=4 "$app"
+            bun scripts/release/verify-public-build-privacy.ts "$app" SIMULATOR_PUBLIC_BUILD_MUST_STRIP_CRASH_INGEST_2026
+            bun scripts/release/updates-disabled.ts --app "$app"
+          done
 
       - name: Attest exact final DMG and ZIP provenance without Apple credentials
         id: attest_provenance

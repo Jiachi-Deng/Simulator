@@ -100,6 +100,16 @@ function makeCandidate(mutateSignature?: (signature: any) => void): Record<strin
     dmgSha256: "5".repeat(64),
     zipSha256: "6".repeat(64),
   }
+  const openDesignAcceptance = {
+    workflowPath: ".github/workflows/open-design-rc-acceptance.yml",
+    runId: "33333",
+    artifactId: "44444",
+    artifactDigest: `sha256:${"8".repeat(64)}`,
+    artifactName: "open-design-rc-acceptance-evidence",
+    summarySha256: "9".repeat(64),
+    machineRunId: "55555",
+    visualRunId: "66666",
+  }
   const identity = {
     bundleIdentifier: "com.example.simulator",
     developerIdApplication: authority,
@@ -114,6 +124,7 @@ function makeCandidate(mutateSignature?: (signature: any) => void): Record<strin
     hostVersion: "0.12.0",
     workflow,
     engineeringRc,
+    openDesignAcceptance,
     identity,
     signed: true,
     createdAt: "2026-07-17T12:34:56.789Z",
@@ -144,6 +155,7 @@ function makeCandidate(mutateSignature?: (signature: any) => void): Record<strin
     artifactName,
     workflow,
     engineeringRc,
+    openDesignAcceptance,
     identity,
     notarization: {
       app: { id: appNotaryId, status: "Accepted", submittedSha256: "1".repeat(64), stapled: true, validated: true },
@@ -192,6 +204,11 @@ describe("signed Host Candidate evidence", () => {
     engineeringRc.rcLabel = "0.13.0-rc.1"
     engineeringRc.artifactName = "simulator-0.13.0-rc.1-macos-arm64-unsigned"
     expect(() => validateSignedHostManifest(manifest)).toThrow("version differs")
+    engineeringRc.rcLabel = "0.12.0-rc.3"
+    engineeringRc.artifactName = "simulator-0.12.0-rc.3-macos-arm64-unsigned"
+    const acceptance = manifest.openDesignAcceptance as Record<string, unknown>
+    acceptance.machineRunId = acceptance.runId
+    expect(() => validateSignedHostManifest(manifest)).toThrow("run identities overlap")
   })
 
   test("verifies exact closure, every file digest, signature/notary/equivalence/provenance fields, and checksums", () => {

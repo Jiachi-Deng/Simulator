@@ -95,6 +95,7 @@ export interface SignedHostManifest extends RecordValue {
   artifactName: string
   workflow: RecordValue
   engineeringRc: RecordValue
+  openDesignAcceptance: RecordValue
   identity: RecordValue
   notarization: RecordValue
   gatekeeper: RecordValue
@@ -106,7 +107,7 @@ export function validateSignedHostManifest(value: unknown): SignedHostManifest {
   const manifest = record(value, "manifest")
   exactKeys(manifest, [
     "artifactName", "engineeringRc", "files", "gatekeeper", "hostVersion", "identity", "kind",
-    "notarization", "payloadEquivalence", "repository", "schemaVersion", "sourceSha", "workflow",
+    "notarization", "openDesignAcceptance", "payloadEquivalence", "repository", "schemaVersion", "sourceSha", "workflow",
   ], "manifest")
   if (manifest.schemaVersion !== 1 || manifest.kind !== "simulator-macos-arm64-developer-id-candidate"
     || manifest.repository !== "Jiachi-Deng/Simulator") throw new Error("Manifest authority differs")
@@ -127,11 +128,29 @@ export function validateSignedHostManifest(value: unknown): SignedHostManifest {
   if (engineeringRc.artifactName !== `simulator-${rcLabel}-macos-arm64-unsigned`
     || !ENGINEERING_RC_NAME_PATTERN.test(String(engineeringRc.artifactName))) throw new Error("Engineering RC Artifact name differs")
   if (rcLabel.replace(/-rc\.[1-9][0-9]*$/, "") !== hostVersion) throw new Error("Engineering RC version differs from Host version")
-  string(engineeringRc.runId, POSITIVE_ID, "engineeringRc.runId")
+  const engineeringRunId = string(engineeringRc.runId, POSITIVE_ID, "engineeringRc.runId")
   string(engineeringRc.artifactId, POSITIVE_ID, "engineeringRc.artifactId")
   string(engineeringRc.artifactDigest, /^sha256:[0-9a-f]{64}$/, "engineeringRc.artifactDigest")
   const baselineDmg = string(engineeringRc.dmgSha256, SHA256, "engineeringRc.dmgSha256")
   const baselineZip = string(engineeringRc.zipSha256, SHA256, "engineeringRc.zipSha256")
+
+  const openDesignAcceptance = record(manifest.openDesignAcceptance, "openDesignAcceptance")
+  exactKeys(openDesignAcceptance, [
+    "artifactDigest", "artifactId", "artifactName", "machineRunId", "runId", "summarySha256", "visualRunId", "workflowPath",
+  ], "openDesignAcceptance")
+  if (openDesignAcceptance.artifactName !== "open-design-rc-acceptance-evidence"
+    || openDesignAcceptance.workflowPath !== ".github/workflows/open-design-rc-acceptance.yml") {
+    throw new Error("OpenDesign acceptance authority differs")
+  }
+  const acceptanceRunId = string(openDesignAcceptance.runId, POSITIVE_ID, "openDesignAcceptance.runId")
+  const machineRunId = string(openDesignAcceptance.machineRunId, POSITIVE_ID, "openDesignAcceptance.machineRunId")
+  const visualRunId = string(openDesignAcceptance.visualRunId, POSITIVE_ID, "openDesignAcceptance.visualRunId")
+  string(openDesignAcceptance.artifactId, POSITIVE_ID, "openDesignAcceptance.artifactId")
+  string(openDesignAcceptance.artifactDigest, /^sha256:[0-9a-f]{64}$/, "openDesignAcceptance.artifactDigest")
+  string(openDesignAcceptance.summarySha256, SHA256, "openDesignAcceptance.summarySha256")
+  if (new Set([engineeringRunId, acceptanceRunId, machineRunId, visualRunId]).size !== 4) {
+    throw new Error("OpenDesign acceptance run identities overlap")
+  }
 
   const identity = record(manifest.identity, "identity")
   exactKeys(identity, ["bundleIdentifier", "developerIdApplication", "entitlementsSha256", "teamId"], "identity")
@@ -324,12 +343,13 @@ function validateJsonEvidence(root: string, manifest: SignedHostManifest): void 
 
   const provenanceFile = files.provenance as RecordValue
   const provenance = record(JSON.parse(readFileSync(join(root, String(provenanceFile.path)), "utf8")), "provenance")
-  exactKeys(provenance, ["createdAt", "engineeringRc", "hostVersion", "identity", "kind", "outputs", "repository", "schemaVersion", "signed", "sourceSha", "workflow"], "provenance")
+  exactKeys(provenance, ["createdAt", "engineeringRc", "hostVersion", "identity", "kind", "openDesignAcceptance", "outputs", "repository", "schemaVersion", "signed", "sourceSha", "workflow"], "provenance")
   if (provenance.schemaVersion !== 1 || provenance.kind !== "simulator-macos-arm64-developer-id-candidate-provenance"
     || provenance.repository !== manifest.repository || provenance.sourceSha !== manifest.sourceSha
     || provenance.hostVersion !== manifest.hostVersion || provenance.signed !== true
     || stable(provenance.workflow) !== stable(manifest.workflow)
     || stable(provenance.engineeringRc) !== stable(manifest.engineeringRc)
+    || stable(provenance.openDesignAcceptance) !== stable(manifest.openDesignAcceptance)
     || stable(provenance.identity) !== stable(manifest.identity)) throw new Error("Signed Host provenance authority differs")
   const createdAt = string(provenance.createdAt, /^\d{4}-(?:0[1-9]|1[0-2])-(?:[0-2]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d\.\d{3}Z$/, "provenance.createdAt")
   if (new Date(createdAt).toISOString() !== createdAt) throw new Error("Provenance timestamp is not canonical UTC")

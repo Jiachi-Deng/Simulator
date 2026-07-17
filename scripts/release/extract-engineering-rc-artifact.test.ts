@@ -59,6 +59,11 @@ const SIGNED_HOST_FINAL_FILES = [
   ...SIGNED_HOST_PRE_FILES,
   "attestations/provenance.sigstore.json",
 ] as const
+const OPEN_DESIGN_ACCEPTANCE_FILES = [
+  "SHA256SUMS",
+  "open-design-rc-acceptance-evidence.json",
+  "open-design-rc-acceptance-intake.json",
+] as const
 
 function fixture(variant: FixtureVariant) {
   root = realpathSync(mkdtempSync(join(tmpdir(), "engineering-rc-extractor-")))
@@ -105,7 +110,7 @@ if variant in {"encrypted", "oversized", "huge-directory"}:
   return { archive, destination }
 }
 
-function extract(archive: string, destination: string, phase: "input" | "pre" | "final" | "zip-sbom" | "signed-host-pre" | "signed-host-final" = "input") {
+function extract(archive: string, destination: string, phase: "input" | "pre" | "final" | "zip-sbom" | "signed-host-pre" | "signed-host-final" | "open-design-acceptance" = "input") {
   return spawnSync("python3", [
     join(import.meta.dir, "extract-engineering-rc-artifact.py"),
     phase,
@@ -114,7 +119,7 @@ function extract(archive: string, destination: string, phase: "input" | "pre" | 
   ], { encoding: "utf8" })
 }
 
-function closureFixture(phase: "pre" | "final" | "zip-sbom" | "signed-host-pre" | "signed-host-final") {
+function closureFixture(phase: "pre" | "final" | "zip-sbom" | "signed-host-pre" | "signed-host-final" | "open-design-acceptance") {
   root = realpathSync(mkdtempSync(join(tmpdir(), "engineering-rc-extractor-closure-")))
   const archive = join(root, `${phase}.zip`)
   const destination = join(root, "output")
@@ -128,7 +133,9 @@ function closureFixture(phase: "pre" | "final" | "zip-sbom" | "signed-host-pre" 
         ? [...SIGNED_HOST_PRE_FILES]
         : phase === "signed-host-final"
           ? [...SIGNED_HOST_FINAL_FILES]
-        : [...PRE_FILES]
+          : phase === "open-design-acceptance"
+            ? [...OPEN_DESIGN_ACCEPTANCE_FILES]
+            : [...PRE_FILES]
   const source = String.raw`
 import json, stat, sys, zipfile
 archive, phase, files_json = sys.argv[1:]
@@ -200,6 +207,19 @@ describe("Engineering RC raw artifact extractor", () => {
       directories: 0,
     })
     expect(statSync(join(destination, "attestations")).mode & 0o777).toBe(0o700)
+    expect(statSync(join(destination, "SHA256SUMS")).mode & 0o777).toBe(0o600)
+  })
+
+  test("extracts the exact final OpenDesign acceptance closure", () => {
+    const { archive, destination } = closureFixture("open-design-acceptance")
+    const result = extract(archive, destination, "open-design-acceptance")
+    expect(result.status).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: true,
+      phase: "open-design-acceptance",
+      files: OPEN_DESIGN_ACCEPTANCE_FILES.length,
+      directories: 0,
+    })
     expect(statSync(join(destination, "SHA256SUMS")).mode & 0o777).toBe(0o600)
   })
 
