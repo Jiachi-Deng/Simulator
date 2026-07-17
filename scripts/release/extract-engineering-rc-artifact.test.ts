@@ -42,6 +42,24 @@ const PRE_FILES = [
   "zip-signatures.json",
 ] as const
 
+const SIGNED_HOST_PRE_FILES = [
+  "Simulator-arm64.dmg",
+  "Simulator-arm64.zip",
+  "app-notarization.json",
+  "dmg-notarization.json",
+  "dmg-signatures.json",
+  "h3-post-install-v1.schema.json",
+  "payload-equivalence.json",
+  "signed-host-manifest.json",
+  "signed-host-provenance.json",
+  "zip-signatures.json",
+] as const
+const SIGNED_HOST_FINAL_FILES = [
+  "SHA256SUMS",
+  ...SIGNED_HOST_PRE_FILES,
+  "attestations/provenance.sigstore.json",
+] as const
+
 function fixture(variant: FixtureVariant) {
   root = realpathSync(mkdtempSync(join(tmpdir(), "engineering-rc-extractor-")))
   const archive = join(root, "artifact.zip")
@@ -87,7 +105,7 @@ if variant in {"encrypted", "oversized", "huge-directory"}:
   return { archive, destination }
 }
 
-function extract(archive: string, destination: string, phase: "input" | "pre" | "final" | "zip-sbom" = "input") {
+function extract(archive: string, destination: string, phase: "input" | "pre" | "final" | "zip-sbom" | "signed-host-pre" | "signed-host-final" = "input") {
   return spawnSync("python3", [
     join(import.meta.dir, "extract-engineering-rc-artifact.py"),
     phase,
@@ -96,7 +114,7 @@ function extract(archive: string, destination: string, phase: "input" | "pre" | 
   ], { encoding: "utf8" })
 }
 
-function closureFixture(phase: "pre" | "final" | "zip-sbom") {
+function closureFixture(phase: "pre" | "final" | "zip-sbom" | "signed-host-pre" | "signed-host-final") {
   root = realpathSync(mkdtempSync(join(tmpdir(), "engineering-rc-extractor-closure-")))
   const archive = join(root, `${phase}.zip`)
   const destination = join(root, "output")
@@ -106,7 +124,11 @@ function closureFixture(phase: "pre" | "final" | "zip-sbom") {
     ? [...PRE_FILES, "attestations/provenance.sigstore.json", "attestations/sbom.sigstore.json"]
     : phase === "zip-sbom"
       ? ["package-verification-code.txt", "packaged-files.sha256", "sbom.spdx.json", "zip-sbom-lineage.json"]
-      : [...PRE_FILES]
+      : phase === "signed-host-pre"
+        ? [...SIGNED_HOST_PRE_FILES]
+        : phase === "signed-host-final"
+          ? [...SIGNED_HOST_FINAL_FILES]
+        : [...PRE_FILES]
   const source = String.raw`
 import json, stat, sys, zipfile
 archive, phase, files_json = sys.argv[1:]
@@ -153,6 +175,32 @@ describe("Engineering RC raw artifact extractor", () => {
       files: 4,
       directories: 0,
     })
+  })
+
+  test("extracts the exact signed Host pre-attestation closure", () => {
+    const { archive, destination } = closureFixture("signed-host-pre")
+    const result = extract(archive, destination, "signed-host-pre")
+    expect(result.status).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: true,
+      phase: "signed-host-pre",
+      files: SIGNED_HOST_PRE_FILES.length,
+      directories: 0,
+    })
+  })
+
+  test("extracts the exact final signed Host closure", () => {
+    const { archive, destination } = closureFixture("signed-host-final")
+    const result = extract(archive, destination, "signed-host-final")
+    expect(result.status).toBe(0)
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      ok: true,
+      phase: "signed-host-final",
+      files: SIGNED_HOST_FINAL_FILES.length,
+      directories: 0,
+    })
+    expect(statSync(join(destination, "attestations")).mode & 0o777).toBe(0o700)
+    expect(statSync(join(destination, "SHA256SUMS")).mode & 0o777).toBe(0o600)
   })
 
   test.each([
