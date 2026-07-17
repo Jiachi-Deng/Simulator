@@ -7,6 +7,7 @@ const path = join(root, ".github/workflows/open-design-release.yml")
 const source = readFileSync(path, "utf8")
 const workflow = Bun.YAML.parse(source) as Record<string, any>
 const productionReleaseGuide = readFileSync(join(root, "modules/open-design/package/PRODUCTION_RELEASE.md"), "utf8")
+const operatorReleaseGuide = readFileSync(join(root, ".github/workflows/open-design-release.md"), "utf8")
 
 function step(jobName: string, name: string): Record<string, any> {
   const found = workflow.jobs[jobName].steps.find((candidate: Record<string, any>) => candidate.name === name)
@@ -191,6 +192,10 @@ describe("OpenDesign release-track safety", () => {
     expect(productionReleaseGuide).toContain("refresh stable first and prerelease second")
     expect(productionReleaseGuide).toContain("compare both public Catalogs again under that freeze")
     expect(productionReleaseGuide).toContain("Equality or reversed\nordering is a pre-Turn stop condition")
+    expect(operatorReleaseGuide).toContain("First set `OPEN_DESIGN_RC_ACCEPTANCE_ENABLED=true` as the\nCatalog refresh freeze")
+    expect(operatorReleaseGuide).toContain("keep it true through machine, visual, final acceptance,\nand rollback evidence")
+    expect(operatorReleaseGuide).toContain("finally disable `OPEN_DESIGN_RC_ACCEPTANCE_ENABLED` before\nCatalog refresh resumes")
+    expect(operatorReleaseGuide).not.toContain("Finally enable the RC acceptance gate only while")
   })
 
   test("anchors the signing key before source verification and keeps the RC config private", () => {
