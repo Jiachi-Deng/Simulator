@@ -10,7 +10,13 @@ on:
       - "apps/electron/resources/**"
       - "scripts/electron-build-*.ts"
       - "scripts/build-environment.ts"
+      - "scripts/packaged-server-resources.ts"
+      - "scripts/release/updates-disabled.ts"
+      - "scripts/release/verify-and-bundle-macos.sh"
+      - "scripts/release/verify-macos-signatures.ts"
+      - "scripts/release/verify-packaged-electron-identity.ts"
       - "scripts/release/verify-public-build-privacy.ts"
+      - "scripts/release/write-app-inventory.py"
       - "package.json"
       - "bun.lock"
   workflow_dispatch:
@@ -78,6 +84,14 @@ jobs:
               exit 1
             fi
           done < <(find apps/electron/release/mac-arm64 -type f -print0)
+          app_root=apps/electron/release/mac-arm64/Simulator.app
+          product_version=$(node -p "require('./apps/electron/package.json').version")
+          executable_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_root/Contents/Info.plist")
+          bun scripts/release/verify-packaged-electron-identity.ts "$app_root" "$product_version"
+          bun scripts/release/verify-macos-signatures.ts \
+            "$app_root" "Contents/MacOS/$executable_name" \
+            > apps/electron/release/package-signatures.json
+          test "$(jq -er .requiredArm64MachOFileType apps/electron/release/package-signatures.json)" = EXECUTE
           shasum -a 256 "${dmgs[0]}" | tee apps/electron/release/SHA256SUMS
 
       - name: Upload engineering artifact

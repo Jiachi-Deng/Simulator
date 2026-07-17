@@ -26,6 +26,20 @@ describe("release operations policy", () => {
     expect(packageWorkflow).toContain('"scripts/release/verify-public-build-privacy.ts"')
   })
 
+  test("the macOS package gate executes packaged identity and signature checks for verifier changes", () => {
+    const packageWorkflow = read(".github/workflows/package-macos.yml")
+    for (const path of [
+      "scripts/release/verify-and-bundle-macos.sh",
+      "scripts/release/verify-macos-signatures.ts",
+      "scripts/release/verify-packaged-electron-identity.ts",
+    ]) {
+      expect(packageWorkflow).toContain(`- \"${path}\"`)
+    }
+    expect(packageWorkflow).toContain('verify-packaged-electron-identity.ts "$app_root" "$product_version"')
+    expect(packageWorkflow).toContain('"$app_root" "Contents/MacOS/$executable_name"')
+    expect(packageWorkflow).toContain(".requiredArm64MachOFileType")
+  })
+
   test("public policy documents remain discoverable and contain no invented contact", () => {
     const readme = read("README.md")
     const security = read("SECURITY.md")
