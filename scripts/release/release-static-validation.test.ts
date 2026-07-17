@@ -7,7 +7,9 @@ const workflow = readFileSync(join(import.meta.dir, "../../.github/workflows/rel
 describe("release static validation workflow", () => {
   test("runs on pull requests that can affect RC, updater, or build-policy behavior", () => {
     expect(workflow).toContain("pull_request:")
+    expect(workflow).toContain(".github/actionlint.yaml")
     expect(workflow).toContain(".github/workflows/engineering-rc.yml")
+    expect(workflow).toContain(".github/workflows/package-macos.yml")
     expect(workflow).toContain(".github/workflows/open-design-production-input.yml")
     expect(workflow).toContain(".github/workflows/open-design-m1-machine-evidence.yml")
     expect(workflow).toContain(".github/workflows/open-design-m1-visual-attestation.yml")
@@ -30,8 +32,14 @@ describe("release static validation workflow", () => {
     const bashValidation = parsed.jobs["release-static-validation"].steps.find(
       (candidate: Record<string, any>) => candidate.name === "Validate embedded release workflow Bash",
     ).run
+    const actionlintValidation = parsed.jobs["release-static-validation"].steps.find(
+      (candidate: Record<string, any>) => candidate.name === "Validate GitHub Actions schema and expression contexts",
+    ).run
     expect(workflow).toContain("bun test scripts/release/*.test.ts")
     expect(workflow).toContain("YAML.safe_load(File.read")
+    expect(workflow).toContain("github.com/rhysd/actionlint/cmd/actionlint@03d0035246f3e81f36aed592ffb4bebf33a03106")
+    expect(workflow).toContain("Validate GitHub Actions schema and expression contexts")
+    expect(workflow).toContain("-shellcheck= -pyflakes=")
     expect(workflow).toContain("Validate embedded release workflow Bash")
     expect(workflow).toContain('Open3.capture3("bash", "-n"')
     expect(workflow).toContain("bash -n")
@@ -40,7 +48,10 @@ describe("release static validation workflow", () => {
     expect(workflow).not.toContain("electron:dist")
     expect(workflow).not.toContain("actions/attest")
     expect(workflow).not.toContain("actions/upload-artifact")
+    expect(actionlintValidation).toContain(".github/workflows/package-macos.yml")
     expect(bashValidation).toContain('".github/workflows/engineering-rc.yml"')
+    expect(bashValidation).toContain('".github/workflows/package-macos.yml"')
+    expect(workflow.match(/\.github\/workflows\/package-macos\.yml/g)).toHaveLength(4)
   })
 
   test("checks out read-only authority without persisting the Actions token", () => {
