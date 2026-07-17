@@ -6,6 +6,8 @@ const root = join(import.meta.dir, "../..")
 const path = join(root, ".github/workflows/open-design-release.yml")
 const source = readFileSync(path, "utf8")
 const workflow = Bun.YAML.parse(source) as Record<string, any>
+const productionReleaseGuide = readFileSync(join(root, "modules/open-design/package/PRODUCTION_RELEASE.md"), "utf8")
+const operatorReleaseGuide = readFileSync(join(root, ".github/workflows/open-design-release.md"), "utf8")
 
 function step(jobName: string, name: string): Record<string, any> {
   const found = workflow.jobs[jobName].steps.find((candidate: Record<string, any>) => candidate.name === name)
@@ -51,6 +53,9 @@ describe("OpenDesign release-track safety", () => {
     expect(publish).toContain('test "$(jq -r .isPrerelease <<<"$release_state")" = false')
     expect(publish).not.toContain("gh release upload")
     expect(publish).not.toContain("open-design-v0.14.5")
+    expect(productionReleaseGuide).toContain("prerelease `0.14.6-rc.1` uploads exactly the archive, Catalog, envelope, and")
+    expect(productionReleaseGuide).toContain("is never published, and is never copied into")
+    expect(productionReleaseGuide).toContain("Only a stable publication may promote its official-channel config")
   })
 
   test("requires stable enablement, an exact confirmation, and the protected stable environment", () => {
@@ -131,7 +136,7 @@ describe("OpenDesign release-track safety", () => {
     expect(verify).toContain('--previous-issued-at "$PRIOR_ISSUED_AT"')
   })
 
-  test("refreshes stable or the fixed prerelease with cross-track monotonic authority", () => {
+  test("refreshes stable or the fixed prerelease with track-appropriate monotonic authority", () => {
     expect(workflow.env.RELEASE_TAG).toBeUndefined()
     expect(workflow.env.MODULE_VERSION).toBeUndefined()
     expect(workflow.jobs.refresh.environment.name).toBe(
@@ -181,6 +186,16 @@ describe("OpenDesign release-track safety", () => {
     expect(derive).toContain('VERIFY_PREVIOUS_SEQUENCE=${highWaterSequence}')
     expect(derive).toContain('VERIFY_PREVIOUS_ISSUED_AT=${new Date(highWaterIssuedAtMs).toISOString()}')
     expect(derive).toContain('CATALOG_SEQUENCE=${highWaterSequence + 1}')
+    expect(productionReleaseGuide).toContain("advances from the\nauthenticated Catalog on its selected stable tag")
+    expect(productionReleaseGuide).toContain("takes the highest authenticated `sequence` and `issuedAt` across the\ncurrent RC and stable `0.14.5` Catalogs")
+    expect(productionReleaseGuide).not.toContain("Both tracks obtain the highest authenticated cross-track")
+    expect(productionReleaseGuide).toContain("refresh stable first and prerelease second")
+    expect(productionReleaseGuide).toContain("compare both public Catalogs again under that freeze")
+    expect(productionReleaseGuide).toContain("Equality or reversed\nordering is a pre-Turn stop condition")
+    expect(operatorReleaseGuide).toContain("First set `OPEN_DESIGN_RC_ACCEPTANCE_ENABLED=true` as the\nCatalog refresh freeze")
+    expect(operatorReleaseGuide).toContain("keep it true through machine, visual, final acceptance,\nand rollback evidence")
+    expect(operatorReleaseGuide).toContain("finally disable `OPEN_DESIGN_RC_ACCEPTANCE_ENABLED` before\nCatalog refresh resumes")
+    expect(operatorReleaseGuide).not.toContain("Finally enable the RC acceptance gate only while")
   })
 
   test("anchors the signing key before source verification and keeps the RC config private", () => {

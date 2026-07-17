@@ -304,14 +304,21 @@ or local file paths:
 
 Activate the stages in that order. Create and API-verify every protected
 Environment first. Refresh stable 0.14.5 and then RC 0.14.6-rc.1 before enabling
-the machine gate. Set only `OPEN_DESIGN_M1_MACHINE_EVIDENCE_ENABLED=true`, run
-and preserve the successful machine run, then set it back to `false`. Enable
-the visual gate only while sealing the already-reviewed decisions; disable it
-after the artifact is created. Finally enable the RC acceptance gate only while
-composing the final evidence, then disable it before Catalog refresh resumes.
-Never enable multiple producer stages merely to shorten the sequence, never
-refresh either Catalog during the paid batch, and never retry within a failed
-40-Turn batch. A repaired new path starts its 20-consecutive-pass count again.
+the machine gate. First set `OPEN_DESIGN_RC_ACCEPTANCE_ENABLED=true` as the
+Catalog refresh freeze described above, re-read and compare both public Catalogs
+under that freeze, and keep it true through machine, visual, final acceptance,
+and rollback evidence. Then set only
+`OPEN_DESIGN_M1_MACHINE_EVIDENCE_ENABLED=true`, run and preserve the successful
+machine run, and set the machine variable back to `false`. Enable the visual
+variable only while sealing the already-reviewed decisions; disable it after
+the visual artifact is created. Dispatch the final RC acceptance producer while
+the already-active freeze variable remains true. Enable the rollback variable
+only for its downstream gate. After rollback evidence succeeds, disable the
+rollback variable and finally disable `OPEN_DESIGN_RC_ACCEPTANCE_ENABLED` before
+Catalog refresh resumes. Never enable multiple execution-stage variables merely
+to shorten the sequence, never refresh either Catalog while the freeze is
+active, and never retry within a failed 40-Turn batch. A repaired new path starts
+its 20-consecutive-pass count again.
 
 ## Debug and acceptance rollback gate
 
