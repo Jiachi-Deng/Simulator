@@ -1,5 +1,12 @@
-import { describe, expect, test } from "bun:test"
+import { afterEach, describe, expect, test } from "bun:test"
+import { Buffer } from "node:buffer"
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs"
+import { join } from "node:path"
 import { generateSpdx, packageVerificationCodeFromContent, packagedFilesFromChecksums, packagesFromBunLock } from "./generate-spdx"
+
+const cliRoot = join(import.meta.dir, ".tmp-generate-spdx")
+
+afterEach(() => rmSync(cliRoot, { recursive: true, force: true }))
 
 const lock = `{
   "packages": {
@@ -8,7 +15,7 @@ const lock = `{
     "nested/z": ["zeta@2.0.0", "", {}],
   }
 }`
-const inventory = `${"a".repeat(64)}  Contents/MacOS/Simulator\n${"b".repeat(64)}  Contents/Info.plist\n`
+const inventory = `${"b".repeat(64)}  Contents/Info.plist\n${"a".repeat(64)}  Contents/MacOS/Simulator\n`
 const packageVerificationCode = `${"c".repeat(40)}\n`
 
 function assertSpdx23ArtifactPackageSchema(value: unknown): void {
@@ -36,14 +43,77 @@ describe("minimal SPDX generator", () => {
     ])
   })
 
-  test("parses deterministic packaged file checksums", () => {
+  test("preserves canonical byte-ordered packaged file checksums", () => {
     expect(packagedFilesFromChecksums(inventory)).toEqual([
       { path: "Contents/Info.plist", sha256: "b".repeat(64) },
       { path: "Contents/MacOS/Simulator", sha256: "a".repeat(64) },
     ])
+
+    const edgePaths = [
+      "Contents/Frameworks/A.dylib",
+      "Contents/Info.plist",
+      "Contents/_CodeSignature/CodeResources",
+      "Contents/a.txt",
+      "Contents/\u{e000}.txt",
+      "Contents/\u{1f600}.txt",
+    ]
+    const edgeInventory = edgePaths
+      .map((path, index) => `${index.toString(16).padStart(64, "0")}  ${path}\n`)
+      .join("")
+    expect(packagedFilesFromChecksums(edgeInventory).map((entry) => entry.path)).toEqual(edgePaths)
+
     expect(() => packagedFilesFromChecksums(`${"a".repeat(64)}  ../escape\n`)).toThrow()
+    expect(() => packagedFilesFromChecksums(`${"a".repeat(64)}  Contents\\escape\n`)).toThrow()
+    expect(() => packagedFilesFromChecksums(`${"a".repeat(64)}  Contents//escape\n`)).toThrow()
+    expect(() => packagedFilesFromChecksums(`${"a".repeat(64)}  Contents/control\tname\n`)).toThrow()
+    expect(() => packagedFilesFromChecksums(`${"a".repeat(64)}  Contents/A\r\n`)).toThrow("canonical LF")
+    expect(() => packagedFilesFromChecksums(`${"a".repeat(64)}  Contents/A`)).toThrow("canonical LF")
+    expect(() => packagedFilesFromChecksums("\n")).toThrow("at least one")
+    expect(() => packagedFilesFromChecksums(`${"a".repeat(64)}  Contents/A\n${"b".repeat(64)}  Contents/A\n`)).toThrow("unique")
+    expect(() => packagedFilesFromChecksums(`${"a".repeat(64)}  Contents/_CodeSignature/CodeResources\n${"b".repeat(64)}  Contents/Frameworks/A.dylib\n`)).toThrow("byte order")
     expect(packageVerificationCodeFromContent(packageVerificationCode)).toBe("c".repeat(40))
     expect(() => packageVerificationCodeFromContent("not-a-sha1")).toThrow()
+  })
+
+  test("CLI rejects invalid or noncanonical UTF-8 bytes before parsing packaged file checksums", () => {
+    mkdirSync(cliRoot, { recursive: true })
+    const lockPath = join(cliRoot, "bun.lock")
+    const inventoryPath = join(cliRoot, "packaged-files.sha256")
+    const verificationCodePath = join(cliRoot, "package-verification-code.txt")
+    const outputPath = join(cliRoot, "sbom.spdx.json")
+    writeFileSync(lockPath, lock)
+    writeFileSync(inventoryPath, Buffer.concat([
+      Buffer.from(`${"a".repeat(64)}  Contents/`, "utf8"),
+      Buffer.from([0x80]),
+      Buffer.from("\n", "utf8"),
+    ]))
+    writeFileSync(verificationCodePath, packageVerificationCode)
+
+    const cli = [
+      process.execPath,
+      join(import.meta.dir, "generate-spdx.ts"),
+      lockPath,
+      inventoryPath,
+      verificationCodePath,
+      outputPath,
+      "1.2.3-rc.1",
+      "a".repeat(40),
+      "2026-01-02T03:04:05Z",
+    ]
+    const result = Bun.spawnSync(cli)
+
+    expect(result.exitCode).not.toBe(0)
+    expect(new TextDecoder().decode(result.stderr)).toContain("must be valid UTF-8")
+    expect(existsSync(outputPath)).toBe(false)
+
+    writeFileSync(inventoryPath, Buffer.concat([
+      Buffer.from([0xef, 0xbb, 0xbf]),
+      Buffer.from(inventory, "utf8"),
+    ]))
+    const bomResult = Bun.spawnSync(cli)
+    expect(bomResult.exitCode).not.toBe(0)
+    expect(new TextDecoder().decode(bomResult.stderr)).toContain("Invalid packaged file checksum line")
+    expect(existsSync(outputPath)).toBe(false)
   })
 
   test("matches the SPDX 2.3 artifact package schema and separates source-lock build inputs", () => {
