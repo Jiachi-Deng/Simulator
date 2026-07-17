@@ -33,6 +33,10 @@ import {
 } from '../host-agent/v1-compatibility-runtime'
 import type { HostAgentProtocolPath } from '../host-agent/protocol'
 import { OPEN_DESIGN_MODULE_ID } from '../shared/open-design-module-ipc'
+import type {
+  OpenDesignAcceptanceBlackoutProxyLaunchLease,
+  OpenDesignAcceptanceBlackoutProxyPort,
+} from './open-design-acceptance-blackout-proxy'
 
 const LAUNCH_GRANT_TTL_MS = 24 * 60 * 60 * 1_000
 
@@ -193,6 +197,8 @@ export interface IsolatedHostModuleAgentRuntimeOptions {
   readonly resolveWorkspaceId: () => string | undefined
   readonly workerEntryPath: string
   readonly shimPath: string
+  /** Packaged acceptance-only external proxy; absent in every normal production launch. */
+  readonly acceptanceBlackoutProxy?: Pick<OpenDesignAcceptanceBlackoutProxyPort, 'prepareLaunch'>
   readonly now?: () => number
   readonly craftPreemptTimeoutMs?: number
   /** Internal deterministic timer seam; production begins safe rotation 35 minutes before fixed 24h expiry. */
@@ -322,6 +328,7 @@ export async function createIsolatedHostModuleAgentRuntime(
     readonly workerEpoch: string
     readonly expiresAt: number
     readonly adapter: V2CorePortAdapter
+    blackoutProxyLease?: OpenDesignAcceptanceBlackoutProxyLaunchLease
     cleaned: boolean
     cancelGrantRotation?: () => void
     cleanupPromise?: Promise<void>
@@ -480,6 +487,17 @@ export async function createIsolatedHostModuleAgentRuntime(
     const operation = (async () => {
       record.cancelGrantRotation?.()
       record.cancelGrantRotation = undefined
+      let proxyCleanupError: unknown
+      if (record.blackoutProxyLease) {
+        const proxyCleanup = await settleBounded(record.blackoutProxyLease.cleanup(), preemptTimeoutMs)
+        if (proxyCleanup.status === 'fulfilled') {
+          record.blackoutProxyLease = undefined
+        } else {
+          proxyCleanupError = proxyCleanup.status === 'rejected'
+            ? proxyCleanup.error
+            : new Error('acceptance blackout proxy cleanup timed out')
+        }
+      }
       const cleanup = await settleBounded(record.adapter.disconnect(), preemptTimeoutMs)
       if (cleanup.status !== 'fulfilled') {
         const error = cleanup.status === 'rejected'
@@ -497,6 +515,12 @@ export async function createIsolatedHostModuleAgentRuntime(
           fence('v2', phase, error, record.workerEpoch)
           throw error
         }
+      }
+      if (proxyCleanupError) {
+        // Fence only after the normal adapter/Worker reap has had its chance;
+        // tripping the Worker first would manufacture a second cleanup fault.
+        fence('v2', phase, proxyCleanupError, record.workerEpoch)
+        throw proxyCleanupError
       }
       // Commit cleanup only after both the grant adapter and exact worker stop
       // are positively settled. A failed stop retains retryable ownership.
@@ -606,10 +630,24 @@ export async function createIsolatedHostModuleAgentRuntime(
       await cleanupV2Record(record, 'worker-recovery')
       throw new Error('v2 Host Agent worker exited during launch')
     }
+    try {
+      if (options.acceptanceBlackoutProxy) {
+        record.blackoutProxyLease = await options.acceptanceBlackoutProxy.prepareLaunch({
+          upstreamBaseUrl: connection.address.url,
+          tokenFile: connection.tokenFile,
+        })
+      }
+    } catch (error) {
+      try { await cleanupV2Record(record, 'launch-cleanup') } catch {
+        // cleanupV2Record already fenced only v2; retain the original launch
+        // failure because no acceptance URL was ever granted to the Module.
+      }
+      throw error
+    }
     armV2GrantRotation(record)
     return {
       environment: Object.freeze({
-        SIMULATOR_HOST_AGENT_URL: connection.address.url,
+        SIMULATOR_HOST_AGENT_URL: record.blackoutProxyLease?.url ?? connection.address.url,
         SIMULATOR_HOST_AGENT_TOKEN_FILE: connection.tokenFile,
         SIMULATOR_HOST_AGENT_SHIM_PATH: shimPath,
         SIMULATOR_HOST_AGENT_CONTRACT_VERSION: '2',

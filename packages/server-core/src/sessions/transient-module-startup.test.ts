@@ -127,6 +127,7 @@ describe('transient Module startup quarantine', () => {
       console.log(JSON.stringify({
         queuedRecoveries,
         exposedSessions: manager.getSessions().map((session) => session.id),
+        residue: manager.getModuleAgentSessionResidueSnapshot(),
         validExists: existsSync(${JSON.stringify(validDir)}),
         invalidSourceExists: [
           ${JSON.stringify(invalidContractDir)},
@@ -157,6 +158,7 @@ describe('transient Module startup quarantine', () => {
     const output = JSON.parse(resultLine!) as {
       queuedRecoveries: number
       exposedSessions: string[]
+      residue: { hiddenSessions: number; transientSessions: number; quarantinedSessions: number }
       validExists: boolean
       invalidSourceExists: boolean[]
       invalidOpenResults: Array<string | null>
@@ -174,6 +176,11 @@ describe('transient Module startup quarantine', () => {
     }
     expect(output.queuedRecoveries).toBe(1)
     expect(output.exposedSessions).toEqual(['ordinary-session'])
+    expect(output.residue).toEqual({
+      hiddenSessions: 1,
+      transientSessions: 0,
+      quarantinedSessions: 3,
+    })
     expect(output.validExists).toBe(false)
     expect(output.invalidSourceExists).toEqual([false, false, false])
     expect(output.invalidOpenResults).toEqual([null, null, null])

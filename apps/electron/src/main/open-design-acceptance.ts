@@ -16,13 +16,25 @@ import type { ModuleDaemonSnapshot } from '@simulator/module-daemon'
 import type { ModuleRegistry } from '@simulator/module-registry'
 import {
   OPEN_DESIGN_ACCEPTANCE_CHANNELS,
+  parseOpenDesignBlackoutArmRequest,
+  parseOpenDesignBlackoutCapability,
+  parseOpenDesignBlackoutEvidence,
+  parseOpenDesignBlackoutEvidenceRequest,
+  parseOpenDesignModuleAgentRuntimeSnapshot,
   type OpenDesignAcceptanceAction,
   type OpenDesignAcceptanceState,
+  type OpenDesignBlackoutArmRequest,
+  type OpenDesignBlackoutArmResult,
+  type OpenDesignBlackoutCapability,
+  type OpenDesignBlackoutEvidence,
+  type OpenDesignBlackoutEvidenceRequest,
+  type OpenDesignModuleAgentRuntimeSnapshot,
 } from '../shared/open-design-acceptance-ipc'
 import { OPEN_DESIGN_MODULE_ID } from '../shared/open-design-module-ipc'
 import type { OpenDesignDevelopmentBootstrap } from './open-design-development-bootstrap'
 import type { OpenDesignOfficialChannelBootstrap } from './open-design-official-channel'
 import type { OpenDesignMutationGate } from './open-design-mutation-gate'
+import type { OpenDesignAcceptanceBlackoutProxyPort } from './open-design-acceptance-blackout-proxy'
 
 export const OPEN_DESIGN_ACCEPTANCE_ENV = 'SIMULATOR_HOST_MODULE_ACCEPTANCE' as const
 export const OPEN_DESIGN_ACCEPTANCE_DESCRIPTOR_RELATIVE_PATH = join(
@@ -336,6 +348,9 @@ export interface OpenDesignAcceptanceControllerOptions {
   readonly getRuntime: () => OpenDesignAcceptanceRuntime | undefined
   readonly host: OpenDesignAcceptanceHostAdapter
   readonly mutationGate: OpenDesignMutationGate
+  readonly blackoutProxy?: Pick<OpenDesignAcceptanceBlackoutProxyPort,
+    'getCapability' | 'armNextBlackout' | 'takeBlackoutEvidence'>
+  readonly getModuleAgentRuntimeSnapshot?: () => OpenDesignModuleAgentRuntimeSnapshot | undefined
   readonly operationId?: (action: OpenDesignAcceptanceAction) => string
   readonly now?: () => number
 }
@@ -471,6 +486,45 @@ export class OpenDesignAcceptanceController {
 
   async getState(): Promise<OpenDesignAcceptanceState> {
     return this.#readState()
+  }
+
+  getBlackoutProxyCapability(): OpenDesignBlackoutCapability {
+    if (!this.#options.blackoutProxy) throw new AcceptanceControlError('ACCEPTANCE_BLACKOUT_PROXY_UNAVAILABLE')
+    try {
+      return parseOpenDesignBlackoutCapability(this.#options.blackoutProxy.getCapability())
+    } catch {
+      throw new AcceptanceControlError('ACCEPTANCE_BLACKOUT_PROXY_UNAVAILABLE')
+    }
+  }
+
+  async armNextBlackout(request: OpenDesignBlackoutArmRequest): Promise<OpenDesignBlackoutArmResult> {
+    if (!this.#options.blackoutProxy) throw new AcceptanceControlError('ACCEPTANCE_BLACKOUT_PROXY_UNAVAILABLE')
+    try {
+      return await this.#options.blackoutProxy.armNextBlackout(parseOpenDesignBlackoutArmRequest(request))
+    } catch {
+      throw new AcceptanceControlError('ACCEPTANCE_BLACKOUT_PROXY_ARM_FAILED')
+    }
+  }
+
+  async takeBlackoutEvidence(request: OpenDesignBlackoutEvidenceRequest): Promise<OpenDesignBlackoutEvidence> {
+    if (!this.#options.blackoutProxy) throw new AcceptanceControlError('ACCEPTANCE_BLACKOUT_PROXY_UNAVAILABLE')
+    try {
+      return parseOpenDesignBlackoutEvidence(
+        await this.#options.blackoutProxy.takeBlackoutEvidence(parseOpenDesignBlackoutEvidenceRequest(request)),
+      )
+    } catch {
+      throw new AcceptanceControlError('ACCEPTANCE_BLACKOUT_PROXY_EVIDENCE_FAILED')
+    }
+  }
+
+  getModuleAgentRuntimeSnapshot(): OpenDesignModuleAgentRuntimeSnapshot {
+    try {
+      const snapshot = this.#options.getModuleAgentRuntimeSnapshot?.()
+      if (!snapshot) throw new Error('unavailable')
+      return parseOpenDesignModuleAgentRuntimeSnapshot(snapshot)
+    } catch {
+      throw new AcceptanceControlError('ACCEPTANCE_MODULE_AGENT_SNAPSHOT_UNAVAILABLE')
+    }
   }
 
   updateToRc(): Promise<OpenDesignAcceptanceState> {
@@ -692,13 +746,20 @@ function validSender(controller: OpenDesignAcceptanceController, event: IpcMainE
   return validMainFrame(event) && controller.isClaimedSender(event.sender)
 }
 
-function assertInvocation(
+function assertSender(
   controller: OpenDesignAcceptanceController,
   event: IpcMainInvokeEvent,
-  args: readonly unknown[],
 ): void {
   if (!validSender(controller, event)) throw new Error('OpenDesign acceptance IPC sender was rejected')
+}
+
+function assertNoInput(args: readonly unknown[]): void {
   if (args.length !== 0) throw new Error('OpenDesign acceptance IPC commands do not accept input')
+}
+
+function oneInput(args: readonly unknown[]): unknown {
+  if (args.length !== 1) throw new Error('OpenDesign acceptance IPC command requires one exact input')
+  return args[0]
 }
 
 /**
@@ -719,11 +780,11 @@ export function registerOpenDesignAcceptanceIpc(
   const register = (
     readyController: OpenDesignAcceptanceController,
     channel: string,
-    invoke: () => Promise<OpenDesignAcceptanceState>,
+    invoke: (args: readonly unknown[]) => unknown,
   ) => {
     ipc.handle(channel, (event, ...args) => {
-      assertInvocation(readyController, event, args)
-      return invoke()
+      assertSender(readyController, event)
+      return invoke(args)
     })
     invokeChannels.push(channel)
   }
@@ -746,9 +807,27 @@ export function registerOpenDesignAcceptanceIpc(
     ipc.on(OPEN_DESIGN_ACCEPTANCE_CHANNELS.IS_AVAILABLE, available)
     if (controller) {
       const readyController = controller
-      register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE, () => readyController.getState())
-      register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC, () => readyController.updateToRc())
-      register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.ROLLBACK, () => readyController.rollback())
+      register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE, (args) => {
+        assertNoInput(args); return readyController.getState()
+      })
+      register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC, (args) => {
+        assertNoInput(args); return readyController.updateToRc()
+      })
+      register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.ROLLBACK, (args) => {
+        assertNoInput(args); return readyController.rollback()
+      })
+      register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_BLACKOUT_PROXY_CAPABILITY, (args) => {
+        assertNoInput(args); return readyController.getBlackoutProxyCapability()
+      })
+      register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_NEXT_BLACKOUT, (args) => (
+        readyController.armNextBlackout(parseOpenDesignBlackoutArmRequest(oneInput(args)))
+      ))
+      register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.TAKE_BLACKOUT_EVIDENCE, (args) => (
+        readyController.takeBlackoutEvidence(parseOpenDesignBlackoutEvidenceRequest(oneInput(args)))
+      ))
+      register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_MODULE_AGENT_RUNTIME_SNAPSHOT, (args) => {
+        assertNoInput(args); return readyController.getModuleAgentRuntimeSnapshot()
+      })
     }
   } catch (error) {
     registration.dispose()

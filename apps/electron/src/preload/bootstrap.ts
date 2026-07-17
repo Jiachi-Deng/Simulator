@@ -47,6 +47,12 @@ import {
   OPEN_DESIGN_ACCEPTANCE_CHANNELS,
   type OpenDesignAcceptanceFacade,
   type OpenDesignAcceptanceState,
+  type OpenDesignBlackoutArmRequest,
+  type OpenDesignBlackoutArmResult,
+  type OpenDesignBlackoutCapability,
+  type OpenDesignBlackoutEvidence,
+  type OpenDesignBlackoutEvidenceRequest,
+  type OpenDesignModuleAgentRuntimeSnapshot,
 } from '../shared/open-design-acceptance-ipc'
 
 type OpenDesignIpcRenderer = Pick<typeof ipcRenderer, 'invoke' | 'on' | 'removeListener' | 'sendSync'>
@@ -81,6 +87,18 @@ export function createOpenDesignAcceptanceFacade(
     getState: () => invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE),
     updateToRc: () => invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC),
     rollback: () => invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.ROLLBACK),
+    getBlackoutProxyCapability: (): Promise<OpenDesignBlackoutCapability> => (
+      ipc.invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_BLACKOUT_PROXY_CAPABILITY)
+    ),
+    armNextBlackout: (request: OpenDesignBlackoutArmRequest): Promise<OpenDesignBlackoutArmResult> => (
+      ipc.invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_NEXT_BLACKOUT, request)
+    ),
+    takeBlackoutEvidence: (request: OpenDesignBlackoutEvidenceRequest): Promise<OpenDesignBlackoutEvidence> => (
+      ipc.invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.TAKE_BLACKOUT_EVIDENCE, request)
+    ),
+    getModuleAgentRuntimeSnapshot: (): Promise<OpenDesignModuleAgentRuntimeSnapshot> => (
+      ipc.invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_MODULE_AGENT_RUNTIME_SNAPSHOT)
+    ),
   })
 }
 

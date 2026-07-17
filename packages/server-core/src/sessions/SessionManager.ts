@@ -2760,6 +2760,29 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
+   * Host-only acceptance/recovery evidence across every loaded workspace.
+   * Renderer DTOs intentionally omit Module ownership and malformed records,
+   * so they cannot prove that transient cleanup reached a global zero state.
+   */
+  getModuleAgentSessionResidueSnapshot(): Readonly<{
+    hiddenSessions: number
+    transientSessions: number
+    quarantinedSessions: number
+  }> {
+    let hiddenSessions = 0
+    let transientSessions = 0
+    for (const managed of this.sessions.values()) {
+      if (managed.hidden === true) hiddenSessions += 1
+      if (managed.moduleAgentRun !== undefined) transientSessions += 1
+    }
+    return Object.freeze({
+      hiddenSessions,
+      transientSessions,
+      quarantinedSessions: this.malformedModuleAgentSessionIds.size,
+    })
+  }
+
+  /**
    * Aggregate unread state across all workspaces.
    * Excludes hidden and archived sessions from counts/indicators.
    */
