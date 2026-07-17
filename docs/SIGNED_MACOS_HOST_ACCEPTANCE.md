@@ -56,21 +56,59 @@ No verifier infers or accepts an Apple identity from ambient Keychain state.
 
 The final Artifact contains signed-only checksums, a strict manifest, a local provenance record, the exact final OpenDesign acceptance run/Artifact/summary reference, signature reports, notarization result summaries, a combined report that independently binds both the DMG-extracted and ZIP-extracted App to the same Engineering RC payload, and an OIDC attestation bundle. All transport digests are calculated after app and DMG stapling.
 
-H3 post-install evidence is a separate owner-only JSON record generated on the clean installation environment. Its schema contains only product identity, Artifact lineage, OS version, installed path, machine-derived verification decisions, and backup/restore state. It rejects unknown fields, non-canonical timestamps, non-absolute paths, non-SHA-256 digests, negative verification results, and secret-shaped keys.
+H3 uses a two-stage, owner-only evidence handoff on the clean installation environment. Stage 1 emits an exact three-file closure (`SHA256SUMS`, `post-install-authority.json`, `post-install.json`); Stage 2 seals the three human observations only after independently reopening that closure and re-authenticating its GitHub authority. The contracts contain only product identity, Artifact lineage, OS version, installed path, machine-derived verification decisions, backup/restore state, and screenshot hashes. They reject unknown fields, non-canonical timestamps, non-absolute paths, non-SHA-256 digests, negative verification results, and secret-shaped keys.
 
-The H3 generator does not accept caller-reported signature, Gatekeeper, notarization, stapling, product identity, DMG hash, or backup hash results. Its inputs are:
+The Stage-1 H3 generator does not accept caller-reported GitHub IDs/digests, signature, Gatekeeper, notarization, stapling, product identity, DMG hash, or backup hash results. Its inputs are:
 
 - the raw ZIP returned by GitHub Actions for the final signed Candidate Artifact;
 - the exact DMG used for Finder installation;
-- an owner-only authority JSON containing exactly `artifactName`, `artifactId`, `artifactDigest`, and `runId`;
 - an owner-only human-input JSON containing only `environmentKind`, `existingAppBeforeInstall`, `backupPath`, and `restoreStatus`.
 
-Before creating evidence, the operator/AI must authenticate the authority JSON against the GitHub Actions Artifact API. `artifactDigest` is the service-reported digest and cannot be inferred from an already extracted directory. The generator independently streams the raw ZIP SHA-256 and requires it to equal that authenticated digest, safely extracts the exact `signed-host-final` closure, verifies its manifest/checksums, and requires the separately retained DMG to match the closure's DMG bytes and hash. It then runs DMG preflight/verification, stapler and Gatekeeper checks; mounts the DMG read-only; compares its App to `/Applications/Simulator.app` using exact-tree and normalized payload inventories; and directly runs strict deep `codesign`, Gatekeeper, stapler, Developer ID, Bundle ID, Team ID, and version checks. A supplied backup path is also inspected and hashed locally.
+The production generator invokes the fixed `/opt/homebrew/bin/gh` executable on macOS arm64. Every `gh api` call explicitly supplies `--hostname github.com`, uses a fixed minimal child environment and timeout, redacts bounded failure diagnostics, and requires the executable realpath/version/byte hash to remain identical before and after the call. It derives the Candidate run from the safely extracted signed manifest, then re-queries the GitHub workflow-run and Artifact APIs and requires the exact repository, `main` source SHA, workflow path/name, run attempt, successful conclusion, Artifact ID/name/service digest, and non-expired state. It independently streams the raw ZIP SHA-256 and requires it to equal the service digest, safely extracts the exact `signed-host-final` closure, verifies its manifest/checksums and Candidate DMG, and requires the separately retained DMG to match the closure's DMG bytes and hash. It then runs DMG preflight/verification, stapler and Gatekeeper checks; mounts the DMG read-only; compares its App to `/Applications/Simulator.app` using exact-tree and normalized payload inventories; and directly runs strict deep `codesign`, Gatekeeper, stapler, Developer ID, Bundle ID, Team ID, and version checks. A supplied backup path is also inspected and hashed locally.
+
+All non-GitHub H3 child processes use a separate fixed macOS boundary: `/usr/bin/shasum`, `/usr/bin/python3`, `/usr/bin/hdiutil`, `/usr/bin/xcrun`, `/usr/sbin/spctl`, `/usr/bin/codesign`, `/usr/bin/sw_vers`, and `/usr/libexec/PlistBuddy`. They run without a shell from `/`, with a fixed system `PATH` and locale and without inherited token, proxy, custom-CA, debug, Python-path, Developer-directory, codesign-tool, or dynamic-loader controls. The shared invocation layer unconditionally inserts Python's `-S` flag before every Python call while keeping the script path next, and also fixes `PYTHONNOUSERSITE=1`, so a real user `HOME` cannot activate user-site `.pth` files or `sitecustomize`. Light commands are bounded to 30 seconds and 1 MiB per output stream; archive, filesystem, trust, mount, and comparison commands are bounded to 300 seconds and 64 MiB. Failures expose only bounded, redacted diagnostics. DMG detach and restored-App exact-tree verification use the same boundary; production Inspectors do not accept a child-process runner override.
 
 ```text
-bun scripts/release/h3-post-install-evidence.ts generate \
+bun scripts/release/h3-post-install-authority.ts generate \
   RAW_CANDIDATE_ARTIFACT.zip Simulator-arm64.dmg \
-  artifact-authority.json human-input.json post-install-evidence.json
+  post-install-human-input.json EMPTY_POST_INSTALL_AUTHORITY_DIR
 ```
 
-The `validate` operation checks canonical storage and schema only; it is not a substitute for the system verification performed by `generate`.
+After the three human observations, but before the Candidate is moved or a previous App is restored, production must reopen the exact Stage-1 three-file closure and run the non-injectable live gate. This command always uses `systemH3PostInstallInspector`; it re-authenticates the raw GitHub Artifact, re-inspects the retained DMG and `/Applications/Simulator.app`, and compares the complete regenerated `post-install.json` value to the sealed record. Its reported `authoritySha256` is frozen as `EXPECTED_STAGE1_AUTHORITY_SHA256`:
+
+```text
+bun scripts/release/h3-post-install-authority.ts pre-restore-verify \
+  POST_INSTALL_AUTHORITY_DIR RAW_CANDIDATE_ARTIFACT.zip \
+  Simulator-arm64.dmg post-install-human-input.json
+```
+
+Stage 2 accepts the Stage-1 directory, the same raw Artifact archive, and that explicit expected Stage-1 authority SHA-256. Both its producer and final verifier independently re-query GitHub, revalidate the raw Candidate plus exact Stage-1 closure, and reject any authority-hash mismatch before accepting the post-install claims. It deliberately does not inspect the Candidate App after the product owner has restored the pre-existing App; recovery is instead proven by the separate exact-tree backup identity check. Screenshots must be owner-only, single-page non-animated PNGs within fixed byte/dimension/pixel bounds. Before copying them into evidence, the producer fully decodes their pixels with pinned `sharp` 0.34.5 and re-encodes a metadata-free PNG; it then decodes the result again and requires pixel equality.
+
+```text
+bun scripts/release/h3-human-observation-evidence.ts generate \
+  POST_INSTALL_AUTHORITY_DIR RAW_CANDIDATE_ARTIFACT.zip \
+  EXPECTED_STAGE1_AUTHORITY_SHA256 \
+  human-observation-input.json EMPTY_HUMAN_EVIDENCE_DIR
+
+bun scripts/release/h3-human-observation-evidence.ts validate \
+  HUMAN_EVIDENCE_DIR POST_INSTALL_AUTHORITY_DIR \
+  RAW_CANDIDATE_ARTIFACT.zip EXPECTED_STAGE1_AUTHORITY_SHA256
+```
+
+The exact Stage-1 closure is three files:
+
+```text
+SHA256SUMS
+post-install-authority.json
+post-install.json
+```
+
+The exact Stage-2 human closure is five files:
+
+```text
+SHA256SUMS
+human-observation.json
+screenshots/CraftVisible.png
+screenshots/OpenDesignModuleEntryVisible.png
+screenshots/OpenDesignSecondLoginAbsent.png
+```

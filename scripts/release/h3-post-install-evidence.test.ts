@@ -2,7 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { chmodSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import {
+  H3_SYSTEM_COMMAND_LIMITS,
+  H3_SYSTEM_EXECUTABLES,
   canonicalH3PostInstallEvidence,
+  createH3SystemCommandInvocation,
+  formatH3SystemCommandFailure,
   generateH3PostInstallEvidence,
   validateH3CandidateArtifactAuthority,
   validateH3PostInstallEvidence,
@@ -13,6 +17,7 @@ import {
   type H3PostInstallEvidence,
   type H3PostInstallHumanInput,
   type H3PostInstallInspector,
+  type H3SystemCommandResult,
 } from "./h3-post-install-evidence"
 
 const root = join(import.meta.dir, ".tmp-h3-post-install")
@@ -234,5 +239,143 @@ describe("H3 post-install evidence", () => {
     expect(source).not.toContain("digest(readFileSync(dmgPath))")
     expect(source).toContain('"exact-tree", mountedApp')
     expect(source).toContain('"exact-tree", installed')
+  })
+
+  test("fixes every macOS child executable and applies deterministic light/heavy command options", () => {
+    const source = readFileSync(join(import.meta.dir, "h3-post-install-evidence.ts"), "utf8")
+    expect(source.match(/spawnSync\(/g)).toHaveLength(1)
+    expect(source).toContain("spawnSync(invocation.command, invocation.args, invocation.options)")
+    expect(H3_SYSTEM_EXECUTABLES).toEqual({
+      codesign: "/usr/bin/codesign",
+      hdiutil: "/usr/bin/hdiutil",
+      plistBuddy: "/usr/libexec/PlistBuddy",
+      python3: "/usr/bin/python3",
+      shasum: "/usr/bin/shasum",
+      spctl: "/usr/sbin/spctl",
+      swVers: "/usr/bin/sw_vers",
+      xcrun: "/usr/bin/xcrun",
+    })
+    expect(H3_SYSTEM_COMMAND_LIMITS).toEqual({
+      light: { timeout: 30_000, maxBuffer: 1024 * 1024 },
+      heavy: { timeout: 300_000, maxBuffer: 64 * 1024 * 1024 },
+    })
+    const hostileEnvironment = {
+      HOME: "/Users/test",
+      GH_TOKEN: "arbitrary-github-token",
+      GITHUB_TOKEN: "actions-token",
+      GH_DEBUG: "api",
+      HTTPS_PROXY: "https://proxy-user:proxy-password@example.invalid",
+      HTTP_PROXY: "http://example.invalid",
+      ALL_PROXY: "socks5://example.invalid",
+      SSL_CERT_FILE: "/attacker/ca.pem",
+      SSL_CERT_DIR: "/attacker/certs",
+      NODE_OPTIONS: "--require=/attacker.js",
+      PYTHONPATH: "/attacker/python",
+      DEVELOPER_DIR: "/attacker/Xcode.app",
+      CODESIGN_ALLOCATE: "/attacker/codesign_allocate",
+      DYLD_INSERT_LIBRARIES: "/attacker/lib.dylib",
+    }
+    const heavy = createH3SystemCommandInvocation(
+      H3_SYSTEM_EXECUTABLES.python3,
+      ["/verified/script.py", "exact-tree", "/Applications/Simulator.app"],
+      "heavy",
+      hostileEnvironment,
+    )
+    expect(heavy).toEqual({
+      command: "/usr/bin/python3",
+      args: ["-S", "/verified/script.py", "exact-tree", "/Applications/Simulator.app"],
+      options: {
+        cwd: "/",
+        encoding: "utf8",
+        env: {
+          HOME: "/Users/test",
+          PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+          LANG: "C",
+          LC_ALL: "C",
+          NO_COLOR: "1",
+          PYTHONUTF8: "1",
+          PYTHONDONTWRITEBYTECODE: "1",
+          PYTHONNOUSERSITE: "1",
+        },
+        input: "",
+        killSignal: "SIGKILL",
+        maxBuffer: 64 * 1024 * 1024,
+        shell: false,
+        timeout: 300_000,
+        windowsHide: true,
+      },
+    })
+    const light = createH3SystemCommandInvocation(
+      H3_SYSTEM_EXECUTABLES.swVers,
+      ["-productVersion"],
+      "light",
+      hostileEnvironment,
+    )
+    expect(light.options.timeout).toBe(30_000)
+    expect(light.options.maxBuffer).toBe(1024 * 1024)
+    for (const forbidden of [
+      "GH_TOKEN", "GITHUB_TOKEN", "GH_DEBUG", "HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
+      "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_OPTIONS", "PYTHONPATH", "DEVELOPER_DIR",
+      "CODESIGN_ALLOCATE", "DYLD_INSERT_LIBRARIES",
+    ]) expect(heavy.options.env[forbidden]).toBeUndefined()
+  })
+
+  test("forces Python site isolation in the unified invocation layer without losing script-directory imports", () => {
+    const hostileEnvironment = {
+      HOME: "/Users/test",
+      PYTHONPATH: "/attacker/python",
+      PYTHONUSERBASE: "/attacker/user-base",
+    }
+    const script = "/verified/helpers/inspect.py"
+    const invocation = createH3SystemCommandInvocation(
+      H3_SYSTEM_EXECUTABLES.python3,
+      [script, "exact-tree", "/Applications/Simulator.app"],
+      "heavy",
+      hostileEnvironment,
+    )
+    expect(invocation.args).toEqual([
+      "-S", script, "exact-tree", "/Applications/Simulator.app",
+    ])
+    expect(invocation.args[0]).toBe("-S")
+    expect(invocation.args[1]).toBe(script)
+    expect(invocation.options.env.PYTHONNOUSERSITE).toBe("1")
+    expect(invocation.options.env.PYTHONPATH).toBeUndefined()
+    expect(invocation.options.env.PYTHONUSERBASE).toBeUndefined()
+
+    for (const callsiteArgs of [
+      [],
+      [script],
+      ["-E", script],
+      ["-s", script],
+      ["--", script],
+    ]) {
+      const protectedInvocation = createH3SystemCommandInvocation(
+        H3_SYSTEM_EXECUTABLES.python3,
+        callsiteArgs,
+        "light",
+        hostileEnvironment,
+      )
+      expect(protectedInvocation.args).toEqual(["-S", ...callsiteArgs])
+      expect(protectedInvocation.args[0]).toBe("-S")
+    }
+  })
+
+  test("bounds and redacts child command failure diagnostics without exposing exact ambient secrets", () => {
+    const secret = "arbitrary-secret-value-not-matched-by-token-shape"
+    const proxy = "https://proxy-user:proxy-password@example.invalid"
+    const result: H3SystemCommandResult = {
+      status: 1,
+      stdout: `stdout ${secret}`,
+      stderr: `Authorization: Bearer ${secret}\nproxy=${proxy}`,
+    }
+    const message = formatH3SystemCommandFailure("H3 fixture", result, {
+      HOME: "/Users/test",
+      PRIVATE_API_TOKEN: secret,
+      HTTPS_PROXY: proxy,
+    })
+    expect(message).toContain("H3 fixture failed (exit 1)")
+    expect(message).not.toContain(secret)
+    expect(message).not.toContain(proxy)
+    expect(message.length).toBeLessThanOrEqual(4_200)
   })
 })

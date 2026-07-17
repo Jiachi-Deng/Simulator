@@ -492,6 +492,8 @@ jobs:
           cp "$RUNNER_TEMP/dmg-signatures.json" "$candidate/dmg-signatures.json"
           cp "$RUNNER_TEMP/zip-signatures.json" "$candidate/zip-signatures.json"
           cp "$RUNNER_TEMP/payload-equivalence.json" "$candidate/payload-equivalence.json"
+          cp scripts/release/schemas/h3-human-observation-v1.schema.json "$candidate/h3-human-observation-v1.schema.json"
+          cp scripts/release/schemas/h3-post-install-authority-v1.schema.json "$candidate/h3-post-install-authority-v1.schema.json"
           cp scripts/release/schemas/h3-post-install-v1.schema.json "$candidate/h3-post-install-v1.schema.json"
           find "$candidate" -maxdepth 1 -type f -exec chmod 600 {} +
           file_record() {
@@ -526,7 +528,9 @@ jobs:
           zip_signatures_record=$(file_record "$candidate/zip-signatures.json" zip-signatures.json)
           app_notary_record=$(file_record "$candidate/app-notarization.json" app-notarization.json)
           dmg_notary_record=$(file_record "$candidate/dmg-notarization.json" dmg-notarization.json)
-          h3_record=$(file_record "$candidate/h3-post-install-v1.schema.json" h3-post-install-v1.schema.json)
+          h3_human_observation_record=$(file_record "$candidate/h3-human-observation-v1.schema.json" h3-human-observation-v1.schema.json)
+          h3_post_install_authority_record=$(file_record "$candidate/h3-post-install-authority-v1.schema.json" h3-post-install-authority-v1.schema.json)
+          h3_post_install_record=$(file_record "$candidate/h3-post-install-v1.schema.json" h3-post-install-v1.schema.json)
           app_notary=$(jq -c '{id,status,submittedSha256:.submittedArtifactSha256,stapled:true,validated:true}' "$candidate/app-notarization.json")
           dmg_notary=$(jq -c '{id,status,submittedSha256:.submittedArtifactSha256,stapled:true,validated:true}' "$candidate/dmg-notarization.json")
           payload_equivalence=$(jq -c --arg reportSha256 "$(jq -r .sha256 <<<"$equivalence_record")" \
@@ -534,8 +538,10 @@ jobs:
           files=$(jq -n --argjson dmg "$dmg_record" --argjson zip "$zip_record" --argjson payloadEquivalence "$equivalence_record" \
             --argjson dmgSignatures "$dmg_signatures_record" --argjson zipSignatures "$zip_signatures_record" \
             --argjson appNotarization "$app_notary_record" --argjson dmgNotarization "$dmg_notary_record" \
-            --argjson provenance "$provenance_record" --argjson h3PostInstallSchema "$h3_record" \
-            '{dmg:$dmg,zip:$zip,payloadEquivalence:$payloadEquivalence,dmgSignatures:$dmgSignatures,zipSignatures:$zipSignatures,appNotarization:$appNotarization,dmgNotarization:$dmgNotarization,provenance:$provenance,h3PostInstallSchema:$h3PostInstallSchema}')
+            --argjson provenance "$provenance_record" --argjson h3HumanObservationSchema "$h3_human_observation_record" \
+            --argjson h3PostInstallAuthoritySchema "$h3_post_install_authority_record" \
+            --argjson h3PostInstallSchema "$h3_post_install_record" \
+            '{dmg:$dmg,zip:$zip,payloadEquivalence:$payloadEquivalence,dmgSignatures:$dmgSignatures,zipSignatures:$zipSignatures,appNotarization:$appNotarization,dmgNotarization:$dmgNotarization,provenance:$provenance,h3HumanObservationSchema:$h3HumanObservationSchema,h3PostInstallAuthoritySchema:$h3PostInstallAuthoritySchema,h3PostInstallSchema:$h3PostInstallSchema}')
           jq -n --arg sourceSha "$SOURCE_SHA" --arg hostVersion "$HOST_VERSION" --arg artifactName "$SIGNED_CANDIDATE_NAME" \
             --argjson workflow "$workflow" --argjson engineeringRc "$engineering_rc" \
             --argjson openDesignAcceptance "$open_design_acceptance" --argjson identity "$identity" \

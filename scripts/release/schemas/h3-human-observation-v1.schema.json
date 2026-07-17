@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simulator.local/schemas/h3-human-observation-v1.schema.json",
+  "title": "Simulator M1 H3 human-observation evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "kind",
+    "authority",
+    "createdAt",
+    "observations",
+    "recovery"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "simulator-h3-human-observation" },
+    "authority": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceSha",
+        "hostBuildRunId",
+        "artifactName",
+        "artifactId",
+        "artifactDigest",
+        "dmgBytes",
+        "dmgSha256",
+        "rawCandidateSha256",
+        "postInstallAuthoritySha256",
+        "postInstallSha256"
+      ],
+      "properties": {
+        "sourceSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "hostBuildRunId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+        "artifactName": { "type": "string", "pattern": "^simulator-host-(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?-macos-arm64-developer-id-candidate-[0-9a-f]{40}$" },
+        "artifactId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+        "artifactDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "dmgBytes": { "type": "integer", "minimum": 1 },
+        "dmgSha256": { "$ref": "#/$defs/sha256" },
+        "rawCandidateSha256": { "$ref": "#/$defs/sha256" },
+        "postInstallAuthoritySha256": {
+          "description": "Stage-1 authority SHA-256 captured from the production pre-restore live verifier while the Candidate remained installed",
+          "$ref": "#/$defs/sha256"
+        },
+        "postInstallSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "createdAt": { "$ref": "#/$defs/canonicalUtc" },
+    "observations": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 3,
+      "prefixItems": [
+        { "$ref": "#/$defs/craftVisible" },
+        { "$ref": "#/$defs/openDesignModuleEntryVisible" },
+        { "$ref": "#/$defs/openDesignSecondLoginAbsent" }
+      ],
+      "items": false
+    },
+    "recovery": {
+      "oneOf": [
+        { "$ref": "#/$defs/recoveryPass" },
+        { "$ref": "#/$defs/recoveryNotNeeded" }
+      ]
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "canonicalUtc": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$"
+    },
+    "screenshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256"],
+      "properties": {
+        "path": { "type": "string", "pattern": "^screenshots/(CraftVisible|OpenDesignModuleEntryVisible|OpenDesignSecondLoginAbsent)\\.png$" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "craftVisible": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "passed", "observedAt", "screenshot"],
+      "properties": {
+        "id": { "const": "CraftVisible" },
+        "passed": { "const": true },
+        "observedAt": { "$ref": "#/$defs/canonicalUtc" },
+        "screenshot": {
+          "type": "object",
+          "$ref": "#/$defs/screenshot",
+          "properties": { "path": { "const": "screenshots/CraftVisible.png" } }
+        }
+      }
+    },
+    "openDesignModuleEntryVisible": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "passed", "observedAt", "screenshot"],
+      "properties": {
+        "id": { "const": "OpenDesignModuleEntryVisible" },
+        "passed": { "const": true },
+        "observedAt": { "$ref": "#/$defs/canonicalUtc" },
+        "screenshot": {
+          "type": "object",
+          "$ref": "#/$defs/screenshot",
+          "properties": { "path": { "const": "screenshots/OpenDesignModuleEntryVisible.png" } }
+        }
+      }
+    },
+    "openDesignSecondLoginAbsent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "passed", "observedAt", "screenshot"],
+      "properties": {
+        "id": { "const": "OpenDesignSecondLoginAbsent" },
+        "passed": { "const": true },
+        "observedAt": { "$ref": "#/$defs/canonicalUtc" },
+        "screenshot": {
+          "type": "object",
+          "$ref": "#/$defs/screenshot",
+          "properties": { "path": { "const": "screenshots/OpenDesignSecondLoginAbsent.png" } }
+        }
+      }
+    },
+    "recoveryPass": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "status", "installedPath", "backupPath", "backupIdentitySha256", "restoredIdentitySha256"],
+      "properties": {
+        "required": { "const": true },
+        "status": { "const": "PASS" },
+        "installedPath": { "const": "/Applications/Simulator.app" },
+        "backupPath": { "type": "string", "pattern": "^/[^\\n\\r]+$" },
+        "backupIdentitySha256": { "$ref": "#/$defs/sha256" },
+        "restoredIdentitySha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "recoveryNotNeeded": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["required", "status", "installedPath", "backupPath", "backupIdentitySha256", "restoredIdentitySha256"],
+      "properties": {
+        "required": { "const": false },
+        "status": { "const": "NOT NEEDED" },
+        "installedPath": { "const": "/Applications/Simulator.app" },
+        "backupPath": { "const": "N/A" },
+        "backupIdentitySha256": { "const": "N/A" },
+        "restoredIdentitySha256": { "const": "N/A" }
+      }
+    }
+  }
+}

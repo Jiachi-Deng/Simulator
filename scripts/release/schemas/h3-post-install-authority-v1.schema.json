@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://simulator.local/schemas/h3-post-install-authority-v1.schema.json",
+  "title": "Simulator M1 H3 authenticated post-install authority closure",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "repository", "authenticatedAt", "github", "githubClient", "rawCandidate", "candidate", "postInstall"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "kind": { "const": "simulator-h3-post-install-authority" },
+    "repository": { "const": "Jiachi-Deng/Simulator" },
+    "authenticatedAt": { "$ref": "#/$defs/canonicalUtc" },
+    "github": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repositoryId", "sourceSha", "headBranch", "runId", "runAttempt", "workflowPath", "workflowDisplayName",
+        "candidateWorkflowName", "event", "status", "conclusion", "artifactId", "artifactName",
+        "artifactServiceDigest", "artifactExpired"
+      ],
+      "properties": {
+        "repositoryId": { "const": 1298254148 },
+        "sourceSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+        "headBranch": { "const": "main" },
+        "runId": { "$ref": "#/$defs/positiveId" },
+        "runAttempt": { "type": "integer", "minimum": 1 },
+        "workflowPath": { "const": ".github/workflows/signed-macos-host-acceptance.yml" },
+        "workflowDisplayName": { "const": "Signed macOS Host acceptance Candidate" },
+        "candidateWorkflowName": { "const": "signed-macos-host-acceptance.yml" },
+        "event": { "const": "workflow_dispatch" },
+        "status": { "const": "completed" },
+        "conclusion": { "const": "success" },
+        "artifactId": { "$ref": "#/$defs/positiveId" },
+        "artifactName": {
+          "type": "string",
+          "pattern": "^simulator-host-(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(?:-[0-9A-Za-z.-]+)?-macos-arm64-developer-id-candidate-[0-9a-f]{40}$"
+        },
+        "artifactServiceDigest": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "artifactExpired": { "const": false }
+      }
+    },
+    "githubClient": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["linkPath", "realPath", "version", "bytes", "sha256"],
+      "properties": {
+        "linkPath": { "const": "/opt/homebrew/bin/gh" },
+        "realPath": { "type": "string", "pattern": "^/opt/homebrew/Cellar/gh/[^\\n\\r]+/bin/gh$" },
+        "version": { "type": "string", "pattern": "^gh version (0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*) \\([^\\n\\r]+\\)$" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "rawCandidate": { "$ref": "#/$defs/fileDigest" },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dmgBytes", "dmgSha256"],
+      "properties": {
+        "dmgBytes": { "type": "integer", "minimum": 1 },
+        "dmgSha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "postInstall": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "bytes", "sha256"],
+      "properties": {
+        "path": { "const": "post-install.json" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "positiveId": { "type": "string", "pattern": "^[1-9][0-9]*$" },
+    "canonicalUtc": { "type": "string", "pattern": "^[0-9]{4}-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]\\.[0-9]{3}Z$" },
+    "fileDigest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["bytes", "sha256"],
+      "properties": {
+        "bytes": { "type": "integer", "minimum": 1 },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    }
+  }
+}
