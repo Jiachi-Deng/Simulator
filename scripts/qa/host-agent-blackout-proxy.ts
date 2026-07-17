@@ -567,12 +567,13 @@ export class HostAgentBlackoutProxy {
       type: string,
       source: HostAgentBlackoutDeliveredFrame['source'],
       business: boolean,
+      minimumAtMs = Number.MIN_SAFE_INTEGER,
     ): HostAgentBlackoutDeliveredFrame => {
       if (deliveredFrames.length >= MAX_EVIDENCE_FRAMES) throw new TypeError('Blackout evidence exceeded')
       // Date timestamps have millisecond resolution. Preserve actual delivery
       // order with a monotonic logical millisecond when multiple frames are
       // written in the same clock tick (notably the end marker and first replay).
-      const atMs = Math.max(this.#clock.now(), lastEvidenceAtMs + 1)
+      const atMs = Math.max(this.#clock.now(), lastEvidenceAtMs + 1, minimumAtMs)
       lastEvidenceAtMs = atMs
       const item = Object.freeze({
         sequence: deliveredFrames.length + 1,
@@ -616,7 +617,16 @@ export class HostAgentBlackoutProxy {
     const blackout = this.#clock.wait(this.#options.blackoutMs, signal).then(() => {
       blackoutComplete = true
       writeFrame(response, BLACKOUT_ENDED_FRAME)
-      const endedFrame = append(BLACKOUT_ENDED_FRAME, 'blackout.ended', 'harness', false)
+      // A millisecond wall clock can still read one tick short when the
+      // monotonic timer fires. Bind the recorded end marker to the promised
+      // blackout boundary so replay frames are always strictly later.
+      const endedFrame = append(
+        BLACKOUT_ENDED_FRAME,
+        'blackout.ended',
+        'harness',
+        false,
+        startedAtMs + this.#options.blackoutMs,
+      )
       const endedAtMs = Date.parse(endedFrame.at)
       const eventSequenceAfter = endedFrame.sequence
       const bufferedEventCount = bufferedFrames.length
@@ -709,7 +719,7 @@ export class HostAgentBlackoutProxy {
         caseId: record.caseId,
         turnOrdinal: record.turnOrdinal,
         startedAt: new Date(startedAtMs).toISOString(),
-        endedAt: new Date(Math.max(blackoutResult.endedAtMs, startedAtMs + this.#options.blackoutMs)).toISOString(),
+        endedAt: new Date(blackoutResult.endedAtMs).toISOString(),
         eventSequenceBefore,
         eventSequenceAfter: blackoutResult.eventSequenceAfter,
         bufferedEventCount: blackoutResult.bufferedEventCount,
