@@ -21,9 +21,9 @@ import { InMemoryModuleCoordinatorStore } from './testing/memory-store.ts'
 
 // These are outer test watchdogs, not product deadlines. Windows CI performs
 // substantially slower real filesystem identity/link operations; keep the
-// operation assertions identical while allowing their cleanup to finish before
-// Bun starts afterEach and removes the trusted root.
-const CRASH_MATRIX_TEST_TIMEOUT_MS = process.platform === 'win32' ? 30_000 : 15_000
+// operation assertions identical while allowing them and fixture cleanup to
+// finish before Bun moves to the next test.
+const FILESYSTEM_TEST_TIMEOUT_MS = process.platform === 'win32' ? 30_000 : 15_000
 
 const NOW = Date.parse('2026-07-12T18:00:00.000Z')
 const MODULE_ID = 'org.simulator.packaged-fake'
@@ -311,10 +311,14 @@ async function createSystem(
 }
 
 afterEach(async () => {
-  await Promise.all(systems.splice(0).map(async (system) => system.coordinator.dispose()))
+  // Snapshot both collections before the first await. If Bun times out this hook,
+  // its continuation must never remove fixtures created by a later test.
+  const staleSystems = systems.splice(0)
+  const staleRoots = roots.splice(0)
+  await Promise.all(staleSystems.map(async (system) => system.coordinator.dispose()))
   await Bun.sleep(10)
-  await Promise.all(roots.splice(0).map(async (root) => await rm(root, { recursive: true, force: true })))
-})
+  await Promise.all(staleRoots.map(async (root) => await rm(root, { recursive: true, force: true })))
+}, FILESYSTEM_TEST_TIMEOUT_MS)
 
 describe('ModuleCoordinator packaged fake module E2E', () => {
   it('constructs an install request from the same verified v2 catalog used by the coordinator', async () => {
@@ -507,7 +511,7 @@ describe('ModuleCoordinator packaged fake module E2E', () => {
     ])
     expect(snapshot.operations.every((operation) => operation.status === 'completed')).toBe(true)
     expect(snapshot.events.some((event) => event.snapshot.state === 'crashed')).toBe(true)
-  })
+  }, FILESYSTEM_TEST_TIMEOUT_MS)
 
   it('deduplicates caller operationIds across concurrency and restart and rejects payload conflicts', async () => {
     const fixture = await createFixture()
@@ -549,7 +553,7 @@ describe('ModuleCoordinator packaged fake module E2E', () => {
     await system.coordinator.stop({ operationId: 'lease-stop', moduleId: MODULE_ID as ModuleId })
     expect((await system.view.query(MODULE_ID as ModuleId))?.state).toBe('detached')
     expect(await system.usage.runExclusive(MODULE_ID as ModuleId, async (lease) => lease.isVersionInUse('1.0.0' as ModuleVersion))).toBe(false)
-  })
+  }, FILESYSTEM_TEST_TIMEOUT_MS)
 })
 
 class CrashAfterCheckpointStore implements ModuleCoordinatorStore {
@@ -595,7 +599,7 @@ describe('ModuleCoordinator durable checkpoint recovery', () => {
       expect(snapshot.operations).toHaveLength(1)
       expect(snapshot.operations[0]).toMatchObject({ status: 'completed', checkpoint: 'completed' })
       expect(restarted.registry.snapshot().modules[0]).toMatchObject({ activeVersion: '1.0.0' })
-    }, CRASH_MATRIX_TEST_TIMEOUT_MS)
+    }, FILESYSTEM_TEST_TIMEOUT_MS)
   }
 })
 
@@ -725,7 +729,7 @@ describe('ModuleCoordinator all-operation forward crash matrix', () => {
         if (kind === 'uninstall') {
           expect(restarted.registry.snapshot().modules[0]?.versions.map((item) => item.version)).not.toContain('1.0.0')
         }
-      }, CRASH_MATRIX_TEST_TIMEOUT_MS)
+      }, FILESYSTEM_TEST_TIMEOUT_MS)
     }
   }
 })
@@ -783,7 +787,7 @@ describe('ModuleCoordinator all-operation compensation crash matrix', () => {
         const module = restarted.registry.snapshot().modules.find((item) => item.id === MODULE_ID)
         expect(module?.activeVersion ?? null).toBe(operation?.source.activeVersion ?? null)
         expect((await restarted.view.query(MODULE_ID as ModuleId))?.state === 'attached').toBe(operation?.source.viewAttached ?? false)
-      }, CRASH_MATRIX_TEST_TIMEOUT_MS)
+      }, FILESYSTEM_TEST_TIMEOUT_MS)
     }
   }
 })
@@ -816,7 +820,7 @@ describe('ModuleCoordinator update failure restoration matrix', () => {
       })
       expect((await system.view.query(MODULE_ID as ModuleId))?.state).toBe('attached')
       expect(system.process.requests.at(-1)?.env.SIMULATOR_MODULE_ID).toBe(MODULE_ID)
-    }, CRASH_MATRIX_TEST_TIMEOUT_MS)
+    }, FILESYSTEM_TEST_TIMEOUT_MS)
   }
 })
 
