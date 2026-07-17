@@ -57,6 +57,11 @@ export const OPEN_DESIGN_ACCEPTANCE_MAX_INPUT_BYTES = 45_000
 type JsonObject = Record<string, unknown>
 
 export interface EvidenceObjectRef {
+  readonly repository: typeof OPEN_DESIGN_ACCEPTANCE_REPOSITORY
+  readonly workflowPath: string
+  readonly runId: number
+  readonly runAttempt: 1
+  readonly headSha: string
   readonly artifactName: string
   readonly objectPath: string
   readonly sha256: string
@@ -138,9 +143,22 @@ function timestamp(value: string, path: string): number {
   return milliseconds
 }
 
-function evidenceRef(value: unknown, path: string): EvidenceObjectRef {
+function evidenceRef(value: unknown, expectedHostHeadSha: string, path: string): EvidenceObjectRef {
   const object = objectAt(value, path)
-  exactKeys(object, ['artifactName', 'objectPath', 'sha256'], path)
+  exactKeys(object, [
+    'artifactName', 'headSha', 'objectPath', 'repository', 'runAttempt', 'runId',
+    'sha256', 'workflowPath',
+  ], path)
+  literal(object.repository, OPEN_DESIGN_ACCEPTANCE_REPOSITORY, `${path}.repository`)
+  literal(object.headSha, expectedHostHeadSha, `${path}.headSha`)
+  literal(object.runAttempt, 1, `${path}.runAttempt`)
+  const runId = numberAt(object, 'runId', path)
+  if (runId < 1) fail(`${path}.runId`)
+  const workflowPath = stringAt(object, 'workflowPath', path)
+  if (
+    workflowPath.length < 1 || workflowPath.length > 256 ||
+    !/^\.github\/workflows\/[A-Za-z0-9][A-Za-z0-9._-]*\.ya?ml$/.test(workflowPath)
+  ) fail(`${path}.workflowPath`)
   const artifactName = stringAt(object, 'artifactName', path)
   const objectPath = stringAt(object, 'objectPath', path)
   const sha256 = hash(stringAt(object, 'sha256', path), `${path}.sha256`)
@@ -151,7 +169,16 @@ function evidenceRef(value: unknown, path: string): EvidenceObjectRef {
     objectPath.split('/').some((segment) => segment === '' || segment === '.' || segment === '..') ||
     !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(objectPath)
   ) fail(`${path}.objectPath`)
-  return { artifactName, objectPath, sha256 }
+  return {
+    repository: OPEN_DESIGN_ACCEPTANCE_REPOSITORY,
+    workflowPath,
+    runId,
+    runAttempt: 1,
+    headSha: expectedHostHeadSha,
+    artifactName,
+    objectPath,
+    sha256,
+  }
 }
 
 function validateHost(value: unknown, path: string): {
@@ -283,14 +310,18 @@ function validateBlackout(value: unknown, stack: 'old' | 'new', path: string): n
     return 0
   }
   exactKeys(object, [
-    'businessEventSilenceSeconds', 'duplicateTerminalCount', 'eventsLost', 'heartbeatContinued',
-    'replayComplete', 'required',
+    'bufferedEventCount', 'businessEventSilenceSeconds', 'duplicateTerminalCount', 'eventsLost', 'heartbeatContinued',
+    'replayedEventCount', 'replayComplete', 'required',
   ], path)
   literal(object.required, true, `${path}.required`)
   const silence = numberAt(object, 'businessEventSilenceSeconds', path)
   if (silence < 65 || silence > 1800) fail(`${path}.businessEventSilenceSeconds`)
   literal(object.heartbeatContinued, true, `${path}.heartbeatContinued`)
   literal(object.replayComplete, true, `${path}.replayComplete`)
+  const bufferedEventCount = numberAt(object, 'bufferedEventCount', path)
+  const replayedEventCount = numberAt(object, 'replayedEventCount', path)
+  if (!Number.isSafeInteger(bufferedEventCount) || bufferedEventCount < 1
+    || replayedEventCount !== bufferedEventCount) fail(`${path}.replayedEventCount`)
   literal(object.eventsLost, 0, `${path}.eventsLost`)
   literal(object.duplicateTerminalCount, 0, `${path}.duplicateTerminalCount`)
   return silence
@@ -300,11 +331,13 @@ function validateCleanup(value: unknown, path: string): void {
   const object = objectAt(value, path)
   exactKeys(object, [
     'activeRuns', 'hiddenSessions', 'moduleSessions', 'processTreeReapedWithinSeconds',
-    'residualProcesses', 'runStateSettledWithinSeconds',
+    'quarantinedSessions', 'residualProcesses', 'runStateSettledWithinSeconds', 'transientSessions',
   ], path)
   literal(object.activeRuns, 0, `${path}.activeRuns`)
   literal(object.moduleSessions, 0, `${path}.moduleSessions`)
   literal(object.hiddenSessions, 0, `${path}.hiddenSessions`)
+  literal(object.transientSessions, 0, `${path}.transientSessions`)
+  literal(object.quarantinedSessions, 0, `${path}.quarantinedSessions`)
   literal(object.residualProcesses, 0, `${path}.residualProcesses`)
   const stateSeconds = numberAt(object, 'runStateSettledWithinSeconds', path)
   const processSeconds = numberAt(object, 'processTreeReapedWithinSeconds', path)
@@ -368,11 +401,11 @@ function validateRecords(
   })
 }
 
-function validateRequiredCi(value: unknown, path: string): void {
+function validateRequiredCi(value: unknown, expectedHostHeadSha: string, path: string): void {
   const object = objectAt(value, path)
   exactKeys(object, ['evidence', 'passed', 'runs'], path)
   literal(object.passed, true, `${path}.passed`)
-  evidenceRef(object.evidence, `${path}.evidence`)
+  evidenceRef(object.evidence, expectedHostHeadSha, `${path}.evidence`)
   if (!Array.isArray(object.runs) || object.runs.length !== OPEN_DESIGN_REQUIRED_CI_WORKFLOW_PATHS.length) {
     fail(`${path}.runs`)
   }
@@ -389,15 +422,15 @@ function validateRequiredCi(value: unknown, path: string): void {
   }
 }
 
-function validateAuthorityEvidence(value: unknown, path: string): {
+function validateAuthorityEvidence(value: unknown, expectedHostHeadSha: string, path: string): {
   machineBatch: EvidenceObjectRef
   visualDecisions: EvidenceObjectRef
 } {
   // One sealed machine batch and one independent human decision object avoid repeating private evidence per record.
   const object = objectAt(value, path)
   exactKeys(object, ['machineBatch', 'visualDecisions'], path)
-  const machine = evidenceRef(object.machineBatch, `${path}.machineBatch`)
-  const visual = evidenceRef(object.visualDecisions, `${path}.visualDecisions`)
+  const machine = evidenceRef(object.machineBatch, expectedHostHeadSha, `${path}.machineBatch`)
+  const visual = evidenceRef(object.visualDecisions, expectedHostHeadSha, `${path}.visualDecisions`)
   if (
     machine.artifactName === visual.artifactName &&
     machine.objectPath === visual.objectPath &&
@@ -406,7 +439,7 @@ function validateAuthorityEvidence(value: unknown, path: string): {
   return { machineBatch: machine, visualDecisions: visual }
 }
 
-function validateRollbackExercise(value: unknown, path: string): void {
+function validateRollbackExercise(value: unknown, expectedHostHeadSha: string, path: string): void {
   const object = objectAt(value, path)
   exactKeys(object, [
     'craftConnectionPreserved', 'craftSurvivedAllTransitions', 'evidence', 'hiddenSessionResidueCount',
@@ -426,9 +459,9 @@ function validateRollbackExercise(value: unknown, path: string): void {
   ) fail(`${path}.transitions`)
   const evidence = objectAt(object.evidence, `${path}.evidence`)
   exactKeys(evidence, ['hiddenSessionSnapshot', 'processSnapshot', 'transitionLog'], `${path}.evidence`)
-  evidenceRef(evidence.transitionLog, `${path}.evidence.transitionLog`)
-  evidenceRef(evidence.processSnapshot, `${path}.evidence.processSnapshot`)
-  evidenceRef(evidence.hiddenSessionSnapshot, `${path}.evidence.hiddenSessionSnapshot`)
+  evidenceRef(evidence.transitionLog, expectedHostHeadSha, `${path}.evidence.transitionLog`)
+  evidenceRef(evidence.processSnapshot, expectedHostHeadSha, `${path}.evidence.processSnapshot`)
+  evidenceRef(evidence.hiddenSessionSnapshot, expectedHostHeadSha, `${path}.evidence.hiddenSessionSnapshot`)
 }
 
 export function validateAndSummarizeOpenDesignRcAcceptanceIntake(
@@ -452,15 +485,15 @@ export function validateAndSummarizeOpenDesignRcAcceptanceIntake(
     '$.caseSeedChecksumsSha256',
   )
   const host = validateHost(object.host, '$.host')
-  const authorityEvidence = validateAuthorityEvidence(object.evidence, '$.evidence')
+  const authorityEvidence = validateAuthorityEvidence(object.evidence, expectedHostHeadSha, '$.evidence')
   const lkg = validateLkg(object.lkg, '$.lkg')
   const rc = validateRc(object.rc, '$.rc')
   if (rc.catalogSequence <= lkg.catalogSequence || rc.issuedAt <= lkg.issuedAt) fail('$.rc')
   const batch = validateBatch(object.batch, '$.batch')
   if (rc.issuedAt > batch.startedAt || batch.completedAt > rc.expiresAt) fail('$.batch')
   validateRecords(object.records, batch, { lkg, rc }, '$.records')
-  validateRequiredCi(object.requiredCi, '$.requiredCi')
-  validateRollbackExercise(object.rollbackExercise, '$.rollbackExercise')
+  validateRequiredCi(object.requiredCi, expectedHostHeadSha, '$.requiredCi')
+  validateRollbackExercise(object.rollbackExercise, expectedHostHeadSha, '$.rollbackExercise')
 
   return {
     blackoutTasksPassed: 20,

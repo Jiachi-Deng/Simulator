@@ -41,8 +41,13 @@ afterEach(async () => {
 function evidence(objectPath: string) {
   return {
     artifactName: 'open-design-acceptance-intake',
+    headSha: HOST_HEAD_SHA,
     objectPath,
+    repository: OPEN_DESIGN_ACCEPTANCE_REPOSITORY,
+    runAttempt: 1,
+    runId: 9002,
     sha256: HASH_A,
+    workflowPath: '.github/workflows/open-design-m1-machine-evidence.yml',
   }
 }
 
@@ -54,10 +59,12 @@ function buildRecord(stack: 'old' | 'new', caseIndex: number, ordinal: number) {
     blackout: stack === 'old'
       ? { required: false }
       : {
+          bufferedEventCount: 1,
           businessEventSilenceSeconds: 65,
           duplicateTerminalCount: 0,
           eventsLost: 0,
           heartbeatContinued: true,
+          replayedEventCount: 1,
           replayComplete: true,
           required: true,
         },
@@ -67,8 +74,10 @@ function buildRecord(stack: 'old' | 'new', caseIndex: number, ordinal: number) {
       hiddenSessions: 0,
       moduleSessions: 0,
       processTreeReapedWithinSeconds: 10,
+      quarantinedSessions: 0,
       residualProcesses: 0,
       runStateSettledWithinSeconds: 5,
+      transientSessions: 0,
     },
     completedAt: new Date(BASE_TIME + ordinal * 120_000 + 90_000).toISOString(),
     craft: {
@@ -117,7 +126,13 @@ function validIntake(): any {
     caseSeedChecksumsSha256: OPEN_DESIGN_M1_CASE_SEED_CHECKSUMS_SHA256,
     evidence: {
       machineBatch: evidence('authority/machine-batch.json'),
-      visualDecisions: { ...evidence('authority/visual-decisions.json'), sha256: HASH_B },
+      visualDecisions: {
+        ...evidence('authority/visual-decisions.json'),
+        artifactName: 'open-design-m1-visual-attestation',
+        runId: 9003,
+        sha256: HASH_B,
+        workflowPath: '.github/workflows/open-design-m1-visual-attestation.yml',
+      },
     },
     host: {
       artifactName: OPEN_DESIGN_HOST_ARTIFACT_NAME,
@@ -190,9 +205,9 @@ describe('OpenDesign RC acceptance evidence validator', () => {
   test('derives only the exact dual-authority schema v2 summary', () => {
     const intake = validIntake()
     const canonicalFixtureBytes = Buffer.byteLength(`${JSON.stringify(intake)}\n`)
-    expect(canonicalFixtureBytes).toBe(40_899)
+    expect(canonicalFixtureBytes).toBe(44_799)
     expect(canonicalFixtureBytes).toBeLessThanOrEqual(OPEN_DESIGN_ACCEPTANCE_MAX_INPUT_BYTES)
-    expect(Math.ceil(canonicalFixtureBytes / 3) * 4).toBe(54_532)
+    expect(Math.ceil(canonicalFixtureBytes / 3) * 4).toBe(59_732)
     expect(Math.ceil(canonicalFixtureBytes / 3) * 4).toBeLessThanOrEqual(60_000)
     const summary = validateAndSummarizeOpenDesignRcAcceptanceIntake(intake, HOST_HEAD_SHA)
     expect(summary).toEqual({
@@ -292,11 +307,15 @@ describe('OpenDesign RC acceptance evidence validator', () => {
     expectRejected((intake) => { intake.records[0].craft.mainPidSurvived = false })
     expectRejected((intake) => { intake.records[0].craft.stateSplitCount = 1 })
     expectRejected((intake) => { intake.records[0].cleanup.hiddenSessions = 1 })
+    expectRejected((intake) => { intake.records[0].cleanup.transientSessions = 1 })
+    expectRejected((intake) => { intake.records[0].cleanup.quarantinedSessions = 1 })
     expectRejected((intake) => { intake.records[0].cleanup.processTreeReapedWithinSeconds = 11 })
     expectRejected((intake) => { intake.records[0].visual = { required: true } })
     expectRejected((intake) => { intake.records[20].visual.decision = 'FAIL' })
     expectRejected((intake) => { intake.records[20].blackout.businessEventSilenceSeconds = 64.999 })
     expectRejected((intake) => { intake.records[20].blackout.eventsLost = 1 })
+    expectRejected((intake) => { intake.records[20].blackout.bufferedEventCount = 0 })
+    expectRejected((intake) => { intake.records[20].blackout.replayedEventCount = 2 })
     expectRejected((intake) => { intake.records[20].blackout.duplicateTerminalCount = 1 })
     expectRejected((intake) => {
       const startedAt = Date.parse(intake.records[20].startedAt)
@@ -318,6 +337,11 @@ describe('OpenDesign RC acceptance evidence validator', () => {
     expectRejected((intake) => { intake.evidence.machineBatch.objectPath = 'records/../evidence.json' })
     expectRejected((intake) => { intake.evidence.machineBatch.objectPath = 'records\\evidence.json' })
     expectRejected((intake) => { intake.evidence.machineBatch.artifactName = '../artifact' })
+    expectRejected((intake) => { intake.evidence.machineBatch.repository = 'attacker/repository' })
+    expectRejected((intake) => { intake.evidence.machineBatch.workflowPath = '../workflow.yml' })
+    expectRejected((intake) => { intake.evidence.machineBatch.runId = 0 })
+    expectRejected((intake) => { intake.evidence.machineBatch.runAttempt = 2 })
+    expectRejected((intake) => { intake.evidence.machineBatch.headSha = 'f'.repeat(40) })
     expectRejected((intake) => { intake.evidence.machineBatch.sha256 = 'secret' })
     expectRejected((intake) => { intake.evidence.visualDecisions = intake.evidence.machineBatch })
   })
