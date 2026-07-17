@@ -7,6 +7,7 @@ export const OPEN_DESIGN_ACCEPTANCE_CHANNELS = Object.freeze({
   ARM_NEXT_BLACKOUT: 'open-design-acceptance:arm-next-blackout',
   TAKE_BLACKOUT_EVIDENCE: 'open-design-acceptance:take-blackout-evidence',
   GET_MODULE_AGENT_RUNTIME_SNAPSHOT: 'open-design-acceptance:get-module-agent-runtime-snapshot',
+  GET_RUNTIME_BINDING: 'open-design-acceptance:get-runtime-binding',
 })
 
 export const OPEN_DESIGN_BLACKOUT_CASE_IDS = Object.freeze([
@@ -138,6 +139,77 @@ export interface OpenDesignModuleAgentRuntimeSnapshot {
   readonly v1: OpenDesignModuleAgentLaneSnapshot
   readonly v2: OpenDesignModuleAgentLaneSnapshot
   readonly sessions: OpenDesignModuleAgentSessionResidueSnapshot
+}
+
+/**
+ * Values already known to the H1 verifier. The packaged App compares these
+ * values with its own process-local authority and never returns either path.
+ */
+export interface OpenDesignAcceptanceRuntimeBindingRequest {
+  readonly profileRealpath: string
+  readonly configRealpath: string
+  readonly mainPid: number
+  readonly serverPid: number
+  readonly serverLockStartedAt: number
+}
+
+/** Deliberately path-free, credential-free, read-only H1 runtime authority. */
+export interface OpenDesignAcceptanceRuntimeBinding {
+  readonly schemaVersion: 1
+  readonly configRootMatches: boolean
+  readonly userDataRootMatches: boolean
+  readonly mainPidMatches: boolean
+  readonly serverIdentityMatches: boolean
+  readonly runtimeInstanceDigest: string
+}
+
+function absolutePath(value: unknown, name: string): string {
+  if (typeof value !== 'string' || value.length < 2 || value.length > 4096
+    || !value.startsWith('/') || value.includes('\0') || value.endsWith('/')) {
+    throw new TypeError(`${name} is invalid`)
+  }
+  return value
+}
+
+function positiveSafeInteger(value: unknown, name: string): number {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 1) {
+    throw new TypeError(`${name} is invalid`)
+  }
+  return value
+}
+
+export function parseOpenDesignAcceptanceRuntimeBindingRequest(
+  value: unknown,
+): OpenDesignAcceptanceRuntimeBindingRequest {
+  const record = exactRecord(value, [
+    'configRealpath', 'mainPid', 'profileRealpath', 'serverLockStartedAt', 'serverPid',
+  ], 'Acceptance runtime binding request')
+  return Object.freeze({
+    profileRealpath: absolutePath(record.profileRealpath, 'Acceptance profile path'),
+    configRealpath: absolutePath(record.configRealpath, 'Acceptance config path'),
+    mainPid: positiveSafeInteger(record.mainPid, 'Acceptance main PID'),
+    serverPid: positiveSafeInteger(record.serverPid, 'Acceptance server PID'),
+    serverLockStartedAt: positiveSafeInteger(record.serverLockStartedAt, 'Acceptance server start'),
+  })
+}
+
+export function parseOpenDesignAcceptanceRuntimeBinding(
+  value: unknown,
+): OpenDesignAcceptanceRuntimeBinding {
+  const record = exactRecord(value, [
+    'configRootMatches', 'mainPidMatches', 'runtimeInstanceDigest', 'schemaVersion',
+    'serverIdentityMatches', 'userDataRootMatches',
+  ], 'Acceptance runtime binding')
+  if (record.schemaVersion !== 1
+    || typeof record.configRootMatches !== 'boolean'
+    || typeof record.userDataRootMatches !== 'boolean'
+    || typeof record.mainPidMatches !== 'boolean'
+    || typeof record.serverIdentityMatches !== 'boolean'
+    || typeof record.runtimeInstanceDigest !== 'string'
+    || !SHA256.test(record.runtimeInstanceDigest)) {
+    throw new TypeError('Acceptance runtime binding is invalid')
+  }
+  return Object.freeze(record) as unknown as OpenDesignAcceptanceRuntimeBinding
 }
 
 export function parseOpenDesignModuleAgentRuntimeSnapshot(
@@ -310,7 +382,7 @@ export interface OpenDesignAcceptanceState {
   readonly errorCode?: string
 }
 
-/** No method accepts renderer-controlled release, URL, token, path, run handle, hash, module, or operation identifiers. */
+/** No method accepts renderer-controlled release, URL, token, run handle, hash, module, or operation identifiers. */
 export interface OpenDesignAcceptanceFacade {
   getState(): Promise<OpenDesignAcceptanceState>
   updateToRc(): Promise<OpenDesignAcceptanceState>
@@ -319,4 +391,6 @@ export interface OpenDesignAcceptanceFacade {
   armNextBlackout(request: OpenDesignBlackoutArmRequest): Promise<OpenDesignBlackoutArmResult>
   takeBlackoutEvidence(request: OpenDesignBlackoutEvidenceRequest): Promise<OpenDesignBlackoutEvidence>
   getModuleAgentRuntimeSnapshot(): Promise<OpenDesignModuleAgentRuntimeSnapshot>
+  /** Compares already-known canonical H1 values; it cannot read or mutate path contents. */
+  getRuntimeBinding(request: OpenDesignAcceptanceRuntimeBindingRequest): Promise<OpenDesignAcceptanceRuntimeBinding>
 }

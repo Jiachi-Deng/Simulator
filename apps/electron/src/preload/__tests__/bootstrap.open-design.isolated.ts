@@ -121,6 +121,13 @@ describe('OpenDesign acceptance preload facade', () => {
     await facade.armNextBlackout({ caseId: 'D01', stack: 'new', turnOrdinal: 1 })
     await facade.takeBlackoutEvidence({ evidenceId: 'evidence-D01-1', caseId: 'D01', turnOrdinal: 1 })
     await facade.getModuleAgentRuntimeSnapshot()
+    await facade.getRuntimeBinding({
+      profileRealpath: '/private/tmp/h1-profile',
+      configRealpath: '/private/tmp/h1-config',
+      mainPid: 42_001,
+      serverPid: 42_001,
+      serverLockStartedAt: 1_721_252_815_000,
+    })
     expect(invoke.mock.calls).toEqual([
       [OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE],
       [OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC],
@@ -131,6 +138,13 @@ describe('OpenDesign acceptance preload facade', () => {
         evidenceId: 'evidence-D01-1', caseId: 'D01', turnOrdinal: 1,
       }],
       [OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_MODULE_AGENT_RUNTIME_SNAPSHOT],
+      [OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_RUNTIME_BINDING, {
+        profileRealpath: '/private/tmp/h1-profile',
+        configRealpath: '/private/tmp/h1-config',
+        mainPid: 42_001,
+        serverPid: 42_001,
+        serverLockStartedAt: 1_721_252_815_000,
+      }],
     ])
   })
 
