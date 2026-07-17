@@ -8,11 +8,14 @@ RC publication requires `OPEN_DESIGN_PRERELEASE_ENABLED=true` and the protected
 `open-design-prerelease` Environment. Stable publication requires both
 `OPEN_DESIGN_RELEASE_ENABLED=true` and
 `OPEN_DESIGN_STABLE_CHANNEL_ENABLED=true`, the exact confirmation input, and
-the separately protected `open-design-production-stable` Environment. Scheduled
-refresh remains stable-only in `open-design-production`; the one fixed RC may
-be refreshed only by a manual dispatch through `open-design-prerelease`. An
-absent variable or any value other than the exact lowercase string `true`
-leaves the corresponding path skipped.
+the protected `open-design-production` Environment already used by the 0.14.5
+scheduled refresh. Stable still has separate acceptance, rollback, channel and
+exact-confirmation gates; reusing the configured signing Environment avoids an
+unprotected auto-created Environment with no secret. Scheduled refresh remains
+stable-only in `open-design-production`; the one fixed RC may be refreshed only
+by a manual dispatch through `open-design-prerelease`. An absent variable or
+any value other than the exact lowercase string `true` leaves the corresponding
+path skipped.
 
 ## Required environment configuration
 
@@ -35,8 +38,20 @@ Environment that is intentionally enabled:
 
 Protect every Environment according to the repository release policy. Required
 reviewers must be configured for `open-design-prerelease`,
-`open-design-production-stable`, and `open-design-acceptance-rollback`; naming
-an Environment in YAML does not by itself configure reviewer protection.
+`open-design-production`, `open-design-rc-acceptance`, and
+`open-design-acceptance-rollback`; naming an Environment in YAML does not by
+itself configure reviewer protection. The two acceptance workflows additionally
+require their exact repository enable variables, so a missing Environment
+cannot silently become an enabled gate. Those variables are
+`OPEN_DESIGN_RC_ACCEPTANCE_ENABLED` and
+`OPEN_DESIGN_ACCEPTANCE_ROLLBACK_ENABLED`.
+
+Activation order is fail-closed and mandatory: first land the workflow on
+`main`; then create the named Environment, configure its required reviewer and
+protected-branch policy; next read the Environment back through the GitHub API
+and verify those settings; only then set the corresponding repository enable
+variable to the exact lowercase string `true`. Set the variable last. Do not
+dispatch a workflow against an auto-created or unverified Environment.
 
 The fixed repository authority is `Jiachi-Deng/Simulator`. Initial publication
 accepts only these version-consistent identities:
@@ -115,11 +130,18 @@ does not mutate the stable Catalog/channel. For `release_track=stable`, the
 fifth official-channel configuration asset is included only after the stable
 Environment approval and exact confirmation have both passed. Stable also
 requires successful `acceptance_run_id` and `rollback_gate_run_id` values from
-the same exact `main` SHA. The fixed acceptance evidence must prove 20 old-stack
+the exact Host `main` SHA being promoted. The already-published RC keeps its
+separate immutable source authority at
+`6b39a9bcc0f158645897976e23f334c5cab771f4`: every acceptance, rollback, and
+stable consumer peels the public RC tag to that commit, requires the GitHub
+Release target to match it, and proves it is an ancestor of the Host SHA. The
+tag is never moved to make the two authorities appear equal. The fixed
+acceptance evidence must prove 20 old-stack
 tasks, a 20-task new-stack consecutive pass, 20 blackout/Preview checks, 40
 paid Turns, Required CI, and the update/rollback exercise. The rollback gate
 downloads and binds that immutable evidence to the RC archive SHA-256 and the
-authenticated RC Catalog `sequence` and canonical `issuedAt`.
+authenticated RC Catalog `sequence` and canonical `issuedAt`. It also binds the
+exact Host DMG SHA-256 and its successful engineering build run.
 
 For stable promotion, all four public RC assets are required exactly. Because
 the prerelease deliberately omits `open-design-official-channel.json`, the
@@ -132,12 +154,13 @@ Catalog sequence is `max(current 0.14.5 sequence, accepted RC sequence) + 1`;
 its `issuedAt` is the later of the current clock and one second after the later
 authenticated predecessor issuance time.
 
-Stable is rebuilt only from the sealed production input for that same SHA. The
+Stable is rebuilt only from the sealed production input for the Host SHA. The
 OpenDesign archive is version-independent; after rebuilding 0.14.6 the workflow
 requires its SHA-256 to equal the accepted 0.14.6-rc.1 archive byte-for-byte.
 Only the separately signed Catalog, release metadata, filenames, and stable
-channel configuration may change. A different runtime closure cannot be
-promoted.
+channel configuration may change. This byte equality closes the two-authority
+chain: Host-only commits may advance after the RC source, but a different
+Module runtime closure cannot be promoted.
 
 The publisher runs with Node 24.18.0 and installs two independent locked
 dependency closures before loading the production CLI: the root Bun workspace
@@ -172,26 +195,52 @@ narrow path: it accepts only version `0.14.6-rc.1`, tag
 `open-design-prerelease` Environment. It cannot select another prerelease or
 modify the stable official-channel configuration.
 
+The resolver obtains one complete GitHub Release listing and uses that same
+snapshot to select the exact target. For an RC refresh it rejects any
+`open-design-v0.14.6` Release, including a draft or malformed one, validates the
+fixed RC Release target against source SHA
+`6b39a9bcc0f158645897976e23f334c5cab771f4`, and validates the exact non-draft,
+non-prerelease 0.14.5 LKG and its five assets. The RC tag must peel to that same
+fixed source SHA and remain an ancestor of the executing Host `main` SHA.
+
 The public RC Release must contain exactly four assets: archive, raw Catalog,
 envelope, and release metadata. It must not contain
-`open-design-official-channel.json`. After downloading those four assets, the
-single secret-bearing step derives the public key from the Environment private
-key and verifies the envelope signature at the signed Catalog's historical
-issuance time. It then fails closed unless the signed Catalog, release metadata,
-track/version/tag/prerelease flag, key and validity window, manifest, archive
-hash and size, extracted-tree metadata, Host range, URLs, refresh policy, and
-four-asset set all match exactly. Only after that authentication does it
-reconstruct `open-design-official-channel.json` inside an owner-only temporary
-directory for this run's production-CLI verification. That private file is
-never uploaded or copied into a public Release.
+`open-design-official-channel.json`. The refresh downloads all four RC assets
+and all five LKG assets, requires the LKG config to equal the checked-in source
+authority, derives the public key from that authority, and authenticates the
+LKG before using its Catalog state. At the beginning of the sole secret-bearing
+step, the public key derived from the private signing key must equal that
+anchored public key. The workflow then authenticates the RC envelope signature
+at the signed Catalog's historical issuance time and fails closed unless the
+signed Catalog, release metadata, track/version/tag/prerelease flag, key and
+validity window, manifest, archive hash and size, extracted-tree metadata, Host
+range, URLs, refresh policy, and four-asset set all match exactly. Only after
+that authentication does it reconstruct `open-design-official-channel.json`
+once inside an owner-only temporary directory for this run's production-CLI
+verification. That private file is never uploaded or copied into a public
+Release.
 
 Historical verification lets a valid RC whose original 20-hour Catalog window
 has already expired be authenticated without weakening current-time install
-rules. The workflow advances the sequence and issuance time, creates a new
-20-hour window, runs the production refresh dry-run, signs the replacement, and
-verifies the complete temporary bundle. Initial and refresh jobs share one
+rules. The RC refresh chooses a sequence strictly greater than both the current
+RC and authenticated LKG sequences and an `issuedAt` strictly later than both
+issuance times. Final local and remote verification use that cross-track
+high-water state, not either predecessor in isolation. The workflow creates a
+new 20-hour window, runs the production refresh dry-run, signs the replacement,
+and verifies the complete temporary bundle. Initial and refresh jobs share one
 non-cancelling concurrency group, so their authenticated snapshots cannot race
 one another.
+
+Before starting the 40-Turn acceptance batch, run this exact operational
+sequence: refresh stable 0.14.5; refresh RC 0.14.6-rc.1; verify the public RC
+Catalog is strictly later than the LKG; create and verify the protected
+`open-design-rc-acceptance` Environment; then set
+`OPEN_DESIGN_RC_ACCEPTANCE_ENABLED=true` last. Enabling that gate freezes all
+scheduled and manual Catalog refreshes, so the evidence batch sees immutable
+Catalog state. Complete the batch inside the refreshed 20-hour Catalog window.
+After the batch and downstream evidence have finished, disable the acceptance
+gate before restoring normal refresh operation. Never refresh either track
+during an active batch.
 
 For both tracks, only the raw Catalog, envelope, and release metadata are
 replaceable. The archive bytes and SHA-256 must remain unchanged. Before any
@@ -206,26 +255,38 @@ only after production verification.
 Consequently every publicly visible RC state has exactly four assets. A
 pre-verification failure restores the old assets before republishing; a failure
 after the new transaction is verified leaves the Release draft for manual
-recovery rather than exposing an invalid or partial public state.
+recovery rather than exposing an invalid or partial public state. If a draft or
+republish API response is lost, the exit trap re-reads the authoritative remote
+draft flag, prerelease flag, and exact asset set. It republishes only an unchanged
+exact snapshot; an ambiguous or mismatched state remains hidden and produces an
+explicit manual-recovery warning.
 
 ## Debug and acceptance rollback gate
 
 `open-design-acceptance-rollback.yml` is a manual, read-only authorization and
 evidence seam. It runs only when both `debug_enabled` and
 `acceptance_approved` are true, the exact rollback confirmation is supplied,
-and the protected `open-design-acceptance-rollback` Environment is approved.
+the repository variable `OPEN_DESIGN_ACCEPTANCE_ROLLBACK_ENABLED` is exactly
+`true`, and the protected `open-design-acceptance-rollback` Environment is
+approved.
 It verifies the successful acceptance run, the four-asset 0.14.6 RC
 prerelease, and the 0.14.5 non-prerelease LKG.
 
 The evidence run must come from the fixed workflow path
 `.github/workflows/open-design-rc-acceptance.yml`, use `workflow_dispatch`, and
-match the gate's exact `main` SHA. That acceptance workflow is not introduced by
-this release-only change, so the gate intentionally remains fail-closed until
-the packaged-app acceptance harness owns that path.
+match the gate's exact final Host `main` SHA. The protected
+`open-design-rc-acceptance` Environment and the explicit
+`OPEN_DESIGN_RC_ACCEPTANCE_ENABLED=true` repository gate are both required;
+an absent or unconfigured Environment must never be treated as approval. The
+public RC tag is independently peeled to its immutable source SHA, which must
+be an ancestor of that Host SHA.
 
 After validation the rollback gate uploads a checksum-protected, non-mutating
-evidence artifact containing the acceptance run ID, exact SHA, RC archive hash,
-RC Catalog sequence/issuedAt, and LKG/RC tags. The stable publisher independently
+evidence artifact containing the acceptance run ID, Host artifact identity,
+sanitized intake digest, machine/human evidence references, RC source SHA,
+RC archive hash, RC Catalog sequence/issuedAt, and LKG/RC tags. The acceptance
+artifact itself retains the exact sanitized canonical intake plus its derived
+summary and a two-entry checksum manifest. The stable publisher independently
 downloads both evidence artifacts and all four public RC assets; it does not
 trust a manual hash or trust-state input.
 

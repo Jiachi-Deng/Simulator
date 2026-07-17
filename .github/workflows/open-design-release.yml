@@ -36,11 +36,11 @@ on:
         required: false
         type: string
       acceptance_run_id:
-        description: Stable only. Successful fixed-SHA OpenDesign RC acceptance evidence run.
+        description: Stable only. Successful final-Host-SHA OpenDesign RC acceptance evidence run.
         required: false
         type: string
       rollback_gate_run_id:
-        description: Stable only. Successful fixed-SHA acceptance rollback gate run bound to the same evidence.
+        description: Stable only. Successful final-Host-SHA rollback gate bound to the same RC-source evidence.
         required: false
         type: string
       stable_channel_confirmation:
@@ -74,7 +74,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 45
     environment:
-      name: ${{ inputs.release_track == 'stable' && 'open-design-production-stable' || 'open-design-prerelease' }}
+      name: ${{ inputs.release_track == 'stable' && 'open-design-production' || 'open-design-prerelease' }}
       url: https://github.com/Jiachi-Deng/Simulator/releases/tag/${{ inputs.release_tag }}
     env:
       RELEASE_TRACK: ${{ inputs.release_track }}
@@ -99,6 +99,7 @@ jobs:
       LKG_ENVELOPE_ASSET: org.simulator.open-design-0.14.5-catalog-v2-envelope.json
       LKG_METADATA_ASSET: org.simulator.open-design-0.14.5-release-metadata.json
       RC_RELEASE_TAG: open-design-v0.14.6-rc.1
+      RC_SOURCE_SHA: 6b39a9bcc0f158645897976e23f334c5cab771f4
       RC_MODULE_VERSION: 0.14.6-rc.1
       RC_ARCHIVE_ASSET: org.simulator.open-design-0.14.6-rc.1-darwin-arm64.tar.gz
       RC_CATALOG_ASSET: org.simulator.open-design-0.14.6-rc.1-catalog-v2.json
@@ -111,6 +112,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -136,11 +138,14 @@ jobs:
           test -n "$KEY_ACTIVE_FROM"
           test -n "$KEY_ACTIVE_UNTIL"
           test "$HOST_VERSION_RANGE" = ">=0.12.0"
+          [[ "$RC_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git merge-base --is-ancestor "$RC_SOURCE_SHA" "$GITHUB_SHA"
           test "$RELEASE_TAG" = "open-design-v$MODULE_VERSION"
           case "$RELEASE_TRACK" in
             prerelease)
               test "$MODULE_VERSION" = "0.14.6-rc.1"
               test "$RELEASE_TAG" = "open-design-v0.14.6-rc.1"
+              test "$GITHUB_SHA" = "$RC_SOURCE_SHA"
               test -z "$STABLE_CHANNEL_CONFIRMATION"
               test -z "$ACCEPTANCE_RUN_ID"
               test -z "$ROLLBACK_GATE_RUN_ID"
@@ -267,6 +272,10 @@ jobs:
           rc="$evidence_root/rc"
           mkdir -m 700 -p "$acceptance" "$rollback" "$rc"
 
+          git fetch --no-tags origin "+refs/tags/$RC_RELEASE_TAG:refs/tags/$RC_RELEASE_TAG"
+          test "$(git rev-parse "refs/tags/$RC_RELEASE_TAG^{commit}")" = "$RC_SOURCE_SHA"
+          git merge-base --is-ancestor "$RC_SOURCE_SHA" "$GITHUB_SHA"
+
           acceptance_run=$(gh api "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/runs/$ACCEPTANCE_RUN_ID")
           test "$(jq -r .conclusion <<<"$acceptance_run")" = success
           test "$(jq -r .head_branch <<<"$acceptance_run")" = main
@@ -278,17 +287,25 @@ jobs:
             --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
             --name open-design-rc-acceptance-evidence \
             --dir "$acceptance"
-          test "$(find "$acceptance" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 2
+          test "$(find "$acceptance" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 3
           test -f "$acceptance/open-design-rc-acceptance-evidence.json"
+          test -f "$acceptance/open-design-rc-acceptance-intake.json"
           test -f "$acceptance/SHA256SUMS"
-          test "$(wc -l < "$acceptance/SHA256SUMS" | tr -d ' ')" = 1
+          test "$(wc -l < "$acceptance/SHA256SUMS" | tr -d ' ')" = 2
           grep -Eq '^[0-9a-f]{64}  open-design-rc-acceptance-evidence\.json$' "$acceptance/SHA256SUMS"
+          grep -Eq '^[0-9a-f]{64}  open-design-rc-acceptance-intake\.json$' "$acceptance/SHA256SUMS"
           (cd "$acceptance" && shasum -a 256 -c SHA256SUMS)
           acceptance_json="$acceptance/open-design-rc-acceptance-evidence.json"
-          jq -e --arg repository "$RELEASE_OWNER/$RELEASE_REPOSITORY" --arg sha "$GITHUB_SHA" '
-            keys == ["blackoutTasksPassed","headSha","hostVersion","newStackConsecutivePassed","oldStackTasksPassed","paidTurns","previewHumanPasses","rcArchiveAsset","rcArchiveSha256","rcCatalogIssuedAt","rcCatalogSequence","rcExtractedManifestSha256","rcTag","rcVersion","repository","requiredCiPassed","rollbackExercisePassed","schemaVersion"] and
-            .schemaVersion == 1 and .repository == $repository and .headSha == $sha and
+          acceptance_intake="$acceptance/open-design-rc-acceptance-intake.json"
+          jq -e --arg repository "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --arg hostHeadSha "$GITHUB_SHA" --arg rcSourceSha "$RC_SOURCE_SHA" '
+            keys == ["blackoutTasksPassed","evidenceBundleSha256","hostArtifactName","hostArtifactSha256","hostBuildRunId","hostHeadSha","hostVersion","machineEvidence","newStackConsecutivePassed","oldStackTasksPassed","paidTurns","previewHumanPasses","rcArchiveAsset","rcArchiveSha256","rcCatalogIssuedAt","rcCatalogSequence","rcExtractedManifestSha256","rcSourceSha","rcTag","rcVersion","repository","requiredCiPassed","rollbackExercisePassed","schemaVersion","visualEvidence"] and
+            .schemaVersion == 2 and .repository == $repository and
+            .hostHeadSha == $hostHeadSha and .rcSourceSha == $rcSourceSha and
             .hostVersion == "0.12.0" and .rcVersion == "0.14.6-rc.1" and
+            .hostArtifactName == "Simulator-arm64.dmg" and
+            (.hostArtifactSha256 | test("^[0-9a-f]{64}$")) and
+            (.hostBuildRunId | type == "number" and . >= 1 and . <= 9007199254740991 and floor == .) and
             .rcTag == "open-design-v0.14.6-rc.1" and
             .rcArchiveAsset == "org.simulator.open-design-0.14.6-rc.1-darwin-arm64.tar.gz" and
             (.rcArchiveSha256 | test("^[0-9a-f]{64}$")) and
@@ -299,9 +316,28 @@ jobs:
             .blackoutTasksPassed == 20 and .previewHumanPasses == 20 and .paidTurns == 40 and
             .rollbackExercisePassed == true and .requiredCiPassed == true
           ' "$acceptance_json" >/dev/null
+          accepted_evidence_bundle_sha=$(shasum -a 256 "$acceptance_intake" | awk '{print $1}')
+          test "$accepted_evidence_bundle_sha" = "$(jq -er .evidenceBundleSha256 "$acceptance_json")"
+          jq -e --slurpfile intake "$acceptance_intake" '
+            .machineEvidence == $intake[0].evidence.machineBatch and
+            .visualEvidence == $intake[0].evidence.visualDecisions
+          ' "$acceptance_json" >/dev/null
           accepted_rc_sha=$(jq -r .rcArchiveSha256 "$acceptance_json")
           accepted_rc_sequence=$(jq -r .rcCatalogSequence "$acceptance_json")
           accepted_rc_issued_at=$(jq -r .rcCatalogIssuedAt "$acceptance_json")
+          accepted_host_artifact_name=$(jq -r .hostArtifactName "$acceptance_json")
+          accepted_host_artifact_sha=$(jq -r .hostArtifactSha256 "$acceptance_json")
+          accepted_host_build_run_id=$(jq -r .hostBuildRunId "$acceptance_json")
+          accepted_machine_evidence=$(jq -c .machineEvidence "$acceptance_json")
+          accepted_visual_evidence=$(jq -c .visualEvidence "$acceptance_json")
+
+          host_run=$(gh api "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/runs/$accepted_host_build_run_id")
+          test "$(jq -r .conclusion <<<"$host_run")" = success
+          test "$(jq -r .head_branch <<<"$host_run")" = main
+          test "$(jq -r .head_sha <<<"$host_run")" = "$GITHUB_SHA"
+          test "$(jq -r .repository.full_name <<<"$host_run")" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
+          test "$(jq -r .path <<<"$host_run")" = ".github/workflows/engineering-rc.yml"
+          test "$(jq -r .event <<<"$host_run")" = workflow_dispatch
 
           rollback_run=$(gh api "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/runs/$ROLLBACK_GATE_RUN_ID")
           test "$(jq -r .conclusion <<<"$rollback_run")" = success
@@ -320,11 +356,23 @@ jobs:
           test "$(wc -l < "$rollback/SHA256SUMS" | tr -d ' ')" = 1
           grep -Eq '^[0-9a-f]{64}  open-design-rollback-gate-evidence\.json$' "$rollback/SHA256SUMS"
           (cd "$rollback" && shasum -a 256 -c SHA256SUMS)
-          jq -e --arg repository "$RELEASE_OWNER/$RELEASE_REPOSITORY" --arg sha "$GITHUB_SHA" \
+          jq -e --arg repository "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --arg hostHeadSha "$GITHUB_SHA" --arg rcSourceSha "$RC_SOURCE_SHA" \
+            --arg evidenceBundleSha256 "$accepted_evidence_bundle_sha" \
+            --argjson machineEvidence "$accepted_machine_evidence" \
+            --argjson visualEvidence "$accepted_visual_evidence" \
+            --arg hostArtifactName "$accepted_host_artifact_name" \
+            --arg hostArtifactSha256 "$accepted_host_artifact_sha" \
+            --argjson hostBuildRunId "$accepted_host_build_run_id" \
             --argjson acceptanceRunId "$ACCEPTANCE_RUN_ID" --arg archiveSha "$accepted_rc_sha" \
             --argjson rcCatalogSequence "$accepted_rc_sequence" --arg rcCatalogIssuedAt "$accepted_rc_issued_at" '
-            keys == ["acceptanceRunId","headSha","lkgTag","rcArchiveSha256","rcCatalogIssuedAt","rcCatalogSequence","rcTag","repository","schemaVersion","validatedAt"] and
-            .schemaVersion == 1 and .repository == $repository and .headSha == $sha and
+            keys == ["acceptanceRunId","evidenceBundleSha256","hostArtifactName","hostArtifactSha256","hostBuildRunId","hostHeadSha","lkgTag","machineEvidence","rcArchiveSha256","rcCatalogIssuedAt","rcCatalogSequence","rcSourceSha","rcTag","repository","schemaVersion","validatedAt","visualEvidence"] and
+            .schemaVersion == 2 and .repository == $repository and
+            .hostHeadSha == $hostHeadSha and .rcSourceSha == $rcSourceSha and
+            .evidenceBundleSha256 == $evidenceBundleSha256 and
+            .machineEvidence == $machineEvidence and .visualEvidence == $visualEvidence and
+            .hostArtifactName == $hostArtifactName and .hostArtifactSha256 == $hostArtifactSha256 and
+            .hostBuildRunId == $hostBuildRunId and
             .acceptanceRunId == $acceptanceRunId and .rcTag == "open-design-v0.14.6-rc.1" and
             .lkgTag == "open-design-v0.14.5" and .rcArchiveSha256 == $archiveSha and
             .rcCatalogSequence == $rcCatalogSequence and .rcCatalogIssuedAt == $rcCatalogIssuedAt and
@@ -337,7 +385,7 @@ jobs:
           test "$(jq -r .tagName <<<"$rc_state")" = "$RC_RELEASE_TAG"
           test "$(jq -r .isDraft <<<"$rc_state")" = false
           test "$(jq -r .isPrerelease <<<"$rc_state")" = true
-          test "$(jq -r .targetCommitish <<<"$rc_state")" = "$GITHUB_SHA"
+          test "$(jq -r .targetCommitish <<<"$rc_state")" = "$RC_SOURCE_SHA"
           expected_rc=$(printf '%s\n' \
             "$RC_ARCHIVE_ASSET" \
             "$RC_CATALOG_ASSET" \
@@ -477,7 +525,8 @@ jobs:
               --key-active-from "$KEY_ACTIVE_FROM" \
               --key-active-until "$KEY_ACTIVE_UNTIL" \
               --public-key-file "$PUBLIC_KEY_FILE" \
-              --previous-sequence 0 \
+              --previous-sequence "$BASELINE_SEQUENCE" \
+              --previous-issued-at "$BASELINE_ISSUED_AT" \
               --verification-time "$CANDIDATE_VERIFICATION_TIME_MS" > "$state_root/rc-verify.json"
             jq -e \
               --argjson sequence "$ACCEPTED_RC_CATALOG_SEQUENCE" \
@@ -687,6 +736,7 @@ jobs:
     if: >-
       github.repository == 'Jiachi-Deng/Simulator' &&
       github.ref == 'refs/heads/main' &&
+      vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED != 'true' &&
       ((github.event_name == 'schedule' && vars.OPEN_DESIGN_RELEASE_ENABLED == 'true') ||
        (github.event_name == 'workflow_dispatch' && inputs.operation == 'refresh' &&
         ((inputs.release_track == 'stable' && vars.OPEN_DESIGN_RELEASE_ENABLED == 'true') ||
@@ -702,6 +752,9 @@ jobs:
       DISPATCH_MODULE_VERSION: ${{ inputs.module_version }}
       DISPATCH_RELEASE_TAG: ${{ inputs.release_tag }}
       STABLE_CHANNEL_CONFIRMATION: ${{ inputs.stable_channel_confirmation }}
+      REFRESH_TRACK: ${{ github.event_name == 'schedule' && 'stable' || inputs.release_track }}
+      RC_SOURCE_SHA: 6b39a9bcc0f158645897976e23f334c5cab771f4
+      SOURCE_AUTHORITY_CONFIG: apps/electron/resources/open-design-official-channel.json
       KEY_ID: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ID }}
       KEY_ACTIVE_FROM: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ACTIVE_FROM }}
       KEY_ACTIVE_UNTIL: ${{ vars.OPEN_DESIGN_RELEASE_KEY_ACTIVE_UNTIL }}
@@ -712,6 +765,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node
         uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -752,7 +806,7 @@ jobs:
               test "$matching_count" = 1
               release_state=$(jq -c --arg tag "$tag" '
                 [.[][] | select(.tag_name == $tag)][0] |
-                {tagName: .tag_name, isDraft: .draft, isPrerelease: .prerelease, assets}
+                {tagName: .tag_name, isDraft: .draft, isPrerelease: .prerelease, targetCommitish: .target_commitish, assets}
               ' <<<"$release_pages")
               test "$(jq -r .tagName <<<"$release_state")" = "$tag"
               test "$(jq -r .isDraft <<<"$release_state")" = false
@@ -783,6 +837,26 @@ jobs:
               test "$DISPATCH_OPERATION" = refresh
               case "$DISPATCH_RELEASE_TRACK" in
                 prerelease)
+                  stable_matching_count=$(jq '[.[][] | select(.tag_name == "open-design-v0.14.6")] | length' <<<"$release_pages")
+                  test "$stable_matching_count" = 0
+                  lkg_assets=(
+                    org.simulator.open-design-0.14.5-darwin-arm64.tar.gz
+                    org.simulator.open-design-0.14.5-catalog-v2.json
+                    org.simulator.open-design-0.14.5-catalog-v2-envelope.json
+                    open-design-official-channel.json
+                    org.simulator.open-design-0.14.5-release-metadata.json
+                  )
+                  lkg_matching_count=$(jq '[.[][] | select(.tag_name == "open-design-v0.14.5")] | length' <<<"$release_pages")
+                  test "$lkg_matching_count" = 1
+                  lkg_state=$(jq -c '
+                    [.[][] | select(.tag_name == "open-design-v0.14.5")][0] |
+                    {tagName: .tag_name, isDraft: .draft, isPrerelease: .prerelease, assets}
+                  ' <<<"$release_pages")
+                  test "$(jq -r .tagName <<<"$lkg_state")" = "open-design-v0.14.5"
+                  test "$(jq -r .isDraft <<<"$lkg_state")" = false
+                  test "$(jq -r .isPrerelease <<<"$lkg_state")" = false
+                  test "$(jq -r '.assets[].name' <<<"$lkg_state" | LC_ALL=C sort)" = \
+                    "$(printf '%s\n' "${lkg_assets[@]}" | LC_ALL=C sort)"
                   selected_version="0.14.6-rc.1"
                   release_track="prerelease"
                   expected_prerelease="true"
@@ -792,8 +866,9 @@ jobs:
                   test "$matching_count" = 1
                   release_state=$(jq -c --arg tag "open-design-v0.14.6-rc.1" '
                     [.[][] | select(.tag_name == $tag)][0] |
-                    {tagName: .tag_name, isDraft: .draft, isPrerelease: .prerelease, assets}
+                    {tagName: .tag_name, isDraft: .draft, isPrerelease: .prerelease, targetCommitish: .target_commitish, assets}
                   ' <<<"$release_pages")
+                  test "$(jq -r .targetCommitish <<<"$release_state")" = "$RC_SOURCE_SHA"
                   ;;
                 stable) resolve_stable ;;
                 *) exit 1 ;;
@@ -830,6 +905,7 @@ jobs:
             printf 'CONFIG_REQUIRED=%s\n' "$config_required"
             printf 'PUBLIC_ASSET_COUNT=%s\n' "${#expected_assets[@]}"
             printf 'EXPECTED_HOST_VERSION_RANGE=%s\n' "$expected_host_version_range"
+            printf 'RELEASE_TARGET_COMMITISH=%s\n' "$(jq -r .targetCommitish <<<"$release_state")"
           } >> "$GITHUB_ENV"
 
       - name: Validate fixed refresh authority
@@ -868,6 +944,11 @@ jobs:
                   test "$PUBLIC_ASSET_COUNT" = 4
                   test "$EXPECTED_HOST_VERSION_RANGE" = ">=0.12.0"
                   test "$STABLE_CHANNEL_CONFIRMATION" = "REFRESH_OPEN_DESIGN_0_14_6_RC_1"
+                  test "$RELEASE_TARGET_COMMITISH" = "$RC_SOURCE_SHA"
+                  [[ "$RC_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+                  git fetch --no-tags origin "+refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+                  test "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")" = "$RC_SOURCE_SHA"
+                  git merge-base --is-ancestor "$RC_SOURCE_SHA" "$GITHUB_SHA"
                   ;;
                 stable)
                   test "$EXPECTED_PRERELEASE" = false
@@ -919,13 +1000,84 @@ jobs:
           [[ "$source_archive_size" =~ ^[1-9][0-9]*$ ]]
           if [[ "$CONFIG_REQUIRED" = true ]]; then
             refresh_input="$source"
+            baseline=""
+            authority_config="$source/$CONFIG_ASSET"
           else
             test ! -e "$source/$CONFIG_ASSET"
             refresh_input="$work/private-input"
+            test -f "$SOURCE_AUTHORITY_CONFIG"
+            baseline="$work/lkg"
+            mkdir -m 700 "$baseline"
+            lkg_tag="open-design-v0.14.5"
+            lkg_assets=(
+              org.simulator.open-design-0.14.5-darwin-arm64.tar.gz
+              org.simulator.open-design-0.14.5-catalog-v2.json
+              org.simulator.open-design-0.14.5-catalog-v2-envelope.json
+              open-design-official-channel.json
+              org.simulator.open-design-0.14.5-release-metadata.json
+            )
+            lkg_state=$(gh release view "$lkg_tag" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+              --json tagName,isDraft,isPrerelease,assets)
+            test "$(jq -r .tagName <<<"$lkg_state")" = "$lkg_tag"
+            test "$(jq -r .isDraft <<<"$lkg_state")" = false
+            test "$(jq -r .isPrerelease <<<"$lkg_state")" = false
+            test "$(jq -r '.assets[].name' <<<"$lkg_state" | LC_ALL=C sort)" = \
+              "$(printf '%s\n' "${lkg_assets[@]}" | LC_ALL=C sort)"
+            for asset in "${lkg_assets[@]}"; do
+              gh release download "$lkg_tag" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+                --pattern "$asset" --dir "$baseline"
+              chmod 600 "$baseline/$asset"
+            done
+            test "$(find "$baseline" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 5
+            cmp "$SOURCE_AUTHORITY_CONFIG" "$baseline/open-design-official-channel.json"
+            authority_config="$baseline/open-design-official-channel.json"
           fi
-          printf 'REFRESH_WORK=%s\nSOURCE_BUNDLE=%s\nREFRESH_INPUT=%s\nREFRESH_OUTPUT=%s\nVERIFY_BUNDLE=%s\nPUBLIC_KEY_FILE=%s\nSOURCE_ARCHIVE_SHA256=%s\nSOURCE_ARCHIVE_SIZE=%s\n' \
-            "$work" "$source" "$refresh_input" "$work/output" "$work/verify" "$work/release-public.pem" \
-            "$source_archive_sha256" "$source_archive_size" >> "$GITHUB_ENV"
+          AUTHORITY_CONFIG="$authority_config" PUBLIC_KEY_FILE="$work/release-public.pem" \
+            node --input-type=module <<'NODE'
+          import { createPublicKey } from "node:crypto";
+          import { readFileSync, writeFileSync } from "node:fs";
+          const authority = JSON.parse(readFileSync(process.env.AUTHORITY_CONFIG, "utf8"));
+          const trusted = authority?.trustedKeys?.[0];
+          const raw = Buffer.from(trusted?.publicKey ?? "", "base64");
+          if (authority?.trustedKeys?.length !== 1 || raw.length !== 32 || raw.toString("base64") !== trusted.publicKey) {
+            throw new Error("Invalid Ed25519 trust authority");
+          }
+          const pem = createPublicKey({
+            key: { kty: "OKP", crv: "Ed25519", x: raw.toString("base64url") }, format: "jwk",
+          }).export({ type: "spki", format: "pem" });
+          writeFileSync(process.env.PUBLIC_KEY_FILE, pem, { mode: 0o600, flag: "wx" });
+          NODE
+          printf 'REFRESH_WORK=%s\nSOURCE_BUNDLE=%s\nBASELINE_BUNDLE=%s\nREFRESH_INPUT=%s\nREFRESH_OUTPUT=%s\nVERIFY_BUNDLE=%s\nPUBLIC_KEY_FILE=%s\nSOURCE_ARCHIVE_SHA256=%s\nSOURCE_ARCHIVE_SIZE=%s\n' \
+            "$work" "$source" "$baseline" "$refresh_input" "$work/output" "$work/verify" \
+            "$work/release-public.pem" "$source_archive_sha256" "$source_archive_size" >> "$GITHUB_ENV"
+
+      - name: Authenticate prerelease cross-track predecessor
+        if: ${{ env.REFRESH_TRACK == 'prerelease' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          baseline_catalog="$BASELINE_BUNDLE/org.simulator.open-design-0.14.5-catalog-v2.json"
+          baseline_state=$(node -e '
+            const fs = require("node:fs");
+            const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            const issuedAtMs = Date.parse(value.issuedAt);
+            if (!Number.isSafeInteger(value.sequence) || value.sequence < 1 ||
+                !Number.isFinite(issuedAtMs) || new Date(issuedAtMs).toISOString() !== value.issuedAt) process.exit(1);
+            process.stdout.write(JSON.stringify({ sequence: value.sequence, issuedAt: value.issuedAt, verificationTime: issuedAtMs + 1000 }));
+          ' "$baseline_catalog")
+          node modules/open-design/package/production-cli.mjs \
+            --module-version 0.14.5 --verify --bundle-root "$BASELINE_BUNDLE" \
+            --release-tag open-design-v0.14.5 --key-id "$KEY_ID" \
+            --key-active-from "$KEY_ACTIVE_FROM" --key-active-until "$KEY_ACTIVE_UNTIL" \
+            --public-key-file "$PUBLIC_KEY_FILE" --previous-sequence 0 \
+            --verification-time "$(jq -r .verificationTime <<<"$baseline_state")" \
+            > "$RUNNER_TEMP/open-design-refresh-baseline-verify.json"
+          jq -e --argjson sequence "$(jq -r .sequence <<<"$baseline_state")" --arg issuedAt "$(jq -r .issuedAt <<<"$baseline_state")" '
+            .ok == true and .version == "0.14.5" and
+            .catalogState.highestSequence == $sequence and .catalogState.latestIssuedAt == $issuedAt
+          ' "$RUNNER_TEMP/open-design-refresh-baseline-verify.json" >/dev/null
+          printf 'BASELINE_SEQUENCE=%s\nBASELINE_ISSUED_AT=%s\n' \
+            "$(jq -r .sequence <<<"$baseline_state")" "$(jq -r .issuedAt <<<"$baseline_state")" >> "$GITHUB_ENV"
 
       - name: Derive monotonic refresh state and bounded window
         shell: bash
@@ -937,11 +1089,32 @@ jobs:
           if (catalog.schemaVersion !== 2 || !Number.isSafeInteger(catalog.sequence) || catalog.sequence < 1 || catalog.sequence >= Number.MAX_SAFE_INTEGER) throw new Error("Invalid prior catalog state");
           const previousIssuedAtMs = Date.parse(catalog.issuedAt);
           if (!Number.isFinite(previousIssuedAtMs) || new Date(previousIssuedAtMs).toISOString() !== catalog.issuedAt) throw new Error("Invalid prior issuedAt");
-          const issuedAtMs = Math.max(Date.now(), previousIssuedAtMs + 1000);
+          let highWaterSequence = catalog.sequence;
+          let highWaterIssuedAtMs = previousIssuedAtMs;
+          if (process.env.REFRESH_TRACK === "prerelease") {
+            const baselineSequence = Number(process.env.BASELINE_SEQUENCE);
+            const baselineIssuedAtMs = Date.parse(process.env.BASELINE_ISSUED_AT ?? "");
+            if (!Number.isSafeInteger(baselineSequence) || baselineSequence < 1 ||
+                !Number.isFinite(baselineIssuedAtMs) ||
+                new Date(baselineIssuedAtMs).toISOString() !== process.env.BASELINE_ISSUED_AT) {
+              throw new Error("Invalid authenticated stable cross-track state");
+            }
+            highWaterSequence = Math.max(highWaterSequence, baselineSequence);
+            highWaterIssuedAtMs = Math.max(highWaterIssuedAtMs, baselineIssuedAtMs);
+          } else if (process.env.REFRESH_TRACK !== "stable") {
+            throw new Error("Invalid refresh track");
+          }
+          if (highWaterSequence >= Number.MAX_SAFE_INTEGER) throw new Error("Catalog sequence exhausted");
+          const issuedAtMs = Math.max(Date.now(), highWaterIssuedAtMs + 1000);
           const issuedAt = new Date(issuedAtMs).toISOString();
           const expiresAt = new Date(issuedAtMs + 20 * 60 * 60 * 1000).toISOString();
           appendFileSync(process.env.GITHUB_ENV,
-            `PREVIOUS_SEQUENCE=${catalog.sequence}\nPREVIOUS_ISSUED_AT=${catalog.issuedAt}\nSOURCE_VERIFICATION_TIME_MS=${previousIssuedAtMs + 1000}\nCATALOG_SEQUENCE=${catalog.sequence + 1}\nCATALOG_ISSUED_AT=${issuedAt}\nCATALOG_EXPIRES_AT=${expiresAt}\nVERIFICATION_TIME_MS=${issuedAtMs + 1000}\n`);
+            `PREVIOUS_SEQUENCE=${catalog.sequence}\nPREVIOUS_ISSUED_AT=${catalog.issuedAt}\n` +
+            `SOURCE_VERIFICATION_TIME_MS=${previousIssuedAtMs + 1000}\n` +
+            `VERIFY_PREVIOUS_SEQUENCE=${highWaterSequence}\n` +
+            `VERIFY_PREVIOUS_ISSUED_AT=${new Date(highWaterIssuedAtMs).toISOString()}\n` +
+            `CATALOG_SEQUENCE=${highWaterSequence + 1}\nCATALOG_ISSUED_AT=${issuedAt}\n` +
+            `CATALOG_EXPIRES_AT=${expiresAt}\nVERIFICATION_TIME_MS=${issuedAtMs + 1000}\n`);
           NODE
 
       - name: Authenticate source, dry-run, and create signed refresh assets
@@ -953,13 +1126,15 @@ jobs:
           set +x
           umask 077
           test -n "$OPEN_DESIGN_RELEASE_PRIVATE_KEY"
-          node --input-type=module <<'NODE'
+          test -s "$PUBLIC_KEY_FILE"
+          PRIVATE_DERIVED_PUBLIC="$REFRESH_WORK/private-derived-public.pem" node --input-type=module <<'NODE'
           import { createPrivateKey, createPublicKey } from "node:crypto";
           import { writeFileSync } from "node:fs";
           const privateKey = createPrivateKey({ key: process.env.OPEN_DESIGN_RELEASE_PRIVATE_KEY, format: "pem" });
           const publicKey = createPublicKey(privateKey).export({ format: "pem", type: "spki" });
-          writeFileSync(process.env.PUBLIC_KEY_FILE, publicKey, { mode: 0o600, flag: "wx" });
+          writeFileSync(process.env.PRIVATE_DERIVED_PUBLIC, publicKey, { mode: 0o600, flag: "wx" });
           NODE
+          cmp "$PUBLIC_KEY_FILE" "$REFRESH_WORK/private-derived-public.pem"
 
           if [[ "$CONFIG_REQUIRED" = false ]]; then
             # A prerelease deliberately has no public official-channel asset.
@@ -1239,8 +1414,8 @@ jobs:
             --key-active-from "$KEY_ACTIVE_FROM" \
             --key-active-until "$KEY_ACTIVE_UNTIL" \
             --public-key-file "$PUBLIC_KEY_FILE" \
-            --previous-sequence "$PREVIOUS_SEQUENCE" \
-            --previous-issued-at "$PREVIOUS_ISSUED_AT" \
+            --previous-sequence "$VERIFY_PREVIOUS_SEQUENCE" \
+            --previous-issued-at "$VERIFY_PREVIOUS_ISSUED_AT" \
             --verification-time "$VERIFICATION_TIME_MS" > "$RUNNER_TEMP/open-design-refresh-verify.json"
           test "$(shasum -a 256 "$VERIFY_BUNDLE/$ARCHIVE_ASSET" | awk '{print $1}')" = "$SOURCE_ARCHIVE_SHA256"
           jq -e --arg version "$MODULE_VERSION" --arg archiveSha "$SOURCE_ARCHIVE_SHA256" --argjson sequence "$CATALOG_SEQUENCE" --arg issuedAt "$CATALOG_ISSUED_AT" '
@@ -1266,6 +1441,7 @@ jobs:
           candidate_ids=()
           old_ids=()
           old_renamed=(0 0 0)
+          hide_requested=0
           hidden=0
           transaction_verified=0
           success=0
@@ -1290,7 +1466,38 @@ jobs:
             local status=$?
             set +e
             if [[ "$success" = 0 ]]; then
-              if [[ "$hidden" = 1 && "$transaction_verified" = 0 ]]; then
+              if [[ "$hidden" = 0 && "$hide_requested" = 1 ]]; then
+                # The draft mutation may have reached GitHub even when its
+                # response was lost. Re-read the authoritative remote state;
+                # only an unchanged exact draft is safe to republish.
+                uncertain_state=$(gh release view "$RELEASE_TAG" \
+                  --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+                  --json isDraft,isPrerelease,assets 2>/dev/null)
+                uncertain_assets=$(jq -r '.assets[].name' <<<"$uncertain_state" 2>/dev/null | LC_ALL=C sort)
+                if [[ -n "$uncertain_state" \
+                  && "$uncertain_assets" = "$expected_public" \
+                  && "$(jq -r .isDraft <<<"$uncertain_state")" = true \
+                  && "$(jq -r .isPrerelease <<<"$uncertain_state")" = "$EXPECTED_PRERELEASE" ]]; then
+                  gh release edit "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --draft=false >/dev/null 2>&1
+                  recovered_state=$(gh release view "$RELEASE_TAG" \
+                    --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+                    --json isDraft,isPrerelease,assets 2>/dev/null)
+                  recovered_assets=$(jq -r '.assets[].name' <<<"$recovered_state" 2>/dev/null | LC_ALL=C sort)
+                  if [[ -z "$recovered_state" \
+                    || "$recovered_assets" != "$expected_public" \
+                    || "$(jq -r .isDraft <<<"$recovered_state")" != false \
+                    || "$(jq -r .isPrerelease <<<"$recovered_state")" != "$EXPECTED_PRERELEASE" ]]; then
+                    echo "Draft transition response was lost and automatic recovery could not be verified; inspect the Release manually" >&2
+                  fi
+                elif [[ -n "$uncertain_state" \
+                  && "$uncertain_assets" = "$expected_public" \
+                  && "$(jq -r .isDraft <<<"$uncertain_state")" = false \
+                  && "$(jq -r .isPrerelease <<<"$uncertain_state")" = "$EXPECTED_PRERELEASE" ]]; then
+                  echo "Draft transition failed before changing the exact public Release" >&2
+                else
+                  echo "Draft transition response was lost and remote state is not safely recoverable; inspect the Release manually" >&2
+                fi
+              elif [[ "$hidden" = 1 && "$transaction_verified" = 0 ]]; then
                 for i in 2 1 0; do
                   [[ -n "${candidate_ids[$i]:-}" ]] && gh api -X DELETE "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/releases/assets/${candidate_ids[$i]}" >/dev/null 2>&1
                   if [[ "${old_renamed[$i]:-0}" = 1 ]]; then
@@ -1307,12 +1514,40 @@ jobs:
                   && "$(jq -r .isDraft <<<"$restored_state")" = true \
                   && "$(jq -r .isPrerelease <<<"$restored_state")" = "$EXPECTED_PRERELEASE" ]]; then
                   gh release edit "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --draft=false >/dev/null 2>&1
+                  republished_state=$(gh release view "$RELEASE_TAG" \
+                    --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+                    --json isDraft,isPrerelease,assets 2>/dev/null)
+                  republished_assets=$(jq -r '.assets[].name' <<<"$republished_state" 2>/dev/null | LC_ALL=C sort)
+                  if [[ -z "$republished_state" \
+                    || "$republished_assets" != "$expected_public" \
+                    || "$(jq -r .isDraft <<<"$republished_state")" != false \
+                    || "$(jq -r .isPrerelease <<<"$republished_state")" != "$EXPECTED_PRERELEASE" ]]; then
+                    echo "Rollback restored the old assets but republishing could not be verified; inspect the draft Release manually" >&2
+                  fi
                 else
                   echo "Rollback needs manual recovery; release remains draft" >&2
                 fi
               elif [[ "$hidden" = 1 ]]; then
-                gh release edit "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --draft=true >/dev/null 2>&1
-                echo "Verified replacement cleanup failed; release remains draft for manual recovery" >&2
+                verified_state=$(gh release view "$RELEASE_TAG" \
+                  --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+                  --json isDraft,isPrerelease,assets 2>/dev/null)
+                verified_assets=$(jq -r '.assets[].name' <<<"$verified_state" 2>/dev/null | LC_ALL=C sort)
+                if [[ -n "$verified_state" \
+                  && "$verified_assets" = "$expected_public" \
+                  && "$(jq -r .isDraft <<<"$verified_state")" = false \
+                  && "$(jq -r .isPrerelease <<<"$verified_state")" = "$EXPECTED_PRERELEASE" ]]; then
+                  echo "Republish response was lost, but the exact verified Release is public" >&2
+                else
+                  gh release edit "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --draft=true >/dev/null 2>&1
+                  recovery_state=$(gh release view "$RELEASE_TAG" \
+                    --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+                    --json isDraft,isPrerelease,assets 2>/dev/null)
+                  if [[ -n "$recovery_state" && "$(jq -r .isDraft <<<"$recovery_state")" = true ]]; then
+                    echo "Verified replacement is hidden for manual recovery" >&2
+                  else
+                    echo "Verified replacement state could not be hidden or verified; inspect the Release immediately" >&2
+                  fi
+                fi
               fi
             fi
             exit "$status"
@@ -1327,6 +1562,7 @@ jobs:
 
           # Hide the Release before adding temporary assets. Therefore every
           # public RC state has exactly four assets; all expanded states are draft.
+          hide_requested=1
           gh release edit "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --draft=true
           hidden=1
           draft_state=$(gh release view "$RELEASE_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --json isDraft,isPrerelease,assets)
@@ -1392,8 +1628,8 @@ jobs:
             --key-active-from "$KEY_ACTIVE_FROM" \
             --key-active-until "$KEY_ACTIVE_UNTIL" \
             --public-key-file "$PUBLIC_KEY_FILE" \
-            --previous-sequence "$PREVIOUS_SEQUENCE" \
-            --previous-issued-at "$PREVIOUS_ISSUED_AT" \
+            --previous-sequence "$VERIFY_PREVIOUS_SEQUENCE" \
+            --previous-issued-at "$VERIFY_PREVIOUS_ISSUED_AT" \
             --verification-time "$VERIFICATION_TIME_MS" > "$RUNNER_TEMP/open-design-refresh-remote-verify.json"
           jq -e --arg version "$MODULE_VERSION" --arg archiveSha "$SOURCE_ARCHIVE_SHA256" --argjson sequence "$CATALOG_SEQUENCE" --arg issuedAt "$CATALOG_ISSUED_AT" '
             .ok == true and .version == $version and .archiveSha256 == $archiveSha and

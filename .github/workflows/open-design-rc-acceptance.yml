@@ -1,0 +1,415 @@
+name: OpenDesign RC Acceptance Evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      evidence_bundle_base64:
+        description: Sanitized canonical acceptance JSON encoded as base64. Never include secrets, screenshots, logs, or absolute paths.
+        required: true
+        type: string
+      evidence_bundle_sha256:
+        description: SHA-256 of the decoded canonical acceptance JSON.
+        required: true
+        type: string
+      acceptance_approved:
+        description: Product-owner attestation that the fixed paid Turns and human Preview decisions are complete.
+        required: true
+        default: false
+        type: boolean
+      acceptance_confirmation:
+        description: Enter ATTEST_OPEN_DESIGN_M1_40_TURNS_AND_PREVIEWS.
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: read
+
+concurrency:
+  group: open-design-rc-acceptance-evidence
+  cancel-in-progress: false
+
+jobs:
+  notarize-acceptance-evidence:
+    name: Validate and notarize sanitized acceptance evidence
+    if: >-
+      github.repository == 'Jiachi-Deng/Simulator' &&
+      github.ref == 'refs/heads/main' &&
+      vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED == 'true' &&
+      inputs.acceptance_approved == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment:
+      name: open-design-rc-acceptance
+    env:
+      RELEASE_OWNER: Jiachi-Deng
+      RELEASE_REPOSITORY: Simulator
+      HOST_HEAD_SHA: ${{ github.sha }}
+      HOST_VERSION: 0.12.0
+      HOST_ARTIFACT_NAME: Simulator-arm64.dmg
+      RC_SOURCE_SHA: 6b39a9bcc0f158645897976e23f334c5cab771f4
+      RC_TAG: open-design-v0.14.6-rc.1
+      RC_VERSION: 0.14.6-rc.1
+      RC_ARCHIVE_ASSET: org.simulator.open-design-0.14.6-rc.1-darwin-arm64.tar.gz
+      RC_CATALOG_ASSET: org.simulator.open-design-0.14.6-rc.1-catalog-v2.json
+      RC_ENVELOPE_ASSET: org.simulator.open-design-0.14.6-rc.1-catalog-v2-envelope.json
+      RC_METADATA_ASSET: org.simulator.open-design-0.14.6-rc.1-release-metadata.json
+      LKG_TAG: open-design-v0.14.5
+      LKG_VERSION: 0.14.5
+      LKG_ARCHIVE_ASSET: org.simulator.open-design-0.14.5-darwin-arm64.tar.gz
+      LKG_CATALOG_ASSET: org.simulator.open-design-0.14.5-catalog-v2.json
+      LKG_ENVELOPE_ASSET: org.simulator.open-design-0.14.5-catalog-v2-envelope.json
+      LKG_CONFIG_ASSET: open-design-official-channel.json
+      LKG_METADATA_ASSET: org.simulator.open-design-0.14.5-release-metadata.json
+      SOURCE_AUTHORITY_CONFIG: apps/electron/resources/open-design-official-channel.json
+      EVIDENCE_BUNDLE_BASE64: ${{ inputs.evidence_bundle_base64 }}
+      EVIDENCE_BUNDLE_SHA256: ${{ inputs.evidence_bundle_sha256 }}
+      ACCEPTANCE_CONFIRMATION: ${{ inputs.acceptance_confirmation }}
+
+    steps:
+      - name: Checkout exact Host authority
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "24.18.0"
+          cache: npm
+          cache-dependency-path: modules/open-design/package-lock.json
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: "1.3.10"
+
+      - name: Install exact verification dependencies
+        run: |
+          bun install --frozen-lockfile --ignore-scripts
+          npm ci --ignore-scripts --prefix modules/open-design
+
+      - name: Validate fixed dual-source authority
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
+          test "$GITHUB_REF" = "refs/heads/main"
+          test "$(git rev-parse HEAD)" = "$HOST_HEAD_SHA"
+          test "$HOST_VERSION" = "0.12.0"
+          test "$HOST_ARTIFACT_NAME" = "Simulator-arm64.dmg"
+          [[ "$HOST_HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$RC_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$ACCEPTANCE_CONFIRMATION" = "ATTEST_OPEN_DESIGN_M1_40_TURNS_AND_PREVIEWS"
+
+          git fetch --no-tags origin "+refs/tags/$RC_TAG:refs/tags/$RC_TAG"
+          test "$(git rev-parse "refs/tags/$RC_TAG^{commit}")" = "$RC_SOURCE_SHA"
+          git merge-base --is-ancestor "$RC_SOURCE_SHA" "$HOST_HEAD_SHA"
+          for authority_path in \
+            scripts/qa/open-design-m1-cases.ts \
+            scripts/qa/generate-open-design-m1-case-artifacts.ts; do
+            test "$(git show "$RC_SOURCE_SHA:$authority_path" | shasum -a 256 | awk '{print $1}')" = \
+              "$(shasum -a 256 "$authority_path" | awk '{print $1}')"
+          done
+
+          rc_state=$(gh release view "$RC_TAG" \
+            --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --json tagName,isDraft,isPrerelease,targetCommitish,assets)
+          test "$(jq -r .tagName <<<"$rc_state")" = "$RC_TAG"
+          test "$(jq -r .isDraft <<<"$rc_state")" = false
+          test "$(jq -r .isPrerelease <<<"$rc_state")" = true
+          test "$(jq -r .targetCommitish <<<"$rc_state")" = "$RC_SOURCE_SHA"
+
+      - name: Decode and validate sanitized offline evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$EVIDENCE_BUNDLE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "${#EVIDENCE_BUNDLE_BASE64}" -ge 4
+          test "${#EVIDENCE_BUNDLE_BASE64}" -le 60000
+          [[ "$EVIDENCE_BUNDLE_BASE64" =~ ^[A-Za-z0-9+/]+={0,2}$ ]]
+          test $((${#EVIDENCE_BUNDLE_BASE64} % 4)) -eq 0
+
+          root="$RUNNER_TEMP/open-design-rc-acceptance"
+          intake="$root/intake/open-design-rc-acceptance-intake.json"
+          output="$root/output"
+          mkdir -m 700 -p "$(dirname "$intake")" "$output"
+          printf '%s' "$EVIDENCE_BUNDLE_BASE64" | base64 --decode > "$intake"
+          test "$(wc -c < "$intake" | tr -d ' ')" -le 45000
+          test "$(base64 -w 0 "$intake")" = "$EVIDENCE_BUNDLE_BASE64"
+          test "$(shasum -a 256 "$intake" | awk '{print $1}')" = "$EVIDENCE_BUNDLE_SHA256"
+
+          summary="$output/open-design-rc-acceptance-evidence.json"
+          bun scripts/qa/open-design-rc-acceptance-evidence.ts \
+            --input "$intake" \
+            --host-head-sha "$HOST_HEAD_SHA" \
+            --output "$summary"
+          test -f "$summary"
+          intake_copy="$output/open-design-rc-acceptance-intake.json"
+          cp -- "$intake" "$intake_copy"
+          chmod 600 "$intake_copy"
+          test "$(jq -er .evidenceBundleSha256 "$summary")" = "$EVIDENCE_BUNDLE_SHA256"
+          jq -e --slurpfile intake "$intake_copy" '
+            .machineEvidence == $intake[0].evidence.machineBatch and
+            .visualEvidence == $intake[0].evidence.visualDecisions
+          ' "$summary" >/dev/null
+          test "$(find "$output" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 2
+          printf 'ACCEPTANCE_ROOT=%s\nACCEPTANCE_INTAKE=%s\nACCEPTANCE_OUTPUT=%s\nACCEPTANCE_SUMMARY=%s\n' \
+            "$root" "$intake" "$output" "$summary" >> "$GITHUB_ENV"
+
+      - name: Authenticate Required CI and exact Host artifact
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          batch_started_at=$(jq -er .batch.startedAt "$ACCEPTANCE_INTAKE")
+
+          completed_before_batch() {
+            node -e '
+              const completed = Date.parse(process.argv[1]);
+              const started = Date.parse(process.argv[2]);
+              if (!Number.isFinite(completed) || !Number.isFinite(started) || completed > started) process.exit(1);
+            ' "$1" "$batch_started_at"
+          }
+
+          while IFS= read -r descriptor; do
+            run_id=$(jq -er .runId <<<"$descriptor")
+            workflow_path=$(jq -er .workflowPath <<<"$descriptor")
+            [[ "$run_id" =~ ^[1-9][0-9]*$ ]]
+            run_json=$(gh api "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/runs/$run_id")
+            test "$(jq -r .conclusion <<<"$run_json")" = success
+            test "$(jq -r .head_branch <<<"$run_json")" = main
+            test "$(jq -r .head_sha <<<"$run_json")" = "$HOST_HEAD_SHA"
+            test "$(jq -r .repository.full_name <<<"$run_json")" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
+            test "$(jq -r .path <<<"$run_json")" = "$workflow_path"
+            case "$(jq -r .event <<<"$run_json")" in
+              push|workflow_dispatch) ;;
+              *) exit 1 ;;
+            esac
+            completed_before_batch "$(jq -er .updated_at <<<"$run_json")"
+          done < <(jq -ce '.requiredCi.runs[]' "$ACCEPTANCE_INTAKE")
+
+          host_build_run_id=$(jq -er .host.buildRunId "$ACCEPTANCE_INTAKE")
+          [[ "$host_build_run_id" =~ ^[1-9][0-9]*$ ]]
+          host_run=$(gh api "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/runs/$host_build_run_id")
+          test "$(jq -r .conclusion <<<"$host_run")" = success
+          test "$(jq -r .head_branch <<<"$host_run")" = main
+          test "$(jq -r .head_sha <<<"$host_run")" = "$HOST_HEAD_SHA"
+          test "$(jq -r .repository.full_name <<<"$host_run")" = "$RELEASE_OWNER/$RELEASE_REPOSITORY"
+          test "$(jq -r .path <<<"$host_run")" = ".github/workflows/engineering-rc.yml"
+          test "$(jq -r .event <<<"$host_run")" = workflow_dispatch
+          completed_before_batch "$(jq -er .updated_at <<<"$host_run")"
+
+          artifacts=$(gh api "repos/$RELEASE_OWNER/$RELEASE_REPOSITORY/actions/runs/$host_build_run_id/artifacts?per_page=100")
+          artifact_count=$(jq '[.artifacts[] | select(.expired == false and (.name | test("^simulator-0\\.12\\.0-rc\\.[1-9][0-9]*-macos-arm64-unsigned$")))] | length' <<<"$artifacts")
+          test "$artifact_count" = 1
+          artifact_name=$(jq -er '.artifacts[] | select(.expired == false and (.name | test("^simulator-0\\.12\\.0-rc\\.[1-9][0-9]*-macos-arm64-unsigned$"))) | .name' <<<"$artifacts")
+
+          host_download="$ACCEPTANCE_ROOT/host-artifact"
+          mkdir -m 700 "$host_download"
+          gh run download "$host_build_run_id" \
+            --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --name "$artifact_name" \
+            --dir "$host_download"
+          mapfile -d '' dmgs < <(find "$host_download" -type f -name "$HOST_ARTIFACT_NAME" -print0)
+          test "${#dmgs[@]}" = 1
+          host_artifact_sha=$(shasum -a 256 "${dmgs[0]}" | awk '{print $1}')
+          test "$host_artifact_sha" = "$(jq -er .host.artifactSha256 "$ACCEPTANCE_INTAKE")"
+          test "$host_artifact_sha" = "$(jq -er .hostArtifactSha256 "$ACCEPTANCE_SUMMARY")"
+          test "$host_build_run_id" = "$(jq -er .hostBuildRunId "$ACCEPTANCE_SUMMARY")"
+
+      - name: Authenticate RC, LKG, and signed Catalog closure
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          release_root="$ACCEPTANCE_ROOT/releases"
+          lkg="$release_root/lkg"
+          rc="$release_root/rc"
+          rc_verify="$release_root/rc-verify"
+          verify_output="$release_root/verify-output"
+          mkdir -m 700 -p "$lkg" "$rc" "$rc_verify" "$verify_output"
+
+          lkg_state=$(gh release view "$LKG_TAG" \
+            --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --json tagName,isDraft,isPrerelease,assets)
+          test "$(jq -r .tagName <<<"$lkg_state")" = "$LKG_TAG"
+          test "$(jq -r .isDraft <<<"$lkg_state")" = false
+          test "$(jq -r .isPrerelease <<<"$lkg_state")" = false
+          expected_lkg=$(printf '%s\n' \
+            "$LKG_ARCHIVE_ASSET" "$LKG_CATALOG_ASSET" "$LKG_ENVELOPE_ASSET" \
+            "$LKG_CONFIG_ASSET" "$LKG_METADATA_ASSET" | LC_ALL=C sort)
+          test "$(jq -r '.assets[].name' <<<"$lkg_state" | LC_ALL=C sort)" = "$expected_lkg"
+
+          rc_state=$(gh release view "$RC_TAG" \
+            --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" \
+            --json tagName,isDraft,isPrerelease,targetCommitish,assets)
+          test "$(jq -r .tagName <<<"$rc_state")" = "$RC_TAG"
+          test "$(jq -r .isDraft <<<"$rc_state")" = false
+          test "$(jq -r .isPrerelease <<<"$rc_state")" = true
+          test "$(jq -r .targetCommitish <<<"$rc_state")" = "$RC_SOURCE_SHA"
+          expected_rc=$(printf '%s\n' \
+            "$RC_ARCHIVE_ASSET" "$RC_CATALOG_ASSET" "$RC_ENVELOPE_ASSET" "$RC_METADATA_ASSET" | LC_ALL=C sort)
+          test "$(jq -r '.assets[].name' <<<"$rc_state" | LC_ALL=C sort)" = "$expected_rc"
+
+          gh release download "$LKG_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --dir "$lkg"
+          gh release download "$RC_TAG" --repo "$RELEASE_OWNER/$RELEASE_REPOSITORY" --dir "$rc"
+          test "$(find "$lkg" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 5
+          test "$(find "$rc" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 4
+          for asset in "$LKG_ARCHIVE_ASSET" "$LKG_CATALOG_ASSET" "$LKG_ENVELOPE_ASSET" "$LKG_CONFIG_ASSET" "$LKG_METADATA_ASSET"; do
+            test -f "$lkg/$asset"
+            chmod 600 "$lkg/$asset"
+          done
+          test -f "$SOURCE_AUTHORITY_CONFIG"
+          cmp "$SOURCE_AUTHORITY_CONFIG" "$lkg/$LKG_CONFIG_ASSET"
+          for asset in "$RC_ARCHIVE_ASSET" "$RC_CATALOG_ASSET" "$RC_ENVELOPE_ASSET" "$RC_METADATA_ASSET"; do
+            test -f "$rc/$asset"
+            cp "$rc/$asset" "$rc_verify/$asset"
+            chmod 600 "$rc/$asset" "$rc_verify/$asset"
+          done
+
+          AUTHORITY_CONFIG="$SOURCE_AUTHORITY_CONFIG" RC_VERIFY_BUNDLE="$rc_verify" \
+            PUBLIC_KEY_FILE="$release_root/release-public.pem" KEY_METADATA_FILE="$release_root/trusted-key.json" \
+            node --input-type=module <<'NODE'
+          import { createPublicKey } from "node:crypto";
+          import { readFileSync, writeFileSync } from "node:fs";
+          import { join } from "node:path";
+          import { encodeCanonicalCatalog } from "@simulator/module-release-trust";
+          const authority = JSON.parse(readFileSync(process.env.AUTHORITY_CONFIG, "utf8"));
+          if (authority?.schemaVersion !== 1 || authority?.moduleId !== "org.simulator.open-design" ||
+              authority?.version !== "0.14.5" || authority?.platform !== "darwin-arm64" ||
+              !Array.isArray(authority?.trustedKeys) || authority.trustedKeys.length !== 1) {
+            throw new Error("Stable authority configuration is invalid");
+          }
+          const trusted = authority.trustedKeys[0];
+          if (trusted?.keyId !== "open-design-release-2026-01" ||
+              typeof trusted?.publicKey !== "string" ||
+              typeof trusted?.activeFrom !== "string" ||
+              typeof trusted?.activeUntil !== "string") {
+            throw new Error("Stable release key authority is invalid");
+          }
+          const raw = Buffer.from(trusted.publicKey, "base64");
+          if (raw.length !== 32 || raw.toString("base64") !== trusted.publicKey) {
+            throw new Error("Stable Ed25519 public key is non-canonical");
+          }
+          const publicKey = createPublicKey({
+            key: { kty: "OKP", crv: "Ed25519", x: raw.toString("base64url") },
+            format: "jwk",
+          }).export({ type: "spki", format: "pem" });
+          writeFileSync(process.env.PUBLIC_KEY_FILE, publicKey, { mode: 0o600, flag: "wx" });
+          const rc = {
+            schemaVersion: 1,
+            moduleId: "org.simulator.open-design",
+            version: "0.14.6-rc.1",
+            platform: "darwin-arm64",
+            catalogUrl: "https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.6-rc.1/org.simulator.open-design-0.14.6-rc.1-catalog-v2-envelope.json",
+            githubRelease: { owner: "Jiachi-Deng", repository: "Simulator", tag: "open-design-v0.14.6-rc.1" },
+            trustedKeys: [trusted],
+          };
+          writeFileSync(join(process.env.RC_VERIFY_BUNDLE, "open-design-official-channel.json"),
+            encodeCanonicalCatalog(rc), { mode: 0o600, flag: "wx" });
+          writeFileSync(process.env.KEY_METADATA_FILE,
+            JSON.stringify({ keyId: trusted.keyId, activeFrom: trusted.activeFrom, activeUntil: trusted.activeUntil }),
+            { mode: 0o600, flag: "wx" });
+          NODE
+
+          key_id=$(jq -er .keyId "$release_root/trusted-key.json")
+          key_active_from=$(jq -er .activeFrom "$release_root/trusted-key.json")
+          key_active_until=$(jq -er .activeUntil "$release_root/trusted-key.json")
+          read_catalog_state() {
+            node -e '
+              const fs = require("node:fs");
+              const value = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+              const issuedAtMs = Date.parse(value.issuedAt);
+              if (!Number.isSafeInteger(value.sequence) || value.sequence < 1 ||
+                  !Number.isFinite(issuedAtMs) || new Date(issuedAtMs).toISOString() !== value.issuedAt) process.exit(1);
+              process.stdout.write(JSON.stringify({ sequence: value.sequence, issuedAt: value.issuedAt, verificationTime: issuedAtMs + 1000 }));
+            ' "$1"
+          }
+
+          lkg_catalog=$(read_catalog_state "$lkg/$LKG_CATALOG_ASSET")
+          rc_catalog=$(read_catalog_state "$rc/$RC_CATALOG_ASSET")
+          test "$(jq -er .expiresAt "$lkg/$LKG_CATALOG_ASSET")" = "$(jq -er .lkg.expiresAt "$ACCEPTANCE_INTAKE")"
+          test "$(jq -er .expiresAt "$rc/$RC_CATALOG_ASSET")" = "$(jq -er .rc.expiresAt "$ACCEPTANCE_INTAKE")"
+          node modules/open-design/package/production-cli.mjs \
+            --module-version "$LKG_VERSION" --verify --bundle-root "$lkg" --release-tag "$LKG_TAG" \
+            --key-id "$key_id" --key-active-from "$key_active_from" --key-active-until "$key_active_until" \
+            --public-key-file "$release_root/release-public.pem" --previous-sequence 0 \
+            --verification-time "$(jq -r .verificationTime <<<"$lkg_catalog")" > "$verify_output/lkg.json"
+          node modules/open-design/package/production-cli.mjs \
+            --module-version "$RC_VERSION" --verify --bundle-root "$rc_verify" --release-tag "$RC_TAG" \
+            --key-id "$key_id" --key-active-from "$key_active_from" --key-active-until "$key_active_until" \
+            --public-key-file "$release_root/release-public.pem" \
+            --previous-sequence "$(jq -r .sequence <<<"$lkg_catalog")" \
+            --previous-issued-at "$(jq -r .issuedAt <<<"$lkg_catalog")" \
+            --verification-time "$(jq -r .verificationTime <<<"$rc_catalog")" > "$verify_output/rc.json"
+
+          jq -e \
+            --argjson sequence "$(jq -er .lkg.catalogSequence "$ACCEPTANCE_INTAKE")" \
+            --arg issuedAt "$(jq -er .lkg.catalogIssuedAt "$ACCEPTANCE_INTAKE")" \
+            --arg archiveSha "$(jq -er .lkg.archiveSha256 "$ACCEPTANCE_INTAKE")" \
+            --arg extractedSha "$(jq -er .lkg.extractedManifestSha256 "$ACCEPTANCE_INTAKE")" '
+            .ok == true and .version == "0.14.5" and
+            .catalogState.highestSequence == $sequence and .catalogState.latestIssuedAt == $issuedAt and
+            .archiveSha256 == $archiveSha and .extractedManifestSha256 == $extractedSha
+          ' "$verify_output/lkg.json" >/dev/null
+          jq -e \
+            --argjson sequence "$(jq -er .rcCatalogSequence "$ACCEPTANCE_SUMMARY")" \
+            --arg issuedAt "$(jq -er .rcCatalogIssuedAt "$ACCEPTANCE_SUMMARY")" \
+            --arg archiveSha "$(jq -er .rcArchiveSha256 "$ACCEPTANCE_SUMMARY")" \
+            --arg extractedSha "$(jq -er .rcExtractedManifestSha256 "$ACCEPTANCE_SUMMARY")" '
+            .ok == true and .version == "0.14.6-rc.1" and
+            .catalogState.highestSequence == $sequence and .catalogState.latestIssuedAt == $issuedAt and
+            .archiveSha256 == $archiveSha and .extractedManifestSha256 == $extractedSha
+          ' "$verify_output/rc.json" >/dev/null
+          test "$(shasum -a 256 "$rc/$RC_ARCHIVE_ASSET" | awk '{print $1}')" = \
+            "$(jq -er .rcArchiveSha256 "$ACCEPTANCE_SUMMARY")"
+          test "$(shasum -a 256 "$lkg/$LKG_ARCHIVE_ASSET" | awk '{print $1}')" = \
+            "$(jq -er .lkg.archiveSha256 "$ACCEPTANCE_INTAKE")"
+
+      - name: Seal exact downstream evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          test "$(find "$ACCEPTANCE_OUTPUT" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 2
+          (
+            cd "$ACCEPTANCE_OUTPUT"
+            shasum -a 256 \
+              open-design-rc-acceptance-evidence.json \
+              open-design-rc-acceptance-intake.json > SHA256SUMS
+            test "$(wc -l < SHA256SUMS | tr -d ' ')" = 2
+            shasum -a 256 -c SHA256SUMS
+          )
+          test "$(find "$ACCEPTANCE_OUTPUT" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 3
+
+      - name: Upload immutable acceptance evidence
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: open-design-rc-acceptance-evidence
+          path: ${{ env.ACCEPTANCE_OUTPUT }}/
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          overwrite: false
+
+      - name: Record attestation boundary
+        shell: bash
+        run: |
+          cat >> "$GITHUB_STEP_SUMMARY" <<'EOF'
+          The fixed OpenDesign M1 evidence was structurally validated and bound to
+          authenticated Required CI, Host artifact, RC tag, Release assets, and
+          signed Catalog state. The exact sanitized intake, its digest, and both
+          offline evidence authority references were retained for downstream audit.
+          This workflow did not run a model, spend a paid
+          Turn, inspect private evidence, or make a human Preview decision.
+          EOF
