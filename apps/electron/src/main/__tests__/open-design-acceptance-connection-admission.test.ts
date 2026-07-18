@@ -44,7 +44,13 @@ async function harness() {
     ['connection-a', connection('connection-a')],
     ['connection-b', connection('connection-b')],
   ])
-  const oauth = new Map([
+  type OAuthCredential = {
+    accessToken: string
+    refreshToken?: string
+    idToken?: string
+    expiresAt?: number
+  }
+  const oauth = new Map<string, OAuthCredential>([
     ['connection-a', { accessToken: jwt('issuer', 'account-a') }],
     ['connection-b', { accessToken: jwt('issuer', 'account-b') }],
   ])
@@ -114,6 +120,7 @@ async function harness() {
     setWorkspaceModel: (model: string) => { workspaceModel = model },
     setActiveWorkspace: (id: string) => { activeWorkspaceId = id },
     setCredential: (slug: string, accessToken: string) => { oauth.set(slug, { accessToken }) },
+    setOAuth: (slug: string, value: OAuthCredential) => { oauth.set(slug, value) },
     setConnection: (slug: string, value: LlmConnection) => { connections.set(slug, value) },
     setApiKey: (slug: string, value: string) => { apiKeys.set(slug, value) },
     setIam: (slug: string, value: { accessKeyId: string; secretAccessKey: string }) => {
@@ -126,6 +133,14 @@ async function harness() {
 }
 
 describe('OpenDesignAcceptanceConnectionAdmission', () => {
+  const approvedRuntime = Object.freeze({
+    workspaceId: 'workspace',
+    connectionSlug: 'connection-b',
+    provider: 'pi' as const,
+    authType: 'oauth' as const,
+    resolvedModel: 'gpt-5.6',
+  })
+
   it('pins only the effective authenticated Connection and exposes no raw identity', async () => {
     const fixture = await harness()
     const proof = await fixture.admission.getConnectionAuthority({ keyBase64: fixture.keyA })
@@ -139,7 +154,12 @@ describe('OpenDesignAcceptanceConnectionAdmission', () => {
       keyBase64: fixture.keyA,
       expectedHmacSha256: proof.authorityHmacSha256,
     })
-    await expect(fixture.admission.admit('workspace')).resolves.toEqual({ llmConnection: 'connection-b' })
+    await expect(fixture.admission.admit('workspace')).resolves.toEqual({
+      llmConnection: 'connection-b',
+      provider: 'pi',
+      authType: 'oauth',
+      resolvedModel: 'gpt-5.6',
+    })
   })
 
   it('rejects wrong keys, wrong HMACs, and every unarmed admission', async () => {
@@ -192,31 +212,57 @@ describe('OpenDesignAcceptanceConnectionAdmission', () => {
         expectedHmacSha256: proof.authorityHmacSha256,
       })
       drift(fixture)
-      await expect(fixture.admission.assertConnection({
-        workspaceId: 'workspace',
-        llmConnection: 'connection-b',
-      })).rejects.toThrow()
+      await expect(fixture.admission.assertConnection(approvedRuntime)).rejects.toThrow()
     }
   })
 
-  it('uses stable OAuth iss/sub identity across token refresh but not account changes', async () => {
+  it('binds the full OAuth generation instead of trusting unverified JWT claims', async () => {
     const fixture = await harness()
+    fixture.setOAuth('connection-b', {
+      accessToken: jwt('issuer', 'access-account-b'),
+      idToken: jwt('issuer', 'display-account-a'),
+      refreshToken: 'refresh-a',
+      expiresAt: 100,
+    })
     const proof = await fixture.admission.getConnectionAuthority({ keyBase64: fixture.keyA })
+    expect(JSON.stringify(proof)).not.toContain('access-account-b')
+    expect(JSON.stringify(proof)).not.toContain('display-account-a')
+    expect(JSON.stringify(proof)).not.toContain('refresh-a')
     await fixture.admission.armConnectionAdmission({
       keyBase64: fixture.keyA,
       expectedHmacSha256: proof.authorityHmacSha256,
     })
-    fixture.setCredential('connection-b', jwt('issuer', 'account-b', 'rotated-token'))
-    await expect(fixture.admission.assertConnection({
-      workspaceId: 'workspace', llmConnection: 'connection-b',
+
+    const rotations = [
+      { accessToken: jwt('issuer', 'access-account-c'), idToken: jwt('issuer', 'display-account-a'), refreshToken: 'refresh-a', expiresAt: 100 },
+      { accessToken: jwt('issuer', 'access-account-b'), idToken: jwt('issuer', 'display-account-a'), refreshToken: 'refresh-b', expiresAt: 100 },
+      { accessToken: jwt('issuer', 'access-account-b'), idToken: jwt('issuer', 'display-account-c'), refreshToken: 'refresh-a', expiresAt: 100 },
+      { accessToken: jwt('issuer', 'access-account-b'), idToken: jwt('issuer', 'display-account-a'), refreshToken: 'refresh-a', expiresAt: 200 },
+    ]
+    for (const rotated of rotations) {
+      fixture.setOAuth('connection-b', rotated)
+      await expect(fixture.admission.assertConnection(approvedRuntime)).rejects.toThrow('drifted')
+      fixture.setOAuth('connection-b', {
+        accessToken: jwt('issuer', 'access-account-b'),
+        idToken: jwt('issuer', 'display-account-a'),
+        refreshToken: 'refresh-a',
+        expiresAt: 100,
+      })
+    }
+
+    await expect(fixture.admission.assertCredential({
+      workspaceId: 'workspace',
+      llmConnection: 'connection-b',
+      credential: { kind: 'oauth-access', accessToken: jwt('issuer', 'access-account-b') },
     })).resolves.toBeUndefined()
-    fixture.setCredential('connection-b', jwt('issuer', 'account-c'))
-    await expect(fixture.admission.assertConnection({
-      workspaceId: 'workspace', llmConnection: 'connection-b',
-    })).rejects.toThrow('drifted')
+    await expect(fixture.admission.assertCredential({
+      workspaceId: 'workspace',
+      llmConnection: 'connection-b',
+      credential: { kind: 'oauth-access', accessToken: jwt('issuer', 'access-account-c') },
+    })).rejects.toThrow('credential mismatch')
   })
 
-  it('keeps API key, IAM, and service-account identities inside the HMAC and detects rotation', async () => {
+  it('keeps API key and IAM identities inside the HMAC and detects rotation', async () => {
     const cases = [
       {
         authType: 'api_key' as const,
@@ -234,14 +280,6 @@ describe('OpenDesignAcceptanceConnectionAdmission', () => {
           fixture.setIam('connection-b', { accessKeyId: 'AKIAFIXTURE', secretAccessKey: value })
         ),
       },
-      {
-        authType: 'service_account_file' as const,
-        first: '{"private_key":"service-secret-first"}',
-        second: '{"private_key":"service-secret-second"}',
-        set: (fixture: Awaited<ReturnType<typeof harness>>, value: string) => (
-          fixture.setServiceAccount('connection-b', { serviceAccountJson: value })
-        ),
-      },
     ]
     for (const credentialCase of cases) {
       const fixture = await harness()
@@ -255,8 +293,41 @@ describe('OpenDesignAcceptanceConnectionAdmission', () => {
       })
       credentialCase.set(fixture, credentialCase.second)
       await expect(fixture.admission.assertConnection({
-        workspaceId: 'workspace', llmConnection: 'connection-b',
+        ...approvedRuntime,
+        authType: credentialCase.authType,
       })).rejects.toThrow('drifted')
     }
+  })
+
+  it('rejects keyless, environment, and unsupported credential types for paid authority', async () => {
+    for (const authType of ['none', 'environment', 'service_account_file'] as const) {
+      const fixture = await harness()
+      fixture.setConnection('connection-b', connection('connection-b', { authType }))
+      await expect(fixture.admission.getConnectionAuthority({
+        keyBase64: fixture.keyA,
+      })).rejects.toThrow()
+    }
+  })
+
+  it('serializes concurrent arm attempts and preserves the first authority key', async () => {
+    const fixture = await harness()
+    const proofA = await fixture.admission.getConnectionAuthority({ keyBase64: fixture.keyA })
+    const proofB = await fixture.admission.getConnectionAuthority({ keyBase64: fixture.keyB })
+    const [first, second] = await Promise.allSettled([
+      fixture.admission.armConnectionAdmission({
+        keyBase64: fixture.keyA,
+        expectedHmacSha256: proofA.authorityHmacSha256,
+      }),
+      fixture.admission.armConnectionAdmission({
+        keyBase64: fixture.keyB,
+        expectedHmacSha256: proofB.authorityHmacSha256,
+      }),
+    ])
+    expect(first.status).toBe('fulfilled')
+    expect(second.status).toBe('rejected')
+    await expect(fixture.admission.armConnectionAdmission({
+      keyBase64: fixture.keyA,
+      expectedHmacSha256: proofA.authorityHmacSha256,
+    })).resolves.toMatchObject({ armed: true })
   })
 })

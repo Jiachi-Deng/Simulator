@@ -46,6 +46,15 @@ const ALL_PREVIEWABLE = new Set([...IMAGE_EXTENSIONS, ...OS_THUMBNAIL_EXTENSIONS
 const cache = new Map<string, { mtime: number; data: Buffer }>()
 
 /**
+ * Host-owned authorization seam for renderer-originated filesystem paths.
+ *
+ * The thumbnail protocol is renderer reachable, so it must use the same path
+ * authority as RPC filesystem handlers before it observes filesystem state or
+ * consults its cache.
+ */
+export type ThumbnailPathAuthority = (filePath: string) => Promise<void>
+
+/**
  * Evict oldest entries when cache exceeds max size.
  * Map iterates in insertion order, so first entries are oldest.
  */
@@ -131,7 +140,11 @@ export function registerThumbnailScheme(): void {
  *   macOS:   thumbnail://thumb/%2FUsers%2Ffoo%2Fimage.png
  *   Windows: thumbnail://thumb/C%3A%5CUsers%5Cfoo%5Cimage.png
  */
-export function registerThumbnailHandler(): void {
+export function registerThumbnailHandler(assertRendererPathAccess: ThumbnailPathAuthority): void {
+  if (typeof assertRendererPathAccess !== 'function') {
+    throw new Error('Thumbnail path authority is required')
+  }
+
   protocol.handle('thumbnail', async (request) => {
     try {
       // Parse the file path from the URL
@@ -143,6 +156,15 @@ export function registerThumbnailHandler(): void {
       // Basic validation: must be an absolute path (works on all platforms)
       if (!filePath || !isAbsolute(filePath)) {
         return new Response(null, { status: 400 })
+      }
+
+      // Fail closed before stat, cache lookup, or thumbnail generation. This
+      // check intentionally runs on every request so an entry cached while a
+      // path was visible cannot outlive a later transient/quarantine boundary.
+      try {
+        await assertRendererPathAccess(filePath)
+      } catch {
+        return new Response(null, { status: 404 })
       }
 
       // Check file extension is previewable

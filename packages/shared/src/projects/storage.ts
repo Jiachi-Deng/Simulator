@@ -17,8 +17,10 @@ import {
   writeFileSync,
   unlinkSync,
   readFileSync,
+  lstatSync,
+  realpathSync,
 } from 'fs';
-import { basename, extname, join } from 'path';
+import { basename, dirname, extname, join } from 'path';
 import { randomUUID } from 'crypto';
 import { atomicWriteFileSync, readJsonFileSync, getMimeType } from '../utils/files.ts';
 import { debug } from '../utils/debug.ts';
@@ -45,7 +47,16 @@ export function getWorkspaceProjectsPath(workspaceRootPath: string): string {
 /**
  * Get path to a project folder within a workspace.
  */
+export function validateProjectSlug(projectSlug: string): void {
+  if (!projectSlug || typeof projectSlug !== 'string' || projectSlug === '.' || projectSlug === '..'
+    || basename(projectSlug) !== projectSlug || projectSlug.includes('/')
+    || projectSlug.includes('\\') || projectSlug.includes('\0')) {
+    throw new Error('Invalid project slug');
+  }
+}
+
 export function getProjectPath(workspaceRootPath: string, projectSlug: string): string {
+  validateProjectSlug(projectSlug);
   return join(getWorkspaceProjectsPath(workspaceRootPath), projectSlug);
 }
 
@@ -336,8 +347,18 @@ export function updateProject(
  * Caller is responsible for unsetting `projectId` on sessions that referenced it.
  */
 export function deleteProject(workspaceRootPath: string, projectSlug: string): void {
+  validateProjectSlug(projectSlug);
   const dir = getProjectPath(workspaceRootPath, projectSlug);
   if (existsSync(dir)) {
+    const entry = lstatSync(dir);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw new Error('Project path is not a direct directory');
+    }
+    const projectsRootReal = realpathSync(getWorkspaceProjectsPath(workspaceRootPath));
+    const projectDirReal = realpathSync(dir);
+    if (dirname(projectDirReal) !== projectsRootReal) {
+      throw new Error('Project path escapes workspace projects directory');
+    }
     rmSync(dir, { recursive: true });
   }
 }

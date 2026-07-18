@@ -37,6 +37,7 @@ export {
   // Directory utilities
   ensureSourcesDir,
   getSourcePath,
+  validateSourceSlug,
   // Config operations
   loadSourceConfig,
   saveSourceConfig,

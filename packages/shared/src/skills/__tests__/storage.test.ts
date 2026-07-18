@@ -14,7 +14,7 @@
  * baseline count and validating relative to it.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync } from 'fs';
 import { homedir, tmpdir } from 'os';
 import { join } from 'path';
 import {
@@ -116,6 +116,20 @@ afterEach(() => {
   if (tempDir && existsSync(tempDir)) {
     rmSync(tempDir, { recursive: true, force: true });
   }
+});
+
+describe('skill path containment', () => {
+  it('rejects traversal and never follows a direct-child symlink during delete', () => {
+    const moduleDir = join(workspaceRoot, 'sessions', 'module-secret');
+    const sentinel = join(moduleDir, 'session.jsonl');
+    mkdirSync(moduleDir, { recursive: true });
+    writeFileSync(sentinel, 'private');
+
+    expect(() => deleteSkill(workspaceRoot, '../sessions/module-secret')).toThrow('Invalid skill slug');
+    symlinkSync(moduleDir, join(workspaceRoot, 'skills', 'linked-module'), 'dir');
+    expect(deleteSkill(workspaceRoot, 'linked-module')).toBe(false);
+    expect(existsSync(sentinel)).toBe(true);
+  });
 });
 
 // ============================================================

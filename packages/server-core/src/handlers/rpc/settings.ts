@@ -73,12 +73,14 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
 
   // Get session-specific model
   server.handle(RPC_CHANNELS.sessions.GET_MODEL, async (_ctx, sessionId: string, _workspaceId: string): Promise<string | null> => {
+    deps.sessionManager.assertRendererSessionAccess(sessionId)
     const session = await deps.sessionManager.getSession(sessionId)
     return session?.model ?? null
   })
 
   // Set session-specific model (and optionally connection)
   server.handle(RPC_CHANNELS.sessions.SET_MODEL, async (_ctx, sessionId: string, workspaceId: string, model: string | null, connection?: string) => {
+    deps.sessionManager.assertRendererSessionAccess(sessionId)
     await deps.sessionManager.updateSessionModel(sessionId, workspaceId, model, connection)
     deps.platform.logger.info(`Session ${sessionId} model updated to: ${model}${connection ? ` (connection: ${connection})` : ''}`)
   })
@@ -107,6 +109,14 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
     // Load workspace config
     const { loadWorkspaceConfig } = await import('@craft-agent/shared/workspaces')
     const config = loadWorkspaceConfig(workspace.rootPath)
+    let workingDirectory = config?.defaults?.workingDirectory
+    if (workingDirectory) {
+      try {
+        await deps.sessionManager.assertRendererPathAccess(workingDirectory)
+      } catch {
+        workingDirectory = undefined
+      }
+    }
 
     return {
       name: config?.name,
@@ -114,7 +124,7 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
       permissionMode: config?.defaults?.permissionMode,
       cyclablePermissionModes: config?.defaults?.cyclablePermissionModes,
       thinkingLevel: normalizeThinkingLevel(config?.defaults?.thinkingLevel),
-      workingDirectory: config?.defaults?.workingDirectory,
+      workingDirectory,
       localMcpEnabled: config?.localMcpServers?.enabled ?? true,
       defaultLlmConnection: config?.defaults?.defaultLlmConnection,
       enabledSourceSlugs: config?.defaults?.enabledSourceSlugs ?? [],
@@ -147,6 +157,7 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
       if (!validation.valid) {
         throw new Error(validation.reason!)
       }
+      await deps.sessionManager.assertRendererPathAccess(String(normalizedValue))
     }
 
     const { loadWorkspaceConfig, saveWorkspaceConfig } = await import('@craft-agent/shared/workspaces')
@@ -205,22 +216,28 @@ export function registerSettingsHandlers(server: RpcServer, deps: HandlerDeps): 
 
   // Get draft for a session (text + attachment refs)
   server.handle(RPC_CHANNELS.drafts.GET, async (_ctx, sessionId: string) => {
+    deps.sessionManager.assertRendererSessionAccess(sessionId)
     return getSessionDraft(sessionId)
   })
 
   // Set draft for a session (empty drafts are cleared)
   server.handle(RPC_CHANNELS.drafts.SET, async (_ctx, sessionId: string, draft: import('@craft-agent/shared/config').SessionDraft) => {
+    deps.sessionManager.assertRendererSessionAccess(sessionId)
     setSessionDraft(sessionId, draft)
   })
 
   // Delete draft for a session
   server.handle(RPC_CHANNELS.drafts.DELETE, async (_ctx, sessionId: string) => {
+    deps.sessionManager.assertRendererSessionAccess(sessionId)
     deleteSessionDraft(sessionId)
   })
 
   // Get all drafts (for loading on app start)
   server.handle(RPC_CHANNELS.drafts.GET_ALL, async () => {
-    return getAllSessionDrafts()
+    return Object.fromEntries(
+      Object.entries(getAllSessionDrafts())
+        .filter(([sessionId]) => !deps.sessionManager.isRendererSessionHidden(sessionId)),
+    )
   })
 
   // ============================================================

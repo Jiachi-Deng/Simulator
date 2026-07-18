@@ -26,7 +26,7 @@ import { join, basename } from 'path';
 import { getWorkspaceSessionsPath } from '../workspaces/storage.ts';
 import { generateUniqueSessionId } from './slug-generator.ts';
 import { toPortablePath, expandPath } from '../utils/paths.ts';
-import { sanitizeSessionId } from './validation.ts';
+import { sanitizeSessionId, validateSessionId } from './validation.ts';
 import { perf } from '../utils/perf.ts';
 import type {
   SessionConfig,
@@ -212,12 +212,20 @@ export async function createSession(
     taskNodeId?: string;
     taskDraft?: boolean;
     moduleAgentRun?: SessionConfig['moduleAgentRun'];
-  }
+  },
+  internal?: {
+    /** Host-preallocated ID used to install isolation before the first write. */
+    sessionId?: string;
+  },
 ): Promise<SessionConfig> {
   ensureSessionsDir(workspaceRootPath);
 
   const now = Date.now();
-  const sessionId = generateSessionId(workspaceRootPath);
+  const sessionId = internal?.sessionId ?? generateSessionId(workspaceRootPath);
+  validateSessionId(sessionId);
+  if (internal?.sessionId && existsSync(getSessionPath(workspaceRootPath, sessionId))) {
+    throw new Error(`Session ${sessionId} already exists`);
+  }
   const ownsSessionDirectory = !existsSync(getSessionPath(workspaceRootPath, sessionId));
 
   // Create session directory with all subdirectories (plans, attachments)
@@ -407,6 +415,10 @@ export function listSessions(workspaceRootPath: string): SessionMetadata[] {
 
   for (const entry of entries) {
     if (entry.isDirectory()) {
+      if (entry.name.startsWith('.session-import-')) {
+        try { rmSync(join(sessionsDir, entry.name), { recursive: true, force: true }); } catch { /* retry next startup */ }
+        continue;
+      }
       const sessionId = entry.name;
       const sessionDir = join(sessionsDir, sessionId);
       const jsonlFile = join(sessionDir, 'session.jsonl');
@@ -421,7 +433,19 @@ export function listSessions(workspaceRootPath: string): SessionMetadata[] {
       if (existsSync(jsonlFile)) {
         const header = readSessionHeader(jsonlFile);
         if (header) {
-          const metadata = headerToMetadata(header, workspaceRootPath);
+          // The directory name is the filesystem authority. Trusting a
+          // mismatched header id lets one folder redirect startup quarantine or
+          // deletion onto another Session. Ordinary mismatches are ignored;
+          // Module-owned mismatches retain the ownership marker but are bound
+          // to the actual folder so Host recovery can reap only that folder.
+          if (header.id !== sessionId && !Object.hasOwn(header, 'moduleAgentRun')) {
+            debug(`[sessions] Ignoring Session with mismatched folder/header identity: folder=${sessionId}`);
+            continue;
+          }
+          const authoritativeHeader = header.id === sessionId
+            ? header
+            : { ...header, id: sessionId };
+          const metadata = headerToMetadata(authoritativeHeader, workspaceRootPath);
           if (metadata) sessions.push(metadata);
         }
       }

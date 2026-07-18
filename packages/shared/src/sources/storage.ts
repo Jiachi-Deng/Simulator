@@ -8,8 +8,8 @@
  * NOT a workspace slug. The `LoadedSource.workspaceId` is derived via basename().
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync } from 'fs';
-import { join, basename } from 'path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, readdirSync, rmSync, lstatSync, realpathSync } from 'fs';
+import { join, basename, dirname } from 'path';
 import { randomUUID } from 'crypto';
 import type {
   FolderSourceConfig,
@@ -42,7 +42,16 @@ import {
 /**
  * Get path to a source folder within a workspace
  */
+export function validateSourceSlug(sourceSlug: string): void {
+  if (!sourceSlug || typeof sourceSlug !== 'string' || sourceSlug === '.' || sourceSlug === '..'
+    || basename(sourceSlug) !== sourceSlug || sourceSlug.includes('/')
+    || sourceSlug.includes('\\') || sourceSlug.includes('\0')) {
+    throw new Error('Invalid source slug');
+  }
+}
+
 export function getSourcePath(workspaceRootPath: string, sourceSlug: string): string {
+  validateSourceSlug(sourceSlug);
   return join(getWorkspaceSourcesPath(workspaceRootPath), sourceSlug);
 }
 
@@ -595,8 +604,18 @@ export async function createSource(
  * Delete a source from a workspace
  */
 export function deleteSource(workspaceRootPath: string, sourceSlug: string): void {
+  validateSourceSlug(sourceSlug);
   const dir = getSourcePath(workspaceRootPath, sourceSlug);
   if (existsSync(dir)) {
+    const entry = lstatSync(dir);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw new Error('Source path is not a direct directory');
+    }
+    const sourcesRootReal = realpathSync(getWorkspaceSourcesPath(workspaceRootPath));
+    const sourceDirReal = realpathSync(dir);
+    if (dirname(sourceDirReal) !== sourcesRootReal) {
+      throw new Error('Source path escapes workspace sources directory');
+    }
     rmSync(dir, { recursive: true });
   }
 }
@@ -620,4 +639,3 @@ export function sourceExists(workspaceRootPath: string, sourceSlug: string): boo
 // ============================================================
 
 export { parseGuideMarkdown };
-

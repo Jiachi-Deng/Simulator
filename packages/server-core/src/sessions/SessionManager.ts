@@ -1,12 +1,20 @@
 import type { EventSink, RpcServer } from '@craft-agent/server-core/transport'
 import { CLIENT_BROWSER_INVOKE } from '@craft-agent/server-core/transport'
-import type { ISessionManager, IBrowserPaneManager, ExecutePromptAutomationInput, InternalCreateSessionOptions, VisibleCraftTurnStateListener } from '@craft-agent/server-core/handlers'
+import type {
+  ISessionManager,
+  IBrowserPaneManager,
+  ExecutePromptAutomationInput,
+  InternalCreateSessionOptions,
+  ModuleAgentCredentialAuthorityAssertion,
+  ModuleAgentRuntimeAuthorityAssertion,
+  VisibleCraftTurnStateListener,
+} from '@craft-agent/server-core/handlers'
 import { RemoteBrowserPaneManager } from './RemoteBrowserPaneManager'
 import { validateFilePath, getWorkspaceAllowedDirs } from '@craft-agent/server-core/handlers'
 import { createScopedLogger, CONSOLE_LOGGER, type PlatformServices, type Logger } from '@craft-agent/server-core/runtime'
-import { basename, dirname, join } from 'path'
-import { existsSync } from 'fs'
-import { chmod, lstat, mkdir, readFile, realpath, rename, writeFile } from 'fs/promises'
+import { basename, dirname, join, resolve, sep } from 'path'
+import { existsSync, renameSync, rmSync } from 'fs'
+import { chmod, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
 import { type AgentEvent, setPermissionMode, hydratePreviousPermissionMode, getPermissionModeDiagnostics, type PermissionMode, unregisterSessionScopedToolCallbacks, mergeSessionScopedToolCallbacks, AbortReason, type AuthRequest, type AuthResult, type CredentialAuthRequest, type BrowserPaneFns, generateConversationSummary, resolveKeepBackgroundTasksAlive, markModuleAgentSession, registerModuleAgentToolBoundary, unregisterModuleAgentToolBoundary } from '@craft-agent/shared/agent'
 import {
@@ -18,6 +26,7 @@ import {
   providerTypeToAgentProvider,
   type AgentBackend,
   type BackendHostRuntimeContext,
+  type BackendRuntimeAuthoritySnapshot,
   type PostInitResult,
 } from '@craft-agent/shared/agent/backend'
 import { getLlmConnection, getLlmConnections, getDefaultLlmConnection, getDefaultThinkingLevel, resetManagedAnthropicAuthEnvVars, resolveMidStreamBehavior, getPersistedUiLanguage, resolveTitleLanguageName } from '@craft-agent/shared/config'
@@ -64,6 +73,7 @@ import {
   writeSessionJsonl,
   serializeSession,
   validateBundle,
+  validateSessionId,
   type SessionBundle,
   type DispatchMode,
   type StoredSession,
@@ -1249,6 +1259,12 @@ interface ModuleAgentAdmissionClaim {
   reject: (error: Error) => void
 }
 
+interface TransientModuleCreationClaim {
+  readonly completed: Promise<void>
+  failure?: Readonly<{ error: unknown }>
+  resolve: () => void
+}
+
 class ModuleAgentAdmissionError extends Error {
   constructor(message = 'Transient Module provider admission is no longer authorized') {
     super(message)
@@ -1265,6 +1281,14 @@ export class SessionManager implements ISessionManager {
    * temporarily unavailable, so reload/open/queue paths remain fail-closed.
    */
   private malformedModuleAgentSessionIds = new Set<string>()
+  /** Exact cleanup-debt paths, partitioned by workspace for fail-closed removal. */
+  private malformedModuleAgentResidues = new Map<string, Map<string, Set<string>>>()
+  /**
+   * Durable-in-process egress fence for Module-owned storage. Entries are not
+   * removed after reap: a stale renderer path must not become readable during
+   * the delete transaction or if the same directory is unexpectedly recreated.
+   */
+  private moduleAgentProtectedPaths = new Set<string>()
   /** Serialize ordinary active-state transitions per transient Session. */
   private moduleAgentRunStateTails = new Map<string, Promise<void>>()
   /**
@@ -1278,6 +1302,19 @@ export class SessionManager implements ISessionManager {
    * enqueue the older state while the atomic JSONL write is in flight.
    */
   private moduleAgentRunPersistenceOverrides = new Map<string, ModuleAgentRunMetadata>()
+  /**
+   * Module Session creation is tracked from its first synchronous admission
+   * check until the Session is either registered or rejected. Workspace
+   * removal waits on these claims before taking its cleanup snapshot.
+   */
+  private transientModuleCreations = new Map<string, Set<TransientModuleCreationClaim>>()
+  /**
+   * A workspace enters this fence synchronously when direct removal starts.
+   * Cleanup failures intentionally leave the fence in place so a failed reap
+   * cannot be followed by another transient provider admission.
+   */
+  private moduleAgentWorkspaceRemovalFences = new Set<string>()
+  private moduleAgentWorkspaceRemovalOperations = new Map<string, Promise<unknown>>()
   /** v2 provider-admission claims; never exposed to renderer/RPC callers. */
   private moduleAgentAdmissionRevisions = new Map<string, number>()
   private moduleAgentAdmissions = new Map<string, ModuleAgentAdmissionClaim>()
@@ -2083,6 +2120,9 @@ export class SessionManager implements ISessionManager {
       // Iterate over each workspace and load its sessions
       for (const workspace of workspaces) {
         const workspaceRootPath = workspace.rootPath
+        await this.rememberModuleAgentProtectedPath(
+          join(workspaceRootPath, 'sessions', '.module-agent-quarantine'),
+        )
         const sessionMetadata = listStoredSessions(workspaceRootPath)
         // Load workspace config once per workspace for default working directory
         const wsConfig = loadWorkspaceConfig(workspaceRootPath)
@@ -2095,6 +2135,8 @@ export class SessionManager implements ISessionManager {
           // never downgrade the session into an ordinary resumable Craft chat.
           if (Object.hasOwn(meta, 'moduleAgentRun')) {
             markModuleAgentSession(meta.id)
+            const moduleSessionPath = getSessionStoragePath(workspaceRootPath, meta.id)
+            await this.rememberModuleAgentProtectedPath(moduleSessionPath)
 
             let ownership: ModuleAgentRunMetadata
             try {
@@ -2117,6 +2159,18 @@ export class SessionManager implements ISessionManager {
                 workspaceRootPath,
                 meta.id,
               )
+              let workspaceResidues = this.malformedModuleAgentResidues.get(workspace.id)
+              if (!workspaceResidues) {
+                workspaceResidues = new Map()
+                this.malformedModuleAgentResidues.set(workspace.id, workspaceResidues)
+              }
+              let sessionResidues = workspaceResidues.get(meta.id)
+              if (!sessionResidues) {
+                sessionResidues = new Set()
+                workspaceResidues.set(meta.id, sessionResidues)
+              }
+              sessionResidues.add(quarantine.path)
+              await this.rememberModuleAgentProtectedPath(quarantine.path)
               sessionLog.error(`Quarantined invalid transient Module session ${meta.id}`, {
                 error: error instanceof Error ? error.message : 'invalid moduleAgentRun metadata',
                 quarantinePath: quarantine.path,
@@ -2685,6 +2739,8 @@ export class SessionManager implements ISessionManager {
     let count = 0
     for (const managed of this.sessions.values()) {
       if (workspaceId && managed.workspace.id !== workspaceId) continue
+      if (this.malformedModuleAgentSessionIds.has(managed.id)) continue
+      if (managed.moduleAgentRun !== undefined) continue
       if (managed.isProcessing) count++
     }
     return count
@@ -2715,6 +2771,8 @@ export class SessionManager implements ISessionManager {
   getActiveSessionsInfo(): ActiveSessionInfo[] {
     const result: ActiveSessionInfo[] = []
     for (const managed of this.sessions.values()) {
+      if (this.malformedModuleAgentSessionIds.has(managed.id)) continue
+      if (managed.moduleAgentRun !== undefined) continue
       if (!managed.isProcessing) continue
 
       let status: SessionProcessingStatus = 'processing'
@@ -2748,6 +2806,7 @@ export class SessionManager implements ISessionManager {
     // Use getSession(id) to load messages for a specific session
     let sessions = Array.from(this.sessions.values())
       .filter((managed) => !this.malformedModuleAgentSessionIds.has(managed.id))
+      .filter((managed) => managed.moduleAgentRun === undefined)
 
     // Filter by workspace if specified (used when switching workspaces)
     if (workspaceId) {
@@ -2757,6 +2816,79 @@ export class SessionManager implements ISessionManager {
     return sessions
       .map(m => managedToSession(m))
       .sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0))
+  }
+
+  assertRendererSessionAccess(sessionId: string): void {
+    if (!this.sessions.has(sessionId) || this.isRendererSessionHidden(sessionId)) {
+      throw new ModuleAgentAdmissionError('Session is unavailable')
+    }
+  }
+
+  isRendererSessionHidden(sessionId: string): boolean {
+    return this.malformedModuleAgentSessionIds.has(sessionId)
+      || this.sessions.get(sessionId)?.moduleAgentRun !== undefined
+  }
+
+  private static pathContains(rootPath: string, candidatePath: string): boolean {
+    const root = resolve(rootPath)
+    const candidate = resolve(candidatePath)
+    return candidate === root || candidate.startsWith(`${root}${sep}`)
+  }
+
+  private async canonicalBoundaryPath(filePath: string): Promise<string> {
+    const absolute = resolve(filePath)
+    try {
+      return await realpath(absolute)
+    } catch {
+      // The protected leaf may already have been reaped or may not exist yet.
+      // Canonicalizing its existing parent still closes workspace-root symlink
+      // aliases without creating the path as a side effect.
+      try {
+        return join(await realpath(dirname(absolute)), basename(absolute))
+      } catch {
+        return absolute
+      }
+    }
+  }
+
+  private async rememberModuleAgentProtectedPath(filePath: string): Promise<void> {
+    this.moduleAgentProtectedPaths.add(resolve(filePath))
+    this.moduleAgentProtectedPaths.add(await this.canonicalBoundaryPath(filePath))
+  }
+
+  async assertRendererPathAccess(filePath: string): Promise<void> {
+    const candidatePaths = new Set<string>([
+      resolve(filePath),
+      await this.canonicalBoundaryPath(filePath),
+    ])
+    const protectedPaths = new Set(this.moduleAgentProtectedPaths)
+
+    // Re-derive live roots as defense in depth if a caller constructed a
+    // transient ManagedSession directly (including tests and recovery seams).
+    for (const managed of this.sessions.values()) {
+      if (managed.moduleAgentRun === undefined) continue
+      const livePath = getSessionStoragePath(managed.workspace.rootPath, managed.id)
+      protectedPaths.add(resolve(livePath))
+      protectedPaths.add(await this.canonicalBoundaryPath(livePath))
+    }
+    // Quarantine contains untrusted ownership headers and transcripts. Hide the
+    // namespace even when it is empty so a renderer cannot race its creation.
+    for (const workspace of getWorkspaces()) {
+      const quarantinePath = join(workspace.rootPath, 'sessions', '.module-agent-quarantine')
+      protectedPaths.add(resolve(quarantinePath))
+      if (!this.moduleAgentProtectedPaths.has(resolve(quarantinePath))) {
+        protectedPaths.add(await this.canonicalBoundaryPath(quarantinePath))
+      }
+    }
+
+    for (const protectedPath of protectedPaths) {
+      const root = resolve(protectedPath)
+      for (const candidate of candidatePaths) {
+        if (SessionManager.pathContains(root, candidate)) {
+          throw new ModuleAgentAdmissionError('Path is unavailable')
+        }
+      }
+    }
   }
 
   /**
@@ -2796,6 +2928,7 @@ export class SessionManager implements ISessionManager {
     }
 
     for (const session of this.sessions.values()) {
+      if (this.malformedModuleAgentSessionIds.has(session.id)) continue
       if (session.hidden || session.isArchived) continue
       if (!session.hasUnread) continue
 
@@ -2846,7 +2979,7 @@ export class SessionManager implements ISessionManager {
   async getSession(sessionId: string): Promise<Session | null> {
     if (this.malformedModuleAgentSessionIds.has(sessionId)) return null
     const m = this.sessions.get(sessionId)
-    if (!m) return null
+    if (!m || m.moduleAgentRun !== undefined) return null
 
     // Lazy-load messages from disk if not yet loaded
     await this.ensureMessagesLoaded(m)
@@ -3212,6 +3345,61 @@ export class SessionManager implements ISessionManager {
     // `{ emitCreatedEvent: false }` to avoid a redundant hydrate.
     internal?: InternalCreateSessionOptions,
   ): Promise<Session> {
+    const moduleAgentRun = internal?.moduleAgentRun === undefined
+      ? undefined
+      : parseModuleAgentRunMetadata(internal.moduleAgentRun)
+    if (!moduleAgentRun) {
+      return this.createSessionInternal(workspaceId, options, internal)
+    }
+
+    const workspace = getWorkspaceByNameOrId(workspaceId)
+    if (!workspace) {
+      throw new Error(`Workspace ${workspaceId} not found`)
+    }
+    if (this.moduleAgentWorkspaceRemovalFences.has(workspace.id)) {
+      throw new ModuleAgentAdmissionError('Workspace removal has fenced transient Module creation')
+    }
+
+    let resolveCreation!: () => void
+    const claim: TransientModuleCreationClaim = {
+      completed: new Promise<void>((resolve) => { resolveCreation = resolve }),
+      resolve: () => resolveCreation(),
+    }
+    let claims = this.transientModuleCreations.get(workspace.id)
+    if (!claims) {
+      claims = new Set()
+      this.transientModuleCreations.set(workspace.id, claims)
+    }
+    claims.add(claim)
+
+    try {
+      return await this.createSessionInternal(workspaceId, options, internal)
+    } catch (error) {
+      claim.failure = { error }
+      throw error
+    } finally {
+      claim.resolve()
+      claims.delete(claim)
+      if (claims.size === 0) this.transientModuleCreations.delete(workspace.id)
+    }
+  }
+
+  private async createSessionInternal(
+    workspaceId: string,
+    options?: import('@craft-agent/shared/protocol').CreateSessionOptions,
+    internal?: InternalCreateSessionOptions,
+  ): Promise<Session> {
+    // Core defense-in-depth for non-RPC creators. A transient Session may never
+    // become a branch source or visible parent, even if a caller bypasses the
+    // renderer handler's embedded-ID checks.
+    for (const referencedSessionId of [options?.branchFromSessionId, options?.parentSessionId]) {
+      if (!referencedSessionId) continue
+      if (this.malformedModuleAgentSessionIds.has(referencedSessionId)
+        || this.sessions.get(referencedSessionId)?.moduleAgentRun !== undefined) {
+        throw new ModuleAgentAdmissionError('Session is unavailable')
+      }
+    }
+
     const workspace = getWorkspaceByNameOrId(workspaceId)
     if (!workspace) {
       throw new Error(`Workspace ${workspaceId} not found`)
@@ -3319,6 +3507,10 @@ export class SessionManager implements ISessionManager {
           resolvedWorkingDir = project.config.workingDirectory
         }
       }
+    }
+
+    if (resolvedWorkingDir) {
+      await this.assertRendererPathAccess(resolvedWorkingDir)
     }
 
     // Validate branch request up-front so branch metadata is only set for valid branches.
@@ -3510,7 +3702,18 @@ export class SessionManager implements ISessionManager {
       })
     }
 
-    // Use storage layer to create and persist the session
+    // Preallocate transient IDs so the exact storage path is fenced before the
+    // storage layer writes its first ownership header. Ordinary Session files
+    // remain readable throughout this transaction.
+    let preallocatedModuleSessionId: string | undefined
+    if (moduleAgentRun) {
+      const sessionsRoot = join(workspaceRootPath, 'sessions')
+      const canonicalSessionsRoot = await this.canonicalBoundaryPath(sessionsRoot)
+      preallocatedModuleSessionId = generateSessionId(workspaceRootPath)
+      this.moduleAgentProtectedPaths.add(resolve(join(sessionsRoot, preallocatedModuleSessionId)))
+      this.moduleAgentProtectedPaths.add(join(canonicalSessionsRoot, preallocatedModuleSessionId))
+    }
+
     const storedSession = await createStoredSession(workspaceRootPath, {
       name: options?.name,
       permissionMode: defaultPermissionMode,
@@ -3530,7 +3733,12 @@ export class SessionManager implements ISessionManager {
       // The workspace-default fallback stays dynamic — freezing it into the header would
       // pin every ordinary session to the defaults as of its creation time.
       enabledSourceSlugs: options?.enabledSourceSlugs,
-    })
+    }, preallocatedModuleSessionId ? { sessionId: preallocatedModuleSessionId } : undefined)
+    if (moduleAgentRun) {
+      const protectedPath = getSessionStoragePath(workspaceRootPath, storedSession.id)
+      await this.rememberModuleAgentProtectedPath(protectedPath)
+      markModuleAgentSession(storedSession.id)
+    }
 
     // Branch: copy messages from source session up to and including the branch point
     if (validatedBranch) {
@@ -3962,7 +4170,11 @@ export class SessionManager implements ISessionManager {
    * 3. global defaultLlmConnection
    * 4. fallback: no connection configured
    */
-  private async getOrCreateAgent(managed: ManagedSession): Promise<AgentInstance> {
+  private async getOrCreateAgent(
+    managed: ManagedSession,
+    assertProviderAuthority?: ModuleAgentRuntimeAuthorityAssertion,
+    assertCredentialAuthority?: ModuleAgentCredentialAuthorityAssertion,
+  ): Promise<AgentInstance> {
     // Refresh runtime config in-place when the connection has drifted since
     // the agent was created. May null out `managed.agent` if the in-place
     // refresh fails, in which case the create branch below rebuilds it.
@@ -3974,6 +4186,9 @@ export class SessionManager implements ISessionManager {
       workspaceDefaultConnectionSlug: workspaceConfig?.defaults?.defaultLlmConnection,
       managedModel: managed.model,
     })
+    if (assertProviderAuthority) {
+      await this.assertModuleProviderAuthority(managed, assertProviderAuthority, backendContext)
+    }
     const connection = backendContext.connection
     const sigInput = {
       connection,
@@ -4015,7 +4230,11 @@ export class SessionManager implements ISessionManager {
       // The SDK subprocess reads CRAFT_SESSION_DIR to write tool-metadata.json;
       // the main process reads it via toolMetadataStore.setSessionDir().
       const sessionDirForMetadata = getSessionStoragePath(managed.workspace.rootPath, managed.id)
-      process.env.CRAFT_SESSION_DIR = sessionDirForMetadata
+      // Hidden Module sessions carry this path in their own subprocess env and
+      // must not mutate the visible Craft runtime's process-wide value.
+      if (managed.moduleAgentRun === undefined) {
+        process.env.CRAFT_SESSION_DIR = sessionDirForMetadata
+      }
       toolMetadataStore.setSessionDir(sessionDirForMetadata)
 
       // Set up agentReady promise so title generation can await agent creation
@@ -4051,6 +4270,7 @@ export class SessionManager implements ISessionManager {
       const miniModel = connection ? (getMiniModel(connection) ?? connection.defaultModel) : undefined
       const envOverrides: Record<string, string> = {
         CRAFT_WORKSPACE_PATH: managed.workspace.rootPath,
+        CRAFT_SESSION_DIR: sessionDirForMetadata,
         // Pass mini model to SDK subprocess so built-in tools like WebFetch
         // use the correct model for summarization (instead of hardcoded Haiku)
         ...(miniModel ? { ANTHROPIC_DEFAULT_HAIKU_MODEL: miniModel } : {}),
@@ -4199,6 +4419,7 @@ export class SessionManager implements ISessionManager {
         mcpPool: managed.mcpPool,
         poolServerUrl,
         envOverrides,
+        assertCredentialAuthority,
         // Claude-specific
         isHeadless: !AGENT_FLAGS.defaultModesEnabled,
         skipConfigWatcher: true, // Server owns workspace-level ConfigWatcher — don't duplicate in agents
@@ -5300,6 +5521,9 @@ export class SessionManager implements ISessionManager {
       sessionLog.warn(`setSessionConnection: session ${sessionId} not found`)
       throw new Error(`Session ${sessionId} not found`)
     }
+    if (managed.moduleAgentRun !== undefined) {
+      throw new ModuleAgentAdmissionError('Transient Module provider configuration is Host-owned')
+    }
 
     // Only allow changing connection before first message (session hasn't started)
     if (managed.messages && managed.messages.length > 0) {
@@ -5737,7 +5961,7 @@ export class SessionManager implements ISessionManager {
    */
   async markSessionRead(sessionId: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
-    if (!managed) return
+    if (!managed || this.malformedModuleAgentSessionIds.has(sessionId) || managed.moduleAgentRun !== undefined) return
 
     // Only mark as read if not currently processing
     // (user is viewing but we want to wait for processing to complete)
@@ -5777,7 +6001,7 @@ export class SessionManager implements ISessionManager {
    */
   async markSessionUnread(sessionId: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
-    if (managed) {
+    if (managed && !this.malformedModuleAgentSessionIds.has(sessionId) && managed.moduleAgentRun === undefined) {
       managed.hasUnread = true
       managed.lastReadMessageId = undefined
       // Persist to disk
@@ -5795,6 +6019,8 @@ export class SessionManager implements ISessionManager {
     const updates: Promise<void>[] = []
     for (const managed of this.sessions.values()) {
       if (managed.workspace.id !== workspaceId) continue
+      if (this.malformedModuleAgentSessionIds.has(managed.id)) continue
+      if (managed.moduleAgentRun !== undefined) continue
       if (managed.hidden || managed.isArchived) continue
       if (managed.isProcessing) continue
       if (!managed.hasUnread) continue
@@ -5954,9 +6180,10 @@ export class SessionManager implements ISessionManager {
    * confusing "bash shell runs from a different directory" warning when the user
    * changes the working directory before their first message.
    */
-  updateWorkingDirectory(sessionId: string, path: string): void {
+  async updateWorkingDirectory(sessionId: string, path: string): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (managed) {
+      await this.assertRendererPathAccess(path)
       const validation = isValidWorkingDirectory(path)
       if (!validation.valid) {
         sessionLog.warn(`Session ${sessionId}: rejected working directory "${path}" — ${validation.reason}`)
@@ -6011,6 +6238,9 @@ export class SessionManager implements ISessionManager {
     sessionLog.info(`[updateSessionModel] sessionId=${sessionId}, model=${model}, connection=${connection}`)
     const managed = this.sessions.get(sessionId)
     if (managed) {
+      if (managed.moduleAgentRun !== undefined) {
+        throw new ModuleAgentAdmissionError('Transient Module provider configuration is Host-owned')
+      }
       managed.model = model ?? undefined
       // Also update connection if provided and not already locked
       if (connection && !managed.connectionLocked) {
@@ -6328,7 +6558,11 @@ export class SessionManager implements ISessionManager {
     deleteStoredSession(workspaceRootPath, sessionId)
 
     // Notify all windows for this workspace that the session was deleted
-    this.sendEvent({ type: 'session_deleted', sessionId }, managed.workspace.id)
+    this.sendEvent(
+      { type: 'session_deleted', sessionId },
+      managed.workspace.id,
+      { suppressRenderer: managed.moduleAgentRun !== undefined },
+    )
     this.emitUnreadSummaryChanged()
 
     // Clean up attachments directory (handled by deleteStoredSession for workspace-scoped storage)
@@ -6343,7 +6577,8 @@ export class SessionManager implements ISessionManager {
   async sendModuleAgentMessage(
     sessionId: string,
     message: string,
-    assertProviderAuthority?: () => Promise<void>,
+    assertProviderAuthority?: ModuleAgentRuntimeAuthorityAssertion,
+    assertCredentialAuthority?: ModuleAgentCredentialAuthorityAssertion,
   ): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (!managed) throw new ModuleAgentAdmissionError('Transient Module session was not found')
@@ -6387,6 +6622,7 @@ export class SessionManager implements ISessionManager {
       undefined,
       claim,
       assertProviderAuthority,
+      assertCredentialAuthority,
     )
     void turn.then(
       () => {
@@ -6417,7 +6653,8 @@ export class SessionManager implements ISessionManager {
   async sendLegacyModuleAgentMessage(
     sessionId: string,
     message: string,
-    assertProviderAuthority: () => Promise<void>,
+    assertProviderAuthority?: ModuleAgentRuntimeAuthorityAssertion,
+    assertCredentialAuthority?: ModuleAgentCredentialAuthorityAssertion,
   ): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (!managed) throw new ModuleAgentAdmissionError('Transient Module session was not found')
@@ -6425,19 +6662,53 @@ export class SessionManager implements ISessionManager {
     if (managed.hidden !== true || ownership.transient !== true || ownership.contractVersion !== 1) {
       throw new ModuleAgentAdmissionError('Legacy provider admission is only available to a v1 transient Module session')
     }
-    return await this.sendMessage(
-      sessionId,
-      message,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      assertProviderAuthority,
-    )
+    if (this.moduleAgentAdmissions.has(sessionId)) {
+      throw new ModuleAgentAdmissionError('Transient Module session already has an active provider admission')
+    }
+
+    const revision = (this.moduleAgentAdmissionRevisions.get(sessionId) ?? 0) + 1
+    this.moduleAgentAdmissionRevisions.set(sessionId, revision)
+    let resolveAdmission!: () => void
+    let rejectAdmission!: (error: Error) => void
+    const acknowledged = new Promise<void>((resolve, reject) => {
+      resolveAdmission = resolve
+      rejectAdmission = reject
+    })
+    void acknowledged.catch(() => undefined)
+    const claim: ModuleAgentAdmissionClaim = {
+      revision,
+      acknowledged,
+      status: 'pending',
+      resolve: resolveAdmission,
+      reject: rejectAdmission,
+    }
+    this.moduleAgentAdmissions.set(sessionId, claim)
+    try {
+      return await this.sendMessage(
+        sessionId,
+        message,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        claim,
+        assertProviderAuthority,
+        assertCredentialAuthority,
+      )
+    } catch (error) {
+      if (claim.status === 'pending') {
+        claim.status = 'cancelled'
+        claim.reject(new ModuleAgentAdmissionError())
+      }
+      throw error
+    } finally {
+      if (this.moduleAgentAdmissions.get(sessionId) === claim) {
+        this.moduleAgentAdmissions.delete(sessionId)
+      }
+    }
   }
 
   private assertModuleAgentAdmission(
@@ -6460,11 +6731,26 @@ export class SessionManager implements ISessionManager {
 
   private async assertModuleProviderAuthority(
     managed: ManagedSession,
-    assertion: (() => Promise<void>) | undefined,
+    assertion: ModuleAgentRuntimeAuthorityAssertion | undefined,
+    resolvedContext?: ReturnType<typeof resolveBackendContext>,
   ): Promise<void> {
     if (!assertion) return
     try {
-      await assertion()
+      const context = resolvedContext ?? resolveBackendContext({
+        sessionConnectionSlug: managed.llmConnection,
+        workspaceDefaultConnectionSlug: loadWorkspaceConfig(managed.workspace.rootPath)?.defaults?.defaultLlmConnection,
+        managedModel: managed.model,
+      })
+      if (!context.connection || !context.authType || !context.resolvedModel) {
+        throw new Error('Provider runtime authority is incomplete')
+      }
+      const snapshot: BackendRuntimeAuthoritySnapshot = Object.freeze({
+        connectionSlug: context.connection.slug,
+        provider: context.provider,
+        authType: context.authType,
+        resolvedModel: context.resolvedModel,
+      })
+      await assertion(snapshot)
     } catch {
       // Authority failures must not leak Connection/credential details or
       // strand an optimistic Module Session in processing before provider
@@ -6530,7 +6816,9 @@ export class SessionManager implements ISessionManager {
     rpcContext?: { callerClientId?: string },
     moduleAgentAdmission?: ModuleAgentAdmissionClaim,
     /** Host-only acceptance gate; never supplied by renderer/RPC callers. */
-    assertProviderAuthority?: () => Promise<void>,
+    assertProviderAuthority?: ModuleAgentRuntimeAuthorityAssertion,
+    /** Host-only exact-credential fence installed on the backend instance. */
+    assertCredentialAuthority?: ModuleAgentCredentialAuthorityAssertion,
   ): Promise<void> {
     if (this.malformedModuleAgentSessionIds.has(sessionId)) {
       throw new Error(`Session ${sessionId} is quarantined due to malformed Module ownership`)
@@ -6539,13 +6827,12 @@ export class SessionManager implements ISessionManager {
     if (!managed) {
       throw new Error(`Session ${sessionId} not found`)
     }
+    let shouldGenerateAiTitle = false
     if (managed.moduleAgentRun !== undefined) {
-      const ownership = parseModuleAgentRunMetadata(managed.moduleAgentRun)
-      if (ownership.contractVersion === 2) {
-        this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
-        if (!moduleAgentAdmission) {
-          throw new ModuleAgentAdmissionError('v2 transient Module messages require provider admission authority')
-        }
+      parseModuleAgentRunMetadata(managed.moduleAgentRun)
+      this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
+      if (!moduleAgentAdmission) {
+        throw new ModuleAgentAdmissionError('Transient Module messages require Host provider admission authority')
       }
     }
     this.setLastMessageClientId(sessionId, rpcContext?.callerClientId)
@@ -6722,9 +7009,11 @@ export class SessionManager implements ISessionManager {
           title: initialTitle,
         }, managed.workspace.id)
 
-        // Generate AI title asynchronously using agent's SDK
-        // (waits briefly for agent creation if needed)
-        this.generateTitle(managed, message)
+        // Defer provider-backed title generation until the visible Craft
+        // priority gate below has interrupted and reaped any active Module
+        // turn. Scheduling it here could create a temporary backend after its
+        // one-second wait while Module cleanup was still in progress.
+        shouldGenerateAiTitle = true
       }
     }
 
@@ -6761,6 +7050,9 @@ export class SessionManager implements ISessionManager {
     // Hidden/transient sessions deliberately bypass this priority seam.
     await this.beginVisibleCraftTurn(managed)
     this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
+    if (shouldGenerateAiTitle) {
+      void this.generateTitle(managed, message)
+    }
     this.setProcessing(managed, true)
     managed.streamingText = ''
     managed.processingGeneration++
@@ -6875,7 +7167,11 @@ export class SessionManager implements ISessionManager {
     // ensureFreshToken mirrors the disk write to source.config in-memory).
     if (assertProviderAuthority) await this.assertModuleProviderAuthority(managed, assertProviderAuthority)
     this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
-    const agent = await this.getOrCreateAgent(managed)
+    const agent = await this.getOrCreateAgent(
+      managed,
+      assertProviderAuthority,
+      assertCredentialAuthority,
+    )
     if (assertProviderAuthority) await this.assertModuleProviderAuthority(managed, assertProviderAuthority)
     this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
     sendSpan.mark('agent.ready')
@@ -7299,6 +7595,131 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
+   * Remove a workspace only after every Host-owned transient Session has
+   * crossed the strict reap boundary. The fence is installed synchronously,
+   * before this method returns its Promise, so a Module creation cannot enter
+   * between the IPC request and the cleanup snapshot.
+   *
+   * Ordinary visible Sessions are deliberately left alone. If a creation or
+   * reap fails, the shared config mutation is never called and the Module
+   * creation fence remains closed; a later removal attempt may retry cleanup.
+   */
+  removeWorkspaceAfterTransientModuleCleanup<T>(
+    workspaceId: string,
+    removeWorkspace: () => T | Promise<T>,
+  ): Promise<T> {
+    const workspaceKey = getWorkspaceByNameOrId(workspaceId)?.id ?? workspaceId
+    this.moduleAgentWorkspaceRemovalFences.add(workspaceKey)
+
+    const existing = this.moduleAgentWorkspaceRemovalOperations.get(workspaceKey)
+    if (existing) return existing as Promise<T>
+
+    const operation = this.reapTransientModulesThenRemoveWorkspace(workspaceKey, removeWorkspace)
+    this.moduleAgentWorkspaceRemovalOperations.set(workspaceKey, operation)
+    void operation.then(
+      () => {
+        if (this.moduleAgentWorkspaceRemovalOperations.get(workspaceKey) !== operation) return
+        this.moduleAgentWorkspaceRemovalOperations.delete(workspaceKey)
+        this.moduleAgentWorkspaceRemovalFences.delete(workspaceKey)
+      },
+      () => {
+        if (this.moduleAgentWorkspaceRemovalOperations.get(workspaceKey) === operation) {
+          this.moduleAgentWorkspaceRemovalOperations.delete(workspaceKey)
+        }
+        // Fail closed: retain the workspace fence until a later removal retry
+        // completes every strict reap and the shared config mutation succeeds.
+      },
+    )
+    return operation
+  }
+
+  private async reapTransientModulesThenRemoveWorkspace<T>(
+    workspaceId: string,
+    removeWorkspace: () => T | Promise<T>,
+  ): Promise<T> {
+    const creationClaims = [...(this.transientModuleCreations.get(workspaceId) ?? [])]
+    await Promise.all(creationClaims.map((claim) => claim.completed))
+
+    const transientSessionIds = [...this.sessions.values()]
+      .filter((managed) => (
+        managed.workspace.id === workspaceId
+        && managed.moduleAgentRun !== undefined
+      ))
+      .map((managed) => managed.id)
+      .sort()
+
+    const failures: unknown[] = creationClaims
+      .filter((claim) => claim.failure !== undefined)
+      .map((claim) => claim.failure!.error)
+    for (const sessionId of transientSessionIds) {
+      try {
+        await this.disposeSessionAndReap(sessionId)
+      } catch (error) {
+        failures.push(error)
+      }
+    }
+
+    const malformedResidues = this.malformedModuleAgentResidues.get(workspaceId)
+    if (malformedResidues) {
+      for (const [sessionId, residuePaths] of malformedResidues) {
+        for (const residuePath of [...residuePaths]) {
+          try {
+            await this.reapMalformedModuleAgentResidue(workspaceId, residuePath)
+            residuePaths.delete(residuePath)
+          } catch (error) {
+            failures.push(error)
+          }
+        }
+        if (residuePaths.size === 0) {
+          malformedResidues.delete(sessionId)
+          this.malformedModuleAgentSessionIds.delete(sessionId)
+        }
+      }
+      if (malformedResidues.size === 0) this.malformedModuleAgentResidues.delete(workspaceId)
+    }
+
+    if (failures.length > 0) {
+      throw new AggregateError(
+        failures,
+        `Workspace ${workspaceId} removal was fenced because transient Module cleanup failed`,
+      )
+    }
+
+    return await removeWorkspace()
+  }
+
+  private async reapMalformedModuleAgentResidue(
+    workspaceId: string,
+    residuePath: string,
+  ): Promise<void> {
+    const workspace = getWorkspaceByNameOrId(workspaceId)
+    if (!workspace) throw new Error(`Workspace ${workspaceId} not found during malformed Module cleanup`)
+    const sessionsRoot = join(workspace.rootPath, 'sessions')
+    if (!SessionManager.pathContains(sessionsRoot, residuePath) || resolve(residuePath) === resolve(sessionsRoot)) {
+      throw new Error(`Malformed Module residue escapes workspace Sessions: ${residuePath}`)
+    }
+    if (!existsSync(residuePath)) return
+
+    const residueStat = await lstat(residuePath)
+    if (!residueStat.isDirectory() || residueStat.isSymbolicLink()
+      || (typeof process.getuid === 'function' && residueStat.uid !== process.getuid())) {
+      throw new Error(`Malformed Module residue is not an owner-only real directory: ${residuePath}`)
+    }
+    const [sessionsRootReal, residueReal] = await Promise.all([
+      realpath(sessionsRoot),
+      realpath(residuePath),
+    ])
+    if (!SessionManager.pathContains(sessionsRootReal, residueReal) || residueReal === sessionsRootReal) {
+      throw new Error(`Malformed Module residue escapes canonical workspace Sessions: ${residuePath}`)
+    }
+
+    await rm(residuePath, { recursive: true, force: true })
+    if (existsSync(residuePath)) {
+      throw new Error(`Malformed Module residue remained after strict cleanup: ${residuePath}`)
+    }
+  }
+
+  /**
    * Strict transient-session teardown. Unlike ordinary UI deletion, every
    * provider, MCP pool, persistence and on-disk boundary is awaited and then
    * verified before the caller may report the Module Run closed.
@@ -7370,6 +7791,11 @@ export class SessionManager implements ISessionManager {
     workspaceId: string,
     failureErrorCode?: string,
   ): boolean {
+    // Module turns are one-shot Host transactions. Generic auth retry would
+    // clear the owned agent reference before a retry that lacks admission and
+    // credential authority, preventing strict reap from seeing the original
+    // provider process. Fail the turn and preserve the agent for Host cleanup.
+    if (managed.moduleAgentRun !== undefined) return false
     if (managed.authRetryAttempted || !managed.lastSentMessage) return false
 
     sessionLog.info(`Auth error detected, attempting token refresh and retry for session ${sessionId}`)
@@ -8217,6 +8643,10 @@ export class SessionManager implements ISessionManager {
       sessionLog.warn('adoptGeneratedTaskOrchestrator: session not found', { sessionId, taskSlug })
       return false
     }
+    if (managed.moduleAgentRun !== undefined) {
+      sessionLog.warn('adoptGeneratedTaskOrchestrator: transient Module Session is Host-owned', { sessionId, taskSlug })
+      return false
+    }
     // Idempotency: already bound to this slug → no-op success. Bound to a different slug → refuse,
     // so a stale draft ref can't hijack an unrelated orchestrator.
     if (managed.taskSlug) {
@@ -8256,7 +8686,7 @@ export class SessionManager implements ISessionManager {
     // and per-field events stay consistent — not just the on-disk metadata (the split-brain the
     // follow-up review flagged). Each targets only the changed field; persist below captures the mode.
     if (modelChanged) await this.updateSessionModel(sessionId, managed.workspace.id, reconcile!.model!)
-    if (cwdChanged) this.updateWorkingDirectory(sessionId, reconcile!.workingDirectory!)
+    if (cwdChanged) await this.updateWorkingDirectory(sessionId, reconcile!.workingDirectory!)
     if (modeChanged) this.setSessionPermissionMode(sessionId, reconcile!.permissionMode!)
 
     this.setMetadataWriteGuard(managed)
@@ -8312,6 +8742,10 @@ export class SessionManager implements ISessionManager {
       sessionLog.warn('bindExistingSessionToTask: session not found', { sessionId, taskSlug })
       return false
     }
+    if (managed.moduleAgentRun !== undefined) {
+      sessionLog.warn('bindExistingSessionToTask: transient Module Session is Host-owned', { sessionId, taskSlug })
+      return false
+    }
     if (managed.taskSlug) {
       if (managed.taskSlug === taskSlug) return true
       sessionLog.warn('bindExistingSessionToTask: slug mismatch, refusing to rebind', {
@@ -8343,7 +8777,7 @@ export class SessionManager implements ISessionManager {
     // and per-field events stay consistent — not just the on-disk metadata (the split-brain the
     // follow-up review flagged). updateSessionModel emits session_model_changed itself.
     if (modelChanged) await this.updateSessionModel(sessionId, managed.workspace.id, reconcile!.model!)
-    if (cwdChanged) this.updateWorkingDirectory(sessionId, reconcile!.workingDirectory!)
+    if (cwdChanged) await this.updateWorkingDirectory(sessionId, reconcile!.workingDirectory!)
     if (modeChanged) this.setSessionPermissionMode(sessionId, reconcile!.permissionMode!)
 
     this.setMetadataWriteGuard(managed)
@@ -9299,7 +9733,11 @@ export class SessionManager implements ISessionManager {
     }
   }
 
-  private sendEvent(event: SessionEvent, workspaceId?: string): void {
+  private sendEvent(
+    event: SessionEvent,
+    workspaceId?: string,
+    options?: Readonly<{ suppressRenderer?: boolean }>,
+  ): void {
     const moduleEvent = toModuleAgentPortEvent(event)
     if (moduleEvent && this.moduleAgentRuntimeListeners.size > 0) {
       for (const listener of this.moduleAgentRuntimeListeners) {
@@ -9309,6 +9747,16 @@ export class SessionManager implements ISessionManager {
           sessionLog.warn('Module Agent runtime observer threw; ignoring', error)
         }
       }
+    }
+
+    const eventSessionId = 'sessionId' in event && typeof event.sessionId === 'string'
+      ? event.sessionId
+      : undefined
+    if (options?.suppressRenderer
+      || (eventSessionId !== undefined
+        && (this.malformedModuleAgentSessionIds.has(eventSessionId)
+          || this.sessions.get(eventSessionId)?.moduleAgentRun !== undefined))) {
+      return
     }
 
     if (!this.eventSink) {
@@ -9710,18 +10158,30 @@ export class SessionManager implements ISessionManager {
     const warnings: string[] = []
     const workspaceRootPath = workspace.rootPath
 
+    // A portable bundle is renderer-controlled at this boundary. Path-bearing
+    // resume metadata must not redirect an imported ordinary Session into
+    // transient/quarantined Host storage before any directory is created.
+    if (bundle.session.header.workingDirectory) {
+      await this.assertRendererPathAccess(bundle.session.header.workingDirectory)
+    }
+    if (bundle.branchInfo?.sdkCwd) {
+      await this.assertRendererPathAccess(bundle.branchInfo.sdkCwd)
+    }
+
     // Determine session ID
     const sessionId = mode === 'move'
       ? bundle.session.header.id
       : generateSessionId(workspaceRootPath)
 
-    // Check for ID collision on move
-    if (mode === 'move' && this.sessions.has(sessionId)) {
+    validateSessionId(sessionId)
+    const targetSessionPath = getSessionStoragePath(workspaceRootPath, sessionId)
+    await this.assertRendererPathAccess(targetSessionPath)
+
+    // A stale/quarantined directory is still an ownership record. Never merge
+    // a portable import into it merely because no live map entry exists.
+    if (this.sessions.has(sessionId) || existsSync(targetSessionPath)) {
       throw new Error(`Session ${sessionId} already exists in target workspace`)
     }
-
-    // Create session directory with all subdirectories
-    const sessionDir = ensureSessionDir(workspaceRootPath, sessionId)
 
     // Build the stored session from bundle data
     // Never accept Host-local transient ownership from a portable bundle.
@@ -9749,7 +10209,8 @@ export class SessionManager implements ISessionManager {
       llmConnection: header.llmConnection,
       connectionLocked: header.connectionLocked,
       thinkingLevel: header.thinkingLevel,
-      hidden: header.hidden,
+      // Portable renderer-controlled bundles cannot mint invisible Sessions.
+      hidden: false,
       transferredSessionSummary: header.transferredSessionSummary,
       transferredSessionSummaryApplied: header.transferredSessionSummaryApplied,
       messages: bundle.session.messages,
@@ -9827,13 +10288,22 @@ export class SessionManager implements ISessionManager {
     }
 
     // Write JSONL file (after compatibility checks so remapped values are persisted)
-    const sessionFile = getSessionFilePath(workspaceRootPath, sessionId)
-    sessionLog.info(`[import] Writing JSONL: ${sessionFile} (llmConnection=${storedSession.llmConnection ?? 'default'}, messages=${storedSession.messages.length})`)
-    writeSessionJsonl(sessionFile, storedSession)
+    const stagingSessionId = `.session-import-${randomUUID()}`
+    const stagingDir = ensureSessionDir(workspaceRootPath, stagingSessionId)
+    const stagingFile = getSessionFilePath(workspaceRootPath, stagingSessionId)
+    sessionLog.info(`[import] Staging JSONL for ${sessionId} (llmConnection=${storedSession.llmConnection ?? 'default'}, messages=${storedSession.messages.length})`)
+    try {
+      writeSessionJsonl(stagingFile, storedSession)
 
-    // Write all bundle files (attachments, plans, data, downloads, etc.)
-    // Uses restoreFiles() for path traversal, size, and base64 validation.
-    restoreFiles(sessionDir, bundle.files)
+      // Write all bundle files into an owned staging directory. Validation is
+      // complete before this point; publish is one same-filesystem rename so a
+      // failed restore cannot leave a half-imported Session target behind.
+      restoreFiles(stagingDir, bundle.files)
+      renameSync(stagingDir, targetSessionPath)
+    } catch (error) {
+      rmSync(stagingDir, { recursive: true, force: true })
+      throw error
+    }
 
     // Register in-memory — pass session metadata without messages to avoid
     // StoredMessage[] vs Message[] type mismatch, then convert messages separately
@@ -9932,6 +10402,12 @@ export class SessionManager implements ISessionManager {
     this.moduleAgentRunStateTails.clear()
     this.moduleAgentRunStateRevisions.clear()
     this.moduleAgentRunPersistenceOverrides.clear()
+    this.moduleAgentProtectedPaths.clear()
+    this.malformedModuleAgentSessionIds.clear()
+    this.malformedModuleAgentResidues.clear()
+    this.transientModuleCreations.clear()
+    this.moduleAgentWorkspaceRemovalFences.clear()
+    this.moduleAgentWorkspaceRemovalOperations.clear()
 
     // Clean up session-scoped tool callbacks for all sessions
     for (const sessionId of this.sessions.keys()) {

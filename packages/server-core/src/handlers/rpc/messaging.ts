@@ -68,15 +68,18 @@ export function registerMessagingHandlers(server: RpcServer, deps: HandlerDeps):
   server.handle(RPC_CHANNELS.messaging.GET_BINDINGS, async (ctx) => {
     if (!ctx.workspaceId) throw new Error('Missing workspaceId')
     return registry.getBindings(ctx.workspaceId)
+      .filter((binding) => !deps.sessionManager.isRendererSessionHidden(binding.sessionId))
   })
 
   server.handle(RPC_CHANNELS.messaging.GENERATE_CODE, async (ctx, sessionId: string, platform: string) => {
     if (!ctx.workspaceId) throw new Error('Missing workspaceId')
+    deps.sessionManager.assertRendererSessionAccess(sessionId)
     return registry.generatePairingCode(ctx.workspaceId, sessionId, platform)
   })
 
   server.handle(RPC_CHANNELS.messaging.UNBIND, async (ctx, sessionId: string, platform?: string) => {
     if (!ctx.workspaceId) throw new Error('Missing workspaceId')
+    deps.sessionManager.assertRendererSessionAccess(sessionId)
     registry.unbindSession(ctx.workspaceId, sessionId, platform)
     return { success: true }
   })
@@ -157,6 +160,7 @@ export function registerMessagingHandlers(server: RpcServer, deps: HandlerDeps):
     async (ctx, platform?: string) => {
       if (!ctx.workspaceId) throw new Error('Missing workspaceId')
       return registry.getPendingSenders(ctx.workspaceId, platform)
+        .filter((sender) => !sender.sessionId || !deps.sessionManager.isRendererSessionHidden(sender.sessionId))
     },
   )
 

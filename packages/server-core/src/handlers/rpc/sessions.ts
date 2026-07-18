@@ -132,6 +132,9 @@ export const HANDLED_CHANNELS = [
 export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): void {
   const { sessionManager, platform } = deps
   const log = platform.logger
+  const assertRendererSessionAccess = (sessionId: string) => {
+    sessionManager.assertRendererSessionAccess(sessionId)
+  }
 
   // Get all sessions for the calling window's workspace
   // Waits for initialization to complete so sessions are never returned empty during startup
@@ -178,6 +181,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
 
   // Get a single session with messages (for lazy loading)
   server.handle(RPC_CHANNELS.sessions.GET_MESSAGES, async (_ctx, sessionId: string) => {
+    assertRendererSessionAccess(sessionId)
     const end = perf.start('rpc.getSessionMessages')
     const session = await sessionManager.getSession(sessionId)
     end()
@@ -186,6 +190,11 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
 
   // Create a new session
   server.handle(RPC_CHANNELS.sessions.CREATE, async (_ctx, workspaceId: string, options?: import('@craft-agent/shared/protocol').CreateSessionOptions) => {
+    // CreateSessionOptions contains exact-ID references as well as scalar
+    // configuration. Fence those references before branch/parent inheritance
+    // can read or copy a Host-owned transient Session.
+    if (options?.branchFromSessionId) assertRendererSessionAccess(options.branchFromSessionId)
+    if (options?.parentSessionId) assertRendererSessionAccess(options.parentSessionId)
     const end = perf.start('rpc.createSession', { workspaceId })
     // The renderer adds the session synchronously from this return value (App.tsx handleCreateSession),
     // so suppress the broadcast to avoid a redundant hydrate round-trip.
@@ -196,6 +205,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
 
   // Delete a session
   server.handle(RPC_CHANNELS.sessions.DELETE, async (_ctx, sessionId: string) => {
+    assertRendererSessionAccess(sessionId)
     return sessionManager.deleteSession(sessionId)
   })
 
@@ -213,6 +223,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
   //     event stream as today.
   // attachments: FileAttachment[] for Claude (has content), storedAttachments: StoredAttachment[] for persistence (has thumbnailBase64)
   server.handle(RPC_CHANNELS.sessions.SEND_MESSAGE, async (ctx, sessionId: string, message: string, attachments?: FileAttachment[], storedAttachments?: StoredAttachment[], options?: SendMessageOptions) => {
+    assertRendererSessionAccess(sessionId)
     // Capture the caller's clientId for error routing
     const callerClientId = ctx.clientId
 
@@ -260,11 +271,13 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
 
   // Cancel processing
   server.handle(RPC_CHANNELS.sessions.CANCEL, async (_ctx, sessionId: string, silent?: boolean) => {
+    assertRendererSessionAccess(sessionId)
     return sessionManager.cancelProcessing(sessionId, silent)
   })
 
   // Kill background shell
   server.handle(RPC_CHANNELS.sessions.KILL_SHELL, async (_ctx, sessionId: string, shellId: string) => {
+    assertRendererSessionAccess(sessionId)
     return sessionManager.killShell(sessionId, shellId)
   })
 
@@ -282,12 +295,14 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
   // Respond to a permission request (bash command approval)
   // Returns true if the response was delivered, false if agent/session is gone
   server.handle(RPC_CHANNELS.sessions.RESPOND_TO_PERMISSION, async (_ctx, sessionId: string, requestId: string, allowed: boolean, alwaysAllow: boolean) => {
+    assertRendererSessionAccess(sessionId)
     return sessionManager.respondToPermission(sessionId, requestId, allowed, alwaysAllow)
   })
 
   // Respond to a credential request (secure auth input)
   // Returns true if the response was delivered, false if agent/session is gone
   server.handle(RPC_CHANNELS.sessions.RESPOND_TO_CREDENTIAL, async (_ctx, sessionId: string, requestId: string, response: import('@craft-agent/shared/protocol').CredentialResponse) => {
+    assertRendererSessionAccess(sessionId)
     return sessionManager.respondToCredential(sessionId, requestId, response)
   })
 
@@ -301,6 +316,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
     sessionId: string,
     command: import('@craft-agent/shared/protocol').SessionCommand
   ) => {
+    assertRendererSessionAccess(sessionId)
     switch (command.type) {
       case 'flag':
         return sessionManager.flagSession(sessionId)
@@ -391,6 +407,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
     _ctx,
     sessionId: string
   ) => {
+    assertRendererSessionAccess(sessionId)
     return sessionManager.getPendingPlanExecution(sessionId)
   })
 
@@ -399,6 +416,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
     _ctx,
     sessionId: string
   ) => {
+    assertRendererSessionAccess(sessionId)
     return sessionManager.getSessionPermissionModeState(sessionId)
   })
 
@@ -435,7 +453,14 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
     const hiddenSessionIds = new Set(
       allSessions.filter(s => s.hidden).map(s => s.id)
     )
-    const filteredResults = results.filter(r => !hiddenSessionIds.has(r.sessionId))
+    const filteredResults = results.filter((result) => {
+      try {
+        assertRendererSessionAccess(result.sessionId)
+        return !hiddenSessionIds.has(result.sessionId)
+      } catch {
+        return false
+      }
+    })
 
     log.info('[search]','ipc:response', { searchId: id, resultCount: filteredResults.length, totalFound: results.length })
     return filteredResults
@@ -447,6 +472,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
 
   // Get files in session directory (recursive tree structure)
   server.handle(RPC_CHANNELS.sessions.GET_FILES, async (_ctx, sessionId: string) => {
+    assertRendererSessionAccess(sessionId)
     const sessionPath = sessionManager.getSessionPath(sessionId)
     if (!sessionPath) return []
 
@@ -460,6 +486,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
 
   // Start watching a session directory for file changes (per client)
   server.handle(RPC_CHANNELS.sessions.WATCH_FILES, async (ctx, sessionId: string) => {
+    assertRendererSessionAccess(sessionId)
     const clientId = ctx.clientId
     cleanupSessionFileWatchForClient(clientId)
 
@@ -504,6 +531,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
 
   // Get session notes (reads notes.md from session directory)
   server.handle(RPC_CHANNELS.sessions.GET_NOTES, async (_ctx, sessionId: string) => {
+    assertRendererSessionAccess(sessionId)
     const sessionPath = sessionManager.getSessionPath(sessionId)
     if (!sessionPath) return ''
 
@@ -519,6 +547,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
 
   // Set session notes (writes to notes.md in session directory)
   server.handle(RPC_CHANNELS.sessions.SET_NOTES, async (_ctx, sessionId: string, content: string) => {
+    assertRendererSessionAccess(sessionId)
     const sessionPath = sessionManager.getSessionPath(sessionId)
     if (!sessionPath) {
       throw new Error(`Session not found: ${sessionId}`)
@@ -539,6 +568,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
 
   // Export a session as a portable bundle
   server.handle(RPC_CHANNELS.sessions.EXPORT, async (ctx, sessionId: string) => {
+    assertRendererSessionAccess(sessionId)
     await sessionManager.waitForInit()
     const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
     if (!workspaceId) throw new Error('No workspace context')
@@ -564,6 +594,7 @@ export function registerSessionsHandlers(server: RpcServer, deps: HandlerDeps): 
 
   // Export a session as a summarized remote-transfer payload.
   server.handle(RPC_CHANNELS.sessions.EXPORT_REMOTE_TRANSFER, async (ctx, sessionId: string) => {
+    assertRendererSessionAccess(sessionId)
     await sessionManager.waitForInit()
     const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
     if (!workspaceId) throw new Error('No workspace context')

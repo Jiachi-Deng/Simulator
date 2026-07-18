@@ -6,6 +6,7 @@ import {
   createSession,
   getOrCreateSessionById,
   getSessionPath,
+  listSessions,
   saveSession,
   sessionPersistenceQueue,
   type StoredSession,
@@ -18,6 +19,69 @@ afterEach(() => {
 })
 
 describe('saveSession durability', () => {
+  it('uses the real folder identity for Module recovery and ignores ordinary header mismatches', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'session-folder-identity-'))
+    roots.push(root)
+    const ownership = {
+      transient: true as const,
+      contractVersion: 2 as const,
+      moduleId: 'org.simulator.open-design',
+      runHandle: `run_${'1'.repeat(32)}`,
+      idempotencyKeyDigest: '2'.repeat(64),
+      requestDigest: '3'.repeat(64),
+      workerEpoch: 'epoch_folder_identity',
+      state: 'accepted' as const,
+    }
+    const actualIds = ['actual-valid-module', 'actual-malformed-module']
+    await createSession(root, { hidden: true, moduleAgentRun: ownership }, { sessionId: actualIds[0] })
+    await createSession(root, { hidden: true, moduleAgentRun: ownership }, { sessionId: actualIds[1] })
+    await createSession(root, {}, { sessionId: 'ordinary-victim' })
+    await createSession(root, {}, { sessionId: 'ordinary-mismatch' })
+
+    const rewriteHeader = (folderId: string, mutate: (header: Record<string, unknown>) => void) => {
+      const file = join(getSessionPath(root, folderId), 'session.jsonl')
+      const lines = readFileSync(file, 'utf8').split('\n')
+      const header = JSON.parse(lines[0]!) as Record<string, unknown>
+      mutate(header)
+      lines[0] = JSON.stringify(header)
+      writeFileSync(file, lines.join('\n'))
+      sessionPersistenceQueue.cancel(folderId)
+    }
+    rewriteHeader(actualIds[0]!, (header) => { header.id = 'ordinary-victim' })
+    rewriteHeader(actualIds[1]!, (header) => {
+      header.id = 'ordinary-victim'
+      header.moduleAgentRun = { transient: true }
+    })
+    rewriteHeader('ordinary-mismatch', (header) => { header.id = 'ordinary-victim' })
+    const crashedImport = join(root, 'sessions', '.session-import-crashed')
+    mkdirSync(crashedImport, { recursive: true })
+    writeFileSync(join(crashedImport, 'session.jsonl'), '{"id":"attacker","createdAt":1}\n')
+
+    const listed = listSessions(root)
+    const listedIds = new Set(listed.map((session) => session.id))
+    expect(listedIds.has('ordinary-victim')).toBe(true)
+    expect(listedIds.has('ordinary-mismatch')).toBe(false)
+    expect(listedIds.has(actualIds[0]!)).toBe(true)
+    expect(listedIds.has(actualIds[1]!)).toBe(true)
+    expect(listed.find((session) => session.id === actualIds[1])?.moduleAgentRun as unknown)
+      .toEqual({ transient: true })
+    expect(existsSync(crashedImport)).toBe(false)
+  })
+
+  it('commits a Host-preallocated Session ID exactly once', async () => {
+    const root = mkdtempSync(join(tmpdir(), 'session-create-preallocated-'))
+    roots.push(root)
+    const sessionId = 'preallocated-module-session'
+
+    const created = await createSession(root, { hidden: true }, { sessionId })
+    expect(created.id).toBe(sessionId)
+    expect(existsSync(getSessionPath(root, sessionId))).toBe(true)
+    await expect(createSession(root, { hidden: true }, { sessionId })).rejects.toThrow(
+      `Session ${sessionId} already exists`,
+    )
+    sessionPersistenceQueue.cancel(sessionId)
+  })
+
   it('rejects when the queued snapshot cannot be written', async () => {
     const root = mkdtempSync(join(tmpdir(), 'session-storage-durability-'))
     roots.push(root)

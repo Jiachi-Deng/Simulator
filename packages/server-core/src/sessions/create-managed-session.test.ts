@@ -59,10 +59,9 @@ describe('createManagedSession', () => {
     }, workspace as any)
     ;(manager as unknown as { sessions: Map<string, unknown> }).sessions.set(managed.id, managed)
 
-    const [rendererSession] = manager.getSessions(workspace.id)
-    expect(rendererSession).toBeDefined()
-    expect(rendererSession).not.toHaveProperty('moduleAgentRun')
-    expect(JSON.stringify(rendererSession)).not.toContain('idempotencyKeyDigest')
+    const rendererSessions = manager.getSessions(workspace.id)
+    expect(rendererSessions).toEqual([])
+    expect(JSON.stringify(rendererSessions)).not.toContain('idempotencyKeyDigest')
     expect(manager.getModuleAgentSessionResidueSnapshot()).toEqual({
       hiddenSessions: 1,
       transientSessions: 1,

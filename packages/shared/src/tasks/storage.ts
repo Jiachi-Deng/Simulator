@@ -10,7 +10,7 @@
  * decisions and reuses recorded node outputs (it never re-runs a node body).
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, appendFileSync } from 'fs';
-import { join } from 'path';
+import { basename, join } from 'path';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { atomicWriteFileSync, stripBom } from '../utils/files.ts';
 import { validateTaskInput } from './validate.ts';
@@ -49,13 +49,30 @@ export type RunLogEntry =
 export function tasksRoot(workspaceRoot: string): string {
   return join(workspaceRoot, TASKS_DIR);
 }
+function validateTaskPathSegment(value: string, label: string): void {
+  if (!value || typeof value !== 'string' || value === '.' || value === '..'
+    || basename(value) !== value || value.includes('/') || value.includes('\\') || value.includes('\0')) {
+    throw new Error(`Invalid ${label}`);
+  }
+}
+export function validateTaskSlug(slug: string): void {
+  validateTaskPathSegment(slug, 'task slug');
+}
+export function validateTaskRunId(runId: string): void {
+  validateTaskPathSegment(runId, 'task run id');
+}
+export function validateTaskNodeId(nodeId: string): void {
+  validateTaskPathSegment(nodeId, 'task node id');
+}
 export function taskDir(workspaceRoot: string, slug: string): string {
+  validateTaskSlug(slug);
   return join(workspaceRoot, TASKS_DIR, slug);
 }
 export function taskYamlPath(workspaceRoot: string, slug: string): string {
   return join(taskDir(workspaceRoot, slug), TASK_FILE);
 }
 export function runDir(workspaceRoot: string, slug: string, runId: string): string {
+  validateTaskRunId(runId);
   return join(taskDir(workspaceRoot, slug), RUNS_DIR, runId);
 }
 
@@ -194,6 +211,7 @@ export function writeNodeOutput(
   nodeId: string,
   output: NodeOutput,
 ): void {
+  validateTaskNodeId(nodeId);
   const dir = join(runDir(workspaceRoot, slug, runId), NODES_DIR);
   ensureDir(dir);
   atomicWriteFileSync(join(dir, `${nodeId}.json`), JSON.stringify(output, null, 2));
@@ -205,6 +223,7 @@ export function readNodeOutput(
   runId: string,
   nodeId: string,
 ): NodeOutput | null {
+  validateTaskNodeId(nodeId);
   const path = join(runDir(workspaceRoot, slug, runId), NODES_DIR, `${nodeId}.json`);
   if (!existsSync(path)) return null;
   try {

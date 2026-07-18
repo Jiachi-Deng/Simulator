@@ -4,6 +4,10 @@ import { homedir } from 'node:os'
 import { resolve } from 'node:path'
 import type { ISessionManager } from '@craft-agent/server-core/handlers'
 import type { ModuleAgentConnectionAdmission } from '@craft-agent/server-core/sessions'
+import type {
+  BackendCredentialAuthoritySnapshot,
+  BackendRuntimeAuthoritySnapshot,
+} from '@craft-agent/shared/agent/backend'
 import {
   getDefaultLlmConnection,
   getLlmConnection,
@@ -77,11 +81,16 @@ interface AuthoritySnapshot {
   readonly workspaceId: string
   readonly workspaceRoot: string
   readonly llmConnection: string
+  readonly provider: BackendRuntimeAuthoritySnapshot['provider']
+  readonly authType: BackendRuntimeAuthoritySnapshot['authType']
+  readonly resolvedModel: string
+  readonly providerCredential: BackendCredentialAuthoritySnapshot
   readonly material: Readonly<Record<string, unknown>>
 }
 
 interface StableAuthority extends AuthoritySnapshot {
   readonly authorityHmacSha256: string
+  readonly credentialHmacSha256: string
 }
 
 interface ArmedAuthority {
@@ -89,7 +98,11 @@ interface ArmedAuthority {
   readonly workspaceId: string
   readonly workspaceRoot: string
   readonly llmConnection: string
+  readonly provider: BackendRuntimeAuthoritySnapshot['provider']
+  readonly authType: BackendRuntimeAuthoritySnapshot['authType']
+  readonly resolvedModel: string
   readonly authorityHmacSha256: string
+  readonly credentialHmacSha256: string
 }
 
 function defaultSource(): ConnectionAuthoritySource {
@@ -143,68 +156,86 @@ function hmacAuthority(key: Buffer, material: Readonly<Record<string, unknown>>)
     .digest('hex')
 }
 
+function hmacCredential(key: Buffer, credential: BackendCredentialAuthoritySnapshot): string {
+  return createHmac('sha256', key)
+    .update('simulator-open-design-acceptance-provider-credential-v1\0', 'utf8')
+    .update(canonicalJson(credential), 'utf8')
+    .digest('hex')
+}
+
 function equalSha256(left: string, right: string): boolean {
   if (!SHA256.test(left) || !SHA256.test(right)) return false
   return timingSafeEqual(Buffer.from(left, 'hex'), Buffer.from(right, 'hex'))
 }
 
-function jwtSubject(token: string | undefined): Readonly<{ issuer: string; subject: string }> | undefined {
-  if (!token) return undefined
-  try {
-    const parts = token.split('.')
-    if (parts.length !== 3 || !parts[1]) return undefined
-    const payload = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf8')) as unknown
-    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return undefined
-    const { iss, sub } = payload as Record<string, unknown>
-    if (typeof iss !== 'string' || iss.length < 1 || iss.length > 2048
-      || typeof sub !== 'string' || sub.length < 1 || sub.length > 2048) return undefined
-    return Object.freeze({ issuer: iss, subject: sub })
-  } catch {
-    return undefined
-  }
-}
-
-async function credentialIdentity(
+async function credentialAuthority(
   credentials: CredentialReader,
   connection: LlmConnection,
-): Promise<Readonly<Record<string, unknown>>> {
+): Promise<Readonly<{
+  generation: Readonly<Record<string, unknown>>
+  providerCredential: BackendCredentialAuthoritySnapshot
+}>> {
+  if (connection.authType === 'none') {
+    throw new Error('Acceptance requires an authenticated Connection')
+  }
+  if (connection.authType === 'environment') {
+    throw new Error('Acceptance Connection environment identity is unavailable')
+  }
   if (!await credentials.hasLlmCredentials(connection.slug, connection.authType, connection.providerType)) {
     throw new Error('Acceptance Connection is not authenticated')
   }
   switch (connection.authType) {
-    case 'none':
-      return Object.freeze({ kind: 'none' })
-    case 'environment':
-      // Craft can resolve several provider-specific environment chains, some of
-      // which include mutable external files. Acceptance cannot bind those
-      // completely without leaking or duplicating provider logic, so it refuses
-      // to authorize paid evidence through this ambiguous identity path.
-      throw new Error('Acceptance Connection environment identity is unavailable')
     case 'api_key':
     case 'api_key_with_endpoint':
     case 'bearer_token': {
       const value = await credentials.getLlmApiKey(connection.slug)
       if (!value) throw new Error('Acceptance Connection credential is unavailable')
-      return Object.freeze({ kind: 'api-key', value })
+      const providerCredential = Object.freeze({ kind: 'api-key' as const, value })
+      return Object.freeze({
+        generation: Object.freeze({ kind: 'api-key-generation', value }),
+        providerCredential,
+      })
     }
     case 'oauth': {
       const oauth = await credentials.getLlmOAuth(connection.slug)
-      if (!oauth) throw new Error('Acceptance Connection credential is unavailable')
-      const subject = jwtSubject(oauth.idToken) ?? jwtSubject(oauth.accessToken)
-      if (subject) return Object.freeze({ kind: 'oauth-subject', ...subject })
-      if (oauth.refreshToken) return Object.freeze({ kind: 'oauth-refresh', value: oauth.refreshToken })
-      return Object.freeze({ kind: 'oauth-access', value: oauth.accessToken })
+      if (!oauth?.accessToken) throw new Error('Acceptance Connection credential is unavailable')
+      const providerCredential: BackendCredentialAuthoritySnapshot = connection.piAuthProvider === 'github-copilot'
+        && oauth.refreshToken
+        ? Object.freeze({
+          kind: 'oauth-access-refresh' as const,
+          accessToken: oauth.accessToken,
+          refreshToken: oauth.refreshToken,
+          expiresAt: oauth.expiresAt ?? null,
+        })
+        : Object.freeze({ kind: 'oauth-access' as const, accessToken: oauth.accessToken })
+      return Object.freeze({
+        generation: Object.freeze({
+          kind: 'oauth-generation',
+          accessToken: oauth.accessToken,
+          refreshToken: oauth.refreshToken ?? null,
+          idToken: oauth.idToken ?? null,
+          expiresAt: oauth.expiresAt ?? null,
+        }),
+        providerCredential,
+      })
     }
     case 'iam_credentials': {
       const iam = await credentials.getLlmIamCredentials(connection.slug)
       if (!iam) throw new Error('Acceptance Connection credential is unavailable')
-      return Object.freeze({ kind: 'iam', ...iam })
+      const providerCredential = Object.freeze({
+        kind: 'iam' as const,
+        accessKeyId: iam.accessKeyId,
+        secretAccessKey: iam.secretAccessKey,
+        region: iam.region ?? null,
+        sessionToken: iam.sessionToken ?? null,
+      })
+      return Object.freeze({
+        generation: Object.freeze({ ...providerCredential, kind: 'iam-generation' }),
+        providerCredential,
+      })
     }
-    case 'service_account_file': {
-      const serviceAccount = await credentials.getLlmServiceAccount(connection.slug)
-      if (!serviceAccount) throw new Error('Acceptance Connection credential is unavailable')
-      return Object.freeze({ kind: 'service-account', ...serviceAccount })
-    }
+    case 'service_account_file':
+      throw new Error('Acceptance Connection credential type is unsupported')
   }
 }
 
@@ -220,6 +251,8 @@ export class OpenDesignAcceptanceConnectionAdmission implements ModuleAgentConne
   readonly #configPath: string
   readonly #userDataPath: string
   #armed?: ArmedAuthority
+  #armTail: Promise<void> = Promise.resolve()
+  #disposed = false
 
   constructor(options: OpenDesignAcceptanceConnectionAdmissionOptions) {
     this.#options = options
@@ -233,9 +266,11 @@ export class OpenDesignAcceptanceConnectionAdmission implements ModuleAgentConne
   async getConnectionAuthority(
     request: OpenDesignAcceptanceConnectionAuthorityRequest,
   ): Promise<OpenDesignAcceptanceConnectionAuthorityResult> {
+    if (this.#disposed) throw new Error('Acceptance Connection admission is disposed')
     const key = parseAuthorityKey(request.keyBase64)
     try {
       const authority = await this.#readStableAuthority(key)
+      if (this.#disposed) throw new Error('Acceptance Connection admission is disposed')
       return Object.freeze({
         schemaVersion: 1 as const,
         authenticated: true as const,
@@ -250,7 +285,13 @@ export class OpenDesignAcceptanceConnectionAdmission implements ModuleAgentConne
     request: OpenDesignAcceptanceConnectionArmRequest,
   ): Promise<OpenDesignAcceptanceConnectionArmResult> {
     const key = parseAuthorityKey(request.keyBase64)
+    let release!: () => void
+    const turn = new Promise<void>((resolve) => { release = resolve })
+    const previous = this.#armTail
+    this.#armTail = previous.then(() => turn)
     try {
+      await previous
+      if (this.#disposed) throw new Error('Acceptance Connection admission is disposed')
       const existing = this.#armed
       if (existing && !timingSafeEqual(existing.key, key)) {
         throw new Error('Acceptance Connection admission is already armed')
@@ -259,6 +300,7 @@ export class OpenDesignAcceptanceConnectionAdmission implements ModuleAgentConne
         throw new Error('Acceptance Connection authority mismatch')
       }
       const authority = await this.#readStableAuthority(key)
+      if (this.#disposed) throw new Error('Acceptance Connection admission is disposed')
       if (!equalSha256(authority.authorityHmacSha256, request.expectedHmacSha256)) {
         throw new Error('Acceptance Connection authority mismatch')
       }
@@ -268,7 +310,11 @@ export class OpenDesignAcceptanceConnectionAdmission implements ModuleAgentConne
           workspaceId: authority.workspaceId,
           workspaceRoot: authority.workspaceRoot,
           llmConnection: authority.llmConnection,
+          provider: authority.provider,
+          authType: authority.authType,
+          resolvedModel: authority.resolvedModel,
           authorityHmacSha256: authority.authorityHmacSha256,
+          credentialHmacSha256: authority.credentialHmacSha256,
         })
       }
       return Object.freeze({
@@ -277,32 +323,72 @@ export class OpenDesignAcceptanceConnectionAdmission implements ModuleAgentConne
         authorityHmacSha256: authority.authorityHmacSha256,
       })
     } finally {
+      release()
       key.fill(0)
     }
   }
 
-  async admit(workspaceId: string): Promise<Readonly<{ llmConnection: string }>> {
+  async admit(workspaceId: string): Promise<Readonly<{
+    llmConnection: string
+    provider: BackendRuntimeAuthoritySnapshot['provider']
+    authType: BackendRuntimeAuthoritySnapshot['authType']
+    resolvedModel: string
+  }>> {
     const armed = this.#armed
-    if (!armed) throw new Error('Acceptance Connection admission is not armed')
+    if (this.#disposed || !armed) throw new Error('Acceptance Connection admission is not armed')
     if (workspaceId !== armed.workspaceId) throw new Error('Acceptance Connection workspace mismatch')
     const authority = await this.#readStableAuthority(armed.key, workspaceId)
     if (!equalSha256(authority.authorityHmacSha256, armed.authorityHmacSha256)
       || authority.workspaceRoot !== armed.workspaceRoot
-      || authority.llmConnection !== armed.llmConnection) {
+      || authority.llmConnection !== armed.llmConnection
+      || authority.provider !== armed.provider
+      || authority.authType !== armed.authType
+      || authority.resolvedModel !== armed.resolvedModel
+      || !equalSha256(authority.credentialHmacSha256, armed.credentialHmacSha256)
+      || this.#armed !== armed) {
       throw new Error('Acceptance Connection authority drifted')
     }
-    return Object.freeze({ llmConnection: armed.llmConnection })
+    return Object.freeze({
+      llmConnection: armed.llmConnection,
+      provider: armed.provider,
+      authType: armed.authType,
+      resolvedModel: armed.resolvedModel,
+    })
   }
 
-  async assertConnection(input: Readonly<{ workspaceId: string; llmConnection: string }>): Promise<void> {
+  async assertConnection(input: Readonly<{
+    workspaceId: string
+  } & BackendRuntimeAuthoritySnapshot>): Promise<void> {
     const armed = this.#armed
-    if (!armed || input.workspaceId !== armed.workspaceId || input.llmConnection !== armed.llmConnection) {
+    if (!armed
+      || input.workspaceId !== armed.workspaceId
+      || input.connectionSlug !== armed.llmConnection
+      || input.provider !== armed.provider
+      || input.authType !== armed.authType
+      || input.resolvedModel !== armed.resolvedModel) {
       throw new Error('Acceptance Connection admission mismatch')
     }
     await this.admit(input.workspaceId)
   }
 
+  async assertCredential(input: Readonly<{
+    workspaceId: string
+    llmConnection: string
+    credential: BackendCredentialAuthoritySnapshot
+  }>): Promise<void> {
+    const armed = this.#armed
+    if (!armed || input.workspaceId !== armed.workspaceId || input.llmConnection !== armed.llmConnection) {
+      throw new Error('Acceptance Connection admission mismatch')
+    }
+    await this.admit(input.workspaceId)
+    const actualHmac = hmacCredential(armed.key, input.credential)
+    if (!equalSha256(actualHmac, armed.credentialHmacSha256) || this.#armed !== armed) {
+      throw new Error('Acceptance Connection credential mismatch')
+    }
+  }
+
   dispose(): void {
+    this.#disposed = true
     this.#armed?.key.fill(0)
     this.#armed = undefined
   }
@@ -310,15 +396,25 @@ export class OpenDesignAcceptanceConnectionAdmission implements ModuleAgentConne
   async #readStableAuthority(key: Buffer, expectedWorkspaceId?: string): Promise<StableAuthority> {
     const first = await this.#readAuthoritySnapshot(expectedWorkspaceId)
     const firstHmac = hmacAuthority(key, first.material)
+    const firstCredentialHmac = hmacCredential(key, first.providerCredential)
     const second = await this.#readAuthoritySnapshot(expectedWorkspaceId)
     const secondHmac = hmacAuthority(key, second.material)
+    const secondCredentialHmac = hmacCredential(key, second.providerCredential)
     if (!equalSha256(firstHmac, secondHmac)
+      || !equalSha256(firstCredentialHmac, secondCredentialHmac)
       || first.workspaceId !== second.workspaceId
       || first.workspaceRoot !== second.workspaceRoot
-      || first.llmConnection !== second.llmConnection) {
+      || first.llmConnection !== second.llmConnection
+      || first.provider !== second.provider
+      || first.authType !== second.authType
+      || first.resolvedModel !== second.resolvedModel) {
       throw new Error('Acceptance Connection authority changed while reading')
     }
-    return Object.freeze({ ...second, authorityHmacSha256: secondHmac })
+    return Object.freeze({
+      ...second,
+      authorityHmacSha256: secondHmac,
+      credentialHmacSha256: secondCredentialHmac,
+    })
   }
 
   async #readAuthoritySnapshot(expectedWorkspaceId?: string): Promise<AuthoritySnapshot> {
@@ -340,7 +436,11 @@ export class OpenDesignAcceptanceConnectionAdmission implements ModuleAgentConne
     if (!connection) throw new Error('Acceptance Connection is unavailable')
     const resolution = workspaceConnection ? 'workspace' : 'global'
     const runtime = this.#source.resolveRuntime(connection, workspaceConfig.defaults?.model)
-    const credential = await credentialIdentity(this.#credentials, connection)
+    if ((runtime.provider !== 'anthropic' && runtime.provider !== 'pi')
+      || !runtime.authType || !runtime.resolvedModel) {
+      throw new Error('Acceptance Connection runtime is unavailable')
+    }
+    const credential = await credentialAuthority(this.#credentials, connection)
     const material = Object.freeze({
       schemaVersion: 1,
       roots: Object.freeze({
@@ -371,12 +471,17 @@ export class OpenDesignAcceptanceConnectionAdmission implements ModuleAgentConne
         midStreamBehavior: connection.midStreamBehavior ?? null,
       }),
       runtime,
-      credential,
+      credential: credential.generation,
+      providerCredential: credential.providerCredential,
     })
     return Object.freeze({
       workspaceId: workspace.id,
       workspaceRoot,
       llmConnection: connection.slug,
+      provider: runtime.provider,
+      authType: runtime.authType as BackendRuntimeAuthoritySnapshot['authType'],
+      resolvedModel: runtime.resolvedModel,
+      providerCredential: credential.providerCredential,
       material,
     })
   }

@@ -471,7 +471,13 @@ app.whenReady().then(async () => {
   ensurePresetThemes()
 
   // Register thumbnail:// protocol handler (scheme was registered earlier, before app.whenReady)
-  registerThumbnailHandler()
+  registerThumbnailHandler(async (filePath) => {
+    const manager = sessionManager
+    if (!manager) {
+      throw new Error('Session manager is unavailable')
+    }
+    await manager.assertRendererPathAccess(filePath)
+  })
 
   // Re-apply proxy settings now that Electron sessions are available
   // (first call before app.whenReady only configured Node-level proxy)
@@ -828,8 +834,10 @@ app.whenReady().then(async () => {
 
       // Remove workspace from config (cleanup stale entries)
       ipcMain.handle('workspace:remove', async (_event, workspaceId: string) => {
-        const { removeWorkspace: remove } = await import('@craft-agent/shared/config')
-        return remove(workspaceId)
+        return instance.sessionManager.removeWorkspaceAfterTransientModuleCleanup(workspaceId, async () => {
+          const { removeWorkspace: remove } = await import('@craft-agent/shared/config')
+          return remove(workspaceId)
+        })
       })
 
       // Cross-server RPC — invoke a channel on an arbitrary remote server
@@ -862,6 +870,14 @@ app.whenReady().then(async () => {
 
         const sourceWorkspace = getWorkspaceByNameOrId(sourceWorkspaceLocalId)
         if (!sourceWorkspace) throw new Error(`Source workspace ${sourceWorkspaceLocalId} not found`)
+
+        // A local transfer bypasses the regular server-core RPC dispatcher, so
+        // apply the same exact-ID renderer fence here before export/summary can
+        // read a Host-owned transient Session. Remote-owned sources are fenced
+        // by their `sessions:export*` handlers on the source server.
+        if (!sourceWorkspace.remoteServer) {
+          sessionManager.assertRendererSessionAccess(sessionId)
+        }
 
         let bundle: any = null
 

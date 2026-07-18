@@ -18,4 +18,5 @@ export {
   listSkillSlugs,
   skillNeedsIconDownload,
   downloadSkillIcon,
+  validateSkillSlug,
 } from './storage.ts';

@@ -10,7 +10,13 @@ type ContentBlockParam =
 import { z } from 'zod';
 import { getSystemPrompt } from '../prompts/system.ts';
 import { BaseAgent, type MiniAgentConfig, MINI_AGENT_TOOLS, MINI_AGENT_MCP_KEYS } from './base-agent.ts';
-import type { BackendConfig, PostInitResult, PermissionRequestType, SdkMcpServerConfig } from './backend/types.ts';
+import type {
+  BackendConfig,
+  BackendCredentialAuthoritySnapshot,
+  PostInitResult,
+  PermissionRequestType,
+  SdkMcpServerConfig,
+} from './backend/types.ts';
 // Plan types are used by UI components; not needed in craft-agent.ts since Safe Mode is user-controlled
 import { parseError, type AgentError } from './errors.ts';
 import { mapClaudeSdkAssistantError, type ClaudeSdkApiError } from './claude-sdk-error-mapper.ts';
@@ -244,6 +250,10 @@ export interface ClaudeAgentConfig {
   mcpPool?: McpClientPool;
   /** LLM connection slug for credential lookup in postInit(). */
   connectionSlug?: string;
+  providerType?: BackendConfig['providerType'];
+  authType?: BackendConfig['authType'];
+  runtime?: BackendConfig['runtime'];
+  assertCredentialAuthority?: BackendConfig['assertCredentialAuthority'];
   /** Enable 1M context window for current Opus models. Default: true. Set false to use 200K and conserve usage limits. */
   enable1MContext?: boolean;
 }
@@ -804,6 +814,10 @@ export class ClaudeAgent extends BaseAgent {
       miniModel: config.miniModel,
       mcpPool: config.mcpPool,
       connectionSlug: config.connectionSlug,
+      providerType: config.providerType,
+      authType: config.authType,
+      runtime: config.runtime,
+      assertCredentialAuthority: config.assertCredentialAuthority,
       automationSystem: config.automationSystem,
     };
 
@@ -886,13 +900,18 @@ export class ClaudeAgent extends BaseAgent {
       return { authInjected: false, authWarning: `Connection not found: ${slug}`, authWarningLevel: 'error' };
     }
 
-    // Clear all auth env vars first for clean state.
-    // Claude subprocesses must never inherit Bedrock-routing toggles from a
-    // previous connection or parent process environment.
-    delete process.env.ANTHROPIC_API_KEY;
-    delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
-    delete process.env.ANTHROPIC_BASE_URL;
-    clearClaudeBedrockRoutingEnvVars();
+    // Ordinary Host sessions retain the legacy process-wide auth baseline.
+    // Acceptance-authorized Module sessions must not mutate it: a concurrent
+    // hidden Module turn is not allowed to clobber the visible Host runtime.
+    // Their exact credentials are carried only in the per-agent subprocess
+    // environment assembled below.
+    const usesHostCredentialFence = this.config.assertCredentialAuthority !== undefined;
+    if (!usesHostCredentialFence) {
+      delete process.env.ANTHROPIC_API_KEY;
+      delete process.env.CLAUDE_CODE_OAUTH_TOKEN;
+      delete process.env.ANTHROPIC_BASE_URL;
+      clearClaudeBedrockRoutingEnvVars();
+    }
 
     // Resolve auth env vars via shared utility
     const manager = getCredentialManager();
@@ -902,9 +921,42 @@ export class ClaudeAgent extends BaseAgent {
       return { authInjected: false, authWarning: result.warning, authWarningLevel: 'error' };
     }
 
-    // Apply env vars to process.env (for SDK subprocess) and envOverrides (per-session isolation)
-    for (const [key, value] of Object.entries(result.envVars)) {
-      process.env[key] = value;
+    if (this.config.assertCredentialAuthority) {
+      let snapshot: BackendCredentialAuthoritySnapshot | undefined;
+      if (connection.authType === 'oauth' && result.envVars.CLAUDE_CODE_OAUTH_TOKEN) {
+        snapshot = Object.freeze({
+          kind: 'oauth-access' as const,
+          accessToken: result.envVars.CLAUDE_CODE_OAUTH_TOKEN,
+        });
+      } else if ((connection.authType === 'api_key'
+        || connection.authType === 'api_key_with_endpoint'
+        || connection.authType === 'bearer_token')
+        && result.envVars.ANTHROPIC_API_KEY) {
+        snapshot = Object.freeze({
+          kind: 'api-key' as const,
+          value: result.envVars.ANTHROPIC_API_KEY,
+        });
+      }
+      if (!snapshot) {
+        throw new Error('Host provider credential authority is unavailable');
+      }
+      await this.config.assertCredentialAuthority(snapshot);
+    }
+
+    // Always pin mutually-exclusive auth variables in the per-agent subprocess
+    // environment. Empty values mask a stale process-wide credential because
+    // envOverrides are spread after process.env by getDefaultOptions().
+    this.config.envOverrides = {
+      ...this.config.envOverrides,
+      ANTHROPIC_API_KEY: '',
+      CLAUDE_CODE_OAUTH_TOKEN: '',
+      ANTHROPIC_BASE_URL: '',
+      ...result.envVars,
+    };
+    if (!usesHostCredentialFence) {
+      for (const [key, value] of Object.entries(result.envVars)) {
+        process.env[key] = value;
+      }
     }
 
     // Pass mini model to SDK subprocess so built-in tools like WebFetch
@@ -912,7 +964,10 @@ export class ClaudeAgent extends BaseAgent {
     // This is critical for custom providers where the default Haiku model ID
     // doesn't exist on the provider's endpoint.
     if (this.config.miniModel) {
-      process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = this.config.miniModel;
+      this.config.envOverrides.ANTHROPIC_DEFAULT_HAIKU_MODEL = this.config.miniModel;
+      if (!usesHostCredentialFence) {
+        process.env.ANTHROPIC_DEFAULT_HAIKU_MODEL = this.config.miniModel;
+      }
     }
 
     return { authInjected: true };

@@ -124,6 +124,12 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       return { slug: '', orchestratorSessionId: '', validation }
     }
     const spec = parsed.spec
+    if (req.attachToExistingSession) {
+      deps.sessionManager.assertRendererSessionAccess(req.attachToExistingSession)
+    }
+    if (req.orchestratorSessionId) {
+      deps.sessionManager.assertRendererSessionAccess(req.orchestratorSessionId)
+    }
     saveTaskSpec(ws.rootPath, spec)
 
     // Single choke point for ALL orchestrator paths (attach / adopt / fresh): apply the reserved
@@ -333,6 +339,9 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
 
   // tasks:run — start a run.
   server.handle(RPC_CHANNELS.tasks.RUN, async (_ctx, workspaceId: string, req: TaskRunRequest) => {
+    if (req.orchestratorSessionId) {
+      deps.sessionManager.assertRendererSessionAccess(req.orchestratorSessionId)
+    }
     return runnerFor(workspaceId).run(req.slug, {
       runId: req.runId,
       orchestratorSessionId: req.orchestratorSessionId,
@@ -364,7 +373,15 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       }
     }
     const run = runId ? runnerFor(workspaceId).getRunState(slug, runId) : null
-    return { slug, validation: toValidationDto(loaded), spec: loaded.spec, run }
+    const runContainsHiddenSession = run
+      ? (run.orchestratorSessionId
+          ? deps.sessionManager.isRendererSessionHidden(run.orchestratorSessionId)
+          : false)
+        || run.nodes.some((node) => node.sessionId
+          ? deps.sessionManager.isRendererSessionHidden(node.sessionId)
+          : false)
+      : false
+    return { slug, validation: toValidationDto(loaded), spec: loaded.spec, run: runContainsHiddenSession ? null : run }
   })
 
   // tasks:list — slugs with a task.yaml.
@@ -425,7 +442,9 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
       }
     }
 
-    const nodes: TaskResultNodeDto[] = [...byId.values()].map((e) => {
+    const nodes: TaskResultNodeDto[] = [...byId.values()]
+      .filter((entry) => !entry.sessionId || !deps.sessionManager.isRendererSessionHidden(entry.sessionId))
+      .map((e) => {
       const out = readNodeOutput(root, slug, chosen, e.id)
       return {
         id: e.id,
@@ -434,7 +453,7 @@ export function registerTasksHandlers(server: RpcServer, deps: HandlerDeps): voi
         ...(e.sessionId ? { sessionId: e.sessionId } : {}),
         ...(out?.text ? { output: out.text } : {}),
       }
-    })
+      })
 
     // Repair accounting: each FAIL verdict consumed one repair attempt; the cap is the per-run
     // snapshot's max_iterations clamped to the shared bound (default when omitted).

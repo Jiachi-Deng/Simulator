@@ -191,6 +191,7 @@ describe('Claude Session disposal containment', () => {
 
     expect(lifecycle).toEqual(['disposeAndReap', 'dispose'])
     expect(managed.agent).toBe(agent)
-    await expect(manager.getSession(managed.id)).resolves.not.toBeNull()
+    expect(manager.getModuleAgentSessionResidueSnapshot().transientSessions).toBe(1)
+    await expect(manager.getSession(managed.id)).resolves.toBeNull()
   })
 })

@@ -1,6 +1,10 @@
-import { describe, expect, it } from 'bun:test'
+import { afterEach, describe, expect, it } from 'bun:test'
 import type { Workspace } from '@craft-agent/core/types'
+import type { AgentBackend } from '@craft-agent/shared/agent/backend'
 import type { ModuleAgentRunMetadata } from '@craft-agent/shared/sessions'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { SessionManager, createManagedSession } from './SessionManager'
 
 type PriorityTestSeam = {
@@ -26,6 +30,11 @@ const moduleOwnership: ModuleAgentRunMetadata = {
   workerEpoch: 'd'.repeat(32),
   state: 'running',
 }
+
+const temporaryRoots: string[] = []
+afterEach(async () => {
+  await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
+})
 
 describe('SessionManager visible Craft priority seam', () => {
   it('awaits visible Craft activation but excludes hidden and transient Module sessions', async () => {
@@ -63,5 +72,60 @@ describe('SessionManager visible Craft priority seam', () => {
     seam.setProcessing(visible, false)
     await seam.visibleCraftTurnGate.end('visible')
     expect(events).toEqual([true, false])
+  })
+
+  it('does not start first-message title provider work before Module preemption finishes', async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), 'visible-craft-title-priority-'))
+    temporaryRoots.push(rootPath)
+    const manager = new SessionManager()
+    const visible = createManagedSession({ id: 'visible-send' }, {
+      ...workspace,
+      id: 'workspace-title-priority',
+      rootPath,
+    }, { messagesLoaded: true })
+    let titleProviderCalls = 0
+    visible.agent = {
+      generateTitle: async () => {
+        titleProviderCalls++
+        return null
+      },
+      setAllSources: () => {},
+      getModel: () => 'fixture-model',
+      getSessionId: () => null,
+      chat: async function* () {
+        yield { type: 'complete' }
+      },
+      isProcessing: () => false,
+      forceAbort: () => {},
+      dispose: () => {},
+      disposeForRestart: async () => {},
+    } as unknown as AgentBackend
+    ;(manager as unknown as { sessions: Map<string, typeof visible> }).sessions.set(visible.id, visible)
+
+    let release!: () => void
+    const blocked = new Promise<void>((resolve) => { release = resolve })
+    let entered!: () => void
+    const gateEntered = new Promise<void>((resolve) => { entered = resolve })
+    manager.onVisibleCraftTurnStateChange(async (change) => {
+      if (!change.active) return
+      entered()
+      await blocked
+    })
+
+    try {
+      const sending = manager.sendMessage(visible.id, 'first visible message')
+      await gateEntered
+      // generateTitle used to wait only one second before creating provider
+      // work, so keep the real gate closed beyond that former deadline.
+      await new Promise((resolve) => setTimeout(resolve, 1_100))
+      expect(titleProviderCalls).toBe(0)
+
+      release()
+      await sending
+      expect(titleProviderCalls).toBe(1)
+    } finally {
+      release()
+      manager.cleanup()
+    }
   })
 })

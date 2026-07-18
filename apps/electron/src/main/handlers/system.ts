@@ -240,6 +240,7 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
       const absolutePath = resolve(expanded)
       const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
       const safePath = await validateFilePath(absolutePath, getWorkspaceAllowedDirs(workspaceId))
+      await deps.sessionManager.assertRendererPathAccess(safePath)
       const result = await requestClientOpenPath(server, ctx.clientId, safePath)
       if (result.error) throw new Error(result.error)
     } catch (error) {
@@ -255,6 +256,7 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
       const absolutePath = resolve(expanded)
       const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
       const safePath = await validateFilePath(absolutePath, getWorkspaceAllowedDirs(workspaceId))
+      await deps.sessionManager.assertRendererPathAccess(safePath)
       await requestClientShowInFolder(server, ctx.clientId, safePath)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'
@@ -393,6 +395,7 @@ export function registerSystemGuiHandlers(server: RpcServer, deps: HandlerDeps):
 
   // Notifications
   server.handle(RPC_CHANNELS.notification.SHOW, async (_ctx, title: string, body: string, workspaceId: string, sessionId: string) => {
+    deps.sessionManager.assertRendererSessionAccess(sessionId)
     const { showNotification } = await import('../notifications')
     showNotification(title, body, workspaceId, sessionId)
   })

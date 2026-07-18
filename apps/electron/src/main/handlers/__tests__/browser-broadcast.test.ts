@@ -16,7 +16,7 @@
 import { describe, it, expect, beforeEach, mock } from 'bun:test'
 import type { RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
-import type { BrowserInstanceInfo } from '@craft-agent/shared/protocol'
+import { RPC_CHANNELS, type BrowserInstanceInfo } from '@craft-agent/shared/protocol'
 
 mock.module('electron', () => ({
   ipcMain: { handle: () => {}, on: () => {} },
@@ -73,9 +73,16 @@ function makeDeps(opts: {
   captureStateCb?: (cb: (info: BrowserInstanceInfo) => void) => void
   captureRemovedCb?: (cb: (id: string) => void) => void
   captureInteractedCb?: (cb: (id: string) => void) => void
+  createForSession?: (sessionId: string) => unknown
+  assertSession?: (sessionId: string) => void
+  isHiddenSession?: (sessionId: string) => boolean
+  navigate?: (id: string, url: string) => unknown
 }): HandlerDeps {
   return {
-    sessionManager: {} as HandlerDeps['sessionManager'],
+    sessionManager: {
+      assertRendererSessionAccess: opts.assertSession ?? (() => {}),
+      isRendererSessionHidden: opts.isHiddenSession ?? (() => false),
+    } as HandlerDeps['sessionManager'],
     platform: {
       appRootPath: '',
       resourcesPath: '',
@@ -94,6 +101,8 @@ function makeDeps(opts: {
       onStateChange: (cb: (info: BrowserInstanceInfo) => void) => opts.captureStateCb?.(cb),
       onRemoved: (cb: (id: string) => void) => opts.captureRemovedCb?.(cb),
       onInteracted: (cb: (id: string) => void) => opts.captureInteractedCb?.(cb),
+      createForSession: (sessionId: string) => opts.createForSession?.(sessionId),
+      navigate: (id: string, url: string) => opts.navigate?.(id, url),
     } as unknown as NonNullable<HandlerDeps['browserPaneManager']>,
     oauthFlowStore: {} as HandlerDeps['oauthFlowStore'],
   }
@@ -202,6 +211,91 @@ describe('browser handler — workspace filtering', () => {
         'remote-tab',
         'unbound',
       ])
+    })
+  })
+
+  describe('CREATE handler', () => {
+    it('rejects a transient Session binding before creating a BrowserPane', async () => {
+      const created: string[] = []
+      const { registerBrowserHandlers } = await import('../browser')
+      registerBrowserHandlers(recorder.server, makeDeps({
+        instances: [],
+        createForSession: (sessionId) => { created.push(sessionId) },
+        assertSession: (sessionId) => {
+          if (sessionId === 'module-session') throw new Error('Session is unavailable')
+        },
+      }))
+
+      const handler = recorder.handlers.get(RPC_CHANNELS.browserPane.CREATE)
+      if (!handler) throw new Error('CREATE handler not registered')
+      expect(() => handler(
+        { clientId: 'c1', workspaceId: 'workspace-1', webContentsId: 1 },
+        { bindToSessionId: 'module-session' },
+      )).toThrow('Session is unavailable')
+      expect(created).toEqual([])
+    })
+  })
+
+  describe('transient Module browser egress', () => {
+    it('filters LIST/events and rejects control by an already-known instance id', async () => {
+      let capturedState: ((info: BrowserInstanceInfo) => void) | null = null
+      const navigated: string[] = []
+      const instances = [
+        makeInstance('module-browser', { ownerSessionId: 'module-session' }),
+        makeInstance('ordinary-browser', { ownerSessionId: 'ordinary-session' }),
+      ]
+      const { registerBrowserHandlers } = await import('../browser')
+      registerBrowserHandlers(recorder.server, makeDeps({
+        instances,
+        captureStateCb: (cb) => { capturedState = cb },
+        isHiddenSession: (sessionId) => sessionId === 'module-session',
+        navigate: (id) => { navigated.push(id) },
+      }))
+
+      const list = recorder.handlers.get(RPC_CHANNELS.browserPane.LIST)
+      if (!list) throw new Error('LIST handler not registered')
+      expect((list({ clientId: 'c1' }) as BrowserInstanceInfo[]).map((entry) => entry.id))
+        .toEqual(['ordinary-browser'])
+
+      capturedState!(makeInstance('module-browser', { ownerSessionId: 'module-session' }))
+      expect(recorder.pushes).toEqual([])
+
+      const navigate = recorder.handlers.get(RPC_CHANNELS.browserPane.NAVIGATE)
+      if (!navigate) throw new Error('NAVIGATE handler not registered')
+      await expect(Promise.resolve(navigate(
+        { clientId: 'c1', workspaceId: 'workspace-1', webContentsId: 1 },
+        'module-browser',
+        'https://example.com',
+      ))).rejects.toThrow('Browser instance is unavailable')
+      expect(navigated).toEqual([])
+    })
+
+    it('propagates BrowserPane file-URL rejection through renderer NAVIGATE RPC', async () => {
+      const attempted: string[] = []
+      const { registerBrowserHandlers } = await import('../browser')
+      registerBrowserHandlers(recorder.server, makeDeps({
+        instances: [makeInstance('ordinary-browser')],
+        navigate: (_id, url) => {
+          attempted.push(url)
+          if (url.startsWith('file:')) throw new Error('Unsupported browser navigation URL')
+          return { url, title: 'Allowed' }
+        },
+      }))
+
+      const navigate = recorder.handlers.get(RPC_CHANNELS.browserPane.NAVIGATE)
+      if (!navigate) throw new Error('NAVIGATE handler not registered')
+      const protectedUrls = [
+        'file:///tmp/workspace/sessions/transient-run/session.jsonl',
+        'file:///tmp/workspace/sessions/.module-agent-quarantine/recovered/session.jsonl',
+      ]
+      for (const protectedUrl of protectedUrls) {
+        await expect(Promise.resolve(navigate(
+          { clientId: 'c1', workspaceId: 'workspace-1', webContentsId: 1 },
+          'ordinary-browser',
+          protectedUrl,
+        ))).rejects.toThrow('Unsupported browser navigation URL')
+      }
+      expect(attempted).toEqual(protectedUrls)
     })
   })
 })

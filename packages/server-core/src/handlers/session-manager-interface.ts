@@ -12,6 +12,10 @@ import type { PermissionMode } from '@craft-agent/shared/agent/mode-types'
 import type { ThinkingLevel } from '@craft-agent/shared/agent/thinking-levels'
 import type { AuthResult } from '@craft-agent/shared/agent'
 import type {
+  BackendCredentialAuthoritySnapshot,
+  BackendRuntimeAuthoritySnapshot,
+} from '@craft-agent/shared/agent/backend'
+import type {
   Session,
   SessionStatus,
   CreateSessionOptions,
@@ -48,6 +52,14 @@ export type VisibleCraftTurnStateListener = (
   change: VisibleCraftTurnStateChange,
 ) => void | Promise<void>
 
+export type ModuleAgentRuntimeAuthorityAssertion = (
+  snapshot: BackendRuntimeAuthoritySnapshot,
+) => Promise<void>
+
+export type ModuleAgentCredentialAuthorityAssertion = (
+  snapshot: BackendCredentialAuthoritySnapshot,
+) => Promise<void>
+
 export interface ISessionManager {
   // ---------------------------------------------------------------------------
   // Lifecycle
@@ -72,6 +84,19 @@ export interface ISessionManager {
 
   getSessions(workspaceId?: string): Session[]
   getSession(sessionId: string): Promise<Session | null>
+  /**
+   * Renderer-RPC choke point for exact-ID access. Transient Module Sessions are
+   * Host-owned and must remain indistinguishable from an unavailable Session.
+   */
+  assertRendererSessionAccess(sessionId: string): void
+  /** Aggregate/remote-aware check: true only for a locally known Host-owned
+   *  transient or quarantined Session; unknown remote IDs remain false. */
+  isRendererSessionHidden(sessionId: string): boolean
+  /**
+   * Renderer filesystem choke point. Paths owned by transient or quarantined
+   * Module Sessions must not be readable, enumerable, opened, or revealed.
+   */
+  assertRendererPathAccess(filePath: string): Promise<void>
   /** Creates a session and (unless `internal.emitCreatedEvent === false`) announces it to the
    *  renderer so it hydrates full metadata instead of fabricating a "New Chat" placeholder. */
   createSession(
@@ -119,7 +144,7 @@ export interface ISessionManager {
 
   setSessionPermissionMode(sessionId: string, mode: PermissionMode): void
   setSessionThinkingLevel(sessionId: string, level: ThinkingLevel): void
-  updateWorkingDirectory(sessionId: string, path: string): void
+  updateWorkingDirectory(sessionId: string, path: string): Promise<void>
   setSessionSources(sessionId: string, sourceSlugs: string[]): Promise<void>
   setSessionLabels(sessionId: string, labels: string[]): void
   /** Apply the reserved Task labeling (mint / inherit the per-task item label under the Task
@@ -167,13 +192,15 @@ export interface ISessionManager {
   sendModuleAgentMessage(
     sessionId: string,
     message: string,
-    assertProviderAuthority?: () => Promise<void>,
+    assertProviderAuthority?: ModuleAgentRuntimeAuthorityAssertion,
+    assertCredentialAuthority?: ModuleAgentCredentialAuthorityAssertion,
   ): Promise<void>
   /** Host-only v1 seam; the returned promise retains sendMessage's full-turn lifecycle. */
   sendLegacyModuleAgentMessage(
     sessionId: string,
     message: string,
-    assertProviderAuthority: () => Promise<void>,
+    assertProviderAuthority?: ModuleAgentRuntimeAuthorityAssertion,
+    assertCredentialAuthority?: ModuleAgentCredentialAuthorityAssertion,
   ): Promise<void>
   cancelProcessing(sessionId: string, silent?: boolean): Promise<void>
   /** Internal lifecycle seam used by the Module Agent adapter. */

@@ -53,6 +53,22 @@ const EARLY_THEME_EXTRACTION_DELAY_MS = 100
 const BROWSER_EMPTY_STATE_PAGE = 'browser-empty-state.html'
 const CRAFT_DEEPLINK_SCHEME_PREFIX = `${process.env.CRAFT_DEEPLINK_SCHEME || 'craftagents'}://`
 
+/**
+ * Browser panes are remote-web surfaces, not general Electron protocol
+ * loaders. Keeping this policy independent of renderer-owned paths prevents
+ * file:, data:, javascript:, custom-protocol and privileged Electron URLs
+ * from becoming a read bypass for Host-owned transient Session storage.
+ */
+export function isAllowedBrowserNavigationUrl(value: string): boolean {
+  if (value === 'about:blank') return true
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
 const THEME_COLOR_EXTRACTOR_FN = String.raw`
 () => {
   const toHex = (r, g, b) => '#' + [r, g, b].map(c => c.toString(16).padStart(2, '0')).join('');
@@ -742,6 +758,16 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       } else {
         normalizedUrl = `https://duckduckgo.com/?q=${encodeURIComponent(normalizedUrl)}`
       }
+    }
+
+    // App deep links are actions, never page content. Preserve their existing
+    // routing without handing the custom protocol to an automatable webContents.
+    if (normalizedUrl.startsWith(CRAFT_DEEPLINK_SCHEME_PREFIX)) {
+      await this.handleDeepLinkUrl(normalizedUrl)
+      return { url: instance.currentUrl, title: instance.title }
+    }
+    if (!isAllowedBrowserNavigationUrl(normalizedUrl)) {
+      throw new Error('Unsupported browser navigation URL')
     }
 
     const timeoutMs = 30_000
@@ -3031,7 +3057,25 @@ export class BrowserPaneManager implements IBrowserPaneManager {
     this.popupParentByWebContentsId.set(popupWcId, parentInstance.id)
 
     const initialUrl = sourceUrl || popupWindow.webContents.getURL?.() || 'about:blank'
+    if (!isAllowedBrowserNavigationUrl(initialUrl)) {
+      mainLog.warn(`[browser-pane] popup denied parent=${parentInstance.id} popupWebContentsId=${popupWcId} reason=unsupported_protocol`)
+      this.unregisterPopupWindow(popupWindow, 'reparented')
+      popupWindow.destroy()
+      return
+    }
     mainLog.info(`[browser-pane] popup created parent=${parentInstance.id} popupWebContentsId=${popupWcId} url=${initialUrl}`)
+
+    popupWindow.webContents.on('will-navigate', (event, popupUrl) => {
+      if (isAllowedBrowserNavigationUrl(popupUrl)) return
+      event.preventDefault()
+      mainLog.warn(`[browser-pane] popup navigation denied parent=${parentInstance.id} popupWebContentsId=${popupWcId} reason=unsupported_protocol`)
+    })
+
+    popupWindow.webContents.on('will-redirect', (event, popupUrl, _isInPlace, isMainFrame) => {
+      if (isMainFrame === false || isAllowedBrowserNavigationUrl(popupUrl)) return
+      event.preventDefault()
+      mainLog.warn(`[browser-pane] popup redirect denied parent=${parentInstance.id} popupWebContentsId=${popupWcId} reason=unsupported_protocol`)
+    })
 
     popupWindow.webContents.on('did-navigate', (_event, urlFromEvent) => {
       const popupUrl = typeof popupWindow.webContents.getURL === 'function'
@@ -3502,10 +3546,25 @@ export class BrowserPaneManager implements IBrowserPaneManager {
       if (url.startsWith(CRAFT_DEEPLINK_SCHEME_PREFIX)) {
         event.preventDefault()
         void this.handleDeepLinkUrl(url)
+        return
+      }
+      if (!isAllowedBrowserNavigationUrl(url)) {
+        event.preventDefault()
+        mainLog.warn(`[browser-pane] navigation denied id=${instance.id} reason=unsupported_protocol`)
       }
     })
 
+    pageWc.on('will-redirect', (event, url, _isInPlace, isMainFrame) => {
+      if (isMainFrame === false || isAllowedBrowserNavigationUrl(url)) return
+      event.preventDefault()
+      mainLog.warn(`[browser-pane] redirect denied id=${instance.id} reason=unsupported_protocol`)
+    })
+
     pageWc.on('did-create-window', (popupWindow, details) => {
+      if (!popupWindow?.webContents) {
+        mainLog.warn(`[browser-pane] popup registration denied id=${instance.id} reason=missing_web_contents`)
+        return
+      }
       const popupUrl = details?.url || popupWindow.webContents.getURL?.() || 'about:blank'
       this.registerPopupWindow(instance, popupWindow, popupUrl)
     })
@@ -3520,16 +3579,8 @@ export class BrowserPaneManager implements IBrowserPaneManager {
         return { action: 'deny' }
       }
 
-      let parsed: URL
-      try {
-        parsed = new URL(details.url)
-      } catch {
-        mainLog.warn(`[browser-pane] window-open denied id=${instance.id} reason=invalid_url url=${details.url}`)
-        return { action: 'deny' }
-      }
-
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-        mainLog.warn(`[browser-pane] window-open denied id=${instance.id} reason=unsupported_protocol protocol=${parsed.protocol} url=${details.url}`)
+      if (!isAllowedBrowserNavigationUrl(details.url)) {
+        mainLog.warn(`[browser-pane] window-open denied id=${instance.id} reason=unsupported_or_invalid_url`)
         return { action: 'deny' }
       }
 

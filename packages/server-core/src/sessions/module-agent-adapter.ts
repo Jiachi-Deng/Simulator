@@ -6,6 +6,10 @@ import type {
   ModuleAgentSessionPort,
 } from '@simulator/module-agent-gateway'
 import type { ISessionManager } from '../handlers/session-manager-interface'
+import type {
+  BackendCredentialAuthoritySnapshot,
+  BackendRuntimeAuthoritySnapshot,
+} from '@craft-agent/shared/agent/backend'
 import type { ModuleAgentRunMetadata } from '@craft-agent/shared/sessions'
 import type {
   CreateHostAgentSessionInput,
@@ -30,13 +34,37 @@ function sha256(value: string): string {
  * Session must be admitted against the exact in-memory Connection pinned by H1.
  */
 export interface ModuleAgentConnectionAdmission {
-  admit(workspaceId: string): Promise<Readonly<{ llmConnection: string }>>
-  assertConnection(input: Readonly<{ workspaceId: string; llmConnection: string }>): Promise<void>
+  admit(workspaceId: string): Promise<Readonly<{
+    llmConnection: string
+    provider: BackendRuntimeAuthoritySnapshot['provider']
+    authType: BackendRuntimeAuthoritySnapshot['authType']
+    resolvedModel: string
+  }>>
+  assertConnection(input: Readonly<{
+    workspaceId: string
+  } & BackendRuntimeAuthoritySnapshot>): Promise<void>
+  assertCredential(input: Readonly<{
+    workspaceId: string
+    llmConnection: string
+    credential: BackendCredentialAuthoritySnapshot
+  }>): Promise<void>
 }
 
 interface AdmittedSessionConnection {
   readonly workspaceId: string
   readonly llmConnection: string
+  readonly provider: BackendRuntimeAuthoritySnapshot['provider']
+  readonly authType: BackendRuntimeAuthoritySnapshot['authType']
+  readonly resolvedModel: string
+}
+
+function runtimeSnapshot(admitted: AdmittedSessionConnection): BackendRuntimeAuthoritySnapshot {
+  return Object.freeze({
+    connectionSlug: admitted.llmConnection,
+    provider: admitted.provider,
+    authType: admitted.authType,
+    resolvedModel: admitted.resolvedModel,
+  })
 }
 
 /**
@@ -106,7 +134,10 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
       hidden: true,
       workingDirectory,
       enabledSourceSlugs: [],
-      ...(admitted ? { llmConnection: admitted.llmConnection } : {}),
+      ...(admitted ? {
+        llmConnection: admitted.llmConnection,
+        model: admitted.resolvedModel,
+      } : {}),
       // OpenDesign tasks may create project artifacts. A Host-owned session
       // boundary is registered below before any prompt can reach this session.
       permissionMode: 'allow-all',
@@ -118,7 +149,8 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
       ? await this.paths.canonicalize(session.workingDirectory)
       : ''
     if (!session.hidden || session.workspaceId !== input.workspaceId || returnedWorkingDirectory !== workingDirectory
-      || (admitted && session.llmConnection !== admitted.llmConnection)) {
+      || (admitted && (session.llmConnection !== admitted.llmConnection
+        || session.model !== admitted.resolvedModel))) {
       await this.sessions.deleteSession(session.id).catch(() => undefined)
       throw new Error('Craft created an invalid hidden module session')
     }
@@ -126,7 +158,7 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
       try {
         await this.connectionAdmission!.assertConnection({
           workspaceId: input.workspaceId,
-          llmConnection: admitted.llmConnection,
+          ...runtimeSnapshot({ workspaceId: input.workspaceId, ...admitted }),
         })
       } catch (error) {
         await this.sessions.deleteSession(session.id).catch(() => undefined)
@@ -134,7 +166,7 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
       }
       this.admittedConnections.set(session.id, {
         workspaceId: input.workspaceId,
-        llmConnection: admitted.llmConnection,
+        ...admitted,
       })
     }
     // Mark first so any accidental queued/tool work between session creation
@@ -163,13 +195,22 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
   }
 
   async sendTurn(sessionId: string, prompt: string): Promise<void> {
-    let assertProviderAuthority: (() => Promise<void>) | undefined
+    let assertProviderAuthority: ((snapshot: BackendRuntimeAuthoritySnapshot) => Promise<void>) | undefined
+    let assertCredentialAuthority: ((snapshot: BackendCredentialAuthoritySnapshot) => Promise<void>) | undefined
     if (this.connectionAdmission) {
       const admitted = this.admittedConnections.get(sessionId)
       if (!admitted) throw new Error('Host provider admission failed')
-      assertProviderAuthority = () => this.connectionAdmission!.assertConnection(admitted)
+      assertProviderAuthority = (snapshot) => this.connectionAdmission!.assertConnection({
+        workspaceId: admitted.workspaceId,
+        ...snapshot,
+      })
+      assertCredentialAuthority = (credential) => this.connectionAdmission!.assertCredential({
+        workspaceId: admitted.workspaceId,
+        llmConnection: admitted.llmConnection,
+        credential,
+      })
       try {
-        await assertProviderAuthority()
+        await assertProviderAuthority(runtimeSnapshot(admitted))
       } catch {
         this.emitLocal({ type: 'turn.failed', sessionId, code: 'HOST_RUNTIME_ERROR' })
         throw new Error('Host provider admission failed')
@@ -179,9 +220,12 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
     // workspace/global Host default and locks it when the first backend starts.
     // Start asynchronously: awaiting the whole SessionManager turn here would
     // block the HTTP response and make streaming/cancellation unusable.
-    const turn = assertProviderAuthority
-      ? this.sessions.sendLegacyModuleAgentMessage(sessionId, prompt, assertProviderAuthority)
-      : this.sessions.sendMessage(sessionId, prompt)
+    const turn = this.sessions.sendLegacyModuleAgentMessage(
+      sessionId,
+      prompt,
+      assertProviderAuthority,
+      assertCredentialAuthority,
+    )
     void turn.catch(() => {
       this.emitLocal({ type: 'turn.failed', sessionId, code: 'HOST_RUNTIME_ERROR' })
     })
@@ -278,7 +322,10 @@ export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
       workingDirectory,
       enabledSourceSlugs: [],
       permissionMode: 'allow-all',
-      ...(admitted ? { llmConnection: admitted.llmConnection } : {}),
+      ...(admitted ? {
+        llmConnection: admitted.llmConnection,
+        model: admitted.resolvedModel,
+      } : {}),
     }, {
       emitCreatedEvent: false,
       moduleAgentRun: ownership,
@@ -287,7 +334,8 @@ export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
       ? await this.paths.canonicalize(session.workingDirectory)
       : ''
     if (!session.hidden || session.workspaceId !== input.workspaceId || returnedWorkingDirectory !== workingDirectory
-      || (admitted && session.llmConnection !== admitted.llmConnection)) {
+      || (admitted && (session.llmConnection !== admitted.llmConnection
+        || session.model !== admitted.resolvedModel))) {
       await this.sessions.deleteSession(session.id).catch(() => undefined)
       throw new Error('Craft created an invalid hidden v2 Module session')
     }
@@ -296,7 +344,7 @@ export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
       try {
         await this.connectionAdmission!.assertConnection({
           workspaceId: input.workspaceId,
-          llmConnection: admitted.llmConnection,
+          ...runtimeSnapshot({ workspaceId: input.workspaceId, ...admitted }),
         })
       } catch (error) {
         await this.sessions.deleteSession(session.id).catch(() => undefined)
@@ -304,7 +352,7 @@ export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
       }
       this.admittedConnections.set(session.id, {
         workspaceId: input.workspaceId,
-        llmConnection: admitted.llmConnection,
+        ...admitted,
       })
     }
 
@@ -358,18 +406,19 @@ export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
     if (!session.hidden
       || session.workspaceId !== input.workspaceId
       || returnedWorkingDirectory !== workingDirectory
-      || (admitted && session.llmConnection !== admitted.llmConnection)) {
+      || (admitted && (session.llmConnection !== admitted.llmConnection
+        || session.model !== admitted.resolvedModel))) {
       throw new Error('Craft recovered an invalid hidden v2 Module session')
     }
 
     if (admitted) {
       await this.connectionAdmission!.assertConnection({
         workspaceId: input.workspaceId,
-        llmConnection: admitted.llmConnection,
+        ...runtimeSnapshot({ workspaceId: input.workspaceId, ...admitted }),
       })
       this.admittedConnections.set(session.id, {
         workspaceId: input.workspaceId,
-        llmConnection: admitted.llmConnection,
+        ...admitted,
       })
     }
 
@@ -393,17 +442,31 @@ export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
 
   async sendTurn(sessionId: string, prompt: string): Promise<void> {
     try {
-      let assertProviderAuthority: (() => Promise<void>) | undefined
+      let assertProviderAuthority: ((snapshot: BackendRuntimeAuthoritySnapshot) => Promise<void>) | undefined
+      let assertCredentialAuthority: ((snapshot: BackendCredentialAuthoritySnapshot) => Promise<void>) | undefined
       if (this.connectionAdmission) {
         const admitted = this.admittedConnections.get(sessionId)
         if (!admitted) throw new Error('Acceptance Connection admission is missing')
-        assertProviderAuthority = () => this.connectionAdmission!.assertConnection(admitted)
-        await assertProviderAuthority()
+        assertProviderAuthority = (snapshot) => this.connectionAdmission!.assertConnection({
+          workspaceId: admitted.workspaceId,
+          ...snapshot,
+        })
+        assertCredentialAuthority = (credential) => this.connectionAdmission!.assertCredential({
+          workspaceId: admitted.workspaceId,
+          llmConnection: admitted.llmConnection,
+          credential,
+        })
+        await assertProviderAuthority(runtimeSnapshot(admitted))
       }
       // This resolves at the provider-admission boundary, not at end-of-turn.
       // RunCore can therefore publish `running` only after every cancellable
       // SessionManager preflight has completed.
-      await this.sessions.sendModuleAgentMessage(sessionId, prompt, assertProviderAuthority)
+      await this.sessions.sendModuleAgentMessage(
+        sessionId,
+        prompt,
+        assertProviderAuthority,
+        assertCredentialAuthority,
+      )
     } catch {
       this.emitLocal({ type: 'turn.failed', sessionId, code: 'RUNTIME_UNAVAILABLE' })
       throw new Error('Host provider admission failed')
