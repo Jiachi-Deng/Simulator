@@ -54,6 +54,11 @@ const MAX_ATTESTATION_RESPONSE_BYTES = 8 * 1024 * 1024
 const MAX_ARTIFACT_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 const SAFE_TARGET_ID = /^[A-Za-z0-9._-]{1,128}$/
 const SAFE_WORKSPACE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
+// Craft owns these two optional router parameters. They are deliberately
+// narrower than a general URL query: H1 does not consume their values, but
+// it must tolerate a normal logged-in Craft window that has an active
+// workspace or session route.
+const SAFE_CRAFT_ROUTE = /^[A-Za-z0-9][A-Za-z0-9._~/-]{0,511}$/
 const RC_LABEL_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-rc\.([1-9]\d*)$/
 const SERVICE_DIGEST_PATTERN = /^sha256:([0-9a-f]{64})$/
 const PROCESS_START_PATTERN = /^[A-Z][a-z]{2} [A-Z][a-z]{2}\s+[0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}$/
@@ -605,8 +610,20 @@ function validatedCraftTarget(candidates: readonly CdpTarget[], instance: Canoni
     if (rendererUrl.protocol !== 'file:' || rendererUrl.username || rendererUrl.password || rendererUrl.hash) return []
     const workspaceIds = rendererUrl.searchParams.getAll('workspaceId')
     const workspaceId = workspaceIds[0]
-    if (rendererUrl.searchParams.size !== 1 || workspaceIds.length !== 1 || !workspaceId
-      || !SAFE_WORKSPACE_ID.test(workspaceId) || rendererUrl.search !== `?workspaceId=${workspaceId}`) return []
+    const workspaceSlugs = rendererUrl.searchParams.getAll('ws')
+    const routes = rendererUrl.searchParams.getAll('route')
+    const workspaceSlug = workspaceSlugs[0]
+    const route = routes[0]
+    if (rendererUrl.searchParams.size !== 1 + workspaceSlugs.length + routes.length
+      || workspaceIds.length !== 1 || workspaceSlugs.length > 1 || routes.length > 1 || !workspaceId
+      || !SAFE_WORKSPACE_ID.test(workspaceId)
+      || (workspaceSlug !== undefined && !SAFE_WORKSPACE_ID.test(workspaceSlug))
+      || (route !== undefined && !SAFE_CRAFT_ROUTE.test(route))) return []
+    const canonicalQuery = new URLSearchParams()
+    canonicalQuery.set('workspaceId', workspaceId)
+    if (workspaceSlug !== undefined) canonicalQuery.set('ws', workspaceSlug)
+    if (route !== undefined) canonicalQuery.set('route', route)
+    if (rendererUrl.search !== `?${canonicalQuery.toString()}`) return []
     let rendererPath: string
     try { rendererPath = fileURLToPath(rendererUrl) } catch { return [] }
     if (rendererPath !== expectedRendererPath) return []
