@@ -34,6 +34,10 @@ const machineAuthority: MachineEvidenceAuthority = {
   producerRunAttempt: 1,
   hostBuildRunId: 8001,
   hostArtifactSha256: 'a'.repeat(64),
+  h1: {
+    connectionEvidenceSha256: 'f'.repeat(64),
+    handoffSha256: '9'.repeat(64),
+  },
   lkg: {
     archiveSha256: 'b'.repeat(64),
     catalogIssuedAt: '2026-07-16T22:00:00.000Z',
@@ -99,6 +103,7 @@ async function fixture(): Promise<{
     hostArtifactSha256: machineAuthority.hostArtifactSha256,
     hostBuildRunId: machineAuthority.hostBuildRunId,
     hostHeadSha: machineAuthority.hostHeadSha,
+    h1: machineAuthority.h1,
     lkg: machineAuthority.lkg,
     machineCompletedAt: new Date(machineCompleted).toISOString(),
     machineRunAttempt: 1,

@@ -62,6 +62,10 @@ import {
   type OpenDesignM1FirstFailureAuthority,
   type OpenDesignM1LifecycleFailurePhase,
 } from './open-design-m1-machine-first-failure'
+import {
+  validateOpenDesignM1H1A1Claim,
+  type H1A1ClaimResult,
+} from './open-design-m1-h1-a1-authority'
 
 const REAL_OPT_IN = 'packaged-open-design-direct-observation'
 const CONFIRMATION = 'RUN_OPEN_DESIGN_M1_40_PAID_TURNS_STOP_ON_FIRST_FAILURE'
@@ -533,14 +537,51 @@ async function requireExternalBlackoutProxy(cdp: CdpClient): Promise<void> {
   }
 }
 
-async function requireAuthenticatedCraftRuntime(cdp: CdpClient): Promise<void> {
-  const ready = await cdp.evaluate(`(async()=>{
-    const list=window.electronAPI?.listLlmConnectionsWithStatus;
-    if(typeof list!=='function')return false;
-    const connections=await list();
-    return Array.isArray(connections)&&connections.some((connection)=>connection?.isAuthenticated===true);
-  })()`)
-  if (ready !== true) throw new Error('Protected runner has no authenticated Craft Runtime connection')
+async function readAuthorityKey(claim: H1A1ClaimResult): Promise<Buffer> {
+  const metadata = await lstat(claim.authorityKeyRealpath)
+  if (!metadata.isFile() || metadata.isSymbolicLink() || metadata.nlink !== 1 || metadata.size !== 32
+    || (typeof process.getuid === 'function' && metadata.uid !== process.getuid())
+    || (metadata.mode & 0o777) !== 0o600
+    || await realpath(claim.authorityKeyRealpath) !== claim.authorityKeyRealpath) {
+    throw new Error('H1 to A1 authority key is not an owner-only canonical file')
+  }
+  const key = await readFile(claim.authorityKeyRealpath)
+  if (key.byteLength !== 32) {
+    key.fill(0)
+    throw new Error('H1 to A1 authority key length changed')
+  }
+  return key
+}
+
+async function armExactAcceptanceConnection(cdp: CdpClient, claim: H1A1ClaimResult): Promise<void> {
+  const key = await readAuthorityKey(claim)
+  let keyBase64 = key.toString('base64')
+  try {
+    const observed = exactObject(
+      await cdp.evaluate(rendererCall('openDesignAcceptance', 'getConnectionAuthority', { keyBase64 })),
+      ['authenticated', 'authorityHmacSha256', 'schemaVersion'],
+      'H1 Connection authority',
+    )
+    if (observed.schemaVersion !== 1 || observed.authenticated !== true
+      || observed.authorityHmacSha256 !== claim.authorityHmacSha256) {
+      throw new Error('H1 Connection authority does not match the one-time handoff')
+    }
+    const armed = exactObject(
+      await cdp.evaluate(rendererCall('openDesignAcceptance', 'armConnectionAdmission', {
+        keyBase64,
+        expectedHmacSha256: claim.authorityHmacSha256,
+      })),
+      ['armed', 'authorityHmacSha256', 'schemaVersion'],
+      'A1 Connection admission',
+    )
+    if (armed.schemaVersion !== 1 || armed.armed !== true
+      || armed.authorityHmacSha256 !== claim.authorityHmacSha256) {
+      throw new Error('A1 Connection admission did not arm the exact H1 authority')
+    }
+  } finally {
+    key.fill(0)
+    keyBase64 = ''
+  }
 }
 
 async function requireOpenDesignHostRuntime(origin: string): Promise<void> {
@@ -1411,6 +1452,8 @@ async function executeCase(options: {
 async function appLaunch(
   executable: string,
   userData: string,
+  acceptanceHome: string,
+  configRoot: string,
   blackoutProxyChild: BlackoutProxyChild,
 ): Promise<ReturnType<typeof Bun.spawn>> {
   await new Promise<void>((resolvePromise, reject) => {
@@ -1421,10 +1464,12 @@ async function appLaunch(
     )))
   })
   const environment: Record<string, string> = {}
-  for (const name of ['HOME', 'PATH', 'TMPDIR', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', '__CF_USER_TEXT_ENCODING']) {
+  for (const name of ['PATH', 'TMPDIR', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', '__CF_USER_TEXT_ENCODING']) {
     const value = process.env[name]
     if (value !== undefined) environment[name] = value
   }
+  environment.HOME = acceptanceHome
+  environment.CRAFT_CONFIG_DIR = configRoot
   environment.SIMULATOR_HOST_MODULE_ACCEPTANCE = '1'
   environment.SIMULATOR_DISABLE_UPDATES = '1'
   environment.SIMULATOR_HOST_AGENT_BLACKOUT_PROXY_BUN_PATH = blackoutProxyChild.bunPath
@@ -1649,7 +1694,7 @@ async function sealArtifact(options: {
     })
   }
   await writeCanonical(options.root, 'machine-manifest.json', {
-    schemaVersion: 2,
+    schemaVersion: 3,
     kind: 'open-design-m1-machine-evidence',
     repository: REPOSITORY,
     workflowPath: OPEN_DESIGN_M1_MACHINE_WORKFLOW_PATH,
@@ -1663,6 +1708,14 @@ async function sealArtifact(options: {
       artifactSha256: options.authority.hostArtifactSha256,
       buildRunId: options.authority.hostBuildRunId,
       version: OPEN_DESIGN_HOST_VERSION,
+    },
+    h1Authority: {
+      connectionEvidenceSha256: options.authority.h1.connectionEvidenceSha256,
+      handoffSha256: options.authority.h1.handoffSha256,
+      exactSourceAndArtifactMatched: true,
+      sameConfigAuthority: true,
+      providerAdmissionPinned: true,
+      matchedBeforeFirstPaidTurn: true,
     },
     lkg: release('old'),
     rc: release('new'),
@@ -1708,12 +1761,23 @@ async function main(): Promise<void> {
   const staging = await isolatedPath('M1_MACHINE_WORK_ROOT', runnerTemp)
   const hostHeadSha = requiredEnv('GITHUB_SHA', COMMIT)
   const hostArtifactSha256 = requiredEnv('HOST_ARTIFACT_SHA256', SHA256)
+  const producerRunId = positiveInteger('GITHUB_RUN_ID')
+  const hostBuildRunId = positiveInteger('HOST_BUILD_RUN_ID')
+  const hostArtifactId = positiveInteger('HOST_ARTIFACT_ID')
+  const hostArtifactName = requiredEnv('HOST_ARTIFACT_NAME', /^[A-Za-z0-9][A-Za-z0-9._-]{0,191}$/)
+  const hostArtifactDigest = requiredEnv('HOST_ARTIFACT_DIGEST', /^sha256:[0-9a-f]{64}$/)
+  const h1ConnectionEvidenceSha256 = requiredEnv('H1_CONNECTION_EVIDENCE_SHA256', SHA256)
+  const h1A1AuthoritySha256 = requiredEnv('H1_A1_AUTHORITY_SHA256', SHA256)
   const failureAuthority: OpenDesignM1FirstFailureAuthority = {
     hostHeadSha,
-    producerRunId: positiveInteger('GITHUB_RUN_ID'),
+    producerRunId,
     producerRunAttempt: 1,
-    hostBuildRunId: positiveInteger('HOST_BUILD_RUN_ID'),
+    hostBuildRunId,
     hostArtifactSha256,
+    h1: {
+      connectionEvidenceSha256: h1ConnectionEvidenceSha256,
+      handoffSha256: h1A1AuthoritySha256,
+    },
   }
   await mkdir(staging, { mode: 0o700 })
   await chmod(staging, 0o700)
@@ -1736,12 +1800,30 @@ async function main(): Promise<void> {
     }
   }
   try {
+    const h1A1Claim = await validateOpenDesignM1H1A1Claim(
+      requiredEnv('M1_H1_A1_CLAIM_FILE'),
+      {
+        sourceSha: hostHeadSha,
+        hostBuildRunId,
+        hostArtifactId,
+        hostArtifactName,
+        hostArtifactDigest,
+        handoffSha256: h1A1AuthoritySha256,
+        connectionSha256: h1ConnectionEvidenceSha256,
+        producerRunId,
+        producerRunAttempt: 1,
+      },
+    )
     const token = requiredEnv('GH_TOKEN')
     await requireNoOpenDesignReleaseTransaction(token)
     const lkgTrust = await fetchReleaseAuthority(OPEN_DESIGN_LKG_VERSION)
     const rcTrust = await fetchReleaseAuthority(OPEN_DESIGN_RC_VERSION)
     const authority: MachineEvidenceAuthority = {
       ...failureAuthority,
+      h1: {
+        connectionEvidenceSha256: h1ConnectionEvidenceSha256,
+        handoffSha256: h1A1AuthoritySha256,
+      },
       lkg: lkgTrust.release,
       rc: { ...rcTrust.release, sourceSha: OPEN_DESIGN_RC_SOURCE_SHA },
     }
@@ -1764,7 +1846,7 @@ async function main(): Promise<void> {
       scriptPath: await trustedOwnerExecutablePath('M1_BLACKOUT_PROXY_SCRIPT_PATH', false),
     }
     await preflightExternalBlackoutProxyChild(blackoutProxyChild, staging)
-    const userData = resolve(requiredEnv('M1_PACKAGED_PROFILE_ROOT'))
+    const userData = h1A1Claim.acceptance.userDataRealpath
     cleanupUserData = userData
     const profileParent = await realpath(dirname(userData))
     if (resolve(profileParent, basename(userData)) !== userData || userData === profileParent) {
@@ -1804,15 +1886,21 @@ async function main(): Promise<void> {
     // any process. A stale or concurrent run is reported and fails closed; it
     // is never selected for cleanup by a command-line path match.
     await requireDedicatedAcceptanceProcessesAbsent(userData, blackoutProxyChild.scriptPath)
-    app = await appLaunch(executable, userData, blackoutProxyChild)
+    app = await appLaunch(
+      executable,
+      userData,
+      h1A1Claim.acceptance.homeRealpath,
+      h1A1Claim.acceptance.configRealpath,
+      blackoutProxyChild,
+    )
     const craft = await craftTarget()
     craftCdp = new CdpClient(craft.webSocketDebuggerUrl)
     await craftCdp.connect()
     const acceptanceAvailable = await craftCdp.evaluate(`Boolean(window.electronAPI?.openDesignAcceptance)`)
     if (acceptanceAvailable !== true) throw new Error('Packaged Host acceptance facade is unavailable')
+    await armExactAcceptanceConnection(craftCdp, h1A1Claim)
     // This runs before installing a Module or spending any paid Turn.
     await requireExternalBlackoutProxy(craftCdp)
-    await requireAuthenticatedCraftRuntime(craftCdp)
     await requireRuntimeCleanup(craftCdp, 1_000)
     await requirePaidTurnRuntimeBaseline(craftCdp)
     let state = await preflightRealPackagedV2ProxyAttach({
@@ -1833,6 +1921,7 @@ async function main(): Promise<void> {
     await requireNoOpenDesignReleaseTransaction(token)
     requireReleaseCatalogUnchanged(lkgTrust, await fetchReleaseAuthority(OPEN_DESIGN_LKG_VERSION))
     requireReleaseCatalogUnchanged(rcTrust, await fetchReleaseAuthority(OPEN_DESIGN_RC_VERSION))
+    await armExactAcceptanceConnection(craftCdp, h1A1Claim)
     await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES_V2, craftCdp, async (testCase, index) => {
       await runTrackedOpenDesignM1Case(batchProgress, 'old', testCase, index, async (onPhase) => {
         await executeCase({
@@ -1858,6 +1947,7 @@ async function main(): Promise<void> {
     origin = new URL(module.url).origin
     await requireOpenDesignHostRuntime(origin)
     lifecyclePhase = 'rc-batch.preflight'
+    await armExactAcceptanceConnection(craftCdp, h1A1Claim)
     await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES_V2, craftCdp, async (testCase, index) => {
       await runTrackedOpenDesignM1Case(batchProgress, 'new', testCase, index, async (onPhase) => {
         await executeCase({
@@ -1898,11 +1988,18 @@ async function main(): Promise<void> {
     rememberProcessTree(preRestartProcessTree)
     await stopApp(app!)
     await requireProcessTreeReaped(preRestartProcessTree)
-    app = await appLaunch(executable, userData, blackoutProxyChild)
+    app = await appLaunch(
+      executable,
+      userData,
+      h1A1Claim.acceptance.homeRealpath,
+      h1A1Claim.acceptance.configRealpath,
+      blackoutProxyChild,
+    )
     lifecyclePhase = 'restart.verify'
     const restartedCraft = await craftTarget()
     craftCdp = new CdpClient(restartedCraft.webSocketDebuggerUrl)
     await craftCdp.connect()
+    await armExactAcceptanceConnection(craftCdp, h1A1Claim)
     state = await craftCdp.evaluate(rendererCall('openDesignAcceptance', 'getState'))
     readyAcceptanceState(state, OPEN_DESIGN_RC_VERSION, OPEN_DESIGN_LKG_VERSION)
     await craftSnapshot(craftCdp, app!.pid)

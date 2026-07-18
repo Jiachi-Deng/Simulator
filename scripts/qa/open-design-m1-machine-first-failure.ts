@@ -79,6 +79,10 @@ export interface OpenDesignM1FirstFailureAuthority {
   readonly producerRunAttempt: 1
   readonly hostBuildRunId: number
   readonly hostArtifactSha256: string
+  readonly h1: {
+    readonly connectionEvidenceSha256: string
+    readonly handoffSha256: string
+  }
 }
 
 export interface OpenDesignM1FirstFailureCase {
@@ -189,7 +193,9 @@ function assertAuthority(authority: OpenDesignM1FirstFailureAuthority): void {
     || !Number.isSafeInteger(authority.producerRunId) || authority.producerRunId < 1
     || authority.producerRunAttempt !== 1
     || !Number.isSafeInteger(authority.hostBuildRunId) || authority.hostBuildRunId < 1
-    || !SHA256.test(authority.hostArtifactSha256)) {
+    || !SHA256.test(authority.hostArtifactSha256)
+    || !SHA256.test(authority.h1.connectionEvidenceSha256)
+    || !SHA256.test(authority.h1.handoffSha256)) {
     throw new TypeError('OpenDesign M1 first-failure authority is invalid')
   }
 }
@@ -306,7 +312,7 @@ function manifestFor(input: OpenDesignM1FirstFailureInput): JsonObject {
   const failure = input.progress.current
   const paidTurnUpperBound = failure?.caseAttemptOrdinal ?? input.progress.completedCaseCount
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     kind: 'open-design-m1-machine-first-failure',
     repository: REPOSITORY,
     workflowPath: WORKFLOW_PATH,
@@ -318,6 +324,10 @@ function manifestFor(input: OpenDesignM1FirstFailureInput): JsonObject {
     host: {
       artifactSha256: input.authority.hostArtifactSha256,
       buildRunId: input.authority.hostBuildRunId,
+    },
+    h1Authority: {
+      connectionEvidenceSha256: input.authority.h1.connectionEvidenceSha256,
+      handoffSha256: input.authority.h1.handoffSha256,
     },
     batch: {
       batchId: `m1-${input.authority.producerRunId}`,
@@ -395,9 +405,10 @@ export async function validateOpenDesignM1FirstFailure(
   }
   const manifest = objectAt(manifestValue, '$')
   exactKeys(manifest, [
-    'schemaVersion', 'kind', 'repository', 'workflowPath', 'producer', 'host', 'batch', 'firstFailure', 'cleanup',
+    'schemaVersion', 'kind', 'repository', 'workflowPath', 'producer', 'host', 'h1Authority',
+    'batch', 'firstFailure', 'cleanup',
   ], '$')
-  if (manifest.schemaVersion !== 2 || manifest.kind !== 'open-design-m1-machine-first-failure'
+  if (manifest.schemaVersion !== 3 || manifest.kind !== 'open-design-m1-machine-first-failure'
     || manifest.repository !== REPOSITORY || manifest.workflowPath !== WORKFLOW_PATH) {
     throw new TypeError('OpenDesign M1 first-failure manifest identity is invalid')
   }
@@ -411,6 +422,12 @@ export async function validateOpenDesignM1FirstFailure(
   exactKeys(host, ['artifactSha256', 'buildRunId'], '$.host')
   if (host.artifactSha256 !== authority.hostArtifactSha256 || host.buildRunId !== authority.hostBuildRunId) {
     throw new TypeError('OpenDesign M1 first-failure Host authority is invalid')
+  }
+  const h1Authority = objectAt(manifest.h1Authority, '$.h1Authority')
+  exactKeys(h1Authority, ['connectionEvidenceSha256', 'handoffSha256'], '$.h1Authority')
+  if (h1Authority.connectionEvidenceSha256 !== authority.h1.connectionEvidenceSha256
+    || h1Authority.handoffSha256 !== authority.h1.handoffSha256) {
+    throw new TypeError('OpenDesign M1 first-failure H1 authority is invalid')
   }
   const batch = objectAt(manifest.batch, '$.batch')
   exactKeys(batch, [

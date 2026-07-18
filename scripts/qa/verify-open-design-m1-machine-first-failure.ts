@@ -32,6 +32,10 @@ async function main(): Promise<void> {
     producerRunAttempt: 1,
     hostBuildRunId: positiveInteger('HOST_BUILD_RUN_ID'),
     hostArtifactSha256: requiredEnv('HOST_ARTIFACT_SHA256', SHA256),
+    h1: {
+      connectionEvidenceSha256: requiredEnv('H1_CONNECTION_EVIDENCE_SHA256', SHA256),
+      handoffSha256: requiredEnv('H1_A1_AUTHORITY_SHA256', SHA256),
+    },
   }
   const result = await validateOpenDesignM1FirstFailure(resolve(process.argv[2]!), authority)
   process.stdout.write(`${JSON.stringify({ status: 'failed', ...result })}\n`)

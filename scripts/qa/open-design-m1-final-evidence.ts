@@ -45,6 +45,10 @@ export interface FinalEvidenceAuthority {
   readonly hostArtifactSha256: string
   readonly hostBuildRunId: number
   readonly hostHeadSha: string
+  readonly h1: {
+    readonly connectionEvidenceSha256: string
+    readonly handoffSha256: string
+  }
   readonly lkg: ReleaseAuthority
   readonly machineCompletedAt: string
   readonly machineRunAttempt: 1
@@ -151,12 +155,18 @@ function releaseAuthority(value: unknown, includeSourceSha: boolean, path: strin
 export function parseFinalEvidenceAuthority(value: unknown): FinalEvidenceAuthority {
   const object = objectAt(value, '$authority')
   exactKeys(object, [
-    'finalCreatedAt', 'hostArtifactSha256', 'hostBuildRunId', 'hostHeadSha', 'lkg',
+    'finalCreatedAt', 'h1', 'hostArtifactSha256', 'hostBuildRunId', 'hostHeadSha', 'lkg',
     'machineCompletedAt', 'machineRunAttempt', 'machineRunId', 'rc',
     'visualCompletedAt', 'visualCreatedAt', 'visualRunAttempt', 'visualRunId',
   ], '$authority')
   const hostHeadSha = stringAt(object, 'hostHeadSha', '$authority')
   const hostArtifactSha256 = hashAt(object, 'hostArtifactSha256', '$authority')
+  const h1Object = objectAt(object.h1, '$authority.h1')
+  exactKeys(h1Object, ['connectionEvidenceSha256', 'handoffSha256'], '$authority.h1')
+  const h1 = {
+    connectionEvidenceSha256: hashAt(h1Object, 'connectionEvidenceSha256', '$authority.h1'),
+    handoffSha256: hashAt(h1Object, 'handoffSha256', '$authority.h1'),
+  }
   if (!COMMIT_SHA.test(hostHeadSha)) fail('$authority.hostHeadSha')
   const hostBuildRunId = integerAt(object, 'hostBuildRunId', '$authority')
   const machineRunId = integerAt(object, 'machineRunId', '$authority')
@@ -186,6 +196,7 @@ export function parseFinalEvidenceAuthority(value: unknown): FinalEvidenceAuthor
     hostArtifactSha256,
     hostBuildRunId,
     hostHeadSha,
+    h1,
     lkg,
     machineCompletedAt,
     machineRunAttempt: 1,
@@ -409,6 +420,7 @@ export async function createOpenDesignM1FinalEvidence(
     producerRunAttempt: authority.machineRunAttempt,
     hostBuildRunId: authority.hostBuildRunId,
     hostArtifactSha256: authority.hostArtifactSha256,
+    h1: authority.h1,
     lkg: authority.lkg,
     rc: authority.rc,
   }

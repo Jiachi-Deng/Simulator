@@ -45,6 +45,10 @@ const authority: MachineEvidenceAuthority = Object.freeze({
   producerRunAttempt: 1,
   hostBuildRunId: 8001,
   hostArtifactSha256: 'a'.repeat(64),
+  h1: {
+    connectionEvidenceSha256: 'f'.repeat(64),
+    handoffSha256: '9'.repeat(64),
+  },
   lkg: {
     archiveSha256: 'b'.repeat(64),
     catalogIssuedAt: '2026-07-16T22:00:00.000Z',
@@ -97,6 +101,18 @@ describe('OpenDesign M1 machine evidence producer contract', () => {
     })
     await machineEvidenceTestOnly.reseal(root)
     await expect(validateOpenDesignM1MachineEvidence(root, authority)).rejects.toThrow('records/old/D01.json')
+  })
+
+  it('rejects machine evidence that is not pinned to the exact H1 authority', async () => {
+    const root = await fixture()
+    await machineEvidenceTestOnly.replaceCanonicalJson(root, 'machine-manifest.json', (manifest) => {
+      const h1 = manifest.h1Authority as Record<string, unknown>
+      h1.providerAdmissionPinned = false
+    })
+    await machineEvidenceTestOnly.reseal(root)
+    await expect(validateOpenDesignM1MachineEvidence(root, authority)).rejects.toThrow(
+      '$.h1Authority.providerAdmissionPinned',
+    )
   })
 
   it('rejects a blackout ledger containing a business event', async () => {

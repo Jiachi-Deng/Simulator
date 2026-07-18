@@ -130,6 +130,7 @@ async function authenticatedMachineView(
   }
   const lkg = releaseAuthorityAt(manifest.lkg, '$machine.lkg', false)
   const rc = releaseAuthorityAt(manifest.rc, '$machine.rc', true)
+  const h1Authority = objectAt(manifest.h1Authority, '$machine.h1Authority', KIND)
   if (!rc.sourceSha) evidenceFailure(KIND, '$machine.rc.sourceSha')
   const validation = await validateOpenDesignM1MachineEvidence(machineRoot, {
     hostHeadSha: sourceSha,
@@ -137,6 +138,15 @@ async function authenticatedMachineView(
     producerRunAttempt: 1,
     hostBuildRunId,
     hostArtifactSha256,
+    h1: {
+      connectionEvidenceSha256: hashAt(
+        h1Authority,
+        'connectionEvidenceSha256',
+        '$machine.h1Authority',
+        KIND,
+      ),
+      handoffSha256: hashAt(h1Authority, 'handoffSha256', '$machine.h1Authority', KIND),
+    },
     lkg,
     rc: rc as ReleaseAuthority & { readonly sourceSha: string },
   } satisfies MachineEvidenceAuthority)
