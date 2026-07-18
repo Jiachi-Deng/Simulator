@@ -1210,8 +1210,12 @@ async function preflightRealPackagedV2ProxyAttach(options: {
 }): Promise<JsonObject> {
   let state = await options.craftCdp.evaluate(rendererCall('openDesignAcceptance', 'getState')) as JsonObject
   if (state?.activeVersion === null) {
-    const installed = await options.craftCdp.evaluate(rendererCall('openDesignModule', 'install'))
-    if (!['available', 'running'].includes(installed?.status)) throw new Error('LKG install failed')
+    state = await options.craftCdp.evaluate(rendererCall('openDesignAcceptance', 'installLkg')) as JsonObject
+    if (state?.status !== 'ready'
+      || state.activeVersion !== OPEN_DESIGN_LKG_VERSION
+      || state.lastKnownGoodVersion !== null
+      || state.running !== false
+      || state.viewAttached !== false) throw new Error('LKG acceptance install failed')
     const started = await options.craftCdp.evaluate(rendererCall('openDesignModule', 'start'))
     if (started?.status !== 'running') throw new Error('LKG start failed')
     state = await options.craftCdp.evaluate(rendererCall('openDesignAcceptance', 'getState')) as JsonObject

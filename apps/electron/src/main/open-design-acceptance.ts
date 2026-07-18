@@ -147,11 +147,26 @@ export const OPEN_DESIGN_ACCEPTANCE_DESCRIPTOR_CANONICAL_JSON = `${JSON.stringif
 const MAX_DESCRIPTOR_BYTES = 16 * 1024
 const MODULE_ID = OPEN_DESIGN_MODULE_ID as ModuleId
 const RC_VERSION = OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion as ModuleVersion
+const LKG_VERSION = OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion as ModuleVersion
+const OPEN_DESIGN_ACCEPTANCE_LKG_IDENTITY = Object.freeze({
+  hostVersionRange: '>=0.11.1 <0.12.0',
+  archiveUrl: 'https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.5/org.simulator.open-design-0.14.5-darwin-arm64.tar.gz',
+  archiveSha256: 'f883aaedd588c62d8a7ba6a4f94b6e2c8e448f9a8816758d6dbeb468a68d3e09',
+  artifactSize: 61_479_889,
+  extractedManifestSha256: '9897521de3493eb2d35c76ff25cd9b714575024c42efd88ccd614331d5445414',
+  entrypoint: 'runtime/open-design-launcher',
+  auxiliaryExecutables: Object.freeze([
+    'runtime/node/bin/node',
+    'runtime/daemon/node_modules/node-pty/prebuilds/darwin-arm64/spawn-helper',
+  ]),
+  capabilities: Object.freeze(['host-agent.use', 'workspace.read', 'workspace.write']),
+} as const)
 
 export type OpenDesignAcceptanceBootstrap =
   | { readonly status: 'not-ready'; readonly errorCode: string }
   | {
       readonly status: 'ready'
+      readonly lkgReleaseRequest: ModuleCoordinatorReleaseRequest
       readonly releaseRequest: ModuleCoordinatorReleaseRequest
       readonly descriptorPath: string
     }
@@ -288,6 +303,11 @@ export async function loadOpenDesignAcceptance(
   return Object.freeze({
     status: 'ready' as const,
     descriptorPath: join(resolve(options.userDataRoot), OPEN_DESIGN_ACCEPTANCE_DESCRIPTOR_RELATIVE_PATH),
+    lkgReleaseRequest: Object.freeze({
+      catalogUrl: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableCatalogUrl,
+      moduleId: MODULE_ID,
+      version: LKG_VERSION,
+    }),
     releaseRequest: Object.freeze({
       catalogUrl: OPEN_DESIGN_ACCEPTANCE_IDENTITY.catalogUrl,
       moduleId: MODULE_ID,
@@ -297,7 +317,7 @@ export async function loadOpenDesignAcceptance(
 }
 
 export interface OpenDesignAcceptanceRuntime {
-  readonly coordinator: Pick<ModuleCoordinator, 'resolveInstallRequest' | 'update' | 'rollback'>
+  readonly coordinator: Pick<ModuleCoordinator, 'resolveInstallRequest' | 'install' | 'update' | 'rollback'>
   readonly registry: Pick<ModuleRegistry, 'snapshot'>
   readonly daemon: { get(moduleId: ModuleId): ModuleDaemonSnapshot | undefined }
   readonly view: Pick<ModuleViewPort, 'query'>
@@ -437,8 +457,54 @@ function assertResolvedRcIdentity(request: ResolvedModuleCoordinatorInstallReque
   }
 }
 
+function assertResolvedLkgIdentity(request: ResolvedModuleCoordinatorInstallRequest, now: number): void {
+  const evidence = request.catalogEvidence
+  if (!evidence) throw new AcceptanceControlError('ACCEPTANCE_RESOLVED_LKG_IDENTITY_MISMATCH')
+  const artifact = request.descriptor.artifact
+  const manifestArtifact = request.descriptor.manifest.artifacts[0]
+  const auxiliaryExecutables = artifact.auxiliaryExecutables ?? []
+  const manifestAuxiliaryExecutables = manifestArtifact?.auxiliaryExecutables ?? []
+  const issuedAt = canonicalTimestamp(evidence.issuedAt)
+  const expiresAt = canonicalTimestamp(evidence.expiresAt)
+  const expected = OPEN_DESIGN_ACCEPTANCE_LKG_IDENTITY
+  if (request.catalogUrl !== OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableCatalogUrl
+    || request.hostVersionRange !== expected.hostVersionRange
+    || request.descriptor.verified !== true
+    || request.descriptor.format !== 'tar.gz'
+    || request.descriptor.extractedManifestSha256 !== expected.extractedManifestSha256
+    || request.descriptor.manifest.schemaVersion !== 1
+    || request.descriptor.manifest.id !== OPEN_DESIGN_MODULE_ID
+    || request.descriptor.manifest.version !== OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion
+    || request.descriptor.manifest.artifacts.length !== 1
+    || !manifestArtifact
+    || request.descriptor.manifest.capabilities.length !== expected.capabilities.length
+    || request.descriptor.manifest.capabilities.some((capability, index) => capability !== expected.capabilities[index])
+    || artifact.platform !== OPEN_DESIGN_ACCEPTANCE_IDENTITY.platform
+    || artifact.url !== expected.archiveUrl
+    || artifact.sha256 !== expected.archiveSha256
+    || artifact.entrypoint !== expected.entrypoint
+    || auxiliaryExecutables.length !== expected.auxiliaryExecutables.length
+    || auxiliaryExecutables.some((entry, index) => entry !== expected.auxiliaryExecutables[index])
+    || manifestArtifact.platform !== OPEN_DESIGN_ACCEPTANCE_IDENTITY.platform
+    || manifestArtifact.url !== expected.archiveUrl
+    || manifestArtifact.sha256 !== expected.archiveSha256
+    || manifestArtifact.entrypoint !== expected.entrypoint
+    || manifestAuxiliaryExecutables.length !== expected.auxiliaryExecutables.length
+    || manifestAuxiliaryExecutables.some((entry, index) => entry !== expected.auxiliaryExecutables[index])
+    || evidence.schemaVersion !== 1
+    || !Number.isSafeInteger(evidence.sequence)
+    || evidence.sequence < 1
+    || issuedAt === undefined
+    || expiresAt === undefined
+    || expiresAt <= issuedAt
+    || expiresAt <= now
+    || evidence.artifactSize !== expected.artifactSize) {
+    throw new AcceptanceControlError('ACCEPTANCE_RESOLVED_LKG_IDENTITY_MISMATCH')
+  }
+}
+
 function operationEvidence(result: ModuleCoordinatorOperationResult) {
-  return Object.freeze({ operationId: result.operationId, kind: result.kind as 'update' | 'rollback', ok: result.ok })
+  return Object.freeze({ operationId: result.operationId, kind: result.kind as 'install' | 'update' | 'rollback', ok: result.ok })
 }
 
 function canonicalTimestamp(value: string): number | undefined {
@@ -451,7 +517,10 @@ function canonicalTimestamp(value: string): number | undefined {
 interface AcceptanceExecution {
   readonly result: ModuleCoordinatorOperationResult
   readonly expectedActiveVersion: string
-  readonly expectedLastKnownGoodVersion: string
+  readonly expectedLastKnownGoodVersion: string | null
+  readonly expectedInstalledVersions: readonly string[]
+  readonly expectedRunning: boolean
+  readonly expectedViewAttached: boolean
 }
 
 interface AcceptanceRegistryState {
@@ -580,6 +649,29 @@ export class OpenDesignAcceptanceController {
     }
   }
 
+  installLkg(): Promise<OpenDesignAcceptanceState> {
+    return this.#run('installLkg', async (runtime, operationId) => {
+      const state = await this.#requireObservedState(runtime)
+      if (state.activeVersion !== null
+        || state.lastKnownGoodVersion !== null
+        || !exactVersions(state.installedVersions, [])
+        || state.running
+        || state.viewAttached) {
+        throw new AcceptanceControlError('ACCEPTANCE_INSTALL_LKG_BASELINE_MISMATCH')
+      }
+      const request = await runtime.coordinator.resolveInstallRequest(this.#options.bootstrap.lkgReleaseRequest)
+      assertResolvedLkgIdentity(request, this.#now())
+      return {
+        result: await runtime.coordinator.install({ ...request, operationId }),
+        expectedActiveVersion: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
+        expectedLastKnownGoodVersion: null,
+        expectedInstalledVersions: [OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion],
+        expectedRunning: false,
+        expectedViewAttached: false,
+      }
+    })
+  }
+
   updateToRc(): Promise<OpenDesignAcceptanceState> {
     return this.#run('updateToRc', async (runtime, operationId) => {
       const state = await this.#requireObservedState(runtime)
@@ -594,6 +686,12 @@ export class OpenDesignAcceptanceController {
         result: await runtime.coordinator.update({ ...request, operationId }),
         expectedActiveVersion: OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion,
         expectedLastKnownGoodVersion: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
+        expectedInstalledVersions: [
+          OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
+          OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion,
+        ],
+        expectedRunning: true,
+        expectedViewAttached: true,
       }
     })
   }
@@ -627,6 +725,12 @@ export class OpenDesignAcceptanceController {
         expectedLastKnownGoodVersion: isRcToStable
           ? OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion
           : OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
+        expectedInstalledVersions: [
+          OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
+          OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion,
+        ],
+        expectedRunning: true,
+        expectedViewAttached: true,
       }
     })
   }
@@ -654,7 +758,7 @@ export class OpenDesignAcceptanceController {
         if (!runtime) throw new AcceptanceControlError('ACCEPTANCE_OPERATION_RUNTIME_UNAVAILABLE')
         const execution = await execute(runtime, operationId)
         const { result } = execution
-        const expectedKind = action === 'updateToRc' ? 'update' : 'rollback'
+        const expectedKind = action === 'installLkg' ? 'install' : action === 'updateToRc' ? 'update' : 'rollback'
         if (result.moduleId !== MODULE_ID || result.kind !== expectedKind || result.operationId !== operationId) {
           throw new AcceptanceControlError('ACCEPTANCE_COORDINATOR_RESULT_MISMATCH')
         }
@@ -662,23 +766,13 @@ export class OpenDesignAcceptanceController {
           this.#lastOperation = operationEvidence(result)
           this.#lastError = `ACCEPTANCE_${expectedKind.toUpperCase()}_FAILED`
         } else {
-          let observed: AcceptanceObservedState | undefined
-          try {
-            observed = await this.#readObservedState(runtime)
-          } catch {
-            // A claimed success without readable Host state is not acceptance evidence.
-          }
+          const observed = await this.#awaitPostcondition(runtime, execution)
           if (!observed
-            || observed.activeVersion !== execution.expectedActiveVersion
-            || observed.lastKnownGoodVersion !== execution.expectedLastKnownGoodVersion
-            || !exactVersions(observed.installedVersions, [
-              OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
-              OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion,
-            ])
-            || !observed.running || !observed.viewAttached
             || result.target.activeVersion !== execution.expectedActiveVersion
             || result.target.lastKnownGoodVersion !== execution.expectedLastKnownGoodVersion
-            || !result.target.running || !result.target.viewAttached || !result.target.registryPresent) {
+            || result.target.running !== execution.expectedRunning
+            || result.target.viewAttached !== execution.expectedViewAttached
+            || !result.target.registryPresent) {
             throw new AcceptanceControlError('ACCEPTANCE_POSTCONDITION_MISMATCH')
           }
           this.#lastOperation = operationEvidence(result)
@@ -686,7 +780,7 @@ export class OpenDesignAcceptanceController {
       } catch (error) {
         this.#lastError = error instanceof AcceptanceControlError
           ? error.code
-          : `ACCEPTANCE_${action === 'updateToRc' ? 'UPDATE' : 'ROLLBACK'}_FAILED`
+          : `ACCEPTANCE_${action === 'installLkg' ? 'INSTALL_LKG' : action === 'updateToRc' ? 'UPDATE' : 'ROLLBACK'}_FAILED`
       } finally {
         this.#action = undefined
       }
@@ -768,6 +862,30 @@ export class OpenDesignAcceptanceController {
         && view.version === registry.activeVersion
         && view.state === 'attached',
     }
+  }
+
+  async #awaitPostcondition(
+    runtime: OpenDesignAcceptanceRuntime,
+    expected: AcceptanceExecution,
+  ): Promise<AcceptanceObservedState | undefined> {
+    // Coordinator completion precedes a small amount of Electron view-manager
+    // propagation. Poll only this fixed, process-local state rather than
+    // declaring a completed update failed because the view snapshot is one tick
+    // behind the Coordinator result.
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try {
+        const observed = await this.#readObservedState(runtime)
+        if (observed.activeVersion === expected.expectedActiveVersion
+          && observed.lastKnownGoodVersion === expected.expectedLastKnownGoodVersion
+          && exactVersions(observed.installedVersions, expected.expectedInstalledVersions)
+          && observed.running === expected.expectedRunning
+          && observed.viewAttached === expected.expectedViewAttached) return observed
+      } catch {
+        // A claimed success without readable Host state is not acceptance evidence.
+      }
+      if (attempt < 9) await new Promise<void>((resolve) => setTimeout(resolve, 50))
+    }
+    return undefined
   }
 
   async #requireObservedState(runtime: OpenDesignAcceptanceRuntime): Promise<AcceptanceObservedState> {
@@ -862,6 +980,9 @@ export function registerOpenDesignAcceptanceIpc(
       const readyController = controller
       register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE, (args) => {
         assertNoInput(args); return readyController.getState()
+      })
+      register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.INSTALL_LKG, (args) => {
+        assertNoInput(args); return readyController.installLkg()
       })
       register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC, (args) => {
         assertNoInput(args); return readyController.updateToRc()

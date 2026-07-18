@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto'
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
@@ -31,6 +31,28 @@ import type {
 } from '../shared/open-design-acceptance-ipc'
 
 const SHA256 = /^[0-9a-f]{64}$/
+
+const ADMISSION_FAILURE_CODES = Object.freeze({
+  'Acceptance Connection admission is disposed': 'DISPOSED',
+  'Acceptance Connection workspace is unavailable': 'WORKSPACE_UNAVAILABLE',
+  'Acceptance Connection workspace config is unavailable': 'WORKSPACE_CONFIG_UNAVAILABLE',
+  'Acceptance Connection is unavailable': 'CONNECTION_UNAVAILABLE',
+  'Acceptance Connection runtime is unavailable': 'RUNTIME_UNAVAILABLE',
+  'Acceptance requires an authenticated Connection': 'UNAUTHENTICATED',
+  'Acceptance Connection environment identity is unavailable': 'ENVIRONMENT_IDENTITY_UNAVAILABLE',
+  'Acceptance Connection is not authenticated': 'CREDENTIAL_NOT_AUTHENTICATED',
+  'Acceptance Connection credential is unavailable': 'CREDENTIAL_UNAVAILABLE',
+  'Acceptance Connection credential type is unsupported': 'CREDENTIAL_TYPE_UNSUPPORTED',
+  'Acceptance Connection authority changed while reading': 'AUTHORITY_CHANGED',
+  'Acceptance Connection authority mismatch': 'AUTHORITY_MISMATCH',
+  'Acceptance Connection admission is already armed': 'ALREADY_ARMED',
+} as const)
+
+/** Safe diagnostics only; it never returns a provider response or credential data. */
+export function openDesignConnectionAdmissionFailureCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : ''
+  return ADMISSION_FAILURE_CODES[message as keyof typeof ADMISSION_FAILURE_CODES] ?? 'UNKNOWN'
+}
 
 interface CredentialReader {
   hasLlmCredentials(slug: string, authType: LlmAuthType, providerType?: LlmProviderType): Promise<boolean>
@@ -324,6 +346,30 @@ export class OpenDesignAcceptanceConnectionAdmission implements ModuleAgentConne
       })
     } finally {
       release()
+      key.fill(0)
+    }
+  }
+
+  /**
+   * Arms the effective Workspace Connection entirely inside the main process.
+   *
+   * OpenDesign is a normal module surface, not an acceptance-console feature:
+   * a signed-in user must not first perform an invisible H1/A1 handshake in
+   * DevTools before the first Module Turn can start. The random authority key
+   * is process-local, never crosses IPC, and is cleared immediately after the
+   * existing proof-and-arm flow completes.
+   */
+  async armActiveConnection(): Promise<void> {
+    if (this.#disposed) throw new Error('Acceptance Connection admission is disposed')
+    const key = randomBytes(32)
+    const keyBase64 = key.toString('base64')
+    try {
+      const authority = await this.getConnectionAuthority({ keyBase64 })
+      await this.armConnectionAdmission({
+        keyBase64,
+        expectedHmacSha256: authority.authorityHmacSha256,
+      })
+    } finally {
       key.fill(0)
     }
   }

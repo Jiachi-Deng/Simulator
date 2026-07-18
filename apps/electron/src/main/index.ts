@@ -146,7 +146,10 @@ import {
 } from './open-design-acceptance'
 import { createOpenDesignMutationGate } from './open-design-mutation-gate'
 import { createOpenDesignAcceptanceRuntimeBindingReader } from './open-design-acceptance-runtime-binding'
-import { OpenDesignAcceptanceConnectionAdmission } from './open-design-acceptance-connection-admission'
+import {
+  OpenDesignAcceptanceConnectionAdmission,
+  openDesignConnectionAdmissionFailureCode,
+} from './open-design-acceptance-connection-admission'
 import {
   loadOpenDesignAcceptanceBlackoutProxy,
   type OpenDesignAcceptanceBlackoutProxy,
@@ -1280,6 +1283,22 @@ app.whenReady().then(async () => {
       // Optional Module and acceptance bootstrap failures are contained before
       // this point so they cannot prevent the primary Host window from opening.
       await createInitialWindows()
+      if (openDesignAcceptanceConnectionAdmission) {
+        try {
+          // A signed-in Host user must be able to start an
+          // OpenDesign Turn directly. Keep the authority handshake inside the
+          // Host main process rather than requiring an acceptance-console IPC
+          // action that the normal Module UI never performs.
+          await openDesignAcceptanceConnectionAdmission.armActiveConnection()
+        } catch (error) {
+          // A missing or stale Connection disables only the Module Turn. The primary Host
+          // remains usable and the later admission check still fails closed.
+          mainLog.warn('OpenDesign internal Connection admission is unavailable', {
+            errorType: error instanceof Error ? error.name : typeof error,
+            reason: openDesignConnectionAdmissionFailureCode(error),
+          })
+        }
+      }
       const developmentBundle = openDesignHostChannel.status === 'ready' && openDesignHostChannel.source === 'development'
         ? openDesignHostChannel.bundle
         : undefined

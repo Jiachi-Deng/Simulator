@@ -125,6 +125,11 @@ describe('OpenDesign acceptance startup gate', () => {
     expect(result).toEqual({
       status: 'ready',
       descriptorPath: join(root, OPEN_DESIGN_ACCEPTANCE_DESCRIPTOR_RELATIVE_PATH),
+      lkgReleaseRequest: {
+        catalogUrl: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableCatalogUrl,
+        moduleId: OPEN_DESIGN_MODULE_ID,
+        version: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
+      },
       releaseRequest: {
         catalogUrl: OPEN_DESIGN_ACCEPTANCE_IDENTITY.catalogUrl,
         moduleId: OPEN_DESIGN_MODULE_ID,
@@ -258,6 +263,11 @@ function readyBootstrap(): Extract<OpenDesignAcceptanceBootstrap, { status: 'rea
   return {
     status: 'ready',
     descriptorPath: '/owner-only/descriptor.json',
+    lkgReleaseRequest: {
+      catalogUrl: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableCatalogUrl,
+      moduleId: OPEN_DESIGN_MODULE_ID as any,
+      version: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion as any,
+    },
     releaseRequest: {
       catalogUrl: OPEN_DESIGN_ACCEPTANCE_IDENTITY.catalogUrl,
       moduleId: OPEN_DESIGN_MODULE_ID as any,
@@ -308,12 +318,32 @@ function resolvedRequest(overrides: Record<string, unknown> = {}): ResolvedModul
   return request as unknown as ResolvedModuleCoordinatorInstallRequest
 }
 
+function resolvedLkgRequest(overrides: Record<string, unknown> = {}): ResolvedModuleCoordinatorInstallRequest {
+  const request = structuredClone(resolvedRequest()) as any
+  request.catalogUrl = OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableCatalogUrl
+  request.hostVersionRange = '>=0.11.1 <0.12.0'
+  request.catalogEvidence = {
+    schemaVersion: 1,
+    sequence: 1,
+    issuedAt: '2026-07-16T21:00:00.000Z',
+    expiresAt: '2026-07-17T21:00:00.000Z',
+    artifactSize: 61_479_889,
+  }
+  request.descriptor.extractedManifestSha256 = '9897521de3493eb2d35c76ff25cd9b714575024c42efd88ccd614331d5445414'
+  for (const artifact of [request.descriptor.artifact, request.descriptor.manifest.artifacts[0]]) {
+    artifact.url = 'https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.5/org.simulator.open-design-0.14.5-darwin-arm64.tar.gz'
+    artifact.sha256 = 'f883aaedd588c62d8a7ba6a4f94b6e2c8e448f9a8816758d6dbeb468a68d3e09'
+  }
+  request.descriptor.manifest.version = OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion
+  return { ...request, ...overrides } as ResolvedModuleCoordinatorInstallRequest
+}
+
 function result(
-  kind: 'update' | 'rollback',
+  kind: 'install' | 'update' | 'rollback',
   operationId: string,
   ok = true,
   activeVersion: string = OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion,
-  lastKnownGoodVersion: string = OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
+  lastKnownGoodVersion: string | null = OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
 ): ModuleCoordinatorOperationResult {
   return {
     operationId,
@@ -330,8 +360,8 @@ function result(
     target: {
       activeVersion: activeVersion as any,
       lastKnownGoodVersion: lastKnownGoodVersion as any,
-      running: true,
-      viewAttached: true,
+      running: kind !== 'install',
+      viewAttached: kind !== 'install',
       registryPresent: true,
     },
     completedAt: 1,
@@ -457,11 +487,21 @@ function controllerHarness(
     version: initialActive,
     state: 'attached',
   }
-  let installedVersions: string[] = initialActive === OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion
+  let installedVersions: string[] = initialActive === null
+    ? []
+    : initialActive === OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion
     || initialLkg === OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion
     ? [OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion, OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion]
     : [OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion]
   const resolveInstallRequest = mock(async () => resolvedRequest())
+  const install = mock(async (request: any) => {
+    activeVersion = OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion
+    lastKnownGoodVersion = null
+    installedVersions = [OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion]
+    daemonSnapshot = undefined
+    viewSnapshot = undefined
+    return result('install', request.operationId, true, activeVersion, null)
+  })
   const update = mock(async (request: any) => {
     activeVersion = OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion
     lastKnownGoodVersion = OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion
@@ -479,7 +519,7 @@ function controllerHarness(
     return result('rollback', request.operationId, true, activeVersion!, lastKnownGoodVersion!)
   })
   const runtime: OpenDesignAcceptanceRuntime = {
-    coordinator: { resolveInstallRequest, update, rollback },
+    coordinator: { resolveInstallRequest, install, update, rollback },
     registry: {
       snapshot: () => ({
         host: { version: '0.12.0', platform: 'darwin-arm64' },
@@ -508,6 +548,7 @@ function controllerHarness(
     controller,
     runtime,
     resolveInstallRequest,
+    install,
     update,
     rollback,
     setState(active: string | null, lkg: string | null) {
@@ -581,6 +622,28 @@ describe('OpenDesign acceptance controller', () => {
     expect(normalGate.getRuntime()).toBe(harness.runtime)
   })
 
+  it('installs only the fixed signed LKG baseline before the RC drill', async () => {
+    const harness = controllerHarness(null)
+    harness.resolveInstallRequest.mockImplementationOnce(async () => resolvedLkgRequest())
+    const state = await harness.controller.installLkg()
+    expect(harness.resolveInstallRequest).toHaveBeenCalledWith(readyBootstrap().lkgReleaseRequest)
+    expect(harness.install).toHaveBeenCalledTimes(1)
+    expect(harness.install.mock.calls[0]?.[0]).toMatchObject({
+      catalogUrl: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableCatalogUrl,
+      operationId: 'fixed-installLkg',
+      catalogEvidence: { schemaVersion: 1, sequence: 1, artifactSize: 61_479_889 },
+    })
+    expect(state).toMatchObject({
+      status: 'ready',
+      activeVersion: '0.14.5',
+      lastKnownGoodVersion: null,
+      installedVersions: ['0.14.5'],
+      running: false,
+      viewAttached: false,
+      operation: { operationId: 'fixed-installLkg', kind: 'install', ok: true },
+    })
+  })
+
   it('resolves the fixed signed public RC and binds exact evidence into the real update call', async () => {
     const harness = controllerHarness()
     const state = await harness.controller.updateToRc()
@@ -601,6 +664,29 @@ describe('OpenDesign acceptance controller', () => {
       lastKnownGoodVersion: '0.14.5',
       installedVersions: ['0.14.5', '0.14.6-rc.1'],
       operation: { operationId: 'fixed-updateToRc', kind: 'update', ok: true },
+    })
+  })
+
+  it('waits briefly for the Electron view snapshot to catch up with a completed RC update', async () => {
+    const harness = controllerHarness()
+    harness.update.mockImplementationOnce(async (request: any) => {
+      harness.setState(OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion, OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion)
+      harness.setInstalledVersions([
+        OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
+        OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion,
+      ])
+      harness.setDaemon('healthy', OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion)
+      harness.setView('attached', OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion)
+      setTimeout(() => harness.setView('attached', OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion), 25)
+      return result('update', request.operationId)
+    })
+
+    expect(await harness.controller.updateToRc()).toMatchObject({
+      status: 'ready',
+      activeVersion: OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion,
+      lastKnownGoodVersion: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
+      running: true,
+      viewAttached: true,
     })
   })
 
@@ -1045,6 +1131,7 @@ describe('OpenDesign acceptance IPC', () => {
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_MODULE_AGENT_RUNTIME_SNAPSHOT,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_RUNTIME_BINDING,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE,
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.INSTALL_LKG,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.ROLLBACK,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.TAKE_BLACKOUT_EVIDENCE,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC,
@@ -1210,6 +1297,7 @@ describe('OpenDesign acceptance IPC', () => {
     }))).rejects.toThrow('invalid')
     for (const channel of [
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE,
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.INSTALL_LKG,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.ROLLBACK,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_BLACKOUT_PROXY_CAPABILITY,
@@ -1233,9 +1321,9 @@ describe('OpenDesign acceptance IPC', () => {
     await expect(Promise.resolve().then(() => getState(ownerReload))).rejects.toThrow('sender was rejected')
 
     const replacement = registerOpenDesignAcceptanceIpc(ipc, ipcController)
-    expect(invokeHandlers.size).toBe(10)
+    expect(invokeHandlers.size).toBe(11)
     registration.dispose()
-    expect(invokeHandlers.size).toBe(10)
+    expect(invokeHandlers.size).toBe(11)
     replacement.dispose()
     replacement.dispose()
     expect(invokeHandlers.size).toBe(0)

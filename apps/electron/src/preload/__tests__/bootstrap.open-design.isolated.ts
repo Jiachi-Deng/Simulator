@@ -115,6 +115,7 @@ describe('OpenDesign acceptance preload facade', () => {
     invoke.mockClear()
     const facade = createOpenDesignAcceptanceFacade({ invoke })
     await facade.getState()
+    await facade.installLkg()
     await facade.updateToRc()
     await facade.rollback()
     await facade.getBlackoutProxyCapability()
@@ -133,6 +134,7 @@ describe('OpenDesign acceptance preload facade', () => {
     await facade.armConnectionAdmission({ keyBase64, expectedHmacSha256: 'a'.repeat(64) })
     expect(invoke.mock.calls).toEqual([
       [OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE],
+      [OPEN_DESIGN_ACCEPTANCE_CHANNELS.INSTALL_LKG],
       [OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC],
       [OPEN_DESIGN_ACCEPTANCE_CHANNELS.ROLLBACK],
       [OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_BLACKOUT_PROXY_CAPABILITY],

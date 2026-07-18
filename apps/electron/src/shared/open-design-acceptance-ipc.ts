@@ -1,6 +1,7 @@
 export const OPEN_DESIGN_ACCEPTANCE_CHANNELS = Object.freeze({
   IS_AVAILABLE: 'open-design-acceptance:is-available',
   GET_STATE: 'open-design-acceptance:get-state',
+  INSTALL_LKG: 'open-design-acceptance:install-lkg',
   UPDATE_TO_RC: 'open-design-acceptance:update-to-rc',
   ROLLBACK: 'open-design-acceptance:rollback',
   GET_BLACKOUT_PROXY_CAPABILITY: 'open-design-acceptance:get-blackout-proxy-capability',
@@ -444,11 +445,11 @@ export function parseOpenDesignBlackoutEvidence(value: unknown): OpenDesignBlack
 }
 
 export type OpenDesignAcceptanceStatus = 'ready' | 'busy' | 'error'
-export type OpenDesignAcceptanceAction = 'updateToRc' | 'rollback'
+export type OpenDesignAcceptanceAction = 'installLkg' | 'updateToRc' | 'rollback'
 
 export interface OpenDesignAcceptanceOperationEvidence {
   readonly operationId: string
-  readonly kind: 'update' | 'rollback'
+  readonly kind: 'install' | 'update' | 'rollback'
   readonly ok: boolean
 }
 
@@ -471,6 +472,8 @@ export interface OpenDesignAcceptanceState {
 /** No method accepts renderer-controlled release, URL, token, run handle, hash, module, or operation identifiers. */
 export interface OpenDesignAcceptanceFacade {
   getState(): Promise<OpenDesignAcceptanceState>
+  /** Installs only the fixed 0.14.5 LKG baseline for the gated RC drill. */
+  installLkg(): Promise<OpenDesignAcceptanceState>
   updateToRc(): Promise<OpenDesignAcceptanceState>
   rollback(): Promise<OpenDesignAcceptanceState>
   getBlackoutProxyCapability(): Promise<OpenDesignBlackoutCapability>

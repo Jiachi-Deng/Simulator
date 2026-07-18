@@ -3,7 +3,10 @@ import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { LlmConnection } from '@craft-agent/shared/config'
-import { OpenDesignAcceptanceConnectionAdmission } from '../open-design-acceptance-connection-admission'
+import {
+  OpenDesignAcceptanceConnectionAdmission,
+  openDesignConnectionAdmissionFailureCode,
+} from '../open-design-acceptance-connection-admission'
 
 const roots: string[] = []
 afterEach(async () => {
@@ -141,6 +144,13 @@ describe('OpenDesignAcceptanceConnectionAdmission', () => {
     resolvedModel: 'gpt-5.6',
   })
 
+  it('maps only fixed Connection failures to safe diagnostics', () => {
+    expect(openDesignConnectionAdmissionFailureCode(
+      new Error('Acceptance Connection credential is unavailable'),
+    )).toBe('CREDENTIAL_UNAVAILABLE')
+    expect(openDesignConnectionAdmissionFailureCode(new Error('provider returned token=secret'))).toBe('UNKNOWN')
+  })
+
   it('pins only the effective authenticated Connection and exposes no raw identity', async () => {
     const fixture = await harness()
     const proof = await fixture.admission.getConnectionAuthority({ keyBase64: fixture.keyA })
@@ -154,6 +164,19 @@ describe('OpenDesignAcceptanceConnectionAdmission', () => {
       keyBase64: fixture.keyA,
       expectedHmacSha256: proof.authorityHmacSha256,
     })
+    await expect(fixture.admission.admit('workspace')).resolves.toEqual({
+      llmConnection: 'connection-b',
+      provider: 'pi',
+      authType: 'oauth',
+      resolvedModel: 'gpt-5.6',
+    })
+  })
+
+  it('arms the signed-in effective Connection internally for the normal Module journey', async () => {
+    const fixture = await harness()
+
+    await fixture.admission.armActiveConnection()
+
     await expect(fixture.admission.admit('workspace')).resolves.toEqual({
       llmConnection: 'connection-b',
       provider: 'pi',

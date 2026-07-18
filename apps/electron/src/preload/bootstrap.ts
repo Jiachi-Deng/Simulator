@@ -91,6 +91,7 @@ export function createOpenDesignAcceptanceFacade(
   const invoke = (channel: string): Promise<OpenDesignAcceptanceState> => ipc.invoke(channel)
   return Object.freeze({
     getState: () => invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE),
+    installLkg: () => invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.INSTALL_LKG),
     updateToRc: () => invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC),
     rollback: () => invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.ROLLBACK),
     getBlackoutProxyCapability: (): Promise<OpenDesignBlackoutCapability> => (
