@@ -165,6 +165,9 @@ jobs:
             "repos/$GITHUB_REPOSITORY/actions/artifacts/$HOST_ARTIFACT_ID/zip" > "$archive"
           test -s "$archive"
           test "$(wc -c < "$archive" | tr -d ' ')" -le 2147483648
+          archive_sha256=$(shasum -a 256 "$archive" | awk '{print $1}')
+          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
+          test "sha256:$archive_sha256" = "$HOST_ARTIFACT_DIGEST"
 
           python3 - "$archive" "$host_bundle" <<'PY'
           import hashlib

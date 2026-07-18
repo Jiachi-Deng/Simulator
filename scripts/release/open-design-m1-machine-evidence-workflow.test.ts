@@ -79,6 +79,16 @@ describe('OpenDesign M1 machine evidence workflow', () => {
     expect(claim).not.toContain('authority-key.bin')
     expect(claim).not.toContain('keyBase64')
 
+    const download = job.steps[downloadIndex]!.run as string
+    const downloadArchive = download.indexOf('actions/artifacts/$HOST_ARTIFACT_ID/zip')
+    const hashArchive = download.indexOf('shasum -a 256 "$archive"')
+    const bindServiceDigest = download.indexOf('test "sha256:$archive_sha256" = "$HOST_ARTIFACT_DIGEST"')
+    const extractArchive = download.indexOf('python3 - "$archive" "$host_bundle"')
+    expect(downloadArchive).toBeGreaterThan(-1)
+    expect(hashArchive).toBeGreaterThan(downloadArchive)
+    expect(bindServiceDigest).toBeGreaterThan(hashArchive)
+    expect(extractArchive).toBeGreaterThan(bindServiceDigest)
+
     const main = runnerSource.slice(runnerSource.indexOf('async function main()'))
     const validation = main.indexOf('await validateOpenDesignM1H1A1Claim(')
     expect(validation).toBeGreaterThan(-1)
