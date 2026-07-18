@@ -6340,7 +6340,11 @@ export class SessionManager implements ISessionManager {
    * has crossed every cancellable preflight and entered the provider iterator.
    * The full sendMessage promise remains detached so streaming can continue.
    */
-  async sendModuleAgentMessage(sessionId: string, message: string): Promise<void> {
+  async sendModuleAgentMessage(
+    sessionId: string,
+    message: string,
+    assertProviderAuthority?: () => Promise<void>,
+  ): Promise<void> {
     const managed = this.sessions.get(sessionId)
     if (!managed) throw new ModuleAgentAdmissionError('Transient Module session was not found')
     const ownership = parseModuleAgentRunMetadata(managed.moduleAgentRun)
@@ -6382,6 +6386,7 @@ export class SessionManager implements ISessionManager {
       undefined,
       undefined,
       claim,
+      assertProviderAuthority,
     )
     void turn.then(
       () => {
@@ -6404,6 +6409,37 @@ export class SessionManager implements ISessionManager {
     await acknowledged
   }
 
+  /**
+   * v1 compatibility counterpart to sendModuleAgentMessage. It keeps the
+   * legacy full-turn promise while placing the same acceptance-only authority
+   * assertions inside SessionManager's provider-admission boundary.
+   */
+  async sendLegacyModuleAgentMessage(
+    sessionId: string,
+    message: string,
+    assertProviderAuthority: () => Promise<void>,
+  ): Promise<void> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) throw new ModuleAgentAdmissionError('Transient Module session was not found')
+    const ownership = parseModuleAgentRunMetadata(managed.moduleAgentRun)
+    if (managed.hidden !== true || ownership.transient !== true || ownership.contractVersion !== 1) {
+      throw new ModuleAgentAdmissionError('Legacy provider admission is only available to a v1 transient Module session')
+    }
+    return await this.sendMessage(
+      sessionId,
+      message,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      assertProviderAuthority,
+    )
+  }
+
   private assertModuleAgentAdmission(
     managed: ManagedSession,
     claim: ModuleAgentAdmissionClaim | undefined,
@@ -6420,6 +6456,25 @@ export class SessionManager implements ISessionManager {
       managed.stopRequested = false
     }
     throw new ModuleAgentAdmissionError()
+  }
+
+  private async assertModuleProviderAuthority(
+    managed: ManagedSession,
+    assertion: (() => Promise<void>) | undefined,
+  ): Promise<void> {
+    if (!assertion) return
+    try {
+      await assertion()
+    } catch {
+      // Authority failures must not leak Connection/credential details or
+      // strand an optimistic Module Session in processing before provider
+      // iteration has actually begun.
+      if (managed.isProcessing && !(managed.agent?.isProcessing?.() ?? false)) {
+        this.setProcessing(managed, false)
+        managed.stopRequested = false
+      }
+      throw new ModuleAgentAdmissionError('Host provider authority was rejected')
+    }
   }
 
   private acknowledgeModuleAgentAdmission(
@@ -6474,6 +6529,8 @@ export class SessionManager implements ISessionManager {
      */
     rpcContext?: { callerClientId?: string },
     moduleAgentAdmission?: ModuleAgentAdmissionClaim,
+    /** Host-only acceptance gate; never supplied by renderer/RPC callers. */
+    assertProviderAuthority?: () => Promise<void>,
   ): Promise<void> {
     if (this.malformedModuleAgentSessionIds.has(sessionId)) {
       throw new Error(`Session ${sessionId} is quarantined due to malformed Module ownership`)
@@ -6816,8 +6873,10 @@ export class SessionManager implements ISessionManager {
     // Get or create the agent (lazy loading). Its internal cold-session build at
     // ~L2956 now sees fresh tokens (or correctly-needs_auth failed sources, since
     // ensureFreshToken mirrors the disk write to source.config in-memory).
+    if (assertProviderAuthority) await this.assertModuleProviderAuthority(managed, assertProviderAuthority)
     this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
     const agent = await this.getOrCreateAgent(managed)
+    if (assertProviderAuthority) await this.assertModuleProviderAuthority(managed, assertProviderAuthority)
     this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
     sendSpan.mark('agent.ready')
 
@@ -6905,12 +6964,15 @@ export class SessionManager implements ISessionManager {
       }
 
       sendSpan.mark('chat.starting')
+      if (assertProviderAuthority) await this.assertModuleProviderAuthority(managed, assertProviderAuthority)
       this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
       const chatIterator = agent.chat(effectiveMessage, modelInputAttachments.attachments)[Symbol.asyncIterator]()
       // Async generators do not execute until next() is called. Starting the
       // first read is therefore the narrow provider-admission point: all Host
       // preflight awaits are behind us and cancellation cannot interleave
       // between the final fence, next(), and this acknowledgement.
+      if (assertProviderAuthority) await this.assertModuleProviderAuthority(managed, assertProviderAuthority)
+      this.assertModuleAgentAdmission(managed, moduleAgentAdmission)
       const firstProviderEvent = chatIterator.next()
       this.acknowledgeModuleAgentAdmission(managed, moduleAgentAdmission)
       sessionLog.info('Got chat iterator, starting iteration...')

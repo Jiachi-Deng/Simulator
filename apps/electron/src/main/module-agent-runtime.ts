@@ -15,6 +15,7 @@ import type { ModuleDaemonLaunchContext, ModuleDaemonLaunchLease } from '@simula
 import {
   CraftModuleAgentSessionPort,
   CraftHostAgentRunSessionPort,
+  type ModuleAgentConnectionAdmission,
 } from '@craft-agent/server-core/sessions'
 import type { ISessionManager } from '@craft-agent/server-core/handlers'
 import { ModuleAgentRunCore } from '@simulator/host-agent-run-core'
@@ -197,6 +198,8 @@ export interface IsolatedHostModuleAgentRuntimeOptions {
   readonly resolveWorkspaceId: () => string | undefined
   readonly workerEntryPath: string
   readonly shimPath: string
+  /** Packaged acceptance-only provider authority; absent in normal production. */
+  readonly connectionAdmission?: ModuleAgentConnectionAdmission
   /** Packaged acceptance-only external proxy; absent in every normal production launch. */
   readonly acceptanceBlackoutProxy?: Pick<OpenDesignAcceptanceBlackoutProxyPort, 'prepareLaunch'>
   readonly now?: () => number
@@ -307,8 +310,16 @@ export async function createIsolatedHostModuleAgentRuntime(
   }
   const paths = new NodeModuleAgentPathAuthority()
   const turnLease = new MainProcessModuleTurnLease()
-  const v1SessionPort = turnLease.wrapV1(new CraftModuleAgentSessionPort(options.sessions, paths))
-  const v2SessionPort = turnLease.wrapV2(new CraftHostAgentRunSessionPort(options.sessions, paths))
+  const v1SessionPort = turnLease.wrapV1(new CraftModuleAgentSessionPort(
+    options.sessions,
+    paths,
+    options.connectionAdmission,
+  ))
+  const v2SessionPort = turnLease.wrapV2(new CraftHostAgentRunSessionPort(
+    options.sessions,
+    paths,
+    options.connectionAdmission,
+  ))
   const core = new ModuleAgentRunCore({
     sessions: v2SessionPort,
     paths,

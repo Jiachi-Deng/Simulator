@@ -146,6 +146,7 @@ import {
 } from './open-design-acceptance'
 import { createOpenDesignMutationGate } from './open-design-mutation-gate'
 import { createOpenDesignAcceptanceRuntimeBindingReader } from './open-design-acceptance-runtime-binding'
+import { OpenDesignAcceptanceConnectionAdmission } from './open-design-acceptance-connection-admission'
 import {
   loadOpenDesignAcceptanceBlackoutProxy,
   type OpenDesignAcceptanceBlackoutProxy,
@@ -291,6 +292,7 @@ let openDesignModuleIpc: OpenDesignModuleIpcRegistration | null = null
 let openDesignAcceptanceController: OpenDesignAcceptanceController | null = null
 let openDesignAcceptanceIpc: OpenDesignAcceptanceIpcRegistration | null = null
 let openDesignAcceptanceBlackoutProxy: OpenDesignAcceptanceBlackoutProxy | null = null
+let openDesignAcceptanceConnectionAdmission: OpenDesignAcceptanceConnectionAdmission | null = null
 let stopServer: (() => Promise<void>) | null = null
 let embeddedServer: { host: string; port: number } | null = null
 let oauthFlowStore: OAuthFlowStore | null = null
@@ -1164,6 +1166,22 @@ app.whenReady().then(async () => {
             userDataRoot: realpathSync(app.getPath('userData')),
             mainPid: process.pid,
           })
+          if (!sessionManager) throw new Error('Session manager is unavailable for acceptance Connection authority')
+          const resolveAcceptanceWorkspaceId = () => {
+            const hostWindow = windowManager?.getLastActiveWindow()
+            const activeWorkspaceId = hostWindow
+              ? windowManager?.getWorkspaceForWindow(hostWindow.webContents.id) ?? undefined
+              : undefined
+            return activeWorkspaceId ?? sessionManager?.getWorkspaces()[0]?.id
+          }
+          const connectionAdmission = new OpenDesignAcceptanceConnectionAdmission({
+            sessions: sessionManager,
+            resolveWorkspaceId: resolveAcceptanceWorkspaceId,
+            homeRoot: homedir(),
+            configRoot: realpathSync(CONFIG_DIR),
+            userDataRoot: realpathSync(app.getPath('userData')),
+          })
+          openDesignAcceptanceConnectionAdmission = connectionAdmission
           openDesignAcceptanceController = new OpenDesignAcceptanceController({
             bootstrap: openDesignAcceptanceBootstrap,
             getRuntime: openDesignAcceptanceRuntimeGate.getRuntime,
@@ -1194,6 +1212,8 @@ app.whenReady().then(async () => {
               })
             },
             getRuntimeBinding: readOpenDesignAcceptanceRuntimeBinding,
+            getConnectionAuthority: (request) => connectionAdmission.getConnectionAuthority(request),
+            armConnectionAdmission: (request) => connectionAdmission.armConnectionAdmission(request),
           })
         } else if (process.env[OPEN_DESIGN_ACCEPTANCE_ENV] === '1') {
           mainLog.info('OpenDesign acceptance control surface is not ready', {
@@ -1207,6 +1227,8 @@ app.whenReady().then(async () => {
         openDesignAcceptanceIpc?.dispose()
         openDesignAcceptanceIpc = null
         openDesignAcceptanceController = null
+        openDesignAcceptanceConnectionAdmission?.dispose()
+        openDesignAcceptanceConnectionAdmission = null
         await openDesignAcceptanceBlackoutProxy?.dispose().catch(() => undefined)
         openDesignAcceptanceBlackoutProxy = null
       }
@@ -1225,6 +1247,8 @@ app.whenReady().then(async () => {
         openDesignAcceptanceIpc?.dispose()
         openDesignAcceptanceIpc = null
         openDesignAcceptanceController = null
+        openDesignAcceptanceConnectionAdmission?.dispose()
+        openDesignAcceptanceConnectionAdmission = null
         await openDesignAcceptanceBlackoutProxy?.dispose().catch(() => undefined)
         openDesignAcceptanceBlackoutProxy = null
         try {
@@ -1294,6 +1318,7 @@ app.whenReady().then(async () => {
           workerEntryPath: resolveHostAgentWorkerEntry(app.getAppPath()),
           shimPath: join(app.getAppPath(), 'dist', 'resources', 'host-agent', 'simulator-host-agent.mjs'),
           acceptanceBlackoutProxy: openDesignAcceptanceBlackoutProxy ?? undefined,
+          connectionAdmission: openDesignAcceptanceConnectionAdmission ?? undefined,
           resolveWorkspaceId: () => {
             const hostWindow = windowManager?.getLastActiveWindow()
             const activeWorkspaceId = hostWindow
@@ -1598,6 +1623,8 @@ async function cleanupBeforeQuit(): Promise<void> {
   openDesignAcceptanceIpc?.dispose()
   openDesignAcceptanceIpc = null
   openDesignAcceptanceController = null
+  openDesignAcceptanceConnectionAdmission?.dispose()
+  openDesignAcceptanceConnectionAdmission = null
   openDesignModuleIpc?.dispose()
   openDesignModuleIpc = null
   openDesignModuleController?.dispose()

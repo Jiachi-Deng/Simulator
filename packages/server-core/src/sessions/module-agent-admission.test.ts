@@ -14,7 +14,7 @@ afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
-async function createTransientManager(): Promise<{
+async function createTransientManager(contractVersion: 1 | 2 = 2): Promise<{
   manager: SessionManager
   managed: ReturnType<typeof createManagedSession>
   ownership: ModuleAgentRunMetadata
@@ -23,7 +23,7 @@ async function createTransientManager(): Promise<{
   temporaryRoots.push(rootPath)
   const ownership: ModuleAgentRunMetadata = {
     transient: true,
-    contractVersion: 2,
+    contractVersion,
     moduleId: 'org.simulator.open-design',
     runHandle: `run_${'1'.repeat(32)}`,
     idempotencyKeyDigest: '2'.repeat(64),
@@ -110,6 +110,103 @@ describe('v2 Module provider admission fence', () => {
     await expect(manager.sendModuleAgentMessage(managed.id, 'too early')).rejects.toThrow(
       'requires starting state',
     )
+    manager.cleanup()
+  })
+
+  it('rejects authority drift before creating any provider runtime', async () => {
+    const { manager, managed } = await createTransientManager()
+    await manager.updateModuleAgentRunState(managed.id, 'starting')
+    let providerStarts = 0
+    ;(manager as unknown as { getOrCreateAgent: () => Promise<never> }).getOrCreateAgent = async () => {
+      providerStarts++
+      throw new Error('provider must not start')
+    }
+    const result = await manager.sendModuleAgentMessage(
+      managed.id,
+      'drifted v2 authority',
+      async () => { throw new Error('authority drifted') },
+    ).then(() => 'resolved', (error: unknown) => error)
+    expect(result).toBeInstanceOf(Error)
+    expect((result as Error).message).not.toContain('authority drifted')
+    expect(providerStarts).toBe(0)
+    expect(managed.isProcessing).toBe(false)
+    manager.cleanup()
+  })
+
+  it('rechecks authority after runtime creation and before agent.chat', async () => {
+    const { manager, managed } = await createTransientManager()
+    await manager.updateModuleAgentRunState(managed.id, 'starting')
+    let authorityChecks = 0
+    let chatCalls = 0
+    ;(manager as unknown as { getOrCreateAgent: () => Promise<unknown> }).getOrCreateAgent = async () => ({
+      chat: () => { chatCalls++; throw new Error('chat must not start') },
+    })
+    const result = await manager.sendModuleAgentMessage(
+      managed.id,
+      'drift after runtime creation',
+      async () => {
+        authorityChecks++
+        if (authorityChecks === 2) throw new Error('authority drifted')
+      },
+    ).then(() => 'resolved', (error: unknown) => error)
+    expect(result).toBeInstanceOf(Error)
+    expect((result as Error).message).not.toContain('authority drifted')
+    expect(authorityChecks).toBe(2)
+    expect(chatCalls).toBe(0)
+    expect(managed.isProcessing).toBe(false)
+    manager.cleanup()
+  })
+
+  it('performs a final authority assertion immediately before iterator.next', async () => {
+    const { manager, managed } = await createTransientManager()
+    await manager.updateModuleAgentRunState(managed.id, 'starting')
+    let authorityChecks = 0
+    let chatCalls = 0
+    let nextCalls = 0
+    ;(manager as unknown as { getOrCreateAgent: () => Promise<unknown> }).getOrCreateAgent = async () => ({
+      setAllSources: () => undefined,
+      getModel: () => 'fixture-model',
+      chat: () => {
+        chatCalls++
+        return {
+          [Symbol.asyncIterator]() { return this },
+          next: async () => { nextCalls++; return { done: true, value: undefined } },
+        }
+      },
+    })
+    const result = await manager.sendModuleAgentMessage(
+      managed.id,
+      'drift before iterator',
+      async () => {
+        authorityChecks++
+        if (authorityChecks === 4) throw new Error('authority drifted')
+      },
+    ).then(() => 'resolved', (error: unknown) => error)
+    expect(result).toBeInstanceOf(Error)
+    expect((result as Error).message).not.toContain('authority drifted')
+    expect(authorityChecks).toBe(4)
+    expect(chatCalls).toBe(1)
+    expect(nextCalls).toBe(0)
+    expect(managed.isProcessing).toBe(false)
+    manager.cleanup()
+  })
+})
+
+describe('v1 Module provider authority fence', () => {
+  it('rejects drift before creating the legacy provider runtime', async () => {
+    const { manager, managed } = await createTransientManager(1)
+    let providerStarts = 0
+    ;(manager as unknown as { getOrCreateAgent: () => Promise<never> }).getOrCreateAgent = async () => {
+      providerStarts++
+      throw new Error('provider must not start')
+    }
+    await expect(manager.sendLegacyModuleAgentMessage(
+      managed.id,
+      'drifted v1 authority',
+      async () => { throw new Error('authority drifted') },
+    )).rejects.toThrow()
+    expect(providerStarts).toBe(0)
+    expect(managed.isProcessing).toBe(false)
     manager.cleanup()
   })
 })

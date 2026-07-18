@@ -1039,6 +1039,8 @@ describe('OpenDesign acceptance IPC', () => {
     const first = registerOpenDesignAcceptanceIpc(ipc, harness.controller)
     expect([...invokeHandlers.keys()].sort()).toEqual([
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_NEXT_BLACKOUT,
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_CONNECTION_ADMISSION,
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_CONNECTION_AUTHORITY,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_BLACKOUT_PROXY_CAPABILITY,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_MODULE_AGENT_RUNTIME_SNAPSHOT,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_RUNTIME_BINDING,
@@ -1109,6 +1111,12 @@ describe('OpenDesign acceptance IPC', () => {
         serverIdentityMatches: true,
         runtimeInstanceDigest: 'a'.repeat(64),
       }),
+      getConnectionAuthority: async () => ({
+        schemaVersion: 1, authenticated: true, authorityHmacSha256: 'b'.repeat(64),
+      }),
+      armConnectionAdmission: async () => ({
+        schemaVersion: 1, armed: true, authorityHmacSha256: 'b'.repeat(64),
+      }),
     })
     first.dispose()
     const registration = registerOpenDesignAcceptanceIpc(ipc, ipcController)
@@ -1158,6 +1166,17 @@ describe('OpenDesign acceptance IPC', () => {
       serverIdentityMatches: true,
       runtimeInstanceDigest: 'a'.repeat(64),
     })
+    const keyBase64 = Buffer.alloc(32, 0x11).toString('base64')
+    expect(await invokeHandlers.get(OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_CONNECTION_AUTHORITY)!(ownerReload, {
+      keyBase64,
+    })).toEqual({
+      schemaVersion: 1, authenticated: true, authorityHmacSha256: 'b'.repeat(64),
+    })
+    expect(await invokeHandlers.get(OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_CONNECTION_ADMISSION)!(ownerReload, {
+      keyBase64, expectedHmacSha256: 'b'.repeat(64),
+    })).toEqual({
+      schemaVersion: 1, armed: true, authorityHmacSha256: 'b'.repeat(64),
+    })
     await expect(Promise.resolve().then(() => invokeHandlers.get(
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_NEXT_BLACKOUT,
     )!(ownerReload, { ...armRequest, upstreamBaseUrl: 'http://127.0.0.1:1' }))).rejects.toThrow('invalid')
@@ -1173,6 +1192,12 @@ describe('OpenDesign acceptance IPC', () => {
       serverPid: 42_001,
       serverLockStartedAt: 1_721_252_815_000,
     }))).rejects.toThrow('invalid')
+    await expect(Promise.resolve().then(() => invokeHandlers.get(
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_CONNECTION_AUTHORITY,
+    )!(ownerReload, { keyBase64, connectionSlug: 'secret-identity' }))).rejects.toThrow('invalid')
+    await expect(Promise.resolve().then(() => invokeHandlers.get(
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_CONNECTION_ADMISSION,
+    )!(ownerReload, { keyBase64, expectedHmacSha256: 'short' }))).rejects.toThrow('invalid')
     await expect(Promise.resolve().then(() => invokeHandlers.get(
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_RUNTIME_BINDING,
     )!(ownerReload, {
@@ -1192,6 +1217,8 @@ describe('OpenDesign acceptance IPC', () => {
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.TAKE_BLACKOUT_EVIDENCE,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_MODULE_AGENT_RUNTIME_SNAPSHOT,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_RUNTIME_BINDING,
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_CONNECTION_AUTHORITY,
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_CONNECTION_ADMISSION,
     ]) {
       await expect(Promise.resolve().then(() => invokeHandlers.get(channel)!(secondWindow))).rejects.toThrow('sender was rejected')
     }
@@ -1206,9 +1233,9 @@ describe('OpenDesign acceptance IPC', () => {
     await expect(Promise.resolve().then(() => getState(ownerReload))).rejects.toThrow('sender was rejected')
 
     const replacement = registerOpenDesignAcceptanceIpc(ipc, ipcController)
-    expect(invokeHandlers.size).toBe(8)
+    expect(invokeHandlers.size).toBe(10)
     registration.dispose()
-    expect(invokeHandlers.size).toBe(8)
+    expect(invokeHandlers.size).toBe(10)
     replacement.dispose()
     replacement.dispose()
     expect(invokeHandlers.size).toBe(0)

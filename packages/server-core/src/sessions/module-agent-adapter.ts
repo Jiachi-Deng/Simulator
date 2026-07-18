@@ -25,6 +25,21 @@ function sha256(value: string): string {
 }
 
 /**
+ * Acceptance-only provider authority owned by the Electron Host. The normal
+ * production path omits this dependency entirely. When present, every Module
+ * Session must be admitted against the exact in-memory Connection pinned by H1.
+ */
+export interface ModuleAgentConnectionAdmission {
+  admit(workspaceId: string): Promise<Readonly<{ llmConnection: string }>>
+  assertConnection(input: Readonly<{ workspaceId: string; llmConnection: string }>): Promise<void>
+}
+
+interface AdmittedSessionConnection {
+  readonly workspaceId: string
+  readonly llmConnection: string
+}
+
+/**
  * Compatibility-only ownership for the v1 Gateway, which creates its public
  * session handle after the Host session port returns. v2 ModuleAgentRunCore
  * must supply its final idempotency/request digests and worker epoch directly.
@@ -61,10 +76,12 @@ export function createLegacyV1ModuleAgentRunMetadata(
  */
 export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
   private readonly localListeners = new Map<string, Set<(event: ModuleAgentPortEvent) => void>>()
+  private readonly admittedConnections = new Map<string, AdmittedSessionConnection>()
 
   constructor(
     private readonly sessions: ISessionManager,
     private readonly paths: ModuleAgentPathAuthority,
+    private readonly connectionAdmission?: ModuleAgentConnectionAdmission,
   ) {}
 
   async createSession(input: CreateHostModuleSessionInput): Promise<CreatedHostModuleSession> {
@@ -82,11 +99,14 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
       throw new Error('Module working directory is outside the launch grant')
     }
 
+    const admitted = await this.connectionAdmission?.admit(input.workspaceId)
+
     const session = await this.sessions.createSession(input.workspaceId, {
       name: 'OpenDesign',
       hidden: true,
       workingDirectory,
       enabledSourceSlugs: [],
+      ...(admitted ? { llmConnection: admitted.llmConnection } : {}),
       // OpenDesign tasks may create project artifacts. A Host-owned session
       // boundary is registered below before any prompt can reach this session.
       permissionMode: 'allow-all',
@@ -97,9 +117,25 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
     const returnedWorkingDirectory = session.workingDirectory
       ? await this.paths.canonicalize(session.workingDirectory)
       : ''
-    if (!session.hidden || session.workspaceId !== input.workspaceId || returnedWorkingDirectory !== workingDirectory) {
+    if (!session.hidden || session.workspaceId !== input.workspaceId || returnedWorkingDirectory !== workingDirectory
+      || (admitted && session.llmConnection !== admitted.llmConnection)) {
       await this.sessions.deleteSession(session.id).catch(() => undefined)
       throw new Error('Craft created an invalid hidden module session')
+    }
+    if (admitted) {
+      try {
+        await this.connectionAdmission!.assertConnection({
+          workspaceId: input.workspaceId,
+          llmConnection: admitted.llmConnection,
+        })
+      } catch (error) {
+        await this.sessions.deleteSession(session.id).catch(() => undefined)
+        throw error
+      }
+      this.admittedConnections.set(session.id, {
+        workspaceId: input.workspaceId,
+        llmConnection: admitted.llmConnection,
+      })
     }
     // Mark first so any accidental queued/tool work between session creation
     // and boundary installation fails closed. createSession does not return to
@@ -112,6 +148,7 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
       // one OpenDesign project from reading sibling projects or daemon data.
       registerModuleAgentToolBoundary(session.id, workingDirectory, workingDirectory)
     } catch (error) {
+      this.admittedConnections.delete(session.id)
       unregisterModuleAgentToolBoundary(session.id)
       await this.sessions.deleteSession(session.id).catch(() => undefined)
       throw error
@@ -126,11 +163,26 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
   }
 
   async sendTurn(sessionId: string, prompt: string): Promise<void> {
-    // No llmConnection is supplied here. SessionManager resolves the existing
+    let assertProviderAuthority: (() => Promise<void>) | undefined
+    if (this.connectionAdmission) {
+      const admitted = this.admittedConnections.get(sessionId)
+      if (!admitted) throw new Error('Host provider admission failed')
+      assertProviderAuthority = () => this.connectionAdmission!.assertConnection(admitted)
+      try {
+        await assertProviderAuthority()
+      } catch {
+        this.emitLocal({ type: 'turn.failed', sessionId, code: 'HOST_RUNTIME_ERROR' })
+        throw new Error('Host provider admission failed')
+      }
+    }
+    // Outside acceptance, SessionManager resolves the existing
     // workspace/global Host default and locks it when the first backend starts.
     // Start asynchronously: awaiting the whole SessionManager turn here would
     // block the HTTP response and make streaming/cancellation unusable.
-    void this.sessions.sendMessage(sessionId, prompt).catch(() => {
+    const turn = assertProviderAuthority
+      ? this.sessions.sendLegacyModuleAgentMessage(sessionId, prompt, assertProviderAuthority)
+      : this.sessions.sendMessage(sessionId, prompt)
+    void turn.catch(() => {
       this.emitLocal({ type: 'turn.failed', sessionId, code: 'HOST_RUNTIME_ERROR' })
     })
   }
@@ -146,6 +198,7 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
   async disposeAndReap(sessionId: string): Promise<void> {
     await this.sessions.disposeSessionAndReap(sessionId)
     unregisterModuleAgentToolBoundary(sessionId)
+    this.admittedConnections.delete(sessionId)
     this.localListeners.delete(sessionId)
   }
 
@@ -193,10 +246,12 @@ export class CraftModuleAgentSessionPort implements ModuleAgentSessionPort {
  */
 export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
   private readonly localListeners = new Map<string, Set<(event: HostAgentSessionEvent) => void>>()
+  private readonly admittedConnections = new Map<string, AdmittedSessionConnection>()
 
   constructor(
     private readonly sessions: ISessionManager,
     private readonly paths: ModuleAgentPathAuthority,
+    private readonly connectionAdmission?: ModuleAgentConnectionAdmission,
   ) {}
 
   async createSession(input: CreateHostAgentSessionInput): Promise<CreatedHostAgentSession> {
@@ -214,6 +269,8 @@ export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
       throw new Error('Module working directory is outside the v2 launch grant')
     }
 
+    const admitted = await this.connectionAdmission?.admit(input.workspaceId)
+
     const ownership = parseV2Ownership(input.ownership)
     const session = await this.sessions.createSession(input.workspaceId, {
       name: 'OpenDesign',
@@ -221,6 +278,7 @@ export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
       workingDirectory,
       enabledSourceSlugs: [],
       permissionMode: 'allow-all',
+      ...(admitted ? { llmConnection: admitted.llmConnection } : {}),
     }, {
       emitCreatedEvent: false,
       moduleAgentRun: ownership,
@@ -228,9 +286,26 @@ export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
     const returnedWorkingDirectory = session.workingDirectory
       ? await this.paths.canonicalize(session.workingDirectory)
       : ''
-    if (!session.hidden || session.workspaceId !== input.workspaceId || returnedWorkingDirectory !== workingDirectory) {
+    if (!session.hidden || session.workspaceId !== input.workspaceId || returnedWorkingDirectory !== workingDirectory
+      || (admitted && session.llmConnection !== admitted.llmConnection)) {
       await this.sessions.deleteSession(session.id).catch(() => undefined)
       throw new Error('Craft created an invalid hidden v2 Module session')
+    }
+
+    if (admitted) {
+      try {
+        await this.connectionAdmission!.assertConnection({
+          workspaceId: input.workspaceId,
+          llmConnection: admitted.llmConnection,
+        })
+      } catch (error) {
+        await this.sessions.deleteSession(session.id).catch(() => undefined)
+        throw error
+      }
+      this.admittedConnections.set(session.id, {
+        workspaceId: input.workspaceId,
+        llmConnection: admitted.llmConnection,
+      })
     }
 
     // Mark before installing the canonical boundary. Any unexpected work in
@@ -239,6 +314,7 @@ export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
     try {
       registerModuleAgentToolBoundary(session.id, workingDirectory, workingDirectory)
     } catch (error) {
+      this.admittedConnections.delete(session.id)
       unregisterModuleAgentToolBoundary(session.id)
       await this.sessions.deleteSession(session.id).catch(() => undefined)
       throw error
@@ -267,6 +343,8 @@ export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
       throw new Error('Module working directory is outside the v2 recovery grant')
     }
 
+    const admitted = await this.connectionAdmission?.admit(input.workspaceId)
+
     const session = await this.sessions.recoverModuleAgentSession({
       workspaceId: input.workspaceId,
       workingDirectory,
@@ -279,8 +357,20 @@ export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
       : ''
     if (!session.hidden
       || session.workspaceId !== input.workspaceId
-      || returnedWorkingDirectory !== workingDirectory) {
+      || returnedWorkingDirectory !== workingDirectory
+      || (admitted && session.llmConnection !== admitted.llmConnection)) {
       throw new Error('Craft recovered an invalid hidden v2 Module session')
+    }
+
+    if (admitted) {
+      await this.connectionAdmission!.assertConnection({
+        workspaceId: input.workspaceId,
+        llmConnection: admitted.llmConnection,
+      })
+      this.admittedConnections.set(session.id, {
+        workspaceId: input.workspaceId,
+        llmConnection: admitted.llmConnection,
+      })
     }
 
     // A recovered Session is never usable until its canonical boundary is
@@ -303,10 +393,17 @@ export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
 
   async sendTurn(sessionId: string, prompt: string): Promise<void> {
     try {
+      let assertProviderAuthority: (() => Promise<void>) | undefined
+      if (this.connectionAdmission) {
+        const admitted = this.admittedConnections.get(sessionId)
+        if (!admitted) throw new Error('Acceptance Connection admission is missing')
+        assertProviderAuthority = () => this.connectionAdmission!.assertConnection(admitted)
+        await assertProviderAuthority()
+      }
       // This resolves at the provider-admission boundary, not at end-of-turn.
       // RunCore can therefore publish `running` only after every cancellable
       // SessionManager preflight has completed.
-      await this.sessions.sendModuleAgentMessage(sessionId, prompt)
+      await this.sessions.sendModuleAgentMessage(sessionId, prompt, assertProviderAuthority)
     } catch {
       this.emitLocal({ type: 'turn.failed', sessionId, code: 'RUNTIME_UNAVAILABLE' })
       throw new Error('Host provider admission failed')
@@ -324,6 +421,7 @@ export class CraftHostAgentRunSessionPort implements HostAgentRunSessionPort {
   async disposeAndReap(sessionId: string): Promise<void> {
     await this.sessions.disposeSessionAndReap(sessionId)
     unregisterModuleAgentToolBoundary(sessionId)
+    this.admittedConnections.delete(sessionId)
     this.localListeners.delete(sessionId)
   }
 

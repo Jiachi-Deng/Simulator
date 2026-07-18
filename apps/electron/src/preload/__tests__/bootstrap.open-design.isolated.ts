@@ -128,6 +128,9 @@ describe('OpenDesign acceptance preload facade', () => {
       serverPid: 42_001,
       serverLockStartedAt: 1_721_252_815_000,
     })
+    const keyBase64 = Buffer.alloc(32, 0x11).toString('base64')
+    await facade.getConnectionAuthority({ keyBase64 })
+    await facade.armConnectionAdmission({ keyBase64, expectedHmacSha256: 'a'.repeat(64) })
     expect(invoke.mock.calls).toEqual([
       [OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE],
       [OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC],
@@ -144,6 +147,10 @@ describe('OpenDesign acceptance preload facade', () => {
         mainPid: 42_001,
         serverPid: 42_001,
         serverLockStartedAt: 1_721_252_815_000,
+      }],
+      [OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_CONNECTION_AUTHORITY, { keyBase64 }],
+      [OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_CONNECTION_ADMISSION, {
+        keyBase64, expectedHmacSha256: 'a'.repeat(64),
       }],
     ])
   })

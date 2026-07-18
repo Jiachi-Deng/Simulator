@@ -97,6 +97,49 @@ describe('CraftModuleAgentSessionPort', () => {
     expect(events).toEqual([{ type: 'turn.failed', sessionId: 'raw', code: 'HOST_RUNTIME_ERROR' }])
     expect(JSON.stringify(events)).not.toContain('secret=abc')
   })
+
+  it('passes the H1-pinned Connection explicitly and fails closed while admission is unarmed', async () => {
+    const container = await mkdtemp(join(tmpdir(), 'module-agent-v1-connection-'))
+    temporaryRoots.push(container)
+    const workspaceRoot = join(container, 'workspace')
+    const projectRoot = join(container, 'project')
+    await Promise.all([mkdir(workspaceRoot), mkdir(projectRoot)])
+    let createCalls = 0
+    let createOptions: Record<string, unknown> | undefined
+    const manager = {
+      getWorkspaces: () => [{ id: 'workspace', rootPath: workspaceRoot }],
+      createSession: async (_workspaceId: string, options: Record<string, unknown>) => {
+        createCalls++
+        createOptions = options
+        return {
+          id: 'v1-pinned', workspaceId: 'workspace', hidden: true, workingDirectory: projectRoot,
+          llmConnection: options.llmConnection,
+        } as Session
+      },
+      deleteSession: async () => undefined,
+      onModuleAgentRuntimeEvent: () => () => undefined,
+      onSessionComplete: () => () => undefined,
+    } as unknown as ISessionManager
+    let armed = false
+    const admission = {
+      admit: async () => {
+        if (!armed) throw new Error('not armed')
+        return { llmConnection: 'approved-connection' }
+      },
+      assertConnection: async () => {
+        if (!armed) throw new Error('not armed')
+      },
+    }
+    const port = new CraftModuleAgentSessionPort(manager, new MemoryModuleAgentPathAuthority(), admission)
+    const input = {
+      workspaceId: 'workspace', workspaceRoot, authorizedWorkingRoot: projectRoot, workingDirectory: projectRoot,
+    }
+    await expect(port.createSession(input)).rejects.toThrow('not armed')
+    expect(createCalls).toBe(0)
+    armed = true
+    await port.createSession(input)
+    expect(createOptions?.llmConnection).toBe('approved-connection')
+  })
 })
 
 describe('CraftHostAgentRunSessionPort', () => {
@@ -130,6 +173,61 @@ describe('CraftHostAgentRunSessionPort', () => {
     await expect(port.sendTurn('raw-v2', 'prompt')).rejects.toThrow('Host provider admission failed')
     expect(events).toEqual([{ type: 'turn.failed', sessionId: 'raw-v2', code: 'RUNTIME_UNAVAILABLE' }])
     expect(JSON.stringify(events)).not.toContain('secret provider path')
+  })
+
+  it('pins the approved Connection for create and recovery and reasserts it before send', async () => {
+    const container = await mkdtemp(join(tmpdir(), 'module-agent-v2-connection-'))
+    temporaryRoots.push(container)
+    const workspaceRoot = join(container, 'workspace')
+    const projectRoot = join(container, 'project')
+    await Promise.all([mkdir(workspaceRoot), mkdir(projectRoot)])
+    let createOptions: Record<string, unknown> | undefined
+    let providerAssertions = 0
+    let sendAssertion: (() => Promise<void>) | undefined
+    const session = {
+      id: 'v2-pinned', workspaceId: 'workspace', hidden: true, workingDirectory: projectRoot,
+      llmConnection: 'approved-connection',
+    } as Session
+    const manager = {
+      getWorkspaces: () => [{ id: 'workspace', rootPath: workspaceRoot }],
+      createSession: async (_workspaceId: string, options: Record<string, unknown>) => {
+        createOptions = options
+        return session
+      },
+      recoverModuleAgentSession: async () => session,
+      sendModuleAgentMessage: async (_sessionId: string, _prompt: string, assertion?: () => Promise<void>) => {
+        sendAssertion = assertion
+        await assertion?.()
+      },
+      deleteSession: async () => undefined,
+      onModuleAgentRuntimeEvent: () => () => undefined,
+      onSessionComplete: () => () => undefined,
+    } as unknown as ISessionManager
+    const admission = {
+      admit: async () => ({ llmConnection: 'approved-connection' }),
+      assertConnection: async () => { providerAssertions++ },
+    }
+    const port = new CraftHostAgentRunSessionPort(manager, new MemoryModuleAgentPathAuthority(), admission)
+    const ownership = {
+      transient: true as const,
+      contractVersion: 2 as const,
+      moduleId: 'org.simulator.open-design',
+      runHandle: `run_${'a'.repeat(32)}`,
+      idempotencyKeyDigest: 'b'.repeat(64),
+      requestDigest: 'c'.repeat(64),
+      workerEpoch: 'epoch_connection_pin',
+      state: 'accepted' as const,
+    }
+    const input = {
+      workspaceId: 'workspace', workspaceRoot, authorizedWorkingRoot: projectRoot, workingDirectory: projectRoot, ownership,
+    }
+    await port.createSession(input)
+    expect(createOptions?.llmConnection).toBe('approved-connection')
+    await port.sendTurn(session.id, 'prompt')
+    expect(sendAssertion).toBeFunction()
+    expect(providerAssertions).toBeGreaterThanOrEqual(3)
+    await port.recoverSession(input)
+    expect(providerAssertions).toBeGreaterThanOrEqual(4)
   })
 
   it('persists RunCore ownership unchanged and advances state through the internal seam', async () => {
