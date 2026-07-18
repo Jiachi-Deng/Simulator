@@ -14,6 +14,7 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { pathToFileURL } from 'node:url'
+import { parse } from 'yaml'
 import {
   captureOpenDesignM1H1LaunchEvidence,
   createOpenDesignM1H1ConnectionEvidence,
@@ -88,7 +89,7 @@ async function fixture(): Promise<Fixture> {
   await chmod(parent, 0o700)
   const appBundle = join(parent, 'Simulator H1.app')
   const executable = join(appBundle, 'Contents', 'MacOS', 'Simulator')
-  const resources = join(appBundle, 'Contents', 'Resources', 'app.asar', 'dist', 'renderer')
+  const resources = join(appBundle, 'Contents', 'Resources', 'app', 'dist', 'renderer')
   const profile = join(parent, 'profile')
   const config = join(parent, 'config')
   const launchEvidence = join(parent, 'launch.json')
@@ -688,6 +689,30 @@ describe('OpenDesign M1 H1 authority/preflight evidence v2', () => {
     )).rejects.toThrow('runtime-binding RPC')
   })
 
+  it('binds the target path to the production unpacked renderer layout', async () => {
+    const builder = parse(await readFile(join(
+      import.meta.dir, '..', '..', 'apps', 'electron', 'electron-builder.yml',
+    ), 'utf8')) as Record<string, unknown>
+    expect(builder.asar).toBe(false)
+
+    const value = await fixture()
+    const asarRendererPath = pathToFileURL(join(
+      value.appBundle, 'Contents', 'Resources', 'app.asar', 'dist', 'renderer', 'index.html',
+    )).href
+    await expect(createOpenDesignM1H1PreflightEvidence(
+      value.preflightRoot, value.authority, value.instance,
+      {
+        ...value.dependencies,
+        discoverTargets: async () => [{
+          id: 'craft-renderer',
+          type: 'page',
+          url: `${asarRendererPath}?workspaceId=fixture`,
+          webSocketDebuggerUrl: `ws://127.0.0.1:${value.instance.cdpPort}/devtools/page/craft-renderer`,
+        }],
+      },
+    )).rejects.toThrow('dedicated Craft CDP target')
+  })
+
   it('requires the unique packaged renderer and one canonical safe workspaceId', async () => {
     const invalidQueries = [
       '', '?workspace=fixture', '?workspaceId=', '?workspaceId=fixture&debug=1',
@@ -696,7 +721,7 @@ describe('OpenDesign M1 H1 authority/preflight evidence v2', () => {
     for (const suffix of invalidQueries) {
       const value = await fixture()
       const rendererPath = pathToFileURL(join(
-        value.appBundle, 'Contents', 'Resources', 'app.asar', 'dist', 'renderer', 'index.html',
+        value.appBundle, 'Contents', 'Resources', 'app', 'dist', 'renderer', 'index.html',
       )).href
       await expect(createOpenDesignM1H1PreflightEvidence(
         value.preflightRoot, value.authority, value.instance,

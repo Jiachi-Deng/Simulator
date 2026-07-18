@@ -558,7 +558,7 @@ function hasOneExactProcessArgument(commandLine: string, argument: string): bool
 
 function validatedCraftTarget(candidates: readonly CdpTarget[], instance: CanonicalInstance): ValidatedTarget {
   const expectedRendererPath = join(
-    instance.appBundleRealpath, 'Contents', 'Resources', 'app.asar', 'dist', 'renderer', 'index.html',
+    instance.appBundleRealpath, 'Contents', 'Resources', 'app', 'dist', 'renderer', 'index.html',
   )
   const matches = candidates.flatMap((target): ValidatedTarget[] => {
     if (target.type !== 'page' || !SAFE_TARGET_ID.test(target.id)) return []
