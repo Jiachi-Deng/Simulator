@@ -146,7 +146,10 @@ import {
 } from './open-design-acceptance'
 import { createOpenDesignMutationGate } from './open-design-mutation-gate'
 import { createOpenDesignAcceptanceRuntimeBindingReader } from './open-design-acceptance-runtime-binding'
-import { OpenDesignAcceptanceConnectionAdmission } from './open-design-acceptance-connection-admission'
+import {
+  OpenDesignAcceptanceConnectionAdmission,
+  openDesignConnectionAdmissionFailureCode,
+} from './open-design-acceptance-connection-admission'
 import {
   loadOpenDesignAcceptanceBlackoutProxy,
   type OpenDesignAcceptanceBlackoutProxy,
@@ -1292,6 +1295,7 @@ app.whenReady().then(async () => {
           // remains usable and the later admission check still fails closed.
           mainLog.warn('OpenDesign internal Connection admission is unavailable', {
             errorType: error instanceof Error ? error.name : typeof error,
+            reason: openDesignConnectionAdmissionFailureCode(error),
           })
         }
       }

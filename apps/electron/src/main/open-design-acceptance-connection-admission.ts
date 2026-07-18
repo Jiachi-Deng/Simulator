@@ -32,6 +32,28 @@ import type {
 
 const SHA256 = /^[0-9a-f]{64}$/
 
+const ADMISSION_FAILURE_CODES = Object.freeze({
+  'Acceptance Connection admission is disposed': 'DISPOSED',
+  'Acceptance Connection workspace is unavailable': 'WORKSPACE_UNAVAILABLE',
+  'Acceptance Connection workspace config is unavailable': 'WORKSPACE_CONFIG_UNAVAILABLE',
+  'Acceptance Connection is unavailable': 'CONNECTION_UNAVAILABLE',
+  'Acceptance Connection runtime is unavailable': 'RUNTIME_UNAVAILABLE',
+  'Acceptance requires an authenticated Connection': 'UNAUTHENTICATED',
+  'Acceptance Connection environment identity is unavailable': 'ENVIRONMENT_IDENTITY_UNAVAILABLE',
+  'Acceptance Connection is not authenticated': 'CREDENTIAL_NOT_AUTHENTICATED',
+  'Acceptance Connection credential is unavailable': 'CREDENTIAL_UNAVAILABLE',
+  'Acceptance Connection credential type is unsupported': 'CREDENTIAL_TYPE_UNSUPPORTED',
+  'Acceptance Connection authority changed while reading': 'AUTHORITY_CHANGED',
+  'Acceptance Connection authority mismatch': 'AUTHORITY_MISMATCH',
+  'Acceptance Connection admission is already armed': 'ALREADY_ARMED',
+} as const)
+
+/** Safe diagnostics only; it never returns a provider response or credential data. */
+export function openDesignConnectionAdmissionFailureCode(error: unknown): string {
+  const message = error instanceof Error ? error.message : ''
+  return ADMISSION_FAILURE_CODES[message as keyof typeof ADMISSION_FAILURE_CODES] ?? 'UNKNOWN'
+}
+
 interface CredentialReader {
   hasLlmCredentials(slug: string, authType: LlmAuthType, providerType?: LlmProviderType): Promise<boolean>
   getLlmApiKey(slug: string): Promise<string | null>

@@ -3,7 +3,10 @@ import { mkdtemp, mkdir, realpath, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { LlmConnection } from '@craft-agent/shared/config'
-import { OpenDesignAcceptanceConnectionAdmission } from '../open-design-acceptance-connection-admission'
+import {
+  OpenDesignAcceptanceConnectionAdmission,
+  openDesignConnectionAdmissionFailureCode,
+} from '../open-design-acceptance-connection-admission'
 
 const roots: string[] = []
 afterEach(async () => {
@@ -139,6 +142,13 @@ describe('OpenDesignAcceptanceConnectionAdmission', () => {
     provider: 'pi' as const,
     authType: 'oauth' as const,
     resolvedModel: 'gpt-5.6',
+  })
+
+  it('maps only fixed Connection failures to safe diagnostics', () => {
+    expect(openDesignConnectionAdmissionFailureCode(
+      new Error('Acceptance Connection credential is unavailable'),
+    )).toBe('CREDENTIAL_UNAVAILABLE')
+    expect(openDesignConnectionAdmissionFailureCode(new Error('provider returned token=secret'))).toBe('UNKNOWN')
   })
 
   it('pins only the effective authenticated Connection and exposes no raw identity', async () => {
