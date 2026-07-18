@@ -162,6 +162,19 @@ describe('OpenDesignAcceptanceConnectionAdmission', () => {
     })
   })
 
+  it('arms the signed-in effective Connection internally for the normal Module journey', async () => {
+    const fixture = await harness()
+
+    await fixture.admission.armActiveConnection()
+
+    await expect(fixture.admission.admit('workspace')).resolves.toEqual({
+      llmConnection: 'connection-b',
+      provider: 'pi',
+      authType: 'oauth',
+      resolvedModel: 'gpt-5.6',
+    })
+  })
+
   it('rejects wrong keys, wrong HMACs, and every unarmed admission', async () => {
     const fixture = await harness()
     await expect(fixture.admission.admit('workspace')).rejects.toThrow('not armed')

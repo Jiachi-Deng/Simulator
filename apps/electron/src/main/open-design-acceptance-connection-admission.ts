@@ -1,4 +1,4 @@
-import { createHmac, timingSafeEqual } from 'node:crypto'
+import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 import { realpathSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { resolve } from 'node:path'
@@ -324,6 +324,30 @@ export class OpenDesignAcceptanceConnectionAdmission implements ModuleAgentConne
       })
     } finally {
       release()
+      key.fill(0)
+    }
+  }
+
+  /**
+   * Arms the effective Craft Connection entirely inside the main process.
+   *
+   * OpenDesign is a normal module surface, not an acceptance-console feature:
+   * a signed-in user must not first perform an invisible H1/A1 handshake in
+   * DevTools before the first Module Turn can start. The random authority key
+   * is process-local, never crosses IPC, and is cleared immediately after the
+   * existing proof-and-arm flow completes.
+   */
+  async armActiveConnection(): Promise<void> {
+    if (this.#disposed) throw new Error('Acceptance Connection admission is disposed')
+    const key = randomBytes(32)
+    const keyBase64 = key.toString('base64')
+    try {
+      const authority = await this.getConnectionAuthority({ keyBase64 })
+      await this.armConnectionAdmission({
+        keyBase64,
+        expectedHmacSha256: authority.authorityHmacSha256,
+      })
+    } finally {
       key.fill(0)
     }
   }
