@@ -54,11 +54,7 @@ const MAX_ATTESTATION_RESPONSE_BYTES = 8 * 1024 * 1024
 const MAX_ARTIFACT_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024
 const SAFE_TARGET_ID = /^[A-Za-z0-9._-]{1,128}$/
 const SAFE_WORKSPACE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/
-// Craft owns these two optional router parameters. They are deliberately
-// narrower than a general URL query: H1 does not consume their values, but
-// it must tolerate a normal logged-in Craft window that has an active
-// workspace or session route.
-const SAFE_CRAFT_ROUTE = /^[A-Za-z0-9][A-Za-z0-9._~/-]{0,511}$/
+const MAX_CRAFT_ROUTER_VALUE_BYTES = 8 * 1024
 const RC_LABEL_PATTERN = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)-rc\.([1-9]\d*)$/
 const SERVICE_DIGEST_PATTERN = /^sha256:([0-9a-f]{64})$/
 const PROCESS_START_PATTERN = /^[A-Z][a-z]{2} [A-Z][a-z]{2}\s+[0-9]{1,2} [0-9]{2}:[0-9]{2}:[0-9]{2} [0-9]{4}$/
@@ -593,6 +589,23 @@ function hasOneExactProcessArgument(commandLine: string, argument: string): bool
   return matches?.length === 1
 }
 
+function isSafeCraftRouterValue(value: string): boolean {
+  return value.length > 0 && Buffer.byteLength(value, 'utf8') <= MAX_CRAFT_ROUTER_VALUE_BYTES
+    && !/[\u0000-\u001f\u007f]/.test(value)
+    && !/\\/.test(value)
+    && !/(^|\/)\.\.?(?:\/|$)/.test(value)
+}
+
+function isSafeCraftSidebar(value: string): boolean {
+  return value === 'history' || value === 'files'
+    || (value.startsWith('files/') && value.length > 'files/'.length && isSafeCraftRouterValue(value))
+}
+
+function oneOptionalCraftRouterValue(params: URLSearchParams, key: string): string | undefined | null {
+  const values = params.getAll(key)
+  return values.length === 0 ? undefined : values.length === 1 ? values[0]! : null
+}
+
 function validatedCraftTarget(candidates: readonly CdpTarget[], instance: CanonicalInstance): ValidatedTarget {
   const expectedRendererPath = join(
     instance.appBundleRealpath, 'Contents', 'Resources', 'app', 'dist', 'renderer', 'index.html',
@@ -610,19 +623,35 @@ function validatedCraftTarget(candidates: readonly CdpTarget[], instance: Canoni
     if (rendererUrl.protocol !== 'file:' || rendererUrl.username || rendererUrl.password || rendererUrl.hash) return []
     const workspaceIds = rendererUrl.searchParams.getAll('workspaceId')
     const workspaceId = workspaceIds[0]
-    const workspaceSlugs = rendererUrl.searchParams.getAll('ws')
-    const routes = rendererUrl.searchParams.getAll('route')
-    const workspaceSlug = workspaceSlugs[0]
-    const route = routes[0]
-    if (rendererUrl.searchParams.size !== 1 + workspaceSlugs.length + routes.length
-      || workspaceIds.length !== 1 || workspaceSlugs.length > 1 || routes.length > 1 || !workspaceId
+    // Craft owns the optional router state below. H1 never interprets it: the
+    // evidence only binds the packaged renderer, its loopback CDP target, and
+    // one workspace identity. We still enumerate, size-bound, and
+    // canonically re-encode every allowed key so an arbitrary query cannot be
+    // smuggled into the binding.
+    const workspaceSlug = oneOptionalCraftRouterValue(rendererUrl.searchParams, 'ws')
+    const route = oneOptionalCraftRouterValue(rendererUrl.searchParams, 'route')
+    const panels = oneOptionalCraftRouterValue(rendererUrl.searchParams, 'panels')
+    const focusedIndex = oneOptionalCraftRouterValue(rendererUrl.searchParams, 'fi')
+    const sidebar = oneOptionalCraftRouterValue(rendererUrl.searchParams, 'sidebar')
+    const optionalValues = [workspaceSlug, route, panels, focusedIndex, sidebar]
+    if (rendererUrl.searchParams.size !== 1 + optionalValues.filter((value) => value !== undefined).length
+      || workspaceIds.length !== 1 || !workspaceId || optionalValues.some((value) => value === null)
       || !SAFE_WORKSPACE_ID.test(workspaceId)
       || (workspaceSlug !== undefined && !SAFE_WORKSPACE_ID.test(workspaceSlug))
-      || (route !== undefined && !SAFE_CRAFT_ROUTE.test(route))) return []
+      || (route !== undefined && !isSafeCraftRouterValue(route))
+      || (panels !== undefined && !isSafeCraftRouterValue(panels))
+      || (sidebar !== undefined && !isSafeCraftSidebar(sidebar))) return []
+    const panelCount = panels?.split(',').filter(Boolean).length ?? 0
+    if ((panels === undefined) !== (focusedIndex === undefined)
+      || (focusedIndex !== undefined && (!/^(0|[1-9][0-9]*)$/.test(focusedIndex)
+        || Number(focusedIndex) >= panelCount))) return []
     const canonicalQuery = new URLSearchParams()
     canonicalQuery.set('workspaceId', workspaceId)
     if (workspaceSlug !== undefined) canonicalQuery.set('ws', workspaceSlug)
     if (route !== undefined) canonicalQuery.set('route', route)
+    if (panels !== undefined) canonicalQuery.set('panels', panels)
+    if (focusedIndex !== undefined) canonicalQuery.set('fi', focusedIndex)
+    if (sidebar !== undefined) canonicalQuery.set('sidebar', sidebar)
     if (rendererUrl.search !== `?${canonicalQuery.toString()}`) return []
     let rendererPath: string
     try { rendererPath = fileURLToPath(rendererUrl) } catch { return [] }

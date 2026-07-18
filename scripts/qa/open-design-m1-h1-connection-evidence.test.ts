@@ -766,7 +766,7 @@ describe('OpenDesign M1 H1 preflight v2 and Connection authority v3', () => {
     )).rejects.toThrow('dedicated Craft CDP target')
   })
 
-  it('accepts the canonical Craft workspace/session route while retaining one safe workspace identity', async () => {
+  it('accepts the canonical Craft workspace, session, multi-panel, and sidebar route while retaining one safe workspace identity', async () => {
     const value = await fixture()
     const rendererUrl = pathToFileURL(join(
       value.appBundle, 'Contents', 'Resources', 'app', 'dist', 'renderer', 'index.html',
@@ -774,6 +774,9 @@ describe('OpenDesign M1 H1 preflight v2 and Connection authority v3', () => {
     rendererUrl.searchParams.set('workspaceId', '221fe607-bb99-a236-3308-f2e0ced471f5')
     rendererUrl.searchParams.set('ws', 'my-workspace')
     rendererUrl.searchParams.set('route', 'allSessions/session/260718-tidy-cascade')
+    rendererUrl.searchParams.set('panels', 'allSessions/session/left:0.5000,sources/source/github:0.5000')
+    rendererUrl.searchParams.set('fi', '1')
+    rendererUrl.searchParams.set('sidebar', 'files/src/components/App Shell.tsx')
     await expect(createOpenDesignM1H1PreflightEvidence(
       value.preflightRoot, value.authority, value.instance,
       {
@@ -793,10 +796,16 @@ describe('OpenDesign M1 H1 preflight v2 and Connection authority v3', () => {
       '', '?workspace=fixture', '?workspaceId=', '?workspaceId=fixture&debug=1',
       '?workspaceId=fixture&workspaceId=other', '?workspaceId=../outside', '?workspaceId=fixture#fragment',
       '?workspaceId=fixture&ws=', '?workspaceId=fixture&ws=../outside',
-      '?workspaceId=fixture&route=', '?workspaceId=fixture&route=../outside',
+      '?workspaceId=fixture&route=', '?workspaceId=fixture&route=../outside', '?workspaceId=fixture&route=bad%5Cpath',
       '?workspaceId=fixture&route=allSessions%2fsession%2Fitem',
       '?ws=my-workspace&workspaceId=fixture', '?workspaceId=fixture&ws=one&ws=two',
       '?workspaceId=fixture&route=one&route=two',
+      '?workspaceId=fixture&panels=..%2Foutside%3A0.5000&fi=0',
+      '?workspaceId=fixture&panels=allSessions%3A0.5000&fi=01',
+      '?workspaceId=fixture&panels=allSessions%3A0.5000&fi=1',
+      '?workspaceId=fixture&panels=allSessions%3A0.5000', '?workspaceId=fixture&fi=0',
+      '?workspaceId=fixture&sidebar=projects', '?workspaceId=fixture&sidebar=files%2F',
+      '?workspaceId=fixture&sidebar=files%2Fbad%00path',
     ]
     for (const suffix of invalidQueries) {
       const value = await fixture()
