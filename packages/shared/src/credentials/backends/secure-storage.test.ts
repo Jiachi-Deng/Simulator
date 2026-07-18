@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from 'bun:test';
+import { execFileSync } from 'node:child_process';
 import {
   chmodSync,
   existsSync,
@@ -31,6 +32,18 @@ function fixture(): string {
 
 function credential(value: string): StoredCredential {
   return { value };
+}
+
+function isolatedChildEnvironment(
+  home: string,
+  overrides: Record<string, string | undefined> = {},
+): Record<string, string | undefined> {
+  return {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    ...overrides,
+  };
 }
 
 afterEach(() => {
@@ -87,7 +100,7 @@ describe('SecureStorageBackend config-root isolation', () => {
   it('preserves ~/.craft-agent as the no-env default', () => {
     const home = fixture();
     const moduleUrl = pathToFileURL(join(import.meta.dir, 'secure-storage.ts')).href;
-    const childEnv: Record<string, string | undefined> = { ...process.env, HOME: home };
+    const childEnv = isolatedChildEnvironment(home);
     delete childEnv.CRAFT_CONFIG_DIR;
 
     const result = Bun.spawnSync(
@@ -101,6 +114,12 @@ describe('SecureStorageBackend config-root isolation', () => {
             { type: 'llm_api_key', connectionSlug: 'default-home' },
             { value: 'default-home-value' },
           );
+          const stored = await backend.get(
+            { type: 'llm_api_key', connectionSlug: 'default-home' },
+          );
+          if (stored?.value !== 'default-home-value') {
+            throw new Error('default credential roundtrip failed');
+          }
         `,
       ],
       { env: childEnv, stdout: 'pipe', stderr: 'pipe' },
@@ -108,6 +127,59 @@ describe('SecureStorageBackend config-root isolation', () => {
 
     expect(result.exitCode, result.stderr.toString()).toBe(0);
     expect(existsSync(join(home, '.craft-agent', 'credentials.enc'))).toBe(true);
+  });
+
+  it('fails closed when CRAFT_CONFIG_DIR is defined but blank', () => {
+    for (const blankValue of ['', ' ', '\t', ' \r\n ']) {
+      process.env.CRAFT_CONFIG_DIR = blankValue;
+      expect(() => new SecureStorageBackend()).toThrow(
+        'Credential storage directory must not be empty',
+      );
+      expect(() => new SecureStorageBackend(fixture())).toThrow(
+        'Credential storage directory must not be empty',
+      );
+    }
+  });
+
+  it('preserves a nonblank environment path exactly', async () => {
+    if (process.platform === 'win32') return;
+    const root = fixture();
+    const configRoot = join(root, ' config ');
+    process.env.CRAFT_CONFIG_DIR = configRoot;
+
+    await new SecureStorageBackend().set(credentialId, credential('spaced-path'));
+
+    expect(existsSync(join(configRoot, 'credentials.enc'))).toBe(true);
+    expect(existsSync(join(root, 'config', 'credentials.enc'))).toBe(false);
+  });
+
+  it('rejects relative roots without changing the working-directory mode', () => {
+    const root = fixture();
+    if (process.platform !== 'win32') chmodSync(root, 0o755);
+    const moduleUrl = pathToFileURL(join(import.meta.dir, 'secure-storage.ts')).href;
+    const result = Bun.spawnSync(
+      [
+        process.execPath,
+        '--eval',
+        `
+          import { SecureStorageBackend } from ${JSON.stringify(moduleUrl)};
+          await new SecureStorageBackend().get(
+            { type: 'llm_api_key', connectionSlug: 'relative-root' },
+          );
+        `,
+      ],
+      {
+        cwd: root,
+        env: isolatedChildEnvironment(root, { CRAFT_CONFIG_DIR: '.' }),
+        stdout: 'pipe',
+        stderr: 'pipe',
+      },
+    );
+
+    expect(result.exitCode).not.toBe(0);
+    expect(result.stderr.toString()).toContain('Credential storage directory must be absolute');
+    if (process.platform !== 'win32') expect(lstatSync(root).mode & 0o777).toBe(0o755);
+    expect(existsSync(join(root, 'credentials.enc'))).toBe(false);
   });
 
   it('creates and repairs owner-only directory and file modes', async () => {
@@ -128,6 +200,33 @@ describe('SecureStorageBackend config-root isolation', () => {
     );
     expect(lstatSync(configRoot).mode & 0o777).toBe(0o700);
     expect(lstatSync(credentialsFile).mode & 0o777).toBe(0o600);
+  });
+
+  it('fails closed for macOS extended ACLs on directories and credential files', async () => {
+    if (process.platform !== 'darwin') return;
+    const root = fixture();
+    const configRoot = join(root, 'config');
+    const credentialsFile = join(configRoot, 'credentials.enc');
+    await new SecureStorageBackend(configRoot).set(credentialId, credential('acl-value'));
+
+    execFileSync(
+      '/bin/chmod',
+      ['+a', 'everyone allow list,search,readattr,readextattr,readsecurity', configRoot],
+      { stdio: 'pipe' },
+    );
+    await expect(new SecureStorageBackend(configRoot).get(credentialId)).rejects.toThrow(
+      'Credential storage directory must not have extended ACL entries',
+    );
+
+    execFileSync('/bin/chmod', ['-N', configRoot], { stdio: 'pipe' });
+    execFileSync(
+      '/bin/chmod',
+      ['+a', 'everyone allow read,readattr,readextattr,readsecurity', credentialsFile],
+      { stdio: 'pipe' },
+    );
+    await expect(new SecureStorageBackend(configRoot).get(credentialId)).rejects.toThrow(
+      'Credential storage file must not have extended ACL entries',
+    );
   });
 
   it('fails closed for symlinked directories and credential files', async () => {

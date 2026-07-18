@@ -1,7 +1,7 @@
 /**
  * Secure Storage Backend
  *
- * Stores credentials in an encrypted file under the active Craft config directory.
+ * Stores credentials in an encrypted file under the active Host config directory.
  * The directory is selected once when the backend is constructed:
  *   explicit constructor path > CRAFT_CONFIG_DIR > ~/.craft-agent
  * Uses AES-256-GCM for authenticated encryption.
@@ -33,7 +33,7 @@ import {
   pbkdf2Sync,
   createHash,
 } from 'crypto';
-import { execSync } from 'child_process';
+import { execFileSync, execSync } from 'child_process';
 import {
   chmodSync,
   existsSync,
@@ -46,7 +46,7 @@ import {
   type Stats,
 } from 'fs';
 import { hostname, userInfo, homedir } from 'os';
-import { join, resolve } from 'path';
+import { isAbsolute, join, resolve } from 'path';
 
 import type { CredentialBackend } from './types.ts';
 import type { CredentialId, StoredCredential } from '../types.ts';
@@ -127,12 +127,18 @@ export class SecureStorageBackend implements CredentialBackend {
   private salt: Buffer | null = null;
 
   constructor(credentialsDir?: string) {
-    if (credentialsDir !== undefined && credentialsDir.trim().length === 0) {
+    const environmentDir = process.env.CRAFT_CONFIG_DIR;
+    if ((environmentDir !== undefined && environmentDir.trim().length === 0)
+      || (credentialsDir !== undefined && credentialsDir.trim().length === 0)) {
       throw new TypeError('Credential storage directory must not be empty');
     }
 
-    const environmentDir = process.env.CRAFT_CONFIG_DIR?.trim() || undefined;
-    const selectedDir = credentialsDir ?? environmentDir ?? join(homedir(), '.craft-agent');
+    const configuredDir = credentialsDir ?? environmentDir;
+    const selectedDir = configuredDir ?? join(homedir(), '.craft-agent');
+    if (!isAbsolute(selectedDir)) {
+      throw new TypeError('Credential storage directory must be absolute');
+    }
+
     this.credentialsDir = resolve(selectedDir);
     this.credentialsFile = join(this.credentialsDir, 'credentials.enc');
   }
@@ -369,6 +375,30 @@ export class SecureStorageBackend implements CredentialBackend {
     const actualMode = lstatSync(path).mode & 0o777;
     if (actualMode !== expectedMode) {
       throw new TypeError(`${label} permission verification failed`);
+    }
+    this.assertNoDarwinAcl(path, label);
+  }
+
+  private assertNoDarwinAcl(path: string, label: string): void {
+    if (process.platform !== 'darwin') return;
+
+    let listing: string;
+    try {
+      listing = execFileSync('/bin/ls', ['-lde', path], {
+        encoding: 'utf8',
+        env: { ...process.env, LC_ALL: 'C' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch {
+      throw new TypeError(`${label} ACL verification failed`);
+    }
+
+    const hasAclEntry = listing
+      .split(/\r?\n/)
+      .slice(1)
+      .some((line) => /^\s+\d+:\s/.test(line));
+    if (hasAclEntry) {
+      throw new TypeError(`${label} must not have extended ACL entries`);
     }
   }
 
