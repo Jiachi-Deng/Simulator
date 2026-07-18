@@ -4,12 +4,69 @@ import {
   loadSession as loadStoredSession,
   type ModuleAgentRunMetadata,
 } from '@craft-agent/shared/sessions'
+import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { SessionManager, createManagedSession } from './SessionManager.ts'
 
 const temporaryRoots: string[] = []
+const AUTHORITY_FIXTURE_PATH = join(import.meta.dir, 'module-agent-authority-fixture.ts')
+
+type AuthorityScenario =
+  | 'v1-before-runtime'
+  | 'v2-before-runtime'
+  | 'v2-after-runtime'
+  | 'v2-before-iterator'
+  | 'v2-incomplete-context'
+
+function runIsolatedAuthorityScenario(scenario: AuthorityScenario): void {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'module-agent-authority-')))
+  temporaryRoots.push(root)
+  const home = join(root, 'home')
+  const configDir = join(root, 'config')
+  const workspaceRoot = join(root, 'workspace')
+  mkdirSync(home)
+  mkdirSync(configDir)
+  mkdirSync(workspaceRoot)
+
+  const hasCompleteConnection = scenario !== 'v2-incomplete-context'
+  writeFileSync(join(configDir, 'config.json'), JSON.stringify({
+    workspaces: [],
+    activeWorkspaceId: null,
+    activeSessionId: null,
+    llmConnections: hasCompleteConnection ? [{
+      slug: 'pinned-connection',
+      name: 'Pinned test Connection',
+      providerType: 'anthropic',
+      authType: 'api_key',
+      defaultModel: 'pinned-model',
+      createdAt: 1,
+    }] : [],
+    defaultLlmConnection: hasCompleteConnection ? 'pinned-connection' : null,
+  }))
+
+  const result = Bun.spawnSync([
+    process.execPath,
+    AUTHORITY_FIXTURE_PATH,
+    scenario,
+    workspaceRoot,
+  ], {
+    cwd: join(import.meta.dir, '..', '..', '..', '..'),
+    env: {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      CRAFT_CONFIG_DIR: configDir,
+    },
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
+  const diagnostics = [result.stdout?.toString(), result.stderr?.toString()]
+    .filter(Boolean)
+    .join('\n')
+  expect(result.exitCode, diagnostics).toBe(0)
+}
 
 afterEach(async () => {
   await Promise.all(temporaryRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
@@ -282,99 +339,24 @@ describe('v2 Module provider admission fence', () => {
   })
 
   it('rejects authority drift before creating any provider runtime', async () => {
-    const { manager, managed } = await createTransientManager()
-    await manager.updateModuleAgentRunState(managed.id, 'starting')
-    let providerStarts = 0
-    ;(manager as unknown as { getOrCreateAgent: () => Promise<never> }).getOrCreateAgent = async () => {
-      providerStarts++
-      throw new Error('provider must not start')
-    }
-    const result = await manager.sendModuleAgentMessage(
-      managed.id,
-      'drifted v2 authority',
-      async () => { throw new Error('authority drifted') },
-    ).then(() => 'resolved', (error: unknown) => error)
-    expect(result).toBeInstanceOf(Error)
-    expect((result as Error).message).not.toContain('authority drifted')
-    expect(providerStarts).toBe(0)
-    expect(managed.isProcessing).toBe(false)
-    manager.cleanup()
+    runIsolatedAuthorityScenario('v2-before-runtime')
   })
 
   it('rechecks authority after runtime creation and before agent.chat', async () => {
-    const { manager, managed } = await createTransientManager()
-    await manager.updateModuleAgentRunState(managed.id, 'starting')
-    let authorityChecks = 0
-    let chatCalls = 0
-    ;(manager as unknown as { getOrCreateAgent: () => Promise<unknown> }).getOrCreateAgent = async () => ({
-      chat: () => { chatCalls++; throw new Error('chat must not start') },
-    })
-    const result = await manager.sendModuleAgentMessage(
-      managed.id,
-      'drift after runtime creation',
-      async () => {
-        authorityChecks++
-        if (authorityChecks === 2) throw new Error('authority drifted')
-      },
-    ).then(() => 'resolved', (error: unknown) => error)
-    expect(result).toBeInstanceOf(Error)
-    expect((result as Error).message).not.toContain('authority drifted')
-    expect(authorityChecks).toBe(2)
-    expect(chatCalls).toBe(0)
-    expect(managed.isProcessing).toBe(false)
-    manager.cleanup()
+    runIsolatedAuthorityScenario('v2-after-runtime')
   })
 
   it('performs a final authority assertion immediately before iterator.next', async () => {
-    const { manager, managed } = await createTransientManager()
-    await manager.updateModuleAgentRunState(managed.id, 'starting')
-    let authorityChecks = 0
-    let chatCalls = 0
-    let nextCalls = 0
-    ;(manager as unknown as { getOrCreateAgent: () => Promise<unknown> }).getOrCreateAgent = async () => ({
-      setAllSources: () => undefined,
-      getModel: () => 'fixture-model',
-      chat: () => {
-        chatCalls++
-        return {
-          [Symbol.asyncIterator]() { return this },
-          next: async () => { nextCalls++; return { done: true, value: undefined } },
-        }
-      },
-    })
-    const result = await manager.sendModuleAgentMessage(
-      managed.id,
-      'drift before iterator',
-      async () => {
-        authorityChecks++
-        if (authorityChecks === 4) throw new Error('authority drifted')
-      },
-    ).then(() => 'resolved', (error: unknown) => error)
-    expect(result).toBeInstanceOf(Error)
-    expect((result as Error).message).not.toContain('authority drifted')
-    expect(authorityChecks).toBe(4)
-    expect(chatCalls).toBe(1)
-    expect(nextCalls).toBe(0)
-    expect(managed.isProcessing).toBe(false)
-    manager.cleanup()
+    runIsolatedAuthorityScenario('v2-before-iterator')
+  })
+
+  it('fails closed before Host assertion or provider creation when runtime context is incomplete', () => {
+    runIsolatedAuthorityScenario('v2-incomplete-context')
   })
 })
 
 describe('v1 Module provider authority fence', () => {
   it('rejects drift before creating the legacy provider runtime', async () => {
-    const { manager, managed } = await createTransientManager(1)
-    let providerStarts = 0
-    ;(manager as unknown as { getOrCreateAgent: () => Promise<never> }).getOrCreateAgent = async () => {
-      providerStarts++
-      throw new Error('provider must not start')
-    }
-    await expect(manager.sendLegacyModuleAgentMessage(
-      managed.id,
-      'drifted v1 authority',
-      async () => { throw new Error('authority drifted') },
-    )).rejects.toThrow()
-    expect(providerStarts).toBe(0)
-    expect(managed.isProcessing).toBe(false)
-    manager.cleanup()
+    runIsolatedAuthorityScenario('v1-before-runtime')
   })
 })
