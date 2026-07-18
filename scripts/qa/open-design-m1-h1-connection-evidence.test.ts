@@ -47,6 +47,7 @@ interface Fixture {
   readonly profile: string
   readonly config: string
   readonly launchEvidence: string
+  readonly authorityKey: string
   readonly authority: H1ConnectionAuthority
   readonly instance: H1ConnectionInstance
   readonly mainProcess: ProcessObservation
@@ -93,6 +94,7 @@ async function fixture(): Promise<Fixture> {
   const profile = join(parent, 'profile')
   const config = join(parent, 'config')
   const launchEvidence = join(parent, 'launch.json')
+  const authorityKey = join(parent, 'authority-key.bin')
   const archive = join(parent, 'engineering-rc-actions-artifact.zip')
   const bundleRoot = join(parent, 'final-bundle')
   await mkdir(join(appBundle, 'Contents', 'MacOS'), { recursive: true, mode: 0o700 })
@@ -107,6 +109,8 @@ async function fixture(): Promise<Fixture> {
   await chmod(bundleRoot, 0o700)
   await writeFile(archive, 'fixture archive', { mode: 0o600 })
   await chmod(archive, 0o600)
+  await writeFile(authorityKey, Buffer.alloc(32, 0x42), { mode: 0o600 })
+  await chmod(authorityKey, 0o600)
   const authority: H1ConnectionAuthority = Object.freeze({
     sourceSha: '1234567890abcdef1234567890abcdef12345678',
     hostBuildRunId: 8_001,
@@ -165,7 +169,14 @@ async function fixture(): Promise<Fixture> {
     inspectProcess: async () => mainProcess,
     listProcesses: async () => [mainProcess],
     discoverTargets: async () => [target],
-    readAuthenticatedConnectionsPresent: async () => true,
+    readEffectiveConnectionAuthority: async (_target, keyBase64) => {
+      expect(keyBase64).toBe(Buffer.alloc(32, 0x42).toString('base64'))
+      return {
+        schemaVersion: 1,
+        authenticated: true,
+        authorityHmacSha256: '8'.repeat(64),
+      }
+    },
     readRuntimeBinding: async () => ({
       schemaVersion: 1,
       configRootMatches: true,
@@ -198,6 +209,7 @@ async function fixture(): Promise<Fixture> {
     profile,
     config,
     launchEvidence,
+    authorityKey,
     authority,
     instance,
     mainProcess,
@@ -215,7 +227,8 @@ async function produce(): Promise<Fixture> {
   const value = await fixture()
   await producePreflight(value)
   await createOpenDesignM1H1ConnectionEvidence(
-    value.outputRoot, value.preflightRoot, value.authority, value.instance, value.dependencies,
+    value.outputRoot, value.preflightRoot, value.authority, value.instance,
+    value.authorityKey, value.dependencies,
   )
   return value
 }
@@ -526,14 +539,15 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })))
 })
 
-describe('OpenDesign M1 H1 authority/preflight evidence v2', () => {
+describe('OpenDesign M1 H1 preflight v2 and Connection authority v3', () => {
   it('seals the exact release, staging, launch, and authenticated connection chain', async () => {
     const value = await produce()
     const preflightResult = await validateOpenDesignM1H1PreflightEvidence(
       value.preflightRoot, value.authority, value.instance, value.dependencies,
     )
     const connectionResult = await validateOpenDesignM1H1ConnectionEvidence(
-      value.outputRoot, value.preflightRoot, value.authority, value.instance, value.dependencies,
+      value.outputRoot, value.preflightRoot, value.authority, value.instance,
+      value.authorityKey, value.dependencies,
     )
     expect(preflightResult).toEqual({
       objectPath: 'h1-preflight.json',
@@ -545,14 +559,17 @@ describe('OpenDesign M1 H1 authority/preflight evidence v2', () => {
       objectPath: 'h1-connection.json',
       sha256: expect.stringMatching(/^[0-9a-f]{64}$/),
       observedAt: new Date(NOW).toISOString(),
-      authenticatedConnectionsPresent: true,
+      effectiveConnectionAuthenticated: true,
+      authorityHmacSha256: '8'.repeat(64),
+      authorityKeyCommitmentSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
       verifierDidNotSendTurn: true,
     })
     expect((await readdir(value.preflightRoot)).sort()).toEqual(['SHA256SUMS', 'h1-preflight.json'])
     expect((await readdir(value.outputRoot)).sort()).toEqual(['SHA256SUMS', 'h1-connection.json'])
     const preflightSource = await readFile(join(value.preflightRoot, 'h1-preflight.json'), 'utf8')
     const preflight = JSON.parse(preflightSource)
-    const connection = JSON.parse(await readFile(join(value.outputRoot, 'h1-connection.json'), 'utf8'))
+    const connectionSource = await readFile(join(value.outputRoot, 'h1-connection.json'), 'utf8')
+    const connection = JSON.parse(connectionSource)
     expect(preflight.schemaVersion).toBe(2)
     expect(preflight.authority.hostArtifactDigest).toBe(value.authority.hostArtifactDigest)
     expect(preflight.authority.verifierRepositoryHeadSha).toBe(value.authority.sourceSha)
@@ -563,10 +580,40 @@ describe('OpenDesign M1 H1 authority/preflight evidence v2', () => {
     expect(preflight.launch.serverPid).toBe(value.instance.mainPid)
     expect(preflight.launch.workspaceId).toBe('221fe607-bb99-a236-3308-f2e0ced471f5')
     expect(connection.preflight.sha256).toBe(preflightResult.sha256)
-    expect(Object.keys(connection).sort()).toEqual(['kind', 'observation', 'preflight', 'schemaVersion'])
+    expect(connection.schemaVersion).toBe(3)
+    expect(connection.connectionAuthority).toEqual({
+      schemaVersion: 1,
+      authenticated: true,
+      authorityHmacSha256: '8'.repeat(64),
+      authorityKeyCommitmentSha256: expect.stringMatching(/^[0-9a-f]{64}$/),
+    })
+    expect(Object.keys(connection).sort()).toEqual([
+      'connectionAuthority', 'kind', 'observation', 'preflight', 'schemaVersion',
+    ])
     for (const forbidden of ['provider', 'person@example.com', 'connection-id', 'secret-value', 'accessToken']) {
       expect(preflightSource).not.toContain(forbidden)
+      expect(connectionSource).not.toContain(forbidden)
     }
+    expect(connectionSource).not.toContain(Buffer.alloc(32, 0x42).toString('base64'))
+    expect(connectionSource).not.toContain(sha256(Buffer.alloc(32, 0x42)))
+  })
+
+  it('binds validation to possession of the exact owner-only authority key', async () => {
+    const value = await produce()
+    const wrongKey = join(value.parent, 'wrong-authority-key.bin')
+    await writeFile(wrongKey, Buffer.alloc(32, 0x43), { mode: 0o600 })
+    await chmod(wrongKey, 0o600)
+    await expect(validateOpenDesignM1H1ConnectionEvidence(
+      value.outputRoot, value.preflightRoot, value.authority, value.instance, wrongKey,
+      {
+        ...value.dependencies,
+        readEffectiveConnectionAuthority: async () => ({
+          schemaVersion: 1,
+          authenticated: true,
+          authorityHmacSha256: '8'.repeat(64),
+        }),
+      },
+    )).rejects.toThrow('authenticated observation')
   })
 
   it('publishes nothing for process, server lock, target, or authentication failure', async () => {
@@ -595,16 +642,22 @@ describe('OpenDesign M1 H1 authority/preflight evidence v2', () => {
     await expect(createOpenDesignM1H1ConnectionEvidence(
       noAuthentication.outputRoot, noAuthentication.preflightRoot,
       noAuthentication.authority, noAuthentication.instance,
-      { ...noAuthentication.dependencies, readAuthenticatedConnectionsPresent: async () => false },
-    )).rejects.toThrow('authenticatedConnectionsPresent')
+      noAuthentication.authorityKey,
+      { ...noAuthentication.dependencies, readEffectiveConnectionAuthority: async () => {
+        throw new TypeError('connection-authority RPC did not bind an authenticated effective Connection')
+      } },
+    )).rejects.toThrow('authenticated effective Connection')
     expect(await readdir(noAuthentication.parent)).not.toContain('h1-connection')
 
     const validationAuthentication = await produce()
     await expect(validateOpenDesignM1H1ConnectionEvidence(
       validationAuthentication.outputRoot, validationAuthentication.preflightRoot,
       validationAuthentication.authority, validationAuthentication.instance,
-      { ...validationAuthentication.dependencies, readAuthenticatedConnectionsPresent: async () => false },
-    )).rejects.toThrow('authenticatedConnectionsPresent')
+      validationAuthentication.authorityKey,
+      { ...validationAuthentication.dependencies, readEffectiveConnectionAuthority: async () => ({
+        schemaVersion: 1, authenticated: true, authorityHmacSha256: '9'.repeat(64),
+      }) },
+    )).rejects.toThrow('authenticated observation')
 
     const noRuntimeBinding = await fixture()
     await expect(createOpenDesignM1H1PreflightEvidence(
@@ -793,7 +846,8 @@ describe('OpenDesign M1 H1 authority/preflight evidence v2', () => {
     await unlink(join(linked.outputRoot, 'SHA256SUMS'))
     await symlink('h1-connection.json', join(linked.outputRoot, 'SHA256SUMS'))
     await expect(validateOpenDesignM1H1ConnectionEvidence(
-      linked.outputRoot, linked.preflightRoot, linked.authority, linked.instance, linked.dependencies,
+      linked.outputRoot, linked.preflightRoot, linked.authority, linked.instance,
+      linked.authorityKey, linked.dependencies,
     )).rejects.toThrow('owner-only regular file')
 
     const permissive = await produce()
@@ -805,7 +859,8 @@ describe('OpenDesign M1 H1 authority/preflight evidence v2', () => {
     const partial = await produce()
     await writeFile(join(partial.outputRoot, 'h1-connection.json'), '{"schemaVersion":2', { mode: 0o600 })
     await expect(validateOpenDesignM1H1ConnectionEvidence(
-      partial.outputRoot, partial.preflightRoot, partial.authority, partial.instance, partial.dependencies,
+      partial.outputRoot, partial.preflightRoot, partial.authority, partial.instance,
+      partial.authorityKey, partial.dependencies,
     )).rejects.toThrow('is not JSON')
 
     const tampered = await produce()
@@ -821,7 +876,8 @@ describe('OpenDesign M1 H1 authority/preflight evidence v2', () => {
     const checksum = await produce()
     await writeFile(join(checksum.outputRoot, 'SHA256SUMS'), `${'0'.repeat(64)}  h1-connection.json\n`, { mode: 0o600 })
     await expect(validateOpenDesignM1H1ConnectionEvidence(
-      checksum.outputRoot, checksum.preflightRoot, checksum.authority, checksum.instance, checksum.dependencies,
+      checksum.outputRoot, checksum.preflightRoot, checksum.authority, checksum.instance,
+      checksum.authorityKey, checksum.dependencies,
     )).rejects.toThrow('SHA256SUMS')
 
     const launchPermissions = await produce()
@@ -849,7 +905,7 @@ describe('OpenDesign M1 H1 authority/preflight evidence v2', () => {
     await reseal(timeOrder.outputRoot, 'h1-connection.json')
     await expect(validateOpenDesignM1H1ConnectionEvidence(
       timeOrder.outputRoot, timeOrder.preflightRoot,
-      timeOrder.authority, timeOrder.instance, timeOrder.dependencies,
+      timeOrder.authority, timeOrder.instance, timeOrder.authorityKey, timeOrder.dependencies,
     )).rejects.toThrow('authenticated observation')
   })
 
@@ -884,7 +940,8 @@ describe('OpenDesign M1 H1 authority/preflight evidence v2', () => {
       await reseal(futureConnection.outputRoot, 'h1-connection.json')
       await expect(validateOpenDesignM1H1ConnectionEvidence(
         futureConnection.outputRoot, futureConnection.preflightRoot,
-        futureConnection.authority, futureConnection.instance, futureConnection.dependencies,
+        futureConnection.authority, futureConnection.instance,
+        futureConnection.authorityKey, futureConnection.dependencies,
       )).rejects.toThrow('authenticated observation')
     }
   })

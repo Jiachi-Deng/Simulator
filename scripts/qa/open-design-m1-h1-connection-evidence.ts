@@ -12,7 +12,7 @@ import {
 } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { execFile as execFileCallback } from 'node:child_process'
-import { createHash } from 'node:crypto'
+import { createHash, createHmac } from 'node:crypto'
 import { promisify } from 'node:util'
 import { fileURLToPath } from 'node:url'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -112,6 +112,12 @@ export interface H1ConnectionInstance {
   readonly launchEvidenceRealpath: string
 }
 
+export interface H1EffectiveConnectionAuthority {
+  readonly schemaVersion: 1
+  readonly authenticated: true
+  readonly authorityHmacSha256: string
+}
+
 export interface ProcessObservation {
   readonly pid: number
   readonly uid: number
@@ -171,7 +177,10 @@ export interface H1ConnectionProbeDependencies {
   readonly inspectProcess: (pid: number) => Promise<ProcessObservation>
   readonly listProcesses: () => Promise<readonly ProcessObservation[]>
   readonly discoverTargets: (port: number) => Promise<readonly CdpTarget[]>
-  readonly readAuthenticatedConnectionsPresent: (target: CdpTarget) => Promise<boolean>
+  readonly readEffectiveConnectionAuthority: (
+    target: CdpTarget,
+    keyBase64: string,
+  ) => Promise<H1EffectiveConnectionAuthority>
   readonly readRuntimeBinding: (
     target: CdpTarget,
     request: H1RuntimeBindingRequest,
@@ -195,7 +204,9 @@ export interface H1ConnectionEvidenceResult {
   readonly objectPath: typeof CONNECTION_PATH
   readonly sha256: string
   readonly observedAt: string
-  readonly authenticatedConnectionsPresent: true
+  readonly effectiveConnectionAuthenticated: true
+  readonly authorityHmacSha256: string
+  readonly authorityKeyCommitmentSha256: string
   readonly verifierDidNotSendTurn: true
 }
 
@@ -464,20 +475,41 @@ class CdpConnection {
   }
 }
 
-async function readAuthenticatedConnectionsPresent(target: CdpTarget): Promise<boolean> {
+async function readEffectiveConnectionAuthority(
+  target: CdpTarget,
+  keyBase64: string,
+): Promise<H1EffectiveConnectionAuthority> {
+  const decodedKey = Buffer.from(keyBase64, 'base64')
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(keyBase64)
+    || decodedKey.byteLength !== 32 || decodedKey.toString('base64') !== keyBase64) {
+    evidenceFailure(KIND, 'connection-authority key')
+  }
   const client = new CdpConnection(target.webSocketDebuggerUrl)
   try {
     await client.connect()
+    const requestSource = JSON.stringify({ keyBase64 })
     const result = objectAt(await client.request('Runtime.evaluate', {
-      expression: `(async()=>{const list=window.electronAPI?.listLlmConnectionsWithStatus;if(typeof list!=='function')return false;const connections=await list();return Array.isArray(connections)&&connections.some((connection)=>connection?.isAuthenticated===true);})()`,
+      expression: `(async()=>{const read=window.electronAPI?.openDesignAcceptance?.getConnectionAuthority;if(typeof read!=='function')return null;return await read(JSON.parse(${JSON.stringify(requestSource)}));})()`,
       awaitPromise: true,
       returnByValue: true,
       userGesture: false,
     }), '$cdp.result', KIND)
     if (result.exceptionDetails !== undefined) evidenceFailure(KIND, 'CDP evaluation', 'failed')
     const remote = objectAt(result.result, '$cdp.result.result', KIND)
-    if (typeof remote.value !== 'boolean') evidenceFailure(KIND, 'CDP evaluation', 'did not return a boolean')
-    return remote.value
+    const authority = objectAt(remote.value, '$cdp.result.result.value', KIND)
+    exactKeys(authority, [
+      'authenticated', 'authorityHmacSha256', 'schemaVersion',
+    ], '$cdp.result.result.value', KIND)
+    if (authority.schemaVersion !== 1 || authority.authenticated !== true
+      || typeof authority.authorityHmacSha256 !== 'string'
+      || !SHA256_PATTERN.test(authority.authorityHmacSha256)) {
+      evidenceFailure(KIND, 'connection-authority RPC', 'did not bind an authenticated effective Connection')
+    }
+    return Object.freeze({
+      schemaVersion: 1,
+      authenticated: true,
+      authorityHmacSha256: authority.authorityHmacSha256,
+    })
   } finally {
     client.close()
   }
@@ -1578,7 +1610,7 @@ const DEFAULT_DEPENDENCIES: H1ConnectionProbeDependencies = Object.freeze({
   inspectProcess: inspectDarwinProcess,
   listProcesses: listDarwinProcesses,
   discoverTargets: discoverCdpTargets,
-  readAuthenticatedConnectionsPresent,
+  readEffectiveConnectionAuthority,
   readRuntimeBinding,
   inspectReleaseAuthority: inspectOpenDesignM1H1ReleaseAuthority,
   inspectStagedApp: inspectOpenDesignM1H1StagedApp,
@@ -1680,18 +1712,27 @@ function expectedConnection(
   preflightRoot: string,
   preflight: H1PreflightEvidenceResult,
   observedAt: string,
+  connectionAuthority: H1EffectiveConnectionAuthority,
+  keyBase64: string,
 ): JsonObject {
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     kind: CONNECTION_KIND,
     preflight: {
       rootRealpath: preflightRoot,
       objectPath: preflight.objectPath,
       sha256: preflight.sha256,
     },
+    connectionAuthority: {
+      schemaVersion: 1,
+      authenticated: true,
+      authorityHmacSha256: connectionAuthority.authorityHmacSha256,
+      authorityKeyCommitmentSha256: authorityKeyCommitment(
+        keyBase64, connectionAuthority.authorityHmacSha256,
+      ),
+    },
     observation: {
       observedAt,
-      authenticatedConnectionsPresent: true,
       verifierDidNotSendTurn: true,
     },
   }
@@ -1701,6 +1742,8 @@ async function validateConnectionDirectory(
   rootInput: string,
   preflightRoot: string,
   preflight: H1PreflightEvidenceResult,
+  connectionAuthority: H1EffectiveConnectionAuthority,
+  keyBase64: string,
   now: number,
 ): Promise<H1ConnectionEvidenceResult> {
   const root = await inventoryOwnerOnlyFiles(rootInput, [CHECKSUMS_PATH, CONNECTION_PATH], KIND)
@@ -1709,18 +1752,28 @@ async function validateConnectionDirectory(
     await readOwnerOnlyCanonicalJson(proofPath, MAX_PROOF_BYTES, KIND, CONNECTION_PATH),
     '$', KIND,
   )
-  exactKeys(proof, ['kind', 'observation', 'preflight', 'schemaVersion'], '$', KIND)
-  if (proof.schemaVersion !== 2 || proof.kind !== CONNECTION_KIND) evidenceFailure(KIND, '$')
+  exactKeys(proof, ['connectionAuthority', 'kind', 'observation', 'preflight', 'schemaVersion'], '$', KIND)
+  if (proof.schemaVersion !== 3 || proof.kind !== CONNECTION_KIND) evidenceFailure(KIND, '$')
+  const recordedAuthority = objectAt(proof.connectionAuthority, '$.connectionAuthority', KIND)
+  exactKeys(recordedAuthority, [
+    'authenticated', 'authorityHmacSha256', 'authorityKeyCommitmentSha256', 'schemaVersion',
+  ], '$.connectionAuthority', KIND)
+  if (recordedAuthority.schemaVersion !== 1 || recordedAuthority.authenticated !== true
+    || typeof recordedAuthority.authorityHmacSha256 !== 'string'
+    || !SHA256_PATTERN.test(recordedAuthority.authorityHmacSha256)
+    || typeof recordedAuthority.authorityKeyCommitmentSha256 !== 'string'
+    || !SHA256_PATTERN.test(recordedAuthority.authorityKeyCommitmentSha256)) {
+    evidenceFailure(KIND, '$.connectionAuthority')
+  }
   const observation = objectAt(proof.observation, '$.observation', KIND)
-  exactKeys(observation, [
-    'authenticatedConnectionsPresent', 'observedAt', 'verifierDidNotSendTurn',
-  ], '$.observation', KIND)
+  exactKeys(observation, ['observedAt', 'verifierDidNotSendTurn'], '$.observation', KIND)
   const observedAt = stringAt(observation, 'observedAt', '$.observation', KIND)
   const observedAtMs = canonicalTimestamp(observedAt, '$.observation.observedAt', KIND)
   if (observedAtMs < canonicalTimestamp(preflight.observedAt, '$.preflight.observedAt', KIND)
-    || observedAtMs > now || observation.authenticatedConnectionsPresent !== true
-    || observation.verifierDidNotSendTurn !== true
-    || canonicalJson(proof) !== canonicalJson(expectedConnection(preflightRoot, preflight, observedAt))) {
+    || observedAtMs > now || observation.verifierDidNotSendTurn !== true
+    || canonicalJson(proof) !== canonicalJson(expectedConnection(
+      preflightRoot, preflight, observedAt, connectionAuthority, keyBase64,
+    ))) {
     evidenceFailure(KIND, '$', 'does not match the validated preflight and authenticated observation')
   }
   const proofSource = canonicalJson(proof)
@@ -1733,9 +1786,26 @@ async function validateConnectionDirectory(
     objectPath: CONNECTION_PATH,
     sha256: proofSha256,
     observedAt,
-    authenticatedConnectionsPresent: true,
+    effectiveConnectionAuthenticated: true,
+    authorityHmacSha256: recordedAuthority.authorityHmacSha256 as string,
+    authorityKeyCommitmentSha256: recordedAuthority.authorityKeyCommitmentSha256 as string,
     verifierDidNotSendTurn: true,
   })
+}
+
+async function readAuthorityKeyBase64(authorityKeyFileInput: string): Promise<string> {
+  const bytes = await readOwnerOnlyBoundedFile(
+    authorityKeyFileInput, 32, KIND, 'authority key',
+  )
+  if (bytes.byteLength !== 32) evidenceFailure(KIND, 'authority key', 'must contain exactly 32 bytes')
+  return bytes.toString('base64')
+}
+
+function authorityKeyCommitment(keyBase64: string, authorityHmacSha256: string): string {
+  return createHmac('sha256', Buffer.from(keyBase64, 'base64'))
+    .update('open-design-m1-h1-a1-authority-v1\0', 'utf8')
+    .update(authorityHmacSha256, 'utf8')
+    .digest('hex')
 }
 
 export async function validateOpenDesignM1H1ConnectionEvidence(
@@ -1743,14 +1813,16 @@ export async function validateOpenDesignM1H1ConnectionEvidence(
   preflightRootInput: string,
   authority: H1ConnectionAuthority,
   instance: H1ConnectionInstance,
+  authorityKeyFileInput: string,
   dependencies: H1ConnectionProbeDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<H1ConnectionEvidenceResult> {
   const validated = await validatePreflightLive(preflightRootInput, authority, instance, dependencies)
-  if (await dependencies.readAuthenticatedConnectionsPresent(validated.collected.target) !== true) {
-    evidenceFailure(KIND, 'authenticatedConnectionsPresent', 'was not observed during validation')
-  }
+  const keyBase64 = await readAuthorityKeyBase64(authorityKeyFileInput)
+  const connectionAuthority = await dependencies.readEffectiveConnectionAuthority(
+    validated.collected.target, keyBase64,
+  )
   return validateConnectionDirectory(
-    rootInput, validated.root, validated.result, dependencies.now(),
+    rootInput, validated.root, validated.result, connectionAuthority, keyBase64, dependencies.now(),
   )
 }
 
@@ -1759,22 +1831,27 @@ export async function createOpenDesignM1H1ConnectionEvidence(
   preflightRootInput: string,
   authority: H1ConnectionAuthority,
   instance: H1ConnectionInstance,
+  authorityKeyFileInput: string,
   dependencies: H1ConnectionProbeDependencies = DEFAULT_DEPENDENCIES,
 ): Promise<H1ConnectionEvidenceResult> {
   const validated = await validatePreflightLive(preflightRootInput, authority, instance, dependencies)
-  const authenticatedConnectionsPresent = await dependencies.readAuthenticatedConnectionsPresent(validated.collected.target)
-  if (authenticatedConnectionsPresent !== true) {
-    evidenceFailure(KIND, 'authenticatedConnectionsPresent', 'was not observed')
-  }
+  const keyBase64 = await readAuthorityKeyBase64(authorityKeyFileInput)
+  const connectionAuthority = await dependencies.readEffectiveConnectionAuthority(
+    validated.collected.target, keyBase64,
+  )
   const observedAt = new Date(dependencies.now()).toISOString()
   canonicalTimestamp(observedAt, '$.observation.observedAt', KIND)
-  const proofSource = canonicalJson(expectedConnection(validated.root, validated.result, observedAt))
+  const proofSource = canonicalJson(expectedConnection(
+    validated.root, validated.result, observedAt, connectionAuthority,
+    keyBase64,
+  ))
   const proofSha256 = sha256(proofSource)
   return publishOwnerOnlyDirectory(rootInput, KIND, async (temporaryRoot) => {
     await writeOwnerOnlyNewFile(join(temporaryRoot, CONNECTION_PATH), proofSource)
     await writeOwnerOnlyNewFile(join(temporaryRoot, CHECKSUMS_PATH), `${proofSha256}  ${CONNECTION_PATH}\n`)
     return validateConnectionDirectory(
-      temporaryRoot, validated.root, validated.result, dependencies.now(),
+      temporaryRoot, validated.root, validated.result, connectionAuthority,
+      keyBase64, dependencies.now(),
     )
   })
 }
@@ -1873,6 +1950,7 @@ async function main(): Promise<void> {
     ...AUTHORITY_KEYS,
     '--output-root',
     ...(needsPreflight ? ['--preflight-root'] : []),
+    ...(needsPreflight ? ['--authority-key-file'] : []),
   ])
   const authority = authorityFromArgs(args)
   const instance = instanceFromArgs(args)
@@ -1888,10 +1966,12 @@ async function main(): Promise<void> {
   } else if (command === 'produce') {
     result = await createOpenDesignM1H1ConnectionEvidence(
       requiredArg(args, '--output-root'), requiredArg(args, '--preflight-root'), authority, instance,
+      requiredArg(args, '--authority-key-file'),
     )
   } else {
     result = await validateOpenDesignM1H1ConnectionEvidence(
       requiredArg(args, '--output-root'), requiredArg(args, '--preflight-root'), authority, instance,
+      requiredArg(args, '--authority-key-file'),
     )
   }
   process.stdout.write(canonicalJson(result))
