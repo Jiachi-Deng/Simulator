@@ -67,6 +67,9 @@ describe('createManagedSession', () => {
       transientSessions: 1,
       quarantinedSessions: 0,
     })
+    expect(manager.isModuleAgentSessionForHostEvidence(managed.id, workspace.id)).toBe(true)
+    expect(manager.isModuleAgentSessionForHostEvidence(managed.id, 'other-workspace')).toBe(false)
+    expect(manager.isModuleAgentSessionForHostEvidence('missing-session', workspace.id)).toBe(false)
   })
 
   it('atomically persists valid transient Run state transitions', async () => {

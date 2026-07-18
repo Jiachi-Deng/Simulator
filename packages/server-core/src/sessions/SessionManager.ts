@@ -2915,6 +2915,22 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
+   * Host-only identity check for acceptance and recovery evidence.
+   *
+   * Renderer/remote callers must continue to use getSessions/getSession, which
+   * deliberately hide transient Module Sessions. This narrow predicate lets
+   * trusted Host instrumentation associate an in-process terminal event with
+   * the transient Session that produced it without reopening the public DTO.
+   */
+  isModuleAgentSessionForHostEvidence(sessionId: string, workspaceId: string): boolean {
+    if (this.malformedModuleAgentSessionIds.has(sessionId)) return false
+    const managed = this.sessions.get(sessionId)
+    return managed?.workspace.id === workspaceId
+      && managed.hidden === true
+      && managed.moduleAgentRun !== undefined
+  }
+
+  /**
    * Aggregate unread state across all workspaces.
    * Excludes hidden and archived sessions from counts/indicators.
    */

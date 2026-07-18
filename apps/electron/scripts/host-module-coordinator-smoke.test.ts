@@ -198,6 +198,8 @@ describe('Electron packaged Host Agent smoke scenarios', () => {
     expect(mainSource).toContain('watchdog.assertMayCommitSuccess()')
     expect(mainSource).toContain("errorCode: 'SMOKE_TIMEOUT'")
     expect(mainSource).toContain('sessionPersistenceVerified')
+    expect(mainSource).toContain('isModuleAgentSessionForHostEvidence(event.sessionId, workspace.id)')
+    expect(mainSource).not.toContain('smoke.sessionManager.getSessions(workspace.id)')
     expect(mainSource).not.toContain('        sessionPath,')
     expect(mainSource).toContain("execFileSync('/bin/ps', ['-axo', 'pid=,ppid=,pgid=,ucomm=']")
     expect(mainSource).toContain("'module-provider-root'")

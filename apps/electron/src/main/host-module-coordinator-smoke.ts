@@ -609,9 +609,9 @@ export async function runHostModuleCoordinatorSmokeIfRequested(smoke: SmokeRunti
     const scenario = contractVersion === 1 ? 'v1-compat' : 'v2-open-design-rc'
     const terminalSessionIds: string[] = []
     unsubscribeModuleRuntimeEvents = smoke.sessionManager.onSessionComplete((event) => {
-      const completed = smoke.sessionManager.getSessions(workspace.id)
-        .find((candidate) => candidate.id === event.sessionId)
-      if (completed?.hidden === true) terminalSessionIds.push(event.sessionId)
+      if (smoke.sessionManager.isModuleAgentSessionForHostEvidence(event.sessionId, workspace.id)) {
+        terminalSessionIds.push(event.sessionId)
+      }
     })
     let terminalSessionOffset = 0
     // Smoke never opens the acceptance runtime and returns before the ordinary
