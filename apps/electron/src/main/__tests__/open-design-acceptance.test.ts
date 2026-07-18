@@ -667,6 +667,29 @@ describe('OpenDesign acceptance controller', () => {
     })
   })
 
+  it('waits briefly for the Electron view snapshot to catch up with a completed RC update', async () => {
+    const harness = controllerHarness()
+    harness.update.mockImplementationOnce(async (request: any) => {
+      harness.setState(OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion, OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion)
+      harness.setInstalledVersions([
+        OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
+        OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion,
+      ])
+      harness.setDaemon('healthy', OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion)
+      harness.setView('attached', OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion)
+      setTimeout(() => harness.setView('attached', OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion), 25)
+      return result('update', request.operationId)
+    })
+
+    expect(await harness.controller.updateToRc()).toMatchObject({
+      status: 'ready',
+      activeVersion: OPEN_DESIGN_ACCEPTANCE_IDENTITY.rcVersion,
+      lastKnownGoodVersion: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion,
+      running: true,
+      viewAttached: true,
+    })
+  })
+
   it('fails closed before update for any missing, stale, or mismatched resolved identity', async () => {
     const mutations: Array<(request: any) => void> = [
       (request) => { delete request.catalogEvidence },

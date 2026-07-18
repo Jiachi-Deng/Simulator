@@ -766,18 +766,8 @@ export class OpenDesignAcceptanceController {
           this.#lastOperation = operationEvidence(result)
           this.#lastError = `ACCEPTANCE_${expectedKind.toUpperCase()}_FAILED`
         } else {
-          let observed: AcceptanceObservedState | undefined
-          try {
-            observed = await this.#readObservedState(runtime)
-          } catch {
-            // A claimed success without readable Host state is not acceptance evidence.
-          }
+          const observed = await this.#awaitPostcondition(runtime, execution)
           if (!observed
-            || observed.activeVersion !== execution.expectedActiveVersion
-            || observed.lastKnownGoodVersion !== execution.expectedLastKnownGoodVersion
-            || !exactVersions(observed.installedVersions, execution.expectedInstalledVersions)
-            || observed.running !== execution.expectedRunning
-            || observed.viewAttached !== execution.expectedViewAttached
             || result.target.activeVersion !== execution.expectedActiveVersion
             || result.target.lastKnownGoodVersion !== execution.expectedLastKnownGoodVersion
             || result.target.running !== execution.expectedRunning
@@ -872,6 +862,30 @@ export class OpenDesignAcceptanceController {
         && view.version === registry.activeVersion
         && view.state === 'attached',
     }
+  }
+
+  async #awaitPostcondition(
+    runtime: OpenDesignAcceptanceRuntime,
+    expected: AcceptanceExecution,
+  ): Promise<AcceptanceObservedState | undefined> {
+    // Coordinator completion precedes a small amount of Electron view-manager
+    // propagation. Poll only this fixed, process-local state rather than
+    // declaring a completed update failed because the view snapshot is one tick
+    // behind the Coordinator result.
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      try {
+        const observed = await this.#readObservedState(runtime)
+        if (observed.activeVersion === expected.expectedActiveVersion
+          && observed.lastKnownGoodVersion === expected.expectedLastKnownGoodVersion
+          && exactVersions(observed.installedVersions, expected.expectedInstalledVersions)
+          && observed.running === expected.expectedRunning
+          && observed.viewAttached === expected.expectedViewAttached) return observed
+      } catch {
+        // A claimed success without readable Host state is not acceptance evidence.
+      }
+      if (attempt < 9) await new Promise<void>((resolve) => setTimeout(resolve, 50))
+    }
+    return undefined
   }
 
   async #requireObservedState(runtime: OpenDesignAcceptanceRuntime): Promise<AcceptanceObservedState> {
