@@ -351,7 +351,7 @@ export class OpenDesignAcceptanceConnectionAdmission implements ModuleAgentConne
   }
 
   /**
-   * Arms the effective Craft Connection entirely inside the main process.
+   * Arms the effective Workspace Connection entirely inside the main process.
    *
    * OpenDesign is a normal module surface, not an acceptance-console feature:
    * a signed-in user must not first perform an invisible H1/A1 handshake in

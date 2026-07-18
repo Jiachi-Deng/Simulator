@@ -1285,13 +1285,13 @@ app.whenReady().then(async () => {
       await createInitialWindows()
       if (openDesignAcceptanceConnectionAdmission) {
         try {
-          // A Craft user who has already signed in must be able to start an
+          // A signed-in Host user must be able to start an
           // OpenDesign Turn directly. Keep the authority handshake inside the
           // Host main process rather than requiring an acceptance-console IPC
           // action that the normal Module UI never performs.
           await openDesignAcceptanceConnectionAdmission.armActiveConnection()
         } catch (error) {
-          // A missing or stale Connection disables only the Module Turn. Craft
+          // A missing or stale Connection disables only the Module Turn. The primary Host
           // remains usable and the later admission check still fails closed.
           mainLog.warn('OpenDesign internal Connection admission is unavailable', {
             errorType: error instanceof Error ? error.name : typeof error,
