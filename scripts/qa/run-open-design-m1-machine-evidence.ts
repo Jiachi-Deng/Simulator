@@ -20,17 +20,24 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'nod
 import { pathToFileURL } from 'node:url'
 import * as tar from 'tar'
 import {
-  OPEN_DESIGN_M1_CASES,
   type OpenDesignM1Case,
 } from './open-design-m1-cases'
+import {
+  OPEN_DESIGN_M1_CASES_V2,
+  OPEN_DESIGN_M1_CASE_MANIFEST_V2_SHA256,
+  OPEN_DESIGN_M1_CASE_V2_HASHES,
+  OPEN_DESIGN_M1_INTERACTION_VECTORS,
+  OPEN_DESIGN_M1_INTERACTION_VECTORS_CANONICAL_SHA256,
+  openDesignM1InteractionVectorSha256,
+  type OpenDesignM1CaseV2,
+} from './open-design-m1-interaction-vectors'
+import { runOpenDesignM1PreviewInteraction } from './open-design-m1-preview-interactions'
 import {
   OPEN_DESIGN_HOST_ARTIFACT_NAME,
   OPEN_DESIGN_HOST_VERSION,
   OPEN_DESIGN_LKG_ARCHIVE_ASSET,
   OPEN_DESIGN_LKG_TAG,
   OPEN_DESIGN_LKG_VERSION,
-  OPEN_DESIGN_M1_CASE_HASHES,
-  OPEN_DESIGN_M1_CASE_MANIFEST_SHA256,
   OPEN_DESIGN_M1_CASE_SEED_CHECKSUMS_SHA256,
   OPEN_DESIGN_RC_ARCHIVE_ASSET,
   OPEN_DESIGN_RC_SOURCE_SHA,
@@ -1220,7 +1227,7 @@ async function requireProcessTreeReaped(snapshot: readonly ProcessIdentity[]): P
 
 async function executeCase(options: {
   stack: OpenDesignM1Stack
-  testCase: OpenDesignM1Case
+  testCase: OpenDesignM1CaseV2
   origin: string
   moduleDataRoot: string
   seedRoot: string
@@ -1333,9 +1340,19 @@ async function executeCase(options: {
   const workspacePath = `workspace/${stack}/${testCase.id}.json`
   await writeCanonical(outputRoot, workspacePath, workspaceValue)
   const workspaceManifestSha256 = sha256(await readFile(join(outputRoot, workspacePath)))
+  const interactionVector = OPEN_DESIGN_M1_INTERACTION_VECTORS.find((value) => value.caseId === testCase.id)
+  if (!interactionVector || testCase.interactionVectorSha256 !== openDesignM1InteractionVectorSha256(interactionVector)) {
+    throw new Error('fixed-cases/v2 interaction vector authority mismatch')
+  }
+  options.onPhase('preview.capture')
+  const previewEvidence = await runOpenDesignM1PreviewInteraction({
+    previewUrl,
+    vector: interactionVector,
+    captureScreenshot: stack === 'new',
+  })
   if (stack === 'new') {
-    options.onPhase('preview.capture')
-    const screenshot = await capturePreviewUrlScreenshot(previewUrl)
+    const screenshot = previewEvidence.screenshot
+    if (!screenshot) throw new Error('New-stack H2 Preview screenshot is unavailable')
     const screenshotPath = `previews/new/${testCase.id}.png`
     await mkdir(dirname(join(outputRoot, screenshotPath)), { recursive: true, mode: 0o700 })
     await writeFile(join(outputRoot, screenshotPath), screenshot, { mode: 0o600 })
@@ -1363,7 +1380,7 @@ async function executeCase(options: {
     : 1
   if (stateSplitCount !== 0) throw new Error('Module and Craft state observations are split')
   const completedAt = Date.now()
-  const caseHash = OPEN_DESIGN_M1_CASE_HASHES.find((item) => item.id === testCase.id)!
+  const caseHash = OPEN_DESIGN_M1_CASE_V2_HASHES.find((item) => item.id === testCase.id)!
   options.onPhase('record.seal')
   await writeCanonical(outputRoot, `records/${stack}/${testCase.id}.json`, {
     attemptOrdinal: 1,
@@ -1378,6 +1395,7 @@ async function executeCase(options: {
     completedAt: new Date(completedAt).toISOString(),
     craft: { mainPidSurvived: craft.mainPidSurvived, stateSplitCount, usableAfterTurn: craft.usableAfterTurn },
     moduleArchiveSha256: options.moduleArchiveSha256,
+    interaction: previewEvidence.interaction,
     preview: { httpStatus: 200, requiredContentVerified: true, requiredFilesVerified: true, route: '/' },
     promptSha256: caseHash.promptSha256,
     seedArchiveSha256: caseHash.seedArchiveSha256,
@@ -1583,7 +1601,7 @@ async function sealArtifact(options: {
   const ref = (path: string): FileRef => ({ path, sha256: files.find((file) => file.path === path)!.sha256 })
   const records: JsonObject[] = []
   for (const stack of ['old', 'new'] as const) {
-    for (const testCase of OPEN_DESIGN_M1_CASES) {
+    for (const testCase of OPEN_DESIGN_M1_CASES_V2) {
       records.push({
         stack, caseId: testCase.id,
         record: ref(`records/${stack}/${testCase.id}.json`),
@@ -1613,8 +1631,25 @@ async function sealArtifact(options: {
       version: stack === 'old' ? OPEN_DESIGN_LKG_VERSION : OPEN_DESIGN_RC_VERSION,
     }
   }
+  const functionalComparisons: JsonObject[] = []
+  for (const testCase of OPEN_DESIGN_M1_CASES_V2) {
+    const oldRecord = JSON.parse(await readFile(join(options.root, `records/old/${testCase.id}.json`), 'utf8')) as JsonObject
+    const newRecord = JSON.parse(await readFile(join(options.root, `records/new/${testCase.id}.json`), 'utf8')) as JsonObject
+    const oldInteraction = oldRecord.interaction as JsonObject | undefined
+    const newInteraction = newRecord.interaction as JsonObject | undefined
+    if (oldInteraction?.normalizedOutcomeDigest !== newInteraction?.normalizedOutcomeDigest) {
+      throw new Error(`Old/new functional outcome mismatch: ${testCase.id}`)
+    }
+    functionalComparisons.push({
+      caseId: testCase.id,
+      vectorSha256: testCase.interactionVectorSha256,
+      oldNormalizedOutcomeDigest: oldInteraction.normalizedOutcomeDigest,
+      newNormalizedOutcomeDigest: newInteraction.normalizedOutcomeDigest,
+      equivalent: true,
+    })
+  }
   await writeCanonical(options.root, 'machine-manifest.json', {
-    schemaVersion: 1,
+    schemaVersion: 2,
     kind: 'open-design-m1-machine-evidence',
     repository: REPOSITORY,
     workflowPath: OPEN_DESIGN_M1_MACHINE_WORKFLOW_PATH,
@@ -1632,8 +1667,10 @@ async function sealArtifact(options: {
     lkg: release('old'),
     rc: release('new'),
     caseAuthority: {
-      caseManifestSha256: OPEN_DESIGN_M1_CASE_MANIFEST_SHA256,
+      authorityVersion: 2,
+      caseManifestSha256: OPEN_DESIGN_M1_CASE_MANIFEST_V2_SHA256,
       caseSeedChecksumsSha256: OPEN_DESIGN_M1_CASE_SEED_CHECKSUMS_SHA256,
+      interactionVectorsSha256: OPEN_DESIGN_M1_INTERACTION_VECTORS_CANONICAL_SHA256,
       rcSourceSha: OPEN_DESIGN_RC_SOURCE_SHA,
     },
     batch: {
@@ -1648,6 +1685,7 @@ async function sealArtifact(options: {
       hiddenSessions: ref('rollback/hidden-sessions.json'),
     },
     records,
+    functionalComparisons,
     files,
     batchDigest,
   })
@@ -1795,7 +1833,7 @@ async function main(): Promise<void> {
     await requireNoOpenDesignReleaseTransaction(token)
     requireReleaseCatalogUnchanged(lkgTrust, await fetchReleaseAuthority(OPEN_DESIGN_LKG_VERSION))
     requireReleaseCatalogUnchanged(rcTrust, await fetchReleaseAuthority(OPEN_DESIGN_RC_VERSION))
-    await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES, craftCdp, async (testCase, index) => {
+    await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES_V2, craftCdp, async (testCase, index) => {
       await runTrackedOpenDesignM1Case(batchProgress, 'old', testCase, index, async (onPhase) => {
         await executeCase({
           stack: 'old', testCase, origin, moduleDataRoot, seedRoot, outputRoot: artifactRoot,
@@ -1820,7 +1858,7 @@ async function main(): Promise<void> {
     origin = new URL(module.url).origin
     await requireOpenDesignHostRuntime(origin)
     lifecyclePhase = 'rc-batch.preflight'
-    await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES, craftCdp, async (testCase, index) => {
+    await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES_V2, craftCdp, async (testCase, index) => {
       await runTrackedOpenDesignM1Case(batchProgress, 'new', testCase, index, async (onPhase) => {
         await executeCase({
           stack: 'new', testCase, origin, moduleDataRoot, seedRoot, outputRoot: artifactRoot,

@@ -82,7 +82,7 @@ const machineId = createHash('sha256').update(hostname() + homedir()).digest('he
 Sentry.setUser({ id: machineId })
 
 import { join, delimiter } from 'path'
-import { existsSync, readFileSync } from 'fs'
+import { existsSync, readFileSync, realpathSync } from 'fs'
 import { RPC_CHANNELS } from '@craft-agent/shared/protocol'
 import type { ModuleId } from '@simulator/module-contract'
 import { SessionManager, setSessionPlatform, setSessionRuntimeHooks } from '@craft-agent/server-core/sessions'
@@ -99,7 +99,7 @@ import { setSearchPlatform, setImageProcessor } from '@craft-agent/server-core/s
 import { createApplicationMenu, setOpenDesignModuleEscapeHandler } from './menu'
 import { WindowManager } from './window-manager'
 import { loadWindowState, saveWindowState } from './window-state'
-import { getWorkspaces, getWorkspaceByNameOrId, loadStoredConfig, addWorkspace, saveConfig } from '@craft-agent/shared/config'
+import { CONFIG_DIR, getWorkspaces, getWorkspaceByNameOrId, loadStoredConfig, addWorkspace, saveConfig } from '@craft-agent/shared/config'
 import { getDefaultWorkspacesDir } from '@craft-agent/shared/workspaces'
 import { initializeDocs } from '@craft-agent/shared/docs'
 import { initializeReleaseNotes } from '@craft-agent/shared/release-notes'
@@ -145,6 +145,7 @@ import {
   type OpenDesignAcceptanceIpcRegistration,
 } from './open-design-acceptance'
 import { createOpenDesignMutationGate } from './open-design-mutation-gate'
+import { createOpenDesignAcceptanceRuntimeBindingReader } from './open-design-acceptance-runtime-binding'
 import {
   loadOpenDesignAcceptanceBlackoutProxy,
   type OpenDesignAcceptanceBlackoutProxy,
@@ -1158,6 +1159,11 @@ app.whenReady().then(async () => {
               errorType: error instanceof Error ? error.name : typeof error,
             })
           }
+          const readOpenDesignAcceptanceRuntimeBinding = createOpenDesignAcceptanceRuntimeBindingReader({
+            configRoot: realpathSync(CONFIG_DIR),
+            userDataRoot: realpathSync(app.getPath('userData')),
+            mainPid: process.pid,
+          })
           openDesignAcceptanceController = new OpenDesignAcceptanceController({
             bootstrap: openDesignAcceptanceBootstrap,
             getRuntime: openDesignAcceptanceRuntimeGate.getRuntime,
@@ -1187,6 +1193,7 @@ app.whenReady().then(async () => {
                 sessions,
               })
             },
+            getRuntimeBinding: readOpenDesignAcceptanceRuntimeBinding,
           })
         } else if (process.env[OPEN_DESIGN_ACCEPTANCE_ENV] === '1') {
           mainLog.info('OpenDesign acceptance control surface is not ready', {

@@ -86,6 +86,7 @@ describe('OpenDesign M1 visual attestation producer workflow', () => {
     const authenticate = step('Authenticate exact machine producer run and artifact').run
     expect(authenticate).toContain('files != 150')
     expect(authenticate).toContain('96 * 1024 * 1024')
+    expect(authenticate).toContain('if path.startswith("records/"): return 384 * 1024')
     expect(authenticate).toContain('maximum_members = 182')
     expect(authenticate).toContain('maximum_directories = 32')
     expect(authenticate).toContain('maximum_path_bytes = 512')

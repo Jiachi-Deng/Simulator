@@ -261,7 +261,7 @@ jobs:
           set -euo pipefail
           umask 077
           case_root="$RUNNER_TEMP/open-design-m1-cases"
-          bun scripts/qa/generate-open-design-m1-case-artifacts.ts "$case_root"
+          bun scripts/qa/generate-open-design-m1-case-artifacts-v2.ts "$case_root"
           printf 'M1_CASE_ARTIFACT_ROOT=%s\n' "$case_root" >> "$GITHUB_ENV"
 
       - name: Pin trusted external blackout proxy child

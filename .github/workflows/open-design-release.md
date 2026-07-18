@@ -147,6 +147,16 @@ that immutable final evidence to the RC archive SHA-256 and the authenticated
 RC Catalog `sequence` and canonical `issuedAt`. It also binds the exact Host
 DMG SHA-256 and its successful engineering build run.
 
+The Host source used for Engineering RC and final signing is prebound to the
+future stable `0.14.6` exact-tag config before H1/A1. This does not publish or
+activate stable `0.14.6`: acceptance still reaches `0.14.6-rc.1` only through
+the owner-only override and rollback still uses public `0.14.5`. At stable
+publication, the workflow requires the generated config and checked-in source
+to be canonical publisher bytes and fails before creating a Release unless they
+are byte-for-byte identical. Therefore the
+stable switch does not introduce a post-acceptance change to the signed Host
+payload.
+
 For stable promotion, all four public RC assets are required exactly. Because
 the prerelease deliberately omits `open-design-official-channel.json`, the
 publisher reconstructs that file only in a private temporary verification tree
@@ -210,11 +220,12 @@ fixed source SHA and remain an ancestor of the executing Host `main` SHA.
 The public RC Release must contain exactly four assets: archive, raw Catalog,
 envelope, and release metadata. It must not contain
 `open-design-official-channel.json`. The refresh downloads all four RC assets
-and all five LKG assets, requires the LKG config to equal the checked-in source
-authority, derives the public key from that authority, and authenticates the
-LKG before using its Catalog state. At the beginning of the sole secret-bearing
-step, the public key derived from the private signing key must equal that
-anchored public key. The workflow then authenticates the RC envelope signature
+and all five LKG assets. It strictly validates the checked-in future stable
+`0.14.6` identity and the public `0.14.5` LKG identity, requires their complete
+Ed25519 trust-root fields to be identical, derives the public key from the LKG,
+and authenticates the LKG before using its Catalog state. At the beginning of
+the sole secret-bearing step, the public key derived from the private signing
+key must equal that anchored public key. The workflow then authenticates the RC envelope signature
 at the signed Catalog's historical issuance time and fails closed unless the
 signed Catalog, release metadata, track/version/tag/prerelease flag, key and
 validity window, manifest, archive hash and size, extracted-tree metadata, Host

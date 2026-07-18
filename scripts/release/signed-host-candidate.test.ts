@@ -32,6 +32,18 @@ function file(name: string) {
   return { path: name, bytes: bytes.length, sha256: sha(bytes) }
 }
 
+function resealCandidate(manifest: Record<string, unknown>): void {
+  const input = join(root, "manifest-input.json")
+  rmSync(join(root, "signed-host-manifest.json"), { force: true })
+  rmSync(join(root, "SHA256SUMS"), { force: true })
+  writeFileSync(input, JSON.stringify(manifest))
+  writeCanonicalSignedHostManifest(input, join(root, "signed-host-manifest.json"))
+  rmSync(input)
+  const sums = SIGNED_CANDIDATE_CLOSURE.filter((path) => path !== "SHA256SUMS")
+    .map((path) => `${sha(readFileSync(join(root, path)))}  ${path}`).join("\n") + "\n"
+  writeFileSync(join(root, "SHA256SUMS"), sums)
+}
+
 function makeCandidate(mutateSignature?: (signature: any) => void): Record<string, unknown> {
   mkdirSync(join(root, "attestations"), { recursive: true })
   writeFileSync(join(root, "Simulator-arm64.dmg"), "signed-stapled-dmg")
@@ -88,6 +100,8 @@ function makeCandidate(mutateSignature?: (signature: any) => void): Record<strin
     containers: { dmg: containerEquivalence, zip: containerEquivalence },
   }
   writeJson("payload-equivalence.json", equivalence)
+  writeFileSync(join(root, "h3-human-observation-v1.schema.json"), readFileSync(join(import.meta.dir, "schemas", "h3-human-observation-v1.schema.json")))
+  writeFileSync(join(root, "h3-post-install-authority-v1.schema.json"), readFileSync(join(import.meta.dir, "schemas", "h3-post-install-authority-v1.schema.json")))
   writeFileSync(join(root, "h3-post-install-v1.schema.json"), readFileSync(join(import.meta.dir, "schemas", "h3-post-install-v1.schema.json")))
   writeFileSync(join(root, "attestations", "provenance.sigstore.json"), "{}\n")
   const workflow = { name: "signed-macos-host-acceptance.yml", runId, runAttempt: 1, environment: "signed-host-acceptance" }
@@ -144,6 +158,8 @@ function makeCandidate(mutateSignature?: (signature: any) => void): Record<strin
     appNotarization: file("app-notarization.json"),
     dmgNotarization: file("dmg-notarization.json"),
     provenance: file("signed-host-provenance.json"),
+    h3HumanObservationSchema: file("h3-human-observation-v1.schema.json"),
+    h3PostInstallAuthoritySchema: file("h3-post-install-authority-v1.schema.json"),
     h3PostInstallSchema: file("h3-post-install-v1.schema.json"),
   }
   const manifest = {
@@ -189,6 +205,9 @@ describe("signed Host Candidate evidence", () => {
     expect(SIGNED_CANDIDATE_NAME_PATTERN.test(artifactName)).toBe(true)
     expect(SIGNED_CANDIDATE_CLOSURE).toEqual([...SIGNED_CANDIDATE_CLOSURE].sort())
     expect(SIGNED_CANDIDATE_CLOSURE).toContain("attestations/provenance.sigstore.json")
+    expect(SIGNED_CANDIDATE_CLOSURE).toContain("h3-human-observation-v1.schema.json")
+    expect(SIGNED_CANDIDATE_CLOSURE).toContain("h3-post-install-authority-v1.schema.json")
+    expect(SIGNED_CANDIDATE_CLOSURE).toContain("h3-post-install-v1.schema.json")
     expect(SIGNED_CANDIDATE_PRE_ATTESTATION_CLOSURE).not.toContain("attestations/provenance.sigstore.json")
     expect(SIGNED_CANDIDATE_PRE_ATTESTATION_CLOSURE).not.toContain("SHA256SUMS")
   })
@@ -216,6 +235,30 @@ describe("signed Host Candidate evidence", () => {
     expect(verifySignedHostCandidate(root, sourceSha, runId, artifactName).sourceSha).toBe(sourceSha)
     writeFileSync(join(root, "Simulator-arm64.dmg"), "tampered")
     expect(() => verifySignedHostCandidate(root, sourceSha, runId, artifactName)).toThrow("file evidence differs")
+  })
+
+  test("rejects a relaxed H3 human-observation schema even when the manifest and sums are resealed", () => {
+    const manifest = makeCandidate()
+    const schemaPath = join(root, "h3-human-observation-v1.schema.json")
+    const schema = JSON.parse(readFileSync(schemaPath, "utf8"))
+    schema.properties.observations.maxItems = 4
+    writeJson("h3-human-observation-v1.schema.json", schema)
+    const files = manifest.files as Record<string, Record<string, unknown>>
+    files.h3HumanObservationSchema = file("h3-human-observation-v1.schema.json")
+    resealCandidate(manifest)
+    expect(() => verifySignedHostCandidate(root, sourceSha, runId, artifactName)).toThrow("differs from the source contract")
+  })
+
+  test("rejects a relaxed H3 post-install authority schema even when the manifest and sums are resealed", () => {
+    const manifest = makeCandidate()
+    const schemaPath = join(root, "h3-post-install-authority-v1.schema.json")
+    const schema = JSON.parse(readFileSync(schemaPath, "utf8"))
+    schema.properties.github.additionalProperties = true
+    writeJson("h3-post-install-authority-v1.schema.json", schema)
+    const files = manifest.files as Record<string, Record<string, unknown>>
+    files.h3PostInstallAuthoritySchema = file("h3-post-install-authority-v1.schema.json")
+    resealCandidate(manifest)
+    expect(() => verifySignedHostCandidate(root, sourceSha, runId, artifactName)).toThrow("differs from the source contract")
   })
 
   test("validates the exact secret-free pre-attestation handoff closure", () => {

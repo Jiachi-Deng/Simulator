@@ -7,12 +7,33 @@ import { tmpdir } from "node:os"
 import { dirname, isAbsolute, join, resolve } from "node:path"
 import { spawnSync } from "node:child_process"
 import { inspectDeveloperIdSignature } from "./verify-macos-signatures"
-import { SIGNED_CANDIDATE_NAME_PATTERN, verifySignedHostCandidate, type SignedHostManifest } from "./signed-host-candidate"
+import {
+  SIGNED_CANDIDATE_NAME_PATTERN,
+  validateSignedHostManifest,
+  verifySignedHostCandidate,
+  type SignedHostManifest,
+} from "./signed-host-candidate"
 
 const SHA256 = /^[0-9a-f]{64}$/
 const SOURCE_SHA = /^[0-9a-f]{40}$/
 const POSITIVE_ID = /^[1-9][0-9]*$/
 const INSTALLED_APP = "/Applications/Simulator.app" as const
+
+export const H3_SYSTEM_EXECUTABLES = Object.freeze({
+  codesign: "/usr/bin/codesign",
+  hdiutil: "/usr/bin/hdiutil",
+  plistBuddy: "/usr/libexec/PlistBuddy",
+  python3: "/usr/bin/python3",
+  shasum: "/usr/bin/shasum",
+  spctl: "/usr/sbin/spctl",
+  swVers: "/usr/bin/sw_vers",
+  xcrun: "/usr/bin/xcrun",
+} as const)
+
+export const H3_SYSTEM_COMMAND_LIMITS = Object.freeze({
+  light: Object.freeze({ timeout: 30_000, maxBuffer: 1024 * 1024 }),
+  heavy: Object.freeze({ timeout: 300_000, maxBuffer: 64 * 1024 * 1024 }),
+} as const)
 
 const requiredKeys = [
   "appBundleVersion", "artifactDigest", "artifactId", "artifactName", "backupIdentitySha256", "backupPath",
@@ -27,6 +48,33 @@ const humanInputKeys = [
 ] as const
 
 type RecordValue = Record<string, unknown>
+export type H3SystemExecutable = typeof H3_SYSTEM_EXECUTABLES[keyof typeof H3_SYSTEM_EXECUTABLES]
+export type H3SystemCommandProfile = keyof typeof H3_SYSTEM_COMMAND_LIMITS
+
+export interface H3SystemCommandOptions {
+  cwd: "/"
+  encoding: "utf8"
+  env: NodeJS.ProcessEnv
+  input: ""
+  killSignal: "SIGKILL"
+  maxBuffer: number
+  shell: false
+  timeout: number
+  windowsHide: true
+}
+
+export interface H3SystemCommandInvocation {
+  command: H3SystemExecutable
+  args: string[]
+  options: H3SystemCommandOptions
+}
+
+export interface H3SystemCommandResult {
+  status: number | null
+  stdout: string
+  stderr: string
+  error?: NodeJS.ErrnoException
+}
 
 export interface H3CandidateArtifactAuthority {
   artifactName: string
@@ -230,23 +278,130 @@ function realRegularFile(path: string, label: string): string {
   return absolute
 }
 
-function run(command: string, args: string[], label: string): { stdout: string; stderr: string } {
-  const result = spawnSync(command, args, { encoding: "utf8", maxBuffer: 16 * 1024 * 1024 })
-  if (result.error) throw result.error
-  if (result.status !== 0) throw new Error(`${label} failed: ${(result.stderr || result.stdout || `exit ${result.status}`).trim()}`)
-  return { stdout: result.stdout, stderr: result.stderr }
+export function createH3SystemCommandEnvironment(source: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+  const home = source.HOME
+  if (typeof home !== "string" || !home.startsWith("/") || /[\r\n]/.test(home)) {
+    throw new Error("H3 system inspection requires one absolute HOME")
+  }
+  return {
+    HOME: home,
+    PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+    LANG: "C",
+    LC_ALL: "C",
+    NO_COLOR: "1",
+    PYTHONUTF8: "1",
+    PYTHONDONTWRITEBYTECODE: "1",
+    PYTHONNOUSERSITE: "1",
+  }
+}
+
+export function createH3SystemCommandInvocation(
+  command: H3SystemExecutable,
+  args: readonly string[],
+  profile: H3SystemCommandProfile,
+  environmentSource: NodeJS.ProcessEnv = process.env,
+): H3SystemCommandInvocation {
+  if (!(Object.values(H3_SYSTEM_EXECUTABLES) as string[]).includes(command)) {
+    throw new Error("H3 system command executable differs from the fixed macOS allowlist")
+  }
+  if (!Object.hasOwn(H3_SYSTEM_COMMAND_LIMITS, profile)) throw new Error("Invalid H3 system command profile")
+  if (args.some((argument) => typeof argument !== "string" || argument.includes("\0"))) {
+    throw new Error("H3 system command argument is invalid")
+  }
+  const limits = H3_SYSTEM_COMMAND_LIMITS[profile]
+  const hardenedArgs = command === H3_SYSTEM_EXECUTABLES.python3
+    ? ["-S", ...args]
+    : [...args]
+  return {
+    command,
+    args: hardenedArgs,
+    options: {
+      cwd: "/",
+      encoding: "utf8",
+      env: createH3SystemCommandEnvironment(environmentSource),
+      input: "",
+      killSignal: "SIGKILL",
+      maxBuffer: limits.maxBuffer,
+      shell: false,
+      timeout: limits.timeout,
+      windowsHide: true,
+    },
+  }
+}
+
+export function sanitizeH3SystemCommandDiagnostic(
+  value: string,
+  environmentSource: NodeJS.ProcessEnv = process.env,
+): string {
+  let redacted = value
+  for (const [key, secret] of Object.entries(environmentSource)) {
+    if (typeof secret === "string" && secret.length >= 4
+      && /(?:TOKEN|SECRET|PASSWORD|PASS|KEY|AUTH|CREDENTIAL|COOKIE|PROXY|CERT)/i.test(key)) {
+      redacted = redacted.split(secret).join("[REDACTED]")
+    }
+  }
+  return redacted
+    .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gi, "[REDACTED PRIVATE KEY]")
+    .replace(/\b(?:gh[opsu]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,})\b/g, "[REDACTED TOKEN]")
+    .replace(/(^|\n)(?:Authorization|Proxy-Authorization):[^\n]*/gi, "$1Authorization: [REDACTED]")
+    .slice(0, 4_096)
+    .trim()
+}
+
+export function formatH3SystemCommandFailure(
+  label: string,
+  result: H3SystemCommandResult,
+  environmentSource: NodeJS.ProcessEnv = process.env,
+): string {
+  const diagnostic = sanitizeH3SystemCommandDiagnostic([
+    result.error?.message ?? "",
+    result.stderr,
+    result.stdout,
+  ].filter(Boolean).join("\n"), environmentSource)
+  const status = result.error?.code ?? (result.status === null ? "unknown exit" : `exit ${result.status}`)
+  return `${label} failed (${status})${diagnostic ? `: ${diagnostic}` : ""}`
+}
+
+export function runH3SystemCommand(
+  command: H3SystemExecutable,
+  args: readonly string[],
+  label: string,
+  profile: H3SystemCommandProfile,
+): { stdout: string; stderr: string } {
+  const environmentSource = { ...process.env }
+  const invocation = createH3SystemCommandInvocation(command, args, profile, environmentSource)
+  const result = spawnSync(invocation.command, invocation.args, invocation.options)
+  const normalized: H3SystemCommandResult = {
+    status: result.status,
+    stdout: result.stdout ?? "",
+    stderr: result.stderr ?? "",
+    error: result.error,
+  }
+  if (Buffer.byteLength(normalized.stdout) > invocation.options.maxBuffer
+    || Buffer.byteLength(normalized.stderr) > invocation.options.maxBuffer) {
+    throw new Error(`${label} failed: output exceeded the fixed H3 bound`)
+  }
+  if (normalized.error || normalized.status !== 0) {
+    throw new Error(formatH3SystemCommandFailure(label, normalized, environmentSource))
+  }
+  return { stdout: normalized.stdout, stderr: normalized.stderr }
 }
 
 function sha256File(path: string, label: string): string {
   if (/[\r\n]/.test(path)) throw new Error(`${label} path contains a line break`)
-  const result = run("shasum", ["-a", "256", "--", path], label)
+  const result = runH3SystemCommand(H3_SYSTEM_EXECUTABLES.shasum, ["-a", "256", "--", path], label, "heavy")
   const match = result.stdout.match(/^([0-9a-f]{64})  (.+)\n?$/)
   if (!match || match[2] !== path) throw new Error(`${label} output differs`)
   return match[1]
 }
 
 function plistValue(appPath: string, key: string): string {
-  return run("/usr/libexec/PlistBuddy", ["-c", `Print :${key}`, join(appPath, "Contents", "Info.plist")], `Read ${key}`).stdout.trim()
+  return runH3SystemCommand(
+    H3_SYSTEM_EXECUTABLES.plistBuddy,
+    ["-c", `Print :${key}`, join(appPath, "Contents", "Info.plist")],
+    `Read ${key}`,
+    "light",
+  ).stdout.trim()
 }
 
 function parseJsonOutput(output: string, label: string): RecordValue {
@@ -278,6 +433,78 @@ function inspectCandidate(candidateRoot: string, authority: H3CandidateArtifactA
   return { root, manifest, dmgPath, dmgBytes, dmgSha256 }
 }
 
+export interface H3RawCandidateInspection {
+  sourceSha: string
+  runId: string
+  runAttempt: number
+  workflowName: string
+  artifactName: string
+  rawArchiveBytes: number
+  rawArchiveSha256: string
+  dmgBytes: number
+  dmgSha256: string
+}
+
+/**
+ * Re-opens the raw GitHub Artifact archive, performs the fail-closed extractor,
+ * and verifies the complete signed Candidate closure.  The expected values are
+ * first parsed only to select the Candidate's own claimed identity; callers
+ * must compare the returned identity with an independent authority (GitHub).
+ */
+export function inspectH3RawCandidateArchive(rawArtifactArchivePath: string): H3RawCandidateInspection {
+  const rawArchive = realRegularFile(rawArtifactArchivePath, "Raw Candidate Artifact archive")
+  const rawMetadata = statSync(rawArchive)
+  if (rawArtifactArchivePath !== rawArchive
+    || (typeof process.getuid === "function" && rawMetadata.uid !== process.getuid())
+    || (rawMetadata.mode & 0o777) !== 0o600) {
+    throw new Error("Raw Candidate Artifact archive must be canonical, current-user-owned, and mode 0600")
+  }
+  const rawArchiveBytes = rawMetadata.size
+  if (rawArchiveBytes < 1 || rawArchiveBytes > 4 * 1024 * 1024 * 1024) throw new Error("Raw Candidate Artifact archive size is invalid")
+  const rawArchiveSha256 = sha256File(rawArchive, "Raw Candidate Artifact SHA-256")
+  const work = mkdtempSync(join(tmpdir(), "simulator-h3-raw-candidate."))
+  const candidateRoot = join(work, "candidate")
+  mkdirSync(candidateRoot, { mode: 0o700 })
+  try {
+    runH3SystemCommand(
+      H3_SYSTEM_EXECUTABLES.python3,
+      [join(import.meta.dir, "extract-engineering-rc-artifact.py"), "signed-host-final", rawArchive, candidateRoot],
+      "Final Candidate Artifact extraction",
+      "heavy",
+    )
+    const manifestPath = realRegularFile(join(candidateRoot, "signed-host-manifest.json"), "Candidate manifest")
+    const manifest = validateSignedHostManifest(JSON.parse(readFileSync(manifestPath, "utf8")))
+    const workflow = record(manifest.workflow, "manifest.workflow")
+    const sourceSha = string(manifest.sourceSha, SOURCE_SHA, "manifest.sourceSha")
+    const runId = string(workflow.runId, POSITIVE_ID, "manifest.workflow.runId")
+    const runAttempt = workflow.runAttempt
+    if (!Number.isSafeInteger(runAttempt) || (runAttempt as number) < 1) throw new Error("Invalid manifest.workflow.runAttempt")
+    const workflowName = string(workflow.name, /^signed-macos-host-acceptance\.yml$/, "manifest.workflow.name")
+    const verified = verifySignedHostCandidate(candidateRoot, sourceSha, runId, manifest.artifactName)
+    if (stable(verified) !== stable(manifest)) throw new Error("Candidate manifest changed during raw archive verification")
+    const dmgPath = realRegularFile(join(candidateRoot, "Simulator-arm64.dmg"), "Candidate DMG")
+    const dmgBytes = statSync(dmgPath).size
+    const dmgSha256 = sha256File(dmgPath, "Candidate DMG SHA-256")
+    const dmg = record(record(manifest.files, "manifest.files").dmg, "manifest.files.dmg")
+    if (dmg.path !== "Simulator-arm64.dmg" || dmg.bytes !== dmgBytes || dmg.sha256 !== dmgSha256) {
+      throw new Error("Candidate DMG differs from signed-host manifest")
+    }
+    return {
+      sourceSha,
+      runId,
+      runAttempt: runAttempt as number,
+      workflowName,
+      artifactName: manifest.artifactName,
+      rawArchiveBytes,
+      rawArchiveSha256,
+      dmgBytes,
+      dmgSha256,
+    }
+  } finally {
+    rmSync(work, { recursive: true, force: true })
+  }
+}
+
 function inspectMountedAndInstalledApps(
   dmgPath: string,
   installedAppPath: string,
@@ -299,16 +526,16 @@ function inspectMountedAndInstalledApps(
   )
 
   const scripts = import.meta.dir
-  run("python3", [join(scripts, "preflight-macos-release-artifact.py"), "dmg", dmgPath], "DMG resource preflight")
-  run("hdiutil", ["verify", dmgPath], "DMG verification")
-  run("xcrun", ["stapler", "validate", dmgPath], "DMG staple validation")
-  run("spctl", ["--assess", "--type", "open", "--context", "context:primary-signature", "--verbose=4", dmgPath], "DMG Gatekeeper assessment")
-  run("python3", [join(scripts, "preflight-macos-release-artifact.py"), "tree", installed], "Installed App resource preflight")
-  run("codesign", ["--verify", "--deep", "--strict", "--verbose=4", installed], "Installed App deep signature verification")
-  run("spctl", ["--assess", "--type", "execute", "--verbose=4", installed], "Installed App Gatekeeper assessment")
-  run("xcrun", ["stapler", "validate", installed], "Installed App staple validation")
+  runH3SystemCommand(H3_SYSTEM_EXECUTABLES.python3, [join(scripts, "preflight-macos-release-artifact.py"), "dmg", dmgPath], "DMG resource preflight", "heavy")
+  runH3SystemCommand(H3_SYSTEM_EXECUTABLES.hdiutil, ["verify", dmgPath], "DMG verification", "heavy")
+  runH3SystemCommand(H3_SYSTEM_EXECUTABLES.xcrun, ["stapler", "validate", dmgPath], "DMG staple validation", "heavy")
+  runH3SystemCommand(H3_SYSTEM_EXECUTABLES.spctl, ["--assess", "--type", "open", "--context", "context:primary-signature", "--verbose=4", dmgPath], "DMG Gatekeeper assessment", "heavy")
+  runH3SystemCommand(H3_SYSTEM_EXECUTABLES.python3, [join(scripts, "preflight-macos-release-artifact.py"), "tree", installed], "Installed App resource preflight", "heavy")
+  runH3SystemCommand(H3_SYSTEM_EXECUTABLES.codesign, ["--verify", "--deep", "--strict", "--verbose=4", installed], "Installed App deep signature verification", "heavy")
+  runH3SystemCommand(H3_SYSTEM_EXECUTABLES.spctl, ["--assess", "--type", "execute", "--verbose=4", installed], "Installed App Gatekeeper assessment", "heavy")
+  runH3SystemCommand(H3_SYSTEM_EXECUTABLES.xcrun, ["stapler", "validate", installed], "Installed App staple validation", "heavy")
 
-  const signature = run("codesign", ["-dvvv", installed], "Installed App identity inspection")
+  const signature = runH3SystemCommand(H3_SYSTEM_EXECUTABLES.codesign, ["-dvvv", installed], "Installed App identity inspection", "light")
   inspectDeveloperIdSignature(`${signature.stdout}\n${signature.stderr}`, expectedAuthority, expectedTeamId)
   const bundleIdentifier = plistValue(installed, "CFBundleIdentifier")
   const hostVersion = plistValue(installed, "CFBundleShortVersionString")
@@ -326,11 +553,16 @@ function inspectMountedAndInstalledApps(
   let canonicalInventorySha256 = ""
   let installedExactTreeSha256 = ""
   try {
-    run("hdiutil", ["attach", dmgPath, "-nobrowse", "-readonly", "-mountpoint", mount, "-quiet"], "DMG attach")
+    runH3SystemCommand(
+      H3_SYSTEM_EXECUTABLES.hdiutil,
+      ["attach", dmgPath, "-nobrowse", "-readonly", "-mountpoint", mount, "-quiet"],
+      "DMG attach",
+      "heavy",
+    )
     attached = true
     const mountedApp = realDirectory(join(mount, "Simulator.app"), "DMG App")
-    run("python3", [join(scripts, "preflight-macos-release-artifact.py"), "tree", mountedApp], "DMG App resource preflight")
-    run("python3", [join(scripts, "compare-macos-app-payloads.py"), mountedApp, installed, comparison], "Installed App payload comparison")
+    runH3SystemCommand(H3_SYSTEM_EXECUTABLES.python3, [join(scripts, "preflight-macos-release-artifact.py"), "tree", mountedApp], "DMG App resource preflight", "heavy")
+    runH3SystemCommand(H3_SYSTEM_EXECUTABLES.python3, [join(scripts, "compare-macos-app-payloads.py"), mountedApp, installed, comparison], "Installed App payload comparison", "heavy")
     const report = parseJsonOutput(readFileSync(comparison, "utf8"), "Installed App payload comparison")
     canonicalInventorySha256 = string(report.candidateCanonicalInventorySha256, SHA256, "installed canonical inventory")
     if (report.equivalent !== true || report.baselineCanonicalInventorySha256 !== canonicalInventorySha256
@@ -338,11 +570,11 @@ function inspectMountedAndInstalledApps(
       throw new Error("Installed App payload inventory differs from Candidate")
     }
     const mountedExact = parseJsonOutput(
-      run("python3", [join(scripts, "compare-macos-app-payloads.py"), "exact-tree", mountedApp], "DMG App exact-tree inventory").stdout,
+      runH3SystemCommand(H3_SYSTEM_EXECUTABLES.python3, [join(scripts, "compare-macos-app-payloads.py"), "exact-tree", mountedApp], "DMG App exact-tree inventory", "heavy").stdout,
       "DMG App exact-tree inventory",
     )
     const installedExact = parseJsonOutput(
-      run("python3", [join(scripts, "compare-macos-app-payloads.py"), "exact-tree", installed], "Installed App exact-tree inventory").stdout,
+      runH3SystemCommand(H3_SYSTEM_EXECUTABLES.python3, [join(scripts, "compare-macos-app-payloads.py"), "exact-tree", installed], "Installed App exact-tree inventory", "heavy").stdout,
       "Installed App exact-tree inventory",
     )
     const mountedExactTreeSha256 = string(mountedExact.inventorySha256, SHA256, "DMG App exact-tree SHA-256")
@@ -352,9 +584,10 @@ function inspectMountedAndInstalledApps(
     inspectionError = error
   } finally {
     if (attached) {
-      const detached = spawnSync("hdiutil", ["detach", mount, "-quiet"], { encoding: "utf8" })
-      if (!inspectionError && (detached.error || detached.status !== 0)) {
-        inspectionError = detached.error ?? new Error(`DMG detach failed: ${(detached.stderr || detached.stdout || `exit ${detached.status}`).trim()}`)
+      try {
+        runH3SystemCommand(H3_SYSTEM_EXECUTABLES.hdiutil, ["detach", mount, "-quiet"], "DMG detach", "light")
+      } catch (error) {
+        if (!inspectionError) inspectionError = error
       }
     }
     rmSync(work, { recursive: true, force: true })
@@ -394,10 +627,11 @@ export const systemH3PostInstallInspector: H3PostInstallInspector = {
     const candidateRoot = join(work, "candidate")
     mkdirSync(candidateRoot, { mode: 0o700 })
     try {
-      run(
-        "python3",
+      runH3SystemCommand(
+        H3_SYSTEM_EXECUTABLES.python3,
         [join(import.meta.dir, "extract-engineering-rc-artifact.py"), "signed-host-final", rawArchive, candidateRoot],
         "Final Candidate Artifact extraction",
+        "heavy",
       )
       const candidate = inspectCandidate(candidateRoot, authority)
       const persistentDmgBytes = statSync(persistentDmg).size
@@ -411,8 +645,18 @@ export const systemH3PostInstallInspector: H3PostInstallInspector = {
       if (candidate.manifest.artifactName !== authority.artifactName || hostBuildRunId !== authority.runId) {
         throw new Error("Candidate manifest differs from authenticated Artifact authority")
       }
-      const productVersion = run("sw_vers", ["-productVersion"], "macOS version inspection").stdout.trim()
-      const buildVersion = run("sw_vers", ["-buildVersion"], "macOS build inspection").stdout.trim()
+      const productVersion = runH3SystemCommand(
+        H3_SYSTEM_EXECUTABLES.swVers,
+        ["-productVersion"],
+        "macOS version inspection",
+        "light",
+      ).stdout.trim()
+      const buildVersion = runH3SystemCommand(
+        H3_SYSTEM_EXECUTABLES.swVers,
+        ["-buildVersion"],
+        "macOS build inspection",
+        "light",
+      ).stdout.trim()
       const macOSVersion = `${productVersion} (${buildVersion})`
       string(macOSVersion, /^[0-9]+\.[0-9]+(?:\.[0-9]+)? \([0-9A-Za-z]+\)$/, "macOSVersion")
       let backupIdentitySha256 = "N/A"
@@ -420,10 +664,11 @@ export const systemH3PostInstallInspector: H3PostInstallInspector = {
         const backup = realDirectory(human.backupPath, "Pre-install App backup")
         if (backup === INSTALLED_APP) throw new Error("Pre-install App backup must not be the installed App")
         const backupInventory = parseJsonOutput(
-          run(
-            "python3",
+          runH3SystemCommand(
+            H3_SYSTEM_EXECUTABLES.python3,
             [join(import.meta.dir, "compare-macos-app-payloads.py"), "exact-tree", backup],
             "Pre-install App backup exact-tree inventory",
+            "heavy",
           ).stdout,
           "Pre-install App backup exact-tree inventory",
         )
@@ -551,17 +796,8 @@ export function verifyH3PostInstallEvidenceFile(path: string): { path: string; s
 }
 
 if (import.meta.main) {
-  process.umask(0o077)
-  const [operation, first, second, third, fourth, fifth] = process.argv.slice(2)
-  if (operation === "generate" && first && second && third && fourth && fifth) {
-    console.log(JSON.stringify(writeH3PostInstallEvidence(first, second, third, fourth, fifth)))
-  } else if (operation === "validate" && first && !second) {
-    const result = verifyH3PostInstallEvidenceFile(first)
-    console.log(JSON.stringify({ ok: true, path: result.path, sha256: result.sha256, schemaVersion: result.evidence.schemaVersion }))
-  } else {
-    throw new Error(
-      "Usage: h3-post-install-evidence.ts generate RAW_CANDIDATE_ARTIFACT_ZIP DMG_PATH ARTIFACT_AUTHORITY_JSON HUMAN_INPUT_JSON OUTPUT_JSON"
-      + " | validate EVIDENCE_JSON",
-    )
-  }
+  throw new Error(
+    "Direct post-install evidence commands are disabled because caller-supplied Artifact authority is not trusted. "
+    + "Use h3-post-install-authority.ts generate/validate so GitHub authority is authenticated online.",
+  )
 }

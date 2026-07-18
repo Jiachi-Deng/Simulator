@@ -21,6 +21,8 @@ export const SIGNED_CANDIDATE_CLOSURE = [
   "attestations/provenance.sigstore.json",
   "dmg-notarization.json",
   "dmg-signatures.json",
+  "h3-human-observation-v1.schema.json",
+  "h3-post-install-authority-v1.schema.json",
   "h3-post-install-v1.schema.json",
   "payload-equivalence.json",
   "signed-host-manifest.json",
@@ -33,7 +35,7 @@ export const SIGNED_CANDIDATE_PRE_ATTESTATION_CLOSURE = SIGNED_CANDIDATE_CLOSURE
 )
 
 const manifestFileKeys = [
-  "appNotarization", "dmg", "dmgNotarization", "dmgSignatures", "h3PostInstallSchema",
+  "appNotarization", "dmg", "dmgNotarization", "dmgSignatures", "h3HumanObservationSchema", "h3PostInstallAuthoritySchema", "h3PostInstallSchema",
   "payloadEquivalence", "provenance", "zip", "zipSignatures",
 ] as const
 
@@ -192,6 +194,8 @@ export function validateSignedHostManifest(value: unknown): SignedHostManifest {
     appNotarization: "app-notarization.json",
     dmgNotarization: "dmg-notarization.json",
     provenance: "signed-host-provenance.json",
+    h3HumanObservationSchema: "h3-human-observation-v1.schema.json",
+    h3PostInstallAuthoritySchema: "h3-post-install-authority-v1.schema.json",
     h3PostInstallSchema: "h3-post-install-v1.schema.json",
   }
   const fileRecords = Object.fromEntries(manifestFileKeys.map((key) => [key, validateFileRecord(files[key], expectedPaths[key], `files.${key}`)])) as Record<(typeof manifestFileKeys)[number], { path: string; sha256: string; bytes: number }>
@@ -358,12 +362,61 @@ function validateJsonEvidence(root: string, manifest: SignedHostManifest): void 
   if (outputs.dmgSha256 !== (files.dmg as RecordValue).sha256 || outputs.zipSha256 !== (files.zip as RecordValue).sha256
     || outputs.payloadEquivalenceSha256 !== (files.payloadEquivalence as RecordValue).sha256) throw new Error("Provenance output digest differs")
 
-  const h3SchemaFile = files.h3PostInstallSchema as RecordValue
-  const h3Schema = record(JSON.parse(readFileSync(join(root, String(h3SchemaFile.path)), "utf8")), "H3 schema")
-  if (h3Schema.additionalProperties !== false || !Array.isArray(h3Schema.required)
-    || !h3Schema.required.includes("artifactName") || !h3Schema.required.includes("artifactDigest")
-    || !h3Schema.required.includes("developerIdApplication") || !h3Schema.required.includes("installedAppIdentitySha256")) {
+  const authoritySchemaFile = files.h3PostInstallAuthoritySchema as RecordValue
+  const authoritySchemaPath = join(root, String(authoritySchemaFile.path))
+  const authoritySchemaBytes = readFileSync(authoritySchemaPath)
+  if (!authoritySchemaBytes.equals(readFileSync(join(import.meta.dir, "schemas", "h3-post-install-authority-v1.schema.json")))) {
+    throw new Error("H3 post-install authority schema differs from the source contract")
+  }
+  const authorityClosureSchema = record(JSON.parse(authoritySchemaBytes.toString("utf8")), "H3 post-install authority schema")
+  const authorityClosureProperties = record(authorityClosureSchema.properties, "H3 post-install authority schema properties")
+  const githubAuthoritySchema = record(authorityClosureProperties.github, "H3 GitHub authority schema")
+  if (authorityClosureSchema.additionalProperties !== false || githubAuthoritySchema.additionalProperties !== false
+    || !Array.isArray(authorityClosureSchema.required) || !authorityClosureSchema.required.includes("github")
+    || !authorityClosureSchema.required.includes("rawCandidate") || !authorityClosureSchema.required.includes("postInstall")) {
+    throw new Error("H3 post-install authority schema is not the strict v1 contract")
+  }
+
+  const postInstallSchemaFile = files.h3PostInstallSchema as RecordValue
+  const postInstallSchemaPath = join(root, String(postInstallSchemaFile.path))
+  const postInstallSchemaBytes = readFileSync(postInstallSchemaPath)
+  if (!postInstallSchemaBytes.equals(readFileSync(join(import.meta.dir, "schemas", "h3-post-install-v1.schema.json")))) {
+    throw new Error("H3 post-install schema differs from the source contract")
+  }
+  const postInstallSchema = record(JSON.parse(postInstallSchemaBytes.toString("utf8")), "H3 post-install schema")
+  if (postInstallSchema.additionalProperties !== false || !Array.isArray(postInstallSchema.required)
+    || !postInstallSchema.required.includes("artifactName") || !postInstallSchema.required.includes("artifactDigest")
+    || !postInstallSchema.required.includes("developerIdApplication") || !postInstallSchema.required.includes("installedAppIdentitySha256")) {
     throw new Error("H3 post-install schema is not the strict v1 contract")
+  }
+
+  const humanSchemaFile = files.h3HumanObservationSchema as RecordValue
+  const humanSchemaPath = join(root, String(humanSchemaFile.path))
+  const humanSchemaBytes = readFileSync(humanSchemaPath)
+  if (!humanSchemaBytes.equals(readFileSync(join(import.meta.dir, "schemas", "h3-human-observation-v1.schema.json")))) {
+    throw new Error("H3 human-observation schema differs from the source contract")
+  }
+  const humanSchema = record(JSON.parse(humanSchemaBytes.toString("utf8")), "H3 human-observation schema")
+  const humanProperties = record(humanSchema.properties, "H3 human-observation schema properties")
+  const authoritySchema = record(humanProperties.authority, "H3 human-observation authority schema")
+  const authorityProperties = record(authoritySchema.properties, "H3 human-observation authority properties")
+  const artifactNameSchema = record(authorityProperties.artifactName, "H3 human-observation artifactName schema")
+  const observationSchema = record(humanProperties.observations, "H3 human-observation observations schema")
+  const recoverySchema = record(humanProperties.recovery, "H3 human-observation recovery schema")
+  const definitions = record(humanSchema.$defs, "H3 human-observation schema definitions")
+  const screenshotSchema = record(definitions.screenshot, "H3 human-observation screenshot schema")
+  const recoveryPass = record(definitions.recoveryPass, "H3 recovery PASS schema")
+  const recoveryNotNeeded = record(definitions.recoveryNotNeeded, "H3 recovery NOT NEEDED schema")
+  if (humanSchema.additionalProperties !== false
+    || stable(humanSchema.required) !== stable(["schemaVersion", "kind", "authority", "createdAt", "observations", "recovery"])
+    || authoritySchema.additionalProperties !== false
+    || artifactNameSchema.pattern !== SIGNED_CANDIDATE_NAME_PATTERN.source
+    || observationSchema.minItems !== 3 || observationSchema.maxItems !== 3 || observationSchema.items !== false
+    || !Array.isArray(observationSchema.prefixItems) || observationSchema.prefixItems.length !== 3
+    || !Array.isArray(recoverySchema.oneOf) || recoverySchema.oneOf.length !== 2
+    || screenshotSchema.additionalProperties !== false
+    || recoveryPass.additionalProperties !== false || recoveryNotNeeded.additionalProperties !== false) {
+    throw new Error("H3 human-observation schema is not the strict v1 contract")
   }
 }
 

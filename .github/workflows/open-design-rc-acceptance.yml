@@ -221,7 +221,7 @@ jobs:
               if path == "machine-manifest.json": return 64 * 1024
               if path == "required-ci.json": return 256 * 1024
               if path == "SHA256SUMS": return 64 * 1024
-              if path.startswith("records/"): return 32 * 1024
+              if path.startswith("records/"): return 384 * 1024
               if path.startswith("events/"): return 256 * 1024
               if path.startswith("workspace/"): return 64 * 1024
               if path.startswith("previews/"): return 4 * 1024 * 1024
@@ -555,27 +555,55 @@ jobs:
             chmod 600 "$lkg/$asset"
           done
           test -f "$SOURCE_AUTHORITY_CONFIG"
-          cmp "$SOURCE_AUTHORITY_CONFIG" "$lkg/$LKG_CONFIG_ASSET"
           for asset in "$RC_ARCHIVE_ASSET" "$RC_CATALOG_ASSET" "$RC_ENVELOPE_ASSET" "$RC_METADATA_ASSET"; do
             test -f "$rc/$asset"
             cp "$rc/$asset" "$rc_verify/$asset"
             chmod 600 "$rc/$asset" "$rc_verify/$asset"
           done
 
-          AUTHORITY_CONFIG="$SOURCE_AUTHORITY_CONFIG" RC_VERIFY_BUNDLE="$rc_verify" \
+          SOURCE_AUTHORITY_CONFIG="$SOURCE_AUTHORITY_CONFIG" LKG_AUTHORITY_CONFIG="$lkg/$LKG_CONFIG_ASSET" \
+            RC_VERIFY_BUNDLE="$rc_verify" \
             PUBLIC_KEY_FILE="$release_root/release-public.pem" KEY_METADATA_FILE="$release_root/trusted-key.json" \
             node --input-type=module <<'NODE'
           import { createPublicKey } from "node:crypto";
           import { readFileSync, writeFileSync } from "node:fs";
           import { join } from "node:path";
           import { encodeCanonicalCatalog } from "@simulator/module-release-trust";
-          const authority = JSON.parse(readFileSync(process.env.AUTHORITY_CONFIG, "utf8"));
-          if (authority?.schemaVersion !== 1 || authority?.moduleId !== "org.simulator.open-design" ||
-              authority?.version !== "0.14.5" || authority?.platform !== "darwin-arm64" ||
-              !Array.isArray(authority?.trustedKeys) || authority.trustedKeys.length !== 1) {
-            throw new Error("Stable authority configuration is invalid");
+          const exactKeys = (value, expected, label) => {
+            if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
+            const actual = Object.keys(value).sort();
+            const wanted = [...expected].sort();
+            if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+              throw new Error(`${label} fields differ`);
+            }
+          };
+          const readAuthority = (path, identity, label) => {
+            const value = JSON.parse(readFileSync(path, "utf8"));
+            exactKeys(value, ["schemaVersion", "moduleId", "version", "platform", "catalogUrl", "githubRelease", "trustedKeys"], label);
+            exactKeys(value.githubRelease, ["owner", "repository", "tag"], `${label} GitHub release`);
+            if (value.schemaVersion !== 1 || value.moduleId !== "org.simulator.open-design" || value.platform !== "darwin-arm64"
+                || value.version !== identity.version || value.catalogUrl !== identity.catalogUrl
+                || value.githubRelease.owner !== "Jiachi-Deng" || value.githubRelease.repository !== "Simulator"
+                || value.githubRelease.tag !== identity.tag || !Array.isArray(value.trustedKeys) || value.trustedKeys.length !== 1) {
+              throw new Error(`${label} identity differs`);
+            }
+            exactKeys(value.trustedKeys[0], ["activeFrom", "activeUntil", "keyId", "publicKey"], `${label} trust root`);
+            return value;
+          };
+          const sourceAuthority = readAuthority(process.env.SOURCE_AUTHORITY_CONFIG, {
+            version: "0.14.6",
+            tag: "open-design-v0.14.6",
+            catalogUrl: "https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.6/org.simulator.open-design-0.14.6-catalog-v2-envelope.json",
+          }, "future stable authority");
+          const lkgAuthority = readAuthority(process.env.LKG_AUTHORITY_CONFIG, {
+            version: "0.14.5",
+            tag: "open-design-v0.14.5",
+            catalogUrl: "https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.5/org.simulator.open-design-0.14.5-catalog-v2-envelope.json",
+          }, "LKG authority");
+          const trusted = lkgAuthority.trustedKeys[0];
+          for (const field of ["activeFrom", "activeUntil", "keyId", "publicKey"]) {
+            if (sourceAuthority.trustedKeys[0][field] !== trusted[field]) throw new Error("Future stable and LKG trust roots differ");
           }
-          const trusted = authority.trustedKeys[0];
           if (trusted?.keyId !== "open-design-release-2026-01" ||
               typeof trusted?.publicKey !== "string" ||
               typeof trusted?.activeFrom !== "string" ||

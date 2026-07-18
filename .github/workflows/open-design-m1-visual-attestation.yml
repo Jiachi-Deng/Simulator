@@ -156,7 +156,7 @@ jobs:
               if path == "machine-manifest.json": return 64 * 1024
               if path == "required-ci.json": return 256 * 1024
               if path == "SHA256SUMS": return 64 * 1024
-              if path.startswith("records/"): return 32 * 1024
+              if path.startswith("records/"): return 384 * 1024
               if path.startswith("events/"): return 256 * 1024
               if path.startswith("workspace/"): return 64 * 1024
               if path.startswith("previews/"): return 4 * 1024 * 1024

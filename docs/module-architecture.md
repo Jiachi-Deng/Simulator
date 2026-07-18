@@ -323,7 +323,7 @@ OpenDesign view 的 hide、return 与 reopen 不会重建正在运行的 Module 
 
 shim 从 `packages/host-agent-shim` 的 TypeScript entrypoint 在 asset copy 时重新构建，不能把仓库内 tracked generated file 当作权威输入。构建门要求 source、`dist/resources` 与最终 `.app` 内 shim 的 SHA-256、size 和 mode 完全一致；shim 必须是非 symlink、非 hardlink、不可 group/world write 的 `0755` regular file。Utility Process Worker 同样要求 `dist` 与 packaged bytes 完全一致，mode 为 `0644`。Runtime 启动前再次验证 canonical absolute path、owner、link count、write bits 和 shim executable bit；任一缺失或 hash/identity drift 只阻止 Module 启动，不能阻止 Craft。
 
-协议按 OpenDesign 精确版本 fail closed：冻结的 `0.14.5` 是 v1 last-known-good 和 rollback 基线；`0.14.6-rc.1` 与 `0.14.6` 才选择 v2，且 signed Catalog 的 `hostVersionRange` 必须是 `>=0.12.0`。未知 OpenDesign 版本不会猜测协议。prerelease workflow 只能发布 RC 自身，不写 stable official-channel 配置；stable workflow 还需要独立 acceptance/rollback evidence 和显式发布批准。`0.14.6-rc.1` 已作为公开 prerelease 发布，并在 2026-07-17 刷新到 Catalog sequence `4`；它没有 official-channel asset。稳定 official channel 仍指向 `0.14.5` sequence `3`。
+协议按 OpenDesign 精确版本 fail closed：冻结的 `0.14.5` 是 v1 last-known-good 和 rollback 基线；`0.14.6-rc.1` 与 `0.14.6` 才选择 v2，且 signed Catalog 的 `hostVersionRange` 必须是 `>=0.12.0`。未知 OpenDesign 版本不会猜测协议。prerelease workflow 只能发布 RC 自身，不写 stable official-channel 配置；stable workflow 还需要独立 acceptance/rollback evidence 和显式发布批准。`0.14.6-rc.1` 已作为公开 prerelease 发布，并在 2026-07-17 刷新到 Catalog sequence `4`；它没有 official-channel asset。当前已安装 Host 与公开稳定 Release 仍使用 `0.14.5` sequence `3`；待验收的 Host `0.12.0` 源码则预绑定未来稳定 `0.14.6` exact-tag config，使 A1 后的稳定发布不改变最终签名 payload。该预绑定不创建 Release、不向普通用户开放 RC，H1/A1 仍只通过 owner-only acceptance override 使用 `0.14.6-rc.1`。
 
 ### M1 clean-room provenance anchor
 

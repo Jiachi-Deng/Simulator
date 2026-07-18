@@ -22,8 +22,11 @@ mutable `latest/download` URL:
   owner-only verification input, is never published, and is never copied into
   the Host application;
 - stable `0.14.5` or separately approved `0.14.6` uploads the five-file public
-  closure. Only a stable publication may promote its official-channel config
-  into a newly built Host application.
+  closure. Only a stable publication may publish its official-channel config.
+  Host `0.12.0` source prebinds the exact future `0.14.6` stable identity before
+  Engineering RC acceptance, while the RC itself remains reachable only through
+  the owner-only acceptance override. This keeps the accepted and later signed
+  Host payload byte-equivalent without exposing a prerelease channel to users.
 
 Build and verify require `--module-version`. The only accepted identities are
 `0.14.5`, `0.14.6-rc.1`, and `0.14.6`; each must use the exact tag
@@ -32,18 +35,23 @@ use `--host-version-range '>=0.12.0'`. Refresh defaults to the frozen `0.14.5`
 identity for compatibility, but automation should pass `--module-version`
 explicitly so filenames and verification cannot drift across releases.
 
-For an explicitly approved stable publication, the generated Host
-configuration is a build input, not user data. Copy:
+The generated Host configuration is a build input, not user data. Before the
+Engineering RC is built, prebind the exact future stable configuration at:
 
 ```text
-<publisher-output>/open-design-official-channel.json
+future stable open-design-official-channel.json
   -> apps/electron/resources/open-design-official-channel.json
   -> Contents/Resources/app/dist/resources/open-design-official-channel.json
 ```
 
 The second step is performed by `apps/electron/scripts/copy-assets.ts`. The
-publisher intentionally does not modify `apps/**`. Never perform this copy for
-a prerelease config; prerelease verification uses its private one-run copy only.
+publisher intentionally does not modify `apps/**`. Never prebind a prerelease
+config; prerelease verification uses its private one-run copy only. At stable
+publication, the release workflow requires both files to be canonical publisher
+bytes and fails before publication unless they are byte-for-byte identical to
+the already code-signed source config. The previously shipped Host and public
+stable channel remain on `0.14.5` until the separately approved signed Host and
+stable `0.14.6` Release are both ready.
 
 ## Catalog refresh requirement
 
@@ -112,7 +120,9 @@ As of 2026-07-17, stable `0.14.5` is at Catalog sequence `3`, while public
 prerelease `0.14.6-rc.1` is at sequence `4`. The RC archive remains fixed at
 SHA-256 `1dd67f6ac536b61009410014ceab562bcba24e0d2694e353914915338d0ef0a3`;
 the prerelease refresh does not authorize stable `0.14.6` publication or an
-official-channel switch.
+official-channel switch. Candidate Host source is prebound to the future stable
+`0.14.6` exact-tag identity only to preserve signed-payload equivalence; this is
+not a public Release and does not change the installed `0.14.5` channel.
 
 Before a paid RC acceptance window, refresh stable first and prerelease second,
 verify that the RC `sequence` and `issuedAt` are both strictly later than the

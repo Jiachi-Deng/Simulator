@@ -43,9 +43,9 @@ function official(): OpenDesignOfficialChannelBootstrap {
         repository: OPEN_DESIGN_ACCEPTANCE_IDENTITY.githubRepository,
       },
       releaseRequest: {
-        catalogUrl: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableCatalogUrl,
+        catalogUrl: OPEN_DESIGN_ACCEPTANCE_IDENTITY.hostOfficialCatalogUrl,
         moduleId: OPEN_DESIGN_MODULE_ID as any,
-        version: OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion as any,
+        version: OPEN_DESIGN_ACCEPTANCE_IDENTITY.hostOfficialVersion as any,
       },
       trustedKeys: [{
         keyId: OPEN_DESIGN_ACCEPTANCE_IDENTITY.trustedKeyId,
@@ -1041,6 +1041,7 @@ describe('OpenDesign acceptance IPC', () => {
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_NEXT_BLACKOUT,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_BLACKOUT_PROXY_CAPABILITY,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_MODULE_AGENT_RUNTIME_SNAPSHOT,
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_RUNTIME_BINDING,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.ROLLBACK,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.TAKE_BLACKOUT_EVIDENCE,
@@ -1100,6 +1101,14 @@ describe('OpenDesign acceptance IPC', () => {
         v2: { activeRuns: 0, moduleSessions: 0 },
         sessions: { hiddenSessions: 0, transientSessions: 0, quarantinedSessions: 0 },
       }),
+      getRuntimeBinding: () => ({
+        schemaVersion: 1,
+        configRootMatches: true,
+        userDataRootMatches: true,
+        mainPidMatches: true,
+        serverIdentityMatches: true,
+        runtimeInstanceDigest: 'a'.repeat(64),
+      }),
     })
     first.dispose()
     const registration = registerOpenDesignAcceptanceIpc(ipc, ipcController)
@@ -1135,12 +1144,45 @@ describe('OpenDesign acceptance IPC', () => {
       v2: { activeRuns: 0, moduleSessions: 0 },
       sessions: { hiddenSessions: 0, transientSessions: 0, quarantinedSessions: 0 },
     })
+    expect(await invokeHandlers.get(OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_RUNTIME_BINDING)!(ownerReload, {
+      profileRealpath: '/private/tmp/h1-profile',
+      configRealpath: '/private/tmp/h1-config',
+      mainPid: 42_001,
+      serverPid: 42_001,
+      serverLockStartedAt: 1_721_252_815_000,
+    })).toEqual({
+      schemaVersion: 1,
+      configRootMatches: true,
+      userDataRootMatches: true,
+      mainPidMatches: true,
+      serverIdentityMatches: true,
+      runtimeInstanceDigest: 'a'.repeat(64),
+    })
     await expect(Promise.resolve().then(() => invokeHandlers.get(
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_NEXT_BLACKOUT,
     )!(ownerReload, { ...armRequest, upstreamBaseUrl: 'http://127.0.0.1:1' }))).rejects.toThrow('invalid')
     await expect(Promise.resolve().then(() => invokeHandlers.get(
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.TAKE_BLACKOUT_EVIDENCE,
     )!(ownerReload, { ...evidenceRequest, token: 'secret' }))).rejects.toThrow('invalid')
+    await expect(Promise.resolve().then(() => invokeHandlers.get(
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_RUNTIME_BINDING,
+    )!(ownerReload, {
+      profileRealpath: '/private/tmp/h1-profile',
+      configRealpath: '../alternate',
+      mainPid: 42_001,
+      serverPid: 42_001,
+      serverLockStartedAt: 1_721_252_815_000,
+    }))).rejects.toThrow('invalid')
+    await expect(Promise.resolve().then(() => invokeHandlers.get(
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_RUNTIME_BINDING,
+    )!(ownerReload, {
+      profileRealpath: '/private/tmp/h1-profile',
+      configRealpath: '/private/tmp/h1-config',
+      mainPid: 42_001,
+      serverPid: 42_001,
+      serverLockStartedAt: 1_721_252_815_000,
+      token: 'secret',
+    }))).rejects.toThrow('invalid')
     for (const channel of [
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_STATE,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.UPDATE_TO_RC,
@@ -1149,6 +1191,7 @@ describe('OpenDesign acceptance IPC', () => {
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_NEXT_BLACKOUT,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.TAKE_BLACKOUT_EVIDENCE,
       OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_MODULE_AGENT_RUNTIME_SNAPSHOT,
+      OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_RUNTIME_BINDING,
     ]) {
       await expect(Promise.resolve().then(() => invokeHandlers.get(channel)!(secondWindow))).rejects.toThrow('sender was rejected')
     }
@@ -1163,9 +1206,9 @@ describe('OpenDesign acceptance IPC', () => {
     await expect(Promise.resolve().then(() => getState(ownerReload))).rejects.toThrow('sender was rejected')
 
     const replacement = registerOpenDesignAcceptanceIpc(ipc, ipcController)
-    expect(invokeHandlers.size).toBe(7)
+    expect(invokeHandlers.size).toBe(8)
     registration.dispose()
-    expect(invokeHandlers.size).toBe(7)
+    expect(invokeHandlers.size).toBe(8)
     replacement.dispose()
     replacement.dispose()
     expect(invokeHandlers.size).toBe(0)

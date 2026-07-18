@@ -209,6 +209,10 @@ describe("OpenDesign official release workflow", () => {
     expect(initial).toContain("--cleanup-tag --yes")
     expect(initial).toContain("cmp \"$INITIAL_OUTPUT/$asset\" \"$remote/$asset\"")
     expect(initial).toContain("--draft=false")
+    const verify = step("initial", "Verify initial bundle before publication").run
+    expect(verify).toContain("bun scripts/release/open-design-official-channel-bytes.ts")
+    expect(verify).toContain('cmp "$SOURCE_AUTHORITY_CONFIG" "$INITIAL_OUTPUT/$CONFIG_ASSET"')
+    expect(initial.indexOf("open-design-official-channel-bytes.ts")).toBeLessThan(initial.indexOf("Publish fixed-tag release"))
   })
 
   test("authenticates the exact nonzero 0.14.5 high-water mark before deriving RC state", () => {
@@ -329,7 +333,11 @@ describe("OpenDesign official release workflow", () => {
     expect(download).toContain('[[ "$CONFIG_REQUIRED" = false ]] || expected_assets+=("$CONFIG_ASSET")')
     expect(download).toContain('test ! -e "$source/$CONFIG_ASSET"')
     expect(download).toContain('refresh_input="$work/private-input"')
-    expect(download).toContain('cmp "$SOURCE_AUTHORITY_CONFIG" "$baseline/open-design-official-channel.json"')
+    expect(download).toContain('SOURCE_CONFIG="$SOURCE_AUTHORITY_CONFIG" LKG_CONFIG="$baseline/open-design-official-channel.json"')
+    expect(download).toContain('version: "0.14.6"')
+    expect(download).toContain('version: "0.14.5"')
+    expect(download).toContain('Future stable and LKG trust roots differ')
+    expect(download).not.toContain('cmp "$SOURCE_AUTHORITY_CONFIG" "$baseline/open-design-official-channel.json"')
     expect(download).not.toContain("encodeCanonicalCatalog")
 
     const predecessor = step("refresh", "Authenticate prerelease cross-track predecessor").run

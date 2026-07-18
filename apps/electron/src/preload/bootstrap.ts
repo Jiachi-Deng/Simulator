@@ -53,6 +53,8 @@ import {
   type OpenDesignBlackoutEvidence,
   type OpenDesignBlackoutEvidenceRequest,
   type OpenDesignModuleAgentRuntimeSnapshot,
+  type OpenDesignAcceptanceRuntimeBinding,
+  type OpenDesignAcceptanceRuntimeBindingRequest,
 } from '../shared/open-design-acceptance-ipc'
 
 type OpenDesignIpcRenderer = Pick<typeof ipcRenderer, 'invoke' | 'on' | 'removeListener' | 'sendSync'>
@@ -98,6 +100,11 @@ export function createOpenDesignAcceptanceFacade(
     ),
     getModuleAgentRuntimeSnapshot: (): Promise<OpenDesignModuleAgentRuntimeSnapshot> => (
       ipc.invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_MODULE_AGENT_RUNTIME_SNAPSHOT)
+    ),
+    getRuntimeBinding: (
+      request: OpenDesignAcceptanceRuntimeBindingRequest,
+    ): Promise<OpenDesignAcceptanceRuntimeBinding> => (
+      ipc.invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_RUNTIME_BINDING, request)
     ),
   })
 }

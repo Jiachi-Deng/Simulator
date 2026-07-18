@@ -106,6 +106,7 @@ jobs:
       RC_CATALOG_ASSET: org.simulator.open-design-0.14.6-rc.1-catalog-v2.json
       RC_ENVELOPE_ASSET: org.simulator.open-design-0.14.6-rc.1-catalog-v2-envelope.json
       RC_METADATA_ASSET: org.simulator.open-design-0.14.6-rc.1-release-metadata.json
+      SOURCE_AUTHORITY_CONFIG: apps/electron/resources/open-design-official-channel.json
 
     steps:
       - name: Checkout fixed main source
@@ -650,6 +651,9 @@ jobs:
           test "$actual" = "$expected"
           if [[ "$RELEASE_TRACK" = stable ]]; then
             test "$(shasum -a 256 "$INITIAL_OUTPUT/$ARCHIVE_ASSET" | awk '{print $1}')" = "$ACCEPTED_RC_ARCHIVE_SHA256"
+            bun scripts/release/open-design-official-channel-bytes.ts \
+              "$SOURCE_AUTHORITY_CONFIG" "$INITIAL_OUTPUT/$CONFIG_ASSET"
+            cmp "$SOURCE_AUTHORITY_CONFIG" "$INITIAL_OUTPUT/$CONFIG_ASSET"
           fi
 
       - name: Publish fixed-tag release through a draft transaction
@@ -1033,7 +1037,44 @@ jobs:
               chmod 600 "$baseline/$asset"
             done
             test "$(find "$baseline" -maxdepth 1 -type f | wc -l | tr -d ' ')" = 5
-            cmp "$SOURCE_AUTHORITY_CONFIG" "$baseline/open-design-official-channel.json"
+            SOURCE_CONFIG="$SOURCE_AUTHORITY_CONFIG" LKG_CONFIG="$baseline/open-design-official-channel.json" \
+              node --input-type=module <<'NODE'
+            import { readFileSync } from "node:fs";
+            const exactKeys = (value, expected, label) => {
+              if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object`);
+              const actual = Object.keys(value).sort();
+              const wanted = [...expected].sort();
+              if (actual.length !== wanted.length || actual.some((key, index) => key !== wanted[index])) {
+                throw new Error(`${label} fields differ`);
+              }
+            };
+            const read = (path, identity, label) => {
+              const value = JSON.parse(readFileSync(path, "utf8"));
+              exactKeys(value, ["schemaVersion", "moduleId", "version", "platform", "catalogUrl", "githubRelease", "trustedKeys"], label);
+              exactKeys(value.githubRelease, ["owner", "repository", "tag"], `${label} GitHub release`);
+              if (value.schemaVersion !== 1 || value.moduleId !== "org.simulator.open-design" || value.platform !== "darwin-arm64"
+                  || value.version !== identity.version || value.catalogUrl !== identity.catalogUrl
+                  || value.githubRelease.owner !== "Jiachi-Deng" || value.githubRelease.repository !== "Simulator"
+                  || value.githubRelease.tag !== identity.tag || !Array.isArray(value.trustedKeys) || value.trustedKeys.length !== 1) {
+                throw new Error(`${label} identity differs`);
+              }
+              exactKeys(value.trustedKeys[0], ["activeFrom", "activeUntil", "keyId", "publicKey"], `${label} trust root`);
+              return value;
+            };
+            const source = read(process.env.SOURCE_CONFIG, {
+              version: "0.14.6",
+              tag: "open-design-v0.14.6",
+              catalogUrl: "https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.6/org.simulator.open-design-0.14.6-catalog-v2-envelope.json",
+            }, "future stable authority");
+            const lkg = read(process.env.LKG_CONFIG, {
+              version: "0.14.5",
+              tag: "open-design-v0.14.5",
+              catalogUrl: "https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.5/org.simulator.open-design-0.14.5-catalog-v2-envelope.json",
+            }, "LKG authority");
+            for (const field of ["activeFrom", "activeUntil", "keyId", "publicKey"]) {
+              if (source.trustedKeys[0][field] !== lkg.trustedKeys[0][field]) throw new Error("Future stable and LKG trust roots differ");
+            }
+          NODE
             authority_config="$baseline/open-design-official-channel.json"
           fi
           AUTHORITY_CONFIG="$authority_config" PUBLIC_KEY_FILE="$work/release-public.pem" \

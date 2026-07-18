@@ -20,6 +20,8 @@ import {
   parseOpenDesignBlackoutCapability,
   parseOpenDesignBlackoutEvidence,
   parseOpenDesignBlackoutEvidenceRequest,
+  parseOpenDesignAcceptanceRuntimeBinding,
+  parseOpenDesignAcceptanceRuntimeBindingRequest,
   parseOpenDesignModuleAgentRuntimeSnapshot,
   type OpenDesignAcceptanceAction,
   type OpenDesignAcceptanceState,
@@ -29,6 +31,8 @@ import {
   type OpenDesignBlackoutEvidence,
   type OpenDesignBlackoutEvidenceRequest,
   type OpenDesignModuleAgentRuntimeSnapshot,
+  type OpenDesignAcceptanceRuntimeBinding,
+  type OpenDesignAcceptanceRuntimeBindingRequest,
 } from '../shared/open-design-acceptance-ipc'
 import { OPEN_DESIGN_MODULE_ID } from '../shared/open-design-module-ipc'
 import type { OpenDesignDevelopmentBootstrap } from './open-design-development-bootstrap'
@@ -47,6 +51,8 @@ export const OPEN_DESIGN_ACCEPTANCE_IDENTITY = Object.freeze({
   hostVersion: '0.12.0',
   moduleId: OPEN_DESIGN_MODULE_ID,
   platform: 'darwin-arm64',
+  hostOfficialVersion: '0.14.6',
+  hostOfficialCatalogUrl: 'https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.6/org.simulator.open-design-0.14.6-catalog-v2-envelope.json',
   stableVersion: '0.14.5',
   stableCatalogUrl: 'https://github.com/Jiachi-Deng/Simulator/releases/download/open-design-v0.14.5/org.simulator.open-design-0.14.5-catalog-v2-envelope.json',
   rcVersion: '0.14.6-rc.1',
@@ -196,8 +202,8 @@ function trustedOfficialChannelMatches(official: OpenDesignOfficialChannelBootst
     return false
   }
   return channel.releaseRequest.moduleId === MODULE_ID
-    && channel.releaseRequest.version === OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableVersion
-    && channel.releaseRequest.catalogUrl === OPEN_DESIGN_ACCEPTANCE_IDENTITY.stableCatalogUrl
+    && channel.releaseRequest.version === OPEN_DESIGN_ACCEPTANCE_IDENTITY.hostOfficialVersion
+    && channel.releaseRequest.catalogUrl === OPEN_DESIGN_ACCEPTANCE_IDENTITY.hostOfficialCatalogUrl
 }
 
 async function readOwnerOnlyCanonicalDescriptor(userDataRoot: string): Promise<string> {
@@ -351,6 +357,9 @@ export interface OpenDesignAcceptanceControllerOptions {
   readonly blackoutProxy?: Pick<OpenDesignAcceptanceBlackoutProxyPort,
     'getCapability' | 'armNextBlackout' | 'takeBlackoutEvidence'>
   readonly getModuleAgentRuntimeSnapshot?: () => OpenDesignModuleAgentRuntimeSnapshot | undefined
+  readonly getRuntimeBinding?: (
+    request: OpenDesignAcceptanceRuntimeBindingRequest,
+  ) => OpenDesignAcceptanceRuntimeBinding
   readonly operationId?: (action: OpenDesignAcceptanceAction) => string
   readonly now?: () => number
 }
@@ -473,6 +482,12 @@ export class OpenDesignAcceptanceController {
     this.#ownerSender = sender
     this.#ownerClaimed = true
     return true
+  }
+
+  getRuntimeBinding(request: OpenDesignAcceptanceRuntimeBindingRequest): OpenDesignAcceptanceRuntimeBinding {
+    const getRuntimeBinding = this.#options.getRuntimeBinding
+    if (!getRuntimeBinding) throw new AcceptanceControlError('ACCEPTANCE_RUNTIME_BINDING_UNAVAILABLE')
+    return parseOpenDesignAcceptanceRuntimeBinding(getRuntimeBinding(request))
   }
 
   isClaimedSender(sender: unknown): boolean {
@@ -828,6 +843,9 @@ export function registerOpenDesignAcceptanceIpc(
       register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_MODULE_AGENT_RUNTIME_SNAPSHOT, (args) => {
         assertNoInput(args); return readyController.getModuleAgentRuntimeSnapshot()
       })
+      register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_RUNTIME_BINDING, (args) => (
+        readyController.getRuntimeBinding(parseOpenDesignAcceptanceRuntimeBindingRequest(oneInput(args)))
+      ))
     }
   } catch (error) {
     registration.dispose()

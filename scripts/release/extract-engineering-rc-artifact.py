@@ -42,6 +42,8 @@ SIGNED_HOST_PRE_FILES = {
     "app-notarization.json",
     "dmg-notarization.json",
     "dmg-signatures.json",
+    "h3-human-observation-v1.schema.json",
+    "h3-post-install-authority-v1.schema.json",
     "h3-post-install-v1.schema.json",
     "payload-equivalence.json",
     "signed-host-manifest.json",
