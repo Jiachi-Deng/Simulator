@@ -21,6 +21,7 @@ import { getProxyEnvVars } from '../config/proxy-env.ts';
 
 import type {
   BackendConfig,
+  BackendCredentialAuthoritySnapshot,
   BackendRuntimeUpdate,
   ChatOptions,
   SdkMcpServerConfig,
@@ -481,6 +482,8 @@ export class PiAgent extends BaseAgent {
       this.debug('Custom endpoint mode: no provider credential configured, sending empty API key');
     }
 
+    await this.assertCredentialAuthority(piAuth, legacyApiKey ?? undefined);
+
     // Derive AWS env vars from the piAuth credential (single fetch, no race).
     const awsEnv = this.buildAwsEnv(piAuth, runtime);
 
@@ -568,6 +571,7 @@ export class PiAgent extends BaseAgent {
       baseUrl: runtime.baseUrl,
       customEndpoint: runtime.customEndpoint,
       customModels: runtime.customModels,
+      moduleAgent: isolateModuleProcessTree,
       // Branch params for Pi SDK session fork
       branchFromSdkSessionId: this.config.session?.branchFromSdkSessionId,
       branchFromSessionPath: this.config.session?.branchFromSessionPath,
@@ -761,6 +765,51 @@ export class PiAgent extends BaseAgent {
     return env;
   }
 
+  private async assertCredentialAuthority(
+    piAuth: Awaited<ReturnType<PiAgent['getPiAuth']>>,
+    legacyApiKey?: string,
+  ): Promise<void> {
+    const assertion = this.config.assertCredentialAuthority;
+    if (!assertion) return;
+
+    let snapshot: BackendCredentialAuthoritySnapshot | undefined;
+    if (this.config.authType === 'oauth') {
+      if (piAuth?.credential.type === 'oauth') {
+        snapshot = Object.freeze({
+          kind: 'oauth-access-refresh' as const,
+          accessToken: piAuth.credential.access,
+          refreshToken: piAuth.credential.refresh,
+          expiresAt: Number.isFinite(piAuth.credential.expires) ? piAuth.credential.expires : null,
+        });
+      } else {
+        const accessToken = piAuth?.credential.type === 'api_key'
+          ? piAuth.credential.key
+          : legacyApiKey;
+        if (accessToken) {
+          snapshot = Object.freeze({ kind: 'oauth-access' as const, accessToken });
+        }
+      }
+    } else if (this.config.authType === 'iam_credentials' && piAuth?.credential.type === 'iam') {
+      snapshot = Object.freeze({
+        kind: 'iam' as const,
+        accessKeyId: piAuth.credential.accessKeyId,
+        secretAccessKey: piAuth.credential.secretAccessKey,
+        region: piAuth.credential.region ?? null,
+        sessionToken: piAuth.credential.sessionToken ?? null,
+      });
+    } else if (this.config.authType === 'api_key'
+      || this.config.authType === 'api_key_with_endpoint'
+      || this.config.authType === 'bearer_token') {
+      const value = piAuth?.credential.type === 'api_key'
+        ? piAuth.credential.key
+        : legacyApiKey;
+      if (value) snapshot = Object.freeze({ kind: 'api-key' as const, value });
+    }
+
+    if (!snapshot) throw new Error('Host provider credential authority is unavailable');
+    await assertion(snapshot);
+  }
+
   /**
    * Refresh OAuth tokens and push updated credentials to the running subprocess.
    * Handles both Copilot (Pi SDK) and ChatGPT Plus token refresh.
@@ -781,6 +830,7 @@ export class PiAgent extends BaseAgent {
       if (this.subprocess) {
         const piAuth = await this.getPiAuth();
         if (piAuth) {
+          await this.assertCredentialAuthority(piAuth);
           this.send({ type: 'token_update', piAuth });
           this.debug('Pushed credentials refreshed by sibling instance');
         }
@@ -825,6 +875,7 @@ export class PiAgent extends BaseAgent {
         if (this.subprocess) {
           const piAuth = await this.getPiAuth();
           if (piAuth) {
+            await this.assertCredentialAuthority(piAuth);
             this.send({ type: 'token_update', piAuth });
             this.debug('Pushed refreshed credentials to subprocess');
           }

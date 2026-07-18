@@ -17,7 +17,9 @@ import {
   type BundleFile,
   MAX_BUNDLE_SIZE_BYTES,
   collectDirectoryFiles,
+  validateBundleFile,
 } from '../utils/bundle-files.ts'
+import { validateSessionId } from './validation.ts'
 
 // Re-export BundleFile and MAX_BUNDLE_SIZE_BYTES for backward compatibility
 export { type BundleFile, MAX_BUNDLE_SIZE_BYTES } from '../utils/bundle-files.ts'
@@ -156,9 +158,23 @@ export function validateBundle(bundle: unknown): bundle is SessionBundle {
 
   const header = session.header as Record<string, unknown>
   if (typeof header.id !== 'string') return false
+  try {
+    validateSessionId(header.id)
+  } catch {
+    return false
+  }
   if (typeof header.createdAt !== 'number') return false
 
   if (!Array.isArray(b.files)) return false
+  for (const candidate of b.files) {
+    if (!candidate || typeof candidate !== 'object') return false
+    const file = candidate as BundleFile
+    if (validateBundleFile(file)) return false
+    const segments = file.relativePath.split('/')
+    if (segments.some((segment) => segment.startsWith('.'))) return false
+    if (segments[0] === 'tmp') return false
+    if (file.relativePath === 'session.jsonl' || file.relativePath === 'session.jsonl.tmp') return false
+  }
 
   return true
 }

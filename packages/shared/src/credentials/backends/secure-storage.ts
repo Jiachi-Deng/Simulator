@@ -1,7 +1,9 @@
 /**
  * Secure Storage Backend
  *
- * Stores credentials in an encrypted file at ~/.craft-agent/credentials.enc
+ * Stores credentials in an encrypted file under the active Host config directory.
+ * The directory is selected once when the backend is constructed:
+ *   explicit constructor path > CRAFT_CONFIG_DIR > ~/.craft-agent
  * Uses AES-256-GCM for authenticated encryption.
  *
  * Encryption key is derived from OS-native hardware UUID using PBKDF2:
@@ -31,18 +33,24 @@ import {
   pbkdf2Sync,
   createHash,
 } from 'crypto';
-import { execSync } from 'child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync, unlinkSync } from 'fs';
+import { execFileSync, execSync } from 'child_process';
+import {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  realpathSync,
+  unlinkSync,
+  type Stats,
+} from 'fs';
 import { hostname, userInfo, homedir } from 'os';
-import { join, dirname } from 'path';
+import { isAbsolute, join, resolve } from 'path';
 
 import type { CredentialBackend } from './types.ts';
 import type { CredentialId, StoredCredential } from '../types.ts';
 import { credentialIdToAccount, accountToCredentialId } from '../types.ts';
-
-// File location
-const CREDENTIALS_DIR = join(homedir(), '.craft-agent');
-const CREDENTIALS_FILE = join(CREDENTIALS_DIR, 'credentials.enc');
 
 // File format constants
 const MAGIC_BYTES = Buffer.from('CRAFT01\0');
@@ -112,9 +120,28 @@ export class SecureStorageBackend implements CredentialBackend {
   readonly name = 'secure-storage';
   readonly priority = 100;
 
+  private readonly credentialsDir: string;
+  private readonly credentialsFile: string;
   private cachedStore: CredentialStore | null = null;
   private encryptionKey: Buffer | null = null;
   private salt: Buffer | null = null;
+
+  constructor(credentialsDir?: string) {
+    const environmentDir = process.env.CRAFT_CONFIG_DIR;
+    if ((environmentDir !== undefined && environmentDir.trim().length === 0)
+      || (credentialsDir !== undefined && credentialsDir.trim().length === 0)) {
+      throw new TypeError('Credential storage directory must not be empty');
+    }
+
+    const configuredDir = credentialsDir ?? environmentDir;
+    const selectedDir = configuredDir ?? join(homedir(), '.craft-agent');
+    if (!isAbsolute(selectedDir)) {
+      throw new TypeError('Credential storage directory must be absolute');
+    }
+
+    this.credentialsDir = resolve(selectedDir);
+    this.credentialsFile = join(this.credentialsDir, 'credentials.enc');
+  }
 
   async isAvailable(): Promise<boolean> {
     // File backend is always available - we can always write to filesystem
@@ -199,11 +226,16 @@ export class SecureStorageBackend implements CredentialBackend {
     // Return cached store if available
     if (this.cachedStore) return this.cachedStore;
 
-    if (!existsSync(CREDENTIALS_FILE)) return null;
+    if (!this.prepareStorageDirectory(false)) return null;
+
+    const fileMetadata = this.lstatOrNull(this.credentialsFile);
+    if (!fileMetadata) return null;
+    this.assertSafeCredentialFile(fileMetadata);
+    this.enforceOwnerOnlyMode(this.credentialsFile, 0o600, 'Credential storage file');
 
     let fileData: Buffer;
     try {
-      fileData = readFileSync(CREDENTIALS_FILE);
+      fileData = readFileSync(this.credentialsFile);
     } catch {
       return null;
     }
@@ -279,9 +311,12 @@ export class SecureStorageBackend implements CredentialBackend {
   }
 
   private saveStoreSync(store: CredentialStore): void {
-    // Ensure directory exists
-    if (!existsSync(CREDENTIALS_DIR)) {
-      mkdirSync(CREDENTIALS_DIR, { recursive: true, mode: 0o700 });
+    this.prepareStorageDirectory(true);
+
+    const existingFile = this.lstatOrNull(this.credentialsFile);
+    if (existingFile) {
+      this.assertSafeCredentialFile(existingFile);
+      this.enforceOwnerOnlyMode(this.credentialsFile, 0o600, 'Credential storage file');
     }
 
     // Use existing salt or generate new one
@@ -312,8 +347,88 @@ export class SecureStorageBackend implements CredentialBackend {
     const fileData = Buffer.concat([header, iv, authTag, ciphertext]);
 
     // Write with restrictive permissions (owner read/write only)
-    writeFileSync(CREDENTIALS_FILE, fileData, { mode: 0o600 });
+    writeFileSync(this.credentialsFile, fileData, { mode: 0o600 });
+    const writtenFile = lstatSync(this.credentialsFile);
+    this.assertSafeCredentialFile(writtenFile);
+    this.enforceOwnerOnlyMode(this.credentialsFile, 0o600, 'Credential storage file');
     this.cachedStore = store;
+  }
+
+  private lstatOrNull(path: string): Stats | null {
+    try {
+      return lstatSync(path);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return null;
+      throw error;
+    }
+  }
+
+  private assertCurrentUser(metadata: Stats, label: string): void {
+    if (typeof process.getuid === 'function' && metadata.uid !== process.getuid()) {
+      throw new TypeError(`${label} must be owned by the current user`);
+    }
+  }
+
+  private enforceOwnerOnlyMode(path: string, expectedMode: number, label: string): void {
+    if (process.platform === 'win32') return;
+    chmodSync(path, expectedMode);
+    const actualMode = lstatSync(path).mode & 0o777;
+    if (actualMode !== expectedMode) {
+      throw new TypeError(`${label} permission verification failed`);
+    }
+    this.assertNoDarwinAcl(path, label);
+  }
+
+  private assertNoDarwinAcl(path: string, label: string): void {
+    if (process.platform !== 'darwin') return;
+
+    let listing: string;
+    try {
+      listing = execFileSync('/bin/ls', ['-lde', path], {
+        encoding: 'utf8',
+        env: { ...process.env, LC_ALL: 'C' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+    } catch {
+      throw new TypeError(`${label} ACL verification failed`);
+    }
+
+    const hasAclEntry = listing
+      .split(/\r?\n/)
+      .slice(1)
+      .some((line) => /^\s+\d+:\s/.test(line));
+    if (hasAclEntry) {
+      throw new TypeError(`${label} must not have extended ACL entries`);
+    }
+  }
+
+  private prepareStorageDirectory(create: boolean): boolean {
+    let metadata = this.lstatOrNull(this.credentialsDir);
+    if (!metadata) {
+      if (!create) return false;
+      mkdirSync(this.credentialsDir, { recursive: true, mode: 0o700 });
+      metadata = lstatSync(this.credentialsDir);
+    }
+
+    if (metadata.isSymbolicLink() || !metadata.isDirectory()) {
+      throw new TypeError('Credential storage directory must be a real directory');
+    }
+    if (realpathSync(this.credentialsDir) !== this.credentialsDir) {
+      throw new TypeError('Credential storage directory must be canonical');
+    }
+    this.assertCurrentUser(metadata, 'Credential storage directory');
+    this.enforceOwnerOnlyMode(this.credentialsDir, 0o700, 'Credential storage directory');
+    return true;
+  }
+
+  private assertSafeCredentialFile(metadata: Stats): void {
+    if (metadata.isSymbolicLink() || !metadata.isFile() || metadata.nlink !== 1) {
+      throw new TypeError('Credential storage file must be a unique regular file');
+    }
+    if (realpathSync(this.credentialsFile) !== this.credentialsFile) {
+      throw new TypeError('Credential storage file must be canonical');
+    }
+    this.assertCurrentUser(metadata, 'Credential storage file');
   }
 
   private getEncryptionKey(salt: Buffer): Buffer {
@@ -350,8 +465,10 @@ export class SecureStorageBackend implements CredentialBackend {
   private handleCorruptedFile(): void {
     // Delete corrupted file - user will need to re-enter credentials
     try {
-      if (existsSync(CREDENTIALS_FILE)) {
-        unlinkSync(CREDENTIALS_FILE);
+      const metadata = this.lstatOrNull(this.credentialsFile);
+      if (metadata) {
+        this.assertSafeCredentialFile(metadata);
+        unlinkSync(this.credentialsFile);
       }
     } catch {
       // Ignore deletion errors

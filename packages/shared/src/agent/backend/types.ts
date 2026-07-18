@@ -163,6 +163,39 @@ export interface BackendHostRuntimeContext {
 }
 
 /**
+ * Exact provider runtime selected for a Host-authorized Module turn. This is a
+ * narrow, secret-free snapshot taken at the backend creation boundary.
+ */
+export interface BackendRuntimeAuthoritySnapshot {
+  connectionSlug: string;
+  provider: AgentProvider;
+  authType: LlmAuthType;
+  resolvedModel: string;
+}
+
+/**
+ * Exact credential material consumed by a backend. Values are passed only to
+ * an in-process Host authority callback; callers must never log or serialize
+ * this object.
+ */
+export type BackendCredentialAuthoritySnapshot =
+  | Readonly<{ kind: 'api-key'; value: string }>
+  | Readonly<{ kind: 'oauth-access'; accessToken: string }>
+  | Readonly<{
+    kind: 'oauth-access-refresh';
+    accessToken: string;
+    refreshToken: string;
+    expiresAt: number | null;
+  }>
+  | Readonly<{
+    kind: 'iam';
+    accessKeyId: string;
+    secretAccessKey: string;
+    region: string | null;
+    sessionToken: string | null;
+  }>;
+
+/**
  * Provider-agnostic backend configuration used by the session layer.
  * Provider-specific runtime details are resolved by backend drivers internally.
  */
@@ -205,6 +238,14 @@ export interface CoreBackendConfig {
    * Spread after process.env in backend-specific option builders.
    */
   envOverrides?: Record<string, string>;
+
+  /**
+   * Acceptance-only Host fence invoked with the exact credential immediately
+   * before a provider subprocess receives it. Ordinary Host sessions omit it.
+   */
+  assertCredentialAuthority?: (
+    snapshot: BackendCredentialAuthoritySnapshot,
+  ) => Promise<void>;
 
   /**
    * Centralized MCP client pool for source tool execution.

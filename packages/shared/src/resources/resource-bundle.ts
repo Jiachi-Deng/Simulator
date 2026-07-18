@@ -24,7 +24,8 @@ import {
   validateBundleFile,
 } from '../utils/bundle-files.ts'
 import { getWorkspaceSourcesPath, getWorkspaceSkillsPath } from '../workspaces/storage.ts'
-import { loadSourceConfig, getSourcePath } from '../sources/storage.ts'
+import { loadSourceConfig, getSourcePath, validateSourceSlug } from '../sources/storage.ts'
+import { validateSkillSlug } from '../skills/storage.ts'
 import { isBuiltinSource } from '../sources/builtin-sources.ts'
 import { validateSourceConfig } from '../config/validators.ts'
 import { AUTOMATIONS_CONFIG_FILE, AUTOMATIONS_HISTORY_FILE, AUTOMATIONS_RETRY_QUEUE_FILE } from '../automations/constants.ts'
@@ -187,6 +188,7 @@ function exportSources(
   }
 
   for (const slug of slugs) {
+    validateSourceSlug(slug)
     const sourcePath = getSourcePath(workspaceRootPath, slug)
     if (!existsSync(sourcePath)) {
       warnings.push(`Source '${slug}' not found, skipping`)
@@ -239,6 +241,7 @@ function exportSkills(
   }
 
   for (const slug of slugs) {
+    validateSkillSlug(slug)
     const skillDir = join(skillsDir, slug)
     if (!existsSync(skillDir)) {
       warnings.push(`Skill '${slug}' not found, skipping`)
@@ -456,6 +459,12 @@ export function validateResourceBundle(bundle: unknown): { valid: boolean; error
           errors.push(`${prefix}: missing or invalid slug`)
           continue
         }
+        try {
+          validateSourceSlug(e.slug)
+        } catch {
+          errors.push(`${prefix}: invalid source slug`)
+          continue
+        }
 
         if (slugs.has(e.slug as string)) {
           errors.push(`${prefix}: duplicate slug '${e.slug}'`)
@@ -479,6 +488,9 @@ export function validateResourceBundle(bundle: unknown): { valid: boolean; error
         if (!Array.isArray(e.files)) {
           errors.push(`${prefix}: files must be an array`)
         } else {
+          if ((e.files as BundleFile[]).some((file) => file?.relativePath === 'config.json')) {
+            errors.push(`${prefix}: config.json is reserved structured data`)
+          }
           validateFileEntries(e.files as BundleFile[], prefix, errors)
         }
       }
@@ -504,6 +516,12 @@ export function validateResourceBundle(bundle: unknown): { valid: boolean; error
 
         if (typeof e.slug !== 'string' || !e.slug) {
           errors.push(`${prefix}: missing or invalid slug`)
+          continue
+        }
+        try {
+          validateSkillSlug(e.slug)
+        } catch {
+          errors.push(`${prefix}: invalid skill slug`)
           continue
         }
 
@@ -688,6 +706,10 @@ async function importSources(
 
   for (const entry of entries) {
     try {
+      if (entry.files.some((file) => file.relativePath === 'config.json')) {
+        result.failed.push({ id: entry.slug, error: 'config.json is reserved structured data' })
+        continue
+      }
       // Check for reserved slugs
       if (isBuiltinSource(entry.slug)) {
         result.failed.push({ id: entry.slug, error: 'Cannot import builtin source slug' })
@@ -770,6 +792,7 @@ function importSkills(
 
   for (const entry of entries) {
     try {
+      validateSkillSlug(entry.slug)
       const targetDir = join(skillsDir, entry.slug)
       const exists = existsSync(targetDir)
 

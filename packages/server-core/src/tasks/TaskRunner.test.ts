@@ -4,7 +4,7 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import type { TokenUsage } from '@craft-agent/core/types';
 import type { CreateSessionOptions } from '@craft-agent/shared/protocol';
-import { parseTaskSpec, saveTaskSpec, readRunLog, readNodeOutput, type TaskSpec } from '@craft-agent/shared/tasks';
+import { appendRunLog, parseTaskSpec, saveTaskSpec, readRunLog, readNodeOutput, type TaskSpec } from '@craft-agent/shared/tasks';
 import type { SessionCompletionEvent } from '../sessions/SessionManager';
 import { TaskRunner, type ConductorSessionHost } from './TaskRunner';
 
@@ -33,6 +33,11 @@ class MockHost implements ConductorSessionHost {
   readonly nodeCounts: { sessionId: string; count: number }[] = [];
   readonly cancelled: string[] = [];
   readonly finalTextById = new Map<string, string>();
+  readonly blockedSessionIds = new Set<string>();
+
+  assertRendererSessionAccess(sessionId: string): void {
+    if (this.blockedSessionIds.has(sessionId)) throw new Error('Session is unavailable');
+  }
 
   async createSession(_workspaceId: string, options: CreateSessionOptions): Promise<{ id: string }> {
     const id = `sess-${options.name}`;
@@ -779,6 +784,34 @@ describe('TaskRunner (Conductor)', () => {
     host2.completeSession('orch', { finalText: 'VERDICT: FAIL — still bad' });
     await tick();
     expect(r2.getRunState('hyd', 'r1')!.status).toBe('failed');
+  });
+
+  it('rejects transient Session ids from both new and persisted runs before side effects', () => {
+    saveTaskSpec(root, specOf({ id: 'fenced', title: 'Fenced', goal: 'g', nodes: [{ id: 'a', prompt: 'a' }] }));
+    host.blockedSessionIds.add('module-session');
+    const runner = makeRunner();
+
+    expect(() => runner.run('fenced', {
+      runId: 'new-run',
+      orchestratorSessionId: 'module-session',
+    })).toThrow('Session is unavailable');
+
+    appendRunLog(root, 'fenced', 'persisted-run', {
+      t: '2026-06-07T00:00:00.000Z',
+      kind: 'run-started',
+      taskId: 'fenced',
+      runId: 'persisted-run',
+      orchestratorSessionId: 'orch',
+    });
+    appendRunLog(root, 'fenced', 'persisted-run', {
+      t: '2026-06-07T00:00:01.000Z',
+      kind: 'node-spawned',
+      nodeId: 'a',
+      sessionId: 'module-session',
+    });
+    expect(() => runner.resume('fenced', 'persisted-run')).toThrow('Session is unavailable');
+    expect(host.created).toEqual([]);
+    expect(host.sent).toEqual([]);
   });
 
   it('fails a node that completes with no text despite declaring outputs (instead of marking it done)', async () => {

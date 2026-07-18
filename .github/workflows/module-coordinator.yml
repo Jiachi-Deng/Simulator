@@ -19,12 +19,22 @@ on:
       - "packages/host-agent-broker/**"
       - "packages/host-agent-shim/**"
       - "packages/server-core/src/handlers/session-manager-interface.ts"
+      - "packages/server-core/src/handlers/rpc/**"
       - "packages/server-core/src/sessions/**"
+      - "packages/server-core/src/tasks/**"
+      - "packages/shared/src/credentials/**"
+      - "packages/shared/src/resources/**"
       - "packages/shared/src/sessions/**"
+      - "packages/shared/src/skills/**"
+      - "packages/shared/src/sources/**"
+      - "packages/shared/src/projects/**"
+      - "packages/shared/src/tasks/**"
+      - "packages/shared/src/workspaces/**"
       - "packages/shared/tests/persistence-queue.test.ts"
       - "packages/shared/src/agent/backend/types.ts"
       - "packages/shared/src/agent/claude-agent.ts"
       - "packages/shared/src/agent/__tests__/claude-agent-module-process-lifecycle.test.ts"
+      - "packages/shared/src/agent/__tests__/credential-authority-fence.test.ts"
       - "packages/shared/src/agent/pi-agent.ts"
       - "packages/shared/src/agent/core/pre-tool-use.ts"
       - "packages/shared/src/agent/module-agent-tool-boundary.ts"
@@ -32,9 +42,7 @@ on:
       - "packages/shared/src/agent/provider-process-reaper.ts"
       - "packages/shared/src/agent/provider-process-reaper.test.ts"
       - "packages/shared/src/agent/index.ts"
-      - "packages/pi-agent-server/src/file-tool-path-input.ts"
-      - "packages/pi-agent-server/src/file-tool-path-input.test.ts"
-      - "packages/pi-agent-server/src/index.ts"
+      - "packages/pi-agent-server/src/**"
       - "modules/open-design/**"
       - "apps/electron/package.json"
       - "apps/electron/electron-builder.yml"
@@ -54,12 +62,16 @@ on:
       - "apps/electron/src/main/host-module-smoke-deadline.ts"
       - "apps/electron/src/main/host-module-smoke-deadline.test.ts"
       - "apps/electron/src/main/index.ts"
+      - "apps/electron/src/main/handlers/**"
       - "apps/electron/src/main/module-agent-runtime.ts"
       - "apps/electron/src/main/module-agent-runtime.test.ts"
       - "apps/electron/src/main/module-agent-worker-recovery.ts"
       - "apps/electron/src/main/module-agent-worker-recovery.test.ts"
       - "apps/electron/src/main/module-view-manager.ts"
-      - "apps/electron/src/preload/module-view.ts"
+      - "apps/electron/src/main/open-design-acceptance*.ts"
+      - "apps/electron/src/main/__tests__/open-design-acceptance*.test.ts"
+      - "apps/electron/src/preload/**"
+      - "apps/electron/src/shared/open-design-*.ts"
   push:
     branches: [main]
     paths:
@@ -79,12 +91,22 @@ on:
       - "packages/host-agent-broker/**"
       - "packages/host-agent-shim/**"
       - "packages/server-core/src/handlers/session-manager-interface.ts"
+      - "packages/server-core/src/handlers/rpc/**"
       - "packages/server-core/src/sessions/**"
+      - "packages/server-core/src/tasks/**"
+      - "packages/shared/src/credentials/**"
+      - "packages/shared/src/resources/**"
       - "packages/shared/src/sessions/**"
+      - "packages/shared/src/skills/**"
+      - "packages/shared/src/sources/**"
+      - "packages/shared/src/projects/**"
+      - "packages/shared/src/tasks/**"
+      - "packages/shared/src/workspaces/**"
       - "packages/shared/tests/persistence-queue.test.ts"
       - "packages/shared/src/agent/backend/types.ts"
       - "packages/shared/src/agent/claude-agent.ts"
       - "packages/shared/src/agent/__tests__/claude-agent-module-process-lifecycle.test.ts"
+      - "packages/shared/src/agent/__tests__/credential-authority-fence.test.ts"
       - "packages/shared/src/agent/pi-agent.ts"
       - "packages/shared/src/agent/core/pre-tool-use.ts"
       - "packages/shared/src/agent/module-agent-tool-boundary.ts"
@@ -92,9 +114,7 @@ on:
       - "packages/shared/src/agent/provider-process-reaper.ts"
       - "packages/shared/src/agent/provider-process-reaper.test.ts"
       - "packages/shared/src/agent/index.ts"
-      - "packages/pi-agent-server/src/file-tool-path-input.ts"
-      - "packages/pi-agent-server/src/file-tool-path-input.test.ts"
-      - "packages/pi-agent-server/src/index.ts"
+      - "packages/pi-agent-server/src/**"
       - "modules/open-design/**"
       - "apps/electron/package.json"
       - "apps/electron/electron-builder.yml"
@@ -114,12 +134,16 @@ on:
       - "apps/electron/src/main/host-module-smoke-deadline.ts"
       - "apps/electron/src/main/host-module-smoke-deadline.test.ts"
       - "apps/electron/src/main/index.ts"
+      - "apps/electron/src/main/handlers/**"
       - "apps/electron/src/main/module-agent-runtime.ts"
       - "apps/electron/src/main/module-agent-runtime.test.ts"
       - "apps/electron/src/main/module-agent-worker-recovery.ts"
       - "apps/electron/src/main/module-agent-worker-recovery.test.ts"
       - "apps/electron/src/main/module-view-manager.ts"
-      - "apps/electron/src/preload/module-view.ts"
+      - "apps/electron/src/main/open-design-acceptance*.ts"
+      - "apps/electron/src/main/__tests__/open-design-acceptance*.test.ts"
+      - "apps/electron/src/preload/**"
+      - "apps/electron/src/shared/open-design-*.ts"
   workflow_dispatch:
 
 concurrency:
@@ -209,6 +233,10 @@ jobs:
         run: >-
           bun test
           packages/server-core/src/sessions/module-agent-admission.test.ts
+          packages/server-core/src/sessions/session-import-containment.test.ts
+          packages/server-core/src/sessions/workspace-removal-fence.test.ts
+          packages/server-core/src/handlers/rpc/renderer-session-isolation.test.ts
+          packages/server-core/src/handlers/rpc/renderer-path-isolation.test.ts
           packages/server-core/src/sessions/create-managed-session.test.ts
           packages/server-core/src/sessions/claude-disposal-containment.test.ts
           packages/server-core/src/sessions/module-agent-adapter.test.ts
@@ -219,14 +247,27 @@ jobs:
           packages/shared/tests/persistence-queue.test.ts
           packages/shared/src/sessions/__tests__/module-agent-run.test.ts
           packages/shared/src/sessions/__tests__/bundle.test.ts
+          packages/shared/src/sessions/__tests__/storage-durability.test.ts
+          packages/shared/src/resources/__tests__/resource-bundle.test.ts
+          packages/shared/src/skills/__tests__/storage.test.ts
+          packages/shared/src/sources/__tests__/storage-path-containment.test.ts
+          packages/shared/src/projects/__tests__/storage.test.ts
+          packages/shared/src/tasks/storage-path-containment.test.ts
           packages/shared/src/agent/__tests__/claude-agent-module-process-lifecycle.test.ts
+          packages/shared/src/agent/__tests__/credential-authority-fence.test.ts
           packages/shared/src/agent/__tests__/module-agent-tool-boundary.test.ts
           packages/shared/src/agent/provider-process-reaper.test.ts
           packages/pi-agent-server/src/file-tool-path-input.test.ts
+          packages/pi-agent-server/src/module-resource-isolation.test.ts
           apps/electron/src/main/module-agent-runtime.test.ts
           apps/electron/src/main/module-agent-worker-recovery.test.ts
           apps/electron/src/main/host-module-process-evidence.test.ts
           apps/electron/src/main/host-module-smoke-deadline.test.ts
+      - name: Validate renderer protocol path fences
+        run: |
+          bun test apps/electron/src/main/__tests__/thumbnail-protocol-path-authority.test.ts
+          bun test apps/electron/src/main/handlers/__tests__/browser-broadcast.test.ts
+          bun test apps/electron/src/main/__tests__/browser-pane-manager.test.ts --test-name-pattern 'denies local-file|rejects transient|blocks non-web'
       - name: Validate Host Agent Run Core closure
         run: bun run validate:host-agent-run-core
       - name: Validate Host-owned zero-argument Shim launcher

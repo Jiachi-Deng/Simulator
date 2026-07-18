@@ -78,6 +78,7 @@ import { resolveSearchProvider } from './tools/search/resolve-provider.ts';
 import { createSearchTool } from './tools/search/create-search-tool.ts';
 import { allowCraftMetadataProperties, stripCraftMetadata } from './craft-metadata-schema.ts';
 import { applySystemPromptOverride } from './system-prompt-override.ts';
+import { createModuleResourceIsolation } from './module-resource-isolation.ts';
 import {
   preparePiFileToolInputForExecutor,
   preparePiFileToolInputForHost,
@@ -120,6 +121,7 @@ interface InitMessage {
   customEndpoint?: { api: CustomEndpointApi; supportsImages?: boolean };
   customModels?: Array<string | { id: string; contextWindow?: number; supportsImages?: boolean }>;
   piAuth?: { provider: string; credential: PiCredential };
+  moduleAgent?: boolean;
 }
 
 interface RuntimeConfigUpdateMessage {
@@ -629,6 +631,16 @@ async function ensureSession(): Promise<AgentSession> {
 
   }
 
+  if (initConfig.moduleAgent) {
+    if (!sessionOptions.agentDir) {
+      throw new Error('Transient Module Pi session requires an isolated agentDir');
+    }
+    Object.assign(
+      sessionOptions,
+      await createModuleResourceIsolation(cwd, sessionOptions.agentDir),
+    );
+  }
+
   // Set model if specified
   if (initConfig.model) {
     try {
@@ -957,6 +969,14 @@ async function queryLlm(request: LLMQueryRequest): Promise<LLMQueryResult> {
       sessionManager: PiSessionManager.inMemory(),
       model: piModel,
     };
+
+    if (initConfig!.moduleAgent) {
+      const agentDir = initConfig!.agentDir || join(initConfig!.sessionPath, '.pi-agent');
+      Object.assign(
+        ephemeralOptions,
+        await createModuleResourceIsolation(resolvedCwd(), agentDir),
+      );
+    }
 
     const { session: ephemeralSession } = await createAgentSession(ephemeralOptions);
 

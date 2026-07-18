@@ -47,7 +47,7 @@ describe('CraftModuleAgentSessionPort', () => {
       deleteSession: async () => { lifecycleCalls.push('delete') },
       awaitSessionStopped: async () => { lifecycleCalls.push('stopped') },
       disposeSessionAndReap: async () => { lifecycleCalls.push('reaped') },
-      sendMessage: async () => undefined,
+      sendLegacyModuleAgentMessage: async () => undefined,
       cancelProcessing: async () => undefined,
       onModuleAgentRuntimeEvent: () => () => undefined,
       onSessionComplete: () => () => undefined,
@@ -84,7 +84,7 @@ describe('CraftModuleAgentSessionPort', () => {
   it('returns from sendTurn before the long-running SessionManager promise and reports rejection generically', async () => {
     let rejectSend: (() => void) | undefined
     const manager = {
-      sendMessage: () => new Promise<void>((_resolve, reject) => { rejectSend = () => reject(new Error('secret=abc')) }),
+      sendLegacyModuleAgentMessage: () => new Promise<void>((_resolve, reject) => { rejectSend = () => reject(new Error('secret=abc')) }),
       onModuleAgentRuntimeEvent: () => () => undefined,
       onSessionComplete: () => () => undefined,
     } as unknown as ISessionManager
@@ -96,6 +96,87 @@ describe('CraftModuleAgentSessionPort', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
     expect(events).toEqual([{ type: 'turn.failed', sessionId: 'raw', code: 'HOST_RUNTIME_ERROR' }])
     expect(JSON.stringify(events)).not.toContain('secret=abc')
+  })
+
+  it('passes the H1-pinned Connection explicitly and fails closed while admission is unarmed', async () => {
+    const container = await mkdtemp(join(tmpdir(), 'module-agent-v1-connection-'))
+    temporaryRoots.push(container)
+    const workspaceRoot = join(container, 'workspace')
+    const projectRoot = join(container, 'project')
+    await Promise.all([mkdir(workspaceRoot), mkdir(projectRoot)])
+    let createCalls = 0
+    let createOptions: Record<string, unknown> | undefined
+    let runtimeAssertion: Parameters<ISessionManager['sendLegacyModuleAgentMessage']>[2]
+    let credentialAssertion: Parameters<ISessionManager['sendLegacyModuleAgentMessage']>[3]
+    const manager = {
+      getWorkspaces: () => [{ id: 'workspace', rootPath: workspaceRoot }],
+      createSession: async (_workspaceId: string, options: Record<string, unknown>) => {
+        createCalls++
+        createOptions = options
+        return {
+          id: 'v1-pinned', workspaceId: 'workspace', hidden: true, workingDirectory: projectRoot,
+          llmConnection: options.llmConnection, model: options.model,
+        } as Session
+      },
+      deleteSession: async () => undefined,
+      sendLegacyModuleAgentMessage: async (
+        _sessionId: string,
+        _prompt: string,
+        assertRuntime?: NonNullable<typeof runtimeAssertion>,
+        assertCredential?: NonNullable<typeof credentialAssertion>,
+      ) => {
+        runtimeAssertion = assertRuntime
+        credentialAssertion = assertCredential
+        await assertRuntime?.({
+          connectionSlug: 'approved-connection', provider: 'pi',
+          authType: 'oauth', resolvedModel: 'gpt-5.6',
+        })
+        await assertCredential?.({ kind: 'oauth-access', accessToken: 'access-token' })
+      },
+      onModuleAgentRuntimeEvent: () => () => undefined,
+      onSessionComplete: () => () => undefined,
+    } as unknown as ISessionManager
+    let armed = false
+    const assertedRuntime: unknown[] = []
+    const assertedCredentials: unknown[] = []
+    const admission = {
+      admit: async () => {
+        if (!armed) throw new Error('not armed')
+        return {
+          llmConnection: 'approved-connection', provider: 'pi' as const,
+          authType: 'oauth' as const, resolvedModel: 'gpt-5.6',
+        }
+      },
+      assertConnection: async (input: unknown) => {
+        if (!armed) throw new Error('not armed')
+        assertedRuntime.push(input)
+      },
+      assertCredential: async (input: unknown) => {
+        if (!armed) throw new Error('not armed')
+        assertedCredentials.push(input)
+      },
+    }
+    const port = new CraftModuleAgentSessionPort(manager, new MemoryModuleAgentPathAuthority(), admission)
+    const input = {
+      workspaceId: 'workspace', workspaceRoot, authorizedWorkingRoot: projectRoot, workingDirectory: projectRoot,
+    }
+    await expect(port.createSession(input)).rejects.toThrow('not armed')
+    expect(createCalls).toBe(0)
+    armed = true
+    await port.createSession(input)
+    expect(createOptions?.llmConnection).toBe('approved-connection')
+    expect(createOptions?.model).toBe('gpt-5.6')
+    await port.sendTurn('v1-pinned', 'prompt')
+    expect(runtimeAssertion).toBeFunction()
+    expect(credentialAssertion).toBeFunction()
+    expect(assertedRuntime.at(-1)).toEqual({
+      workspaceId: 'workspace', connectionSlug: 'approved-connection',
+      provider: 'pi', authType: 'oauth', resolvedModel: 'gpt-5.6',
+    })
+    expect(assertedCredentials).toEqual([{
+      workspaceId: 'workspace', llmConnection: 'approved-connection',
+      credential: { kind: 'oauth-access', accessToken: 'access-token' },
+    }])
   })
 })
 
@@ -130,6 +211,127 @@ describe('CraftHostAgentRunSessionPort', () => {
     await expect(port.sendTurn('raw-v2', 'prompt')).rejects.toThrow('Host provider admission failed')
     expect(events).toEqual([{ type: 'turn.failed', sessionId: 'raw-v2', code: 'RUNTIME_UNAVAILABLE' }])
     expect(JSON.stringify(events)).not.toContain('secret provider path')
+  })
+
+  it('pins the approved Connection for create and recovery and reasserts it before send', async () => {
+    const container = await mkdtemp(join(tmpdir(), 'module-agent-v2-connection-'))
+    temporaryRoots.push(container)
+    const workspaceRoot = join(container, 'workspace')
+    const projectRoot = join(container, 'project')
+    await Promise.all([mkdir(workspaceRoot), mkdir(projectRoot)])
+    let createOptions: Record<string, unknown> | undefined
+    let providerAssertions = 0
+    const credentialAssertions: unknown[] = []
+    let sendAssertion: Parameters<ISessionManager['sendModuleAgentMessage']>[2]
+    let sendCredentialAssertion: Parameters<ISessionManager['sendModuleAgentMessage']>[3]
+    const session = {
+      id: 'v2-pinned', workspaceId: 'workspace', hidden: true, workingDirectory: projectRoot,
+      llmConnection: 'approved-connection', model: 'gpt-5.6',
+    } as Session
+    const manager = {
+      getWorkspaces: () => [{ id: 'workspace', rootPath: workspaceRoot }],
+      createSession: async (_workspaceId: string, options: Record<string, unknown>) => {
+        createOptions = options
+        return session
+      },
+      recoverModuleAgentSession: async () => session,
+      sendModuleAgentMessage: async (
+        _sessionId: string,
+        _prompt: string,
+        assertion?: NonNullable<typeof sendAssertion>,
+        credentialAssertion?: NonNullable<typeof sendCredentialAssertion>,
+      ) => {
+        sendAssertion = assertion
+        sendCredentialAssertion = credentialAssertion
+        await assertion?.({
+          connectionSlug: 'approved-connection', provider: 'pi',
+          authType: 'oauth', resolvedModel: 'gpt-5.6',
+        })
+        await credentialAssertion?.({ kind: 'oauth-access', accessToken: 'access-token' })
+      },
+      deleteSession: async () => undefined,
+      onModuleAgentRuntimeEvent: () => () => undefined,
+      onSessionComplete: () => () => undefined,
+    } as unknown as ISessionManager
+    const admission = {
+      admit: async () => ({
+        llmConnection: 'approved-connection', provider: 'pi' as const,
+        authType: 'oauth' as const, resolvedModel: 'gpt-5.6',
+      }),
+      assertConnection: async () => { providerAssertions++ },
+      assertCredential: async (input: unknown) => { credentialAssertions.push(input) },
+    }
+    const port = new CraftHostAgentRunSessionPort(manager, new MemoryModuleAgentPathAuthority(), admission)
+    const ownership = {
+      transient: true as const,
+      contractVersion: 2 as const,
+      moduleId: 'org.simulator.open-design',
+      runHandle: `run_${'a'.repeat(32)}`,
+      idempotencyKeyDigest: 'b'.repeat(64),
+      requestDigest: 'c'.repeat(64),
+      workerEpoch: 'epoch_connection_pin',
+      state: 'accepted' as const,
+    }
+    const input = {
+      workspaceId: 'workspace', workspaceRoot, authorizedWorkingRoot: projectRoot, workingDirectory: projectRoot, ownership,
+    }
+    await port.createSession(input)
+    expect(createOptions?.llmConnection).toBe('approved-connection')
+    expect(createOptions?.model).toBe('gpt-5.6')
+    await port.sendTurn(session.id, 'prompt')
+    expect(sendAssertion).toBeFunction()
+    expect(sendCredentialAssertion).toBeFunction()
+    expect(credentialAssertions).toEqual([{
+      workspaceId: 'workspace', llmConnection: 'approved-connection',
+      credential: { kind: 'oauth-access', accessToken: 'access-token' },
+    }])
+    expect(providerAssertions).toBeGreaterThanOrEqual(3)
+    await port.recoverSession(input)
+    expect(providerAssertions).toBeGreaterThanOrEqual(4)
+  })
+
+  it('deletes and rejects a newly created Session whose pinned model drifts', async () => {
+    const container = await mkdtemp(join(tmpdir(), 'module-agent-v2-model-drift-'))
+    temporaryRoots.push(container)
+    const workspaceRoot = join(container, 'workspace')
+    const projectRoot = join(container, 'project')
+    await Promise.all([mkdir(workspaceRoot), mkdir(projectRoot)])
+    const deleted: string[] = []
+    const manager = {
+      getWorkspaces: () => [{ id: 'workspace', rootPath: workspaceRoot }],
+      createSession: async () => ({
+        id: 'v2-drifted', workspaceId: 'workspace', hidden: true,
+        workingDirectory: projectRoot, llmConnection: 'approved-connection',
+        model: 'attacker-model',
+      } as Session),
+      deleteSession: async (sessionId: string) => { deleted.push(sessionId) },
+      onModuleAgentRuntimeEvent: () => () => undefined,
+      onSessionComplete: () => () => undefined,
+    } as unknown as ISessionManager
+    const admission = {
+      admit: async () => ({
+        llmConnection: 'approved-connection', provider: 'pi' as const,
+        authType: 'oauth' as const, resolvedModel: 'gpt-5.6',
+      }),
+      assertConnection: async () => undefined,
+      assertCredential: async () => undefined,
+    }
+    const port = new CraftHostAgentRunSessionPort(
+      manager,
+      new MemoryModuleAgentPathAuthority(),
+      admission,
+    )
+    await expect(port.createSession({
+      workspaceId: 'workspace', workspaceRoot,
+      authorizedWorkingRoot: projectRoot, workingDirectory: projectRoot,
+      ownership: {
+        transient: true, contractVersion: 2, moduleId: 'org.simulator.open-design',
+        runHandle: `run_${'9'.repeat(32)}`,
+        idempotencyKeyDigest: '8'.repeat(64), requestDigest: '7'.repeat(64),
+        workerEpoch: 'epoch_model_drift', state: 'accepted',
+      },
+    })).rejects.toThrow('invalid hidden v2 Module session')
+    expect(deleted).toEqual(['v2-drifted'])
   })
 
   it('persists RunCore ownership unchanged and advances state through the internal seam', async () => {

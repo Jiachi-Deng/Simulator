@@ -244,6 +244,7 @@ export function registerAutomationsHandlers(server: RpcServer, deps: HandlerDeps
       return lines
         .map(line => { try { return JSON.parse(line) } catch { return null } })
         .filter((e): e is HistoryEntry => e?.id === automationId)
+        .filter((e) => !e.sessionId || !deps.sessionManager.isRendererSessionHidden(e.sessionId))
         .slice(-clampedLimit)
         .reverse()
     } catch {

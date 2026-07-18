@@ -35,6 +35,8 @@ import {
   readRunLog,
   loadTaskSpec,
   writeRunSpecSnapshot,
+  validateTaskRunId,
+  validateTaskSlug,
   DEFAULT_REPAIR_ATTEMPTS,
   MAX_REPAIR_ATTEMPTS_CAP,
 } from '@craft-agent/shared/tasks';
@@ -44,6 +46,8 @@ import {
 // ---------------------------------------------------------------------------
 
 export interface ConductorSessionHost {
+  /** Fail closed unless the persisted/task-supplied ID names an ordinary visible Session. */
+  assertRendererSessionAccess(sessionId: string): void;
   /** Creates the child session AND announces it to the renderer (createSession emits
    *  session_created by default), so the subtask appears on the board with its real title. */
   createSession(workspaceId: string, options: CreateSessionOptions): Promise<{ id: string }>;
@@ -834,11 +838,14 @@ export class TaskRunner {
   constructor(private readonly deps: TaskRunnerDeps) {}
 
   private key(slug: string, runId: string): string {
+    validateTaskSlug(slug);
+    validateTaskRunId(runId);
     return `${slug}:${runId}`;
   }
 
   /** Load + validate a task's yaml and start a run. Throws if the task is missing or invalid. */
   run(slug: string, opts: RunOptions = {}): RunSnapshot {
+    validateTaskSlug(slug);
     const loaded = loadTaskSpec(this.deps.workspaceRoot, slug);
     if (!loaded?.spec) throw new Error(`Task "${slug}" not found or has no valid task.yaml`);
     if (!loaded.valid) {
@@ -850,6 +857,7 @@ export class TaskRunner {
     // orchestrator mid-`verifying` — that race is a known, bounded v1 limitation.
     const orchestrator = opts.orchestratorSessionId;
     if (orchestrator) {
+      this.deps.host.assertRendererSessionAccess(orchestrator);
       for (const existing of this.runs.values()) {
         const snap = existing.snapshot();
         if (snap.orchestratorSessionId === orchestrator && !isTerminalRunStatus(snap.status)) {
@@ -860,6 +868,7 @@ export class TaskRunner {
       }
     }
     const runId = opts.runId ?? (this.deps.genRunId ? this.deps.genRunId() : `run-${Date.now()}`);
+    validateTaskRunId(runId);
     const run = new ActiveRun(
       loaded.spec,
       slug,
@@ -896,6 +905,12 @@ export class TaskRunner {
     if (log.length === 0) throw new Error(`Cannot resume "${slug}:${runId}": no run-log found`);
     const started = log.find((e) => e.kind === 'run-started');
     const orchestratorSessionId = started && started.kind === 'run-started' ? started.orchestratorSessionId : undefined;
+    if (orchestratorSessionId) this.deps.host.assertRendererSessionAccess(orchestratorSessionId);
+    for (const entry of log) {
+      if ((entry.kind === 'node-spawned' || entry.kind === 'node-finished') && entry.sessionId) {
+        this.deps.host.assertRendererSessionAccess(entry.sessionId);
+      }
+    }
     const run = new ActiveRun(
       loaded.spec,
       slug,

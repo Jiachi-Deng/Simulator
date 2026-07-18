@@ -89,6 +89,7 @@ export function registerOAuthHandlers(server: RpcServer, deps: HandlerDeps): voi
     authRequestId?: string
   }) => {
     const { sourceSlug, callbackPort, callbackUrl, sessionId, authRequestId } = args
+    if (sessionId) deps.sessionManager.assertRendererSessionAccess(sessionId)
 
     if (!ctx.workspaceId) {
       throw new Error('No workspace bound to this client')

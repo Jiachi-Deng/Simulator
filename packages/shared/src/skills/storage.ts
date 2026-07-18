@@ -11,9 +11,11 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  lstatSync,
+  realpathSync,
 } from 'fs';
 import { homedir } from 'os';
-import { join } from 'path';
+import { basename, dirname, join } from 'path';
 import matter from 'gray-matter';
 import type { LoadedSkill, SkillMetadata, SkillSource } from './types.ts';
 import { getWorkspaceSkillsPath } from '../workspaces/storage.ts';
@@ -34,6 +36,14 @@ export const GLOBAL_AGENT_SKILLS_DIR = join(homedir(), '.agents', 'skills');
 
 /** Project-level agent skills relative directory name */
 export const PROJECT_AGENT_SKILLS_DIR = '.agents/skills';
+
+/** Validate an untrusted skill identifier before using it as a path segment. */
+export function validateSkillSlug(slug: string): void {
+  if (!slug || typeof slug !== 'string' || slug === '.' || slug === '..'
+    || basename(slug) !== slug || slug.includes('/') || slug.includes('\\') || slug.includes('\0')) {
+    throw new Error('Invalid skill slug');
+  }
+}
 
 /**
  * Normalize requiredSources frontmatter to a clean string array.
@@ -105,6 +115,7 @@ function parseSkillFile(content: string): { metadata: SkillMetadata; body: strin
  * @param source - Where this skill is loaded from
  */
 function loadSkillFromDir(skillsDir: string, slug: string, source: SkillSource): LoadedSkill | null {
+  validateSkillSlug(slug);
   const skillDir = join(skillsDir, slug);
   const skillFile = join(skillDir, 'SKILL.md');
 
@@ -296,6 +307,7 @@ export function getSkillIconPath(workspaceRoot: string, slug: string): string | 
  * @param slug - Skill directory name
  */
 export function deleteSkill(workspaceRoot: string, slug: string): boolean {
+  validateSkillSlug(slug);
   const skillsDir = getWorkspaceSkillsPath(workspaceRoot);
   const skillDir = join(skillsDir, slug);
 
@@ -304,6 +316,15 @@ export function deleteSkill(workspaceRoot: string, slug: string): boolean {
   }
 
   try {
+    const entry = lstatSync(skillDir);
+    if (!entry.isDirectory() || entry.isSymbolicLink()) {
+      throw new Error('Skill path is not a direct directory');
+    }
+    const skillsRootReal = realpathSync(skillsDir);
+    const skillDirReal = realpathSync(skillDir);
+    if (dirname(skillDirReal) !== skillsRootReal) {
+      throw new Error('Skill path escapes workspace skills directory');
+    }
     rmSync(skillDir, { recursive: true });
     return true;
   } catch {
@@ -321,6 +342,7 @@ export function deleteSkill(workspaceRoot: string, slug: string): boolean {
  * @param slug - Skill directory name
  */
 export function skillExists(workspaceRoot: string, slug: string): boolean {
+  validateSkillSlug(slug);
   const skillsDir = getWorkspaceSkillsPath(workspaceRoot);
   const skillDir = join(skillsDir, slug);
   const skillFile = join(skillDir, 'SKILL.md');

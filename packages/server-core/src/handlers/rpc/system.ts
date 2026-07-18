@@ -336,6 +336,7 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
       const expanded = path.startsWith('~') ? path.replace(/^~/, homedir()) : path
       const absolutePath = resolve(expanded)
       const safePath = await validateFilePath(absolutePath, getWorkspaceAllowedDirs(ctx.workspaceId))
+      await deps.sessionManager.assertRendererPathAccess(safePath)
       const result = await requestClientOpenPath(server, ctx.clientId, safePath)
       if (result.error) throw new Error(result.error)
     } catch (error) {
@@ -351,6 +352,7 @@ export function registerSystemCoreHandlers(server: RpcServer, deps: HandlerDeps)
       const expanded = path.startsWith('~') ? path.replace(/^~/, homedir()) : path
       const absolutePath = resolve(expanded)
       const safePath = await validateFilePath(absolutePath, getWorkspaceAllowedDirs(ctx.workspaceId))
+      await deps.sessionManager.assertRendererPathAccess(safePath)
       await requestClientShowInFolder(server, ctx.clientId, safePath)
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Unknown error'

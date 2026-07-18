@@ -2,6 +2,7 @@ import { join } from 'path'
 import { existsSync, readdirSync, statSync } from 'fs'
 import { RPC_CHANNELS, type SkillFile } from '@craft-agent/shared/protocol'
 import { getWorkspaceByNameOrId } from '@craft-agent/shared/config'
+import { validateSkillSlug } from '@craft-agent/shared/skills'
 import type { RpcServer } from '@craft-agent/server-core/transport'
 import type { HandlerDeps } from '../handler-deps'
 
@@ -25,16 +26,27 @@ export function registerSkillsHandlers(server: RpcServer, deps: HandlerDeps): vo
     // Validate workingDirectory exists on this server — a thin client may pass
     // its local path which doesn't exist on the remote server's filesystem.
     const effectiveWorkingDir = workingDirectory && existsSync(workingDirectory)
-      ? workingDirectory
+      ? await deps.sessionManager.assertRendererPathAccess(workingDirectory).then(() => workingDirectory)
       : undefined
     const { loadAllSkills } = await import('@craft-agent/shared/skills')
     const skills = loadAllSkills(workspace.rootPath, effectiveWorkingDir)
     deps.platform.logger?.info(`SKILLS_GET: Loaded ${skills.length} skills from ${workspace.rootPath}`)
-    return skills
+    const visibility = await Promise.all(skills.map(async (skill) => {
+      try {
+        await deps.sessionManager.assertRendererPathAccess(skill.path)
+        await deps.sessionManager.assertRendererPathAccess(join(skill.path, 'SKILL.md'))
+        if (skill.iconPath) await deps.sessionManager.assertRendererPathAccess(skill.iconPath)
+        return true
+      } catch {
+        return false
+      }
+    }))
+    return skills.filter((_skill, index) => visibility[index])
   })
 
   // Get files in a skill directory
   server.handle(RPC_CHANNELS.skills.GET_FILES, async (_ctx, workspaceId: string, skillSlug: string) => {
+    validateSkillSlug(skillSlug)
     const workspace = getWorkspaceByNameOrId(workspaceId)
     if (!workspace) {
       deps.platform.logger?.error(`SKILLS_GET_FILES: Workspace not found: ${workspaceId}`)
@@ -45,12 +57,13 @@ export function registerSkillsHandlers(server: RpcServer, deps: HandlerDeps): vo
 
     const skillsDir = getWorkspaceSkillsPath(workspace.rootPath)
     const skillDir = join(skillsDir, skillSlug)
+    await deps.sessionManager.assertRendererPathAccess(skillDir)
 
     function scanDirectory(dirPath: string): SkillFile[] {
       try {
         const entries = readdirSync(dirPath, { withFileTypes: true })
         return entries
-          .filter(entry => !entry.name.startsWith('.')) // Skip hidden files
+          .filter(entry => !entry.name.startsWith('.') && !entry.isSymbolicLink())
           .map(entry => {
             const fullPath = join(dirPath, entry.name)
             if (entry.isDirectory()) {
@@ -84,16 +97,20 @@ export function registerSkillsHandlers(server: RpcServer, deps: HandlerDeps): vo
 
   // Delete a skill from a workspace
   server.handle(RPC_CHANNELS.skills.DELETE, async (_ctx, workspaceId: string, skillSlug: string) => {
+    validateSkillSlug(skillSlug)
     const workspace = getWorkspaceByNameOrId(workspaceId)
     if (!workspace) throw new Error('Workspace not found')
 
     const { deleteSkill } = await import('@craft-agent/shared/skills')
+    const { getWorkspaceSkillsPath } = await import('@craft-agent/shared/workspaces')
+    await deps.sessionManager.assertRendererPathAccess(join(getWorkspaceSkillsPath(workspace.rootPath), skillSlug))
     deleteSkill(workspace.rootPath, skillSlug)
     deps.platform.logger?.info(`Deleted skill: ${skillSlug}`)
   })
 
   // Open skill SKILL.md in editor
   server.handle(RPC_CHANNELS.skills.OPEN_EDITOR, async (_ctx, workspaceId: string, skillSlug: string) => {
+    validateSkillSlug(skillSlug)
     const workspace = getWorkspaceByNameOrId(workspaceId)
     if (!workspace) throw new Error('Workspace not found')
     if (workspace.remoteServer) throw new Error('Open in editor is not available for remote workspaces')
@@ -102,11 +119,13 @@ export function registerSkillsHandlers(server: RpcServer, deps: HandlerDeps): vo
 
     const skillsDir = getWorkspaceSkillsPath(workspace.rootPath)
     const skillFile = join(skillsDir, skillSlug, 'SKILL.md')
+    await deps.sessionManager.assertRendererPathAccess(skillFile)
     await deps.platform.openPath?.(skillFile)
   })
 
   // Open skill folder in Finder/Explorer
   server.handle(RPC_CHANNELS.skills.OPEN_FINDER, async (_ctx, workspaceId: string, skillSlug: string) => {
+    validateSkillSlug(skillSlug)
     const workspace = getWorkspaceByNameOrId(workspaceId)
     if (!workspace) throw new Error('Workspace not found')
     if (workspace.remoteServer) throw new Error('Show in Finder is not available for remote workspaces')
@@ -115,6 +134,7 @@ export function registerSkillsHandlers(server: RpcServer, deps: HandlerDeps): vo
 
     const skillsDir = getWorkspaceSkillsPath(workspace.rootPath)
     const skillDir = join(skillsDir, skillSlug)
+    await deps.sessionManager.assertRendererPathAccess(skillDir)
     await deps.platform.showItemInFolder?.(skillDir)
   })
 }

@@ -87,6 +87,9 @@ function fakeSessions(workspaceRoot: string, options: {
     async sendMessage(sessionId: string, prompt: string) {
       await sendFixtureMessage(sessionId, prompt)
     },
+    async sendLegacyModuleAgentMessage(sessionId: string, prompt: string) {
+      await sendFixtureMessage(sessionId, prompt)
+    },
     async sendModuleAgentMessage(sessionId: string, prompt: string) {
       await sendFixtureMessage(sessionId, prompt)
     },

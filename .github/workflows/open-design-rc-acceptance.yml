@@ -700,6 +700,8 @@ jobs:
             --arg hostArtifactSha256 "$HOST_ARTIFACT_SHA256" \
             --argjson hostBuildRunId "$HOST_BUILD_RUN_ID" \
             --arg hostHeadSha "$HOST_HEAD_SHA" \
+            --arg h1ConnectionEvidenceSha256 "$(jq -er .h1Authority.connectionEvidenceSha256 "$manifest")" \
+            --arg h1HandoffSha256 "$(jq -er .h1Authority.handoffSha256 "$manifest")" \
             --arg machineCompletedAt "$MACHINE_COMPLETED_AT" \
             --argjson machineRunId "$MACHINE_RUN_ID" \
             --arg visualCompletedAt "$VISUAL_COMPLETED_AT" \
@@ -725,6 +727,10 @@ jobs:
               hostArtifactSha256: $hostArtifactSha256,
               hostBuildRunId: $hostBuildRunId,
               hostHeadSha: $hostHeadSha,
+              h1: {
+                connectionEvidenceSha256: $h1ConnectionEvidenceSha256,
+                handoffSha256: $h1HandoffSha256
+              },
               lkg: {
                 archiveSha256: $lkgArchiveSha,
                 catalogIssuedAt: $lkgCatalogIssuedAt,

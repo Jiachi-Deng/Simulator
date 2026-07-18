@@ -4,7 +4,7 @@
  * Uses real temp directories to exercise actual filesystem operations.
  */
 import { describe, it, expect, beforeEach, afterEach } from 'bun:test';
-import { mkdtempSync, writeFileSync, rmSync, existsSync } from 'fs';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync, symlinkSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { estimateTokensDensityAware } from '../../utils/large-response.ts';
@@ -13,6 +13,8 @@ import {
   getProjectMemoryPath,
   loadProjectMemory,
   sanitizeAssetFilename,
+  deleteProject,
+  validateProjectSlug,
 } from '../storage.ts';
 
 let tempDir: string;
@@ -45,6 +47,22 @@ describe('sanitizeAssetFilename', () => {
 
   it('falls back to a generated name when the input reduces to empty', () => {
     expect(sanitizeAssetFilename('\x00\n\t')).toMatch(/^asset_[0-9a-f]{8}$/);
+  });
+});
+
+describe('project path containment', () => {
+  it('rejects traversal and never follows a direct-child symlink during delete', () => {
+    const moduleDir = join(workspaceRoot, 'sessions', 'module-secret');
+    const sentinel = join(moduleDir, 'session.jsonl');
+    mkdirSync(moduleDir, { recursive: true });
+    writeFileSync(sentinel, 'private');
+    mkdirSync(join(workspaceRoot, 'projects'), { recursive: true });
+
+    expect(() => validateProjectSlug('..')).toThrow('Invalid project slug');
+    expect(() => deleteProject(workspaceRoot, '..')).toThrow('Invalid project slug');
+    symlinkSync(moduleDir, join(workspaceRoot, 'projects', 'linked-module'), 'dir');
+    expect(() => deleteProject(workspaceRoot, 'linked-module')).toThrow('direct directory');
+    expect(existsSync(sentinel)).toBe(true);
   });
 });
 

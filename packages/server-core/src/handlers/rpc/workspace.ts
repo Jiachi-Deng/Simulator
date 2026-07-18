@@ -50,6 +50,7 @@ export function registerWorkspaceCoreHandlers(server: RpcServer, deps: HandlerDe
     if (!validation.valid) {
       throw new Error(validation.reason!)
     }
+    await sessionManager.assertRendererPathAccess(rootPath)
 
     const workspace = addWorkspace({ name, rootPath, ...(remoteServer && { remoteServer }) })
     // Make it active
@@ -175,6 +176,7 @@ export function registerWorkspaceCoreHandlers(server: RpcServer, deps: HandlerDe
     if (!absolutePath.startsWith(workspace.rootPath)) {
       throw new Error('Invalid path: outside workspace directory')
     }
+    await deps.sessionManager.assertRendererPathAccess(absolutePath)
 
     if (!existsSync(absolutePath)) {
       return null  // Missing optional files - silent fallback to default icons
@@ -229,6 +231,7 @@ export function registerWorkspaceCoreHandlers(server: RpcServer, deps: HandlerDe
     if (!absolutePath.startsWith(workspace.rootPath)) {
       throw new Error('Invalid path: outside workspace directory')
     }
+    await deps.sessionManager.assertRendererPathAccess(absolutePath)
 
     // If this is an icon file (icon.*), delete any existing icon files with different extensions
     const fileName = basename(relativePath)

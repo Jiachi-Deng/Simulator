@@ -8,6 +8,8 @@ export const OPEN_DESIGN_ACCEPTANCE_CHANNELS = Object.freeze({
   TAKE_BLACKOUT_EVIDENCE: 'open-design-acceptance:take-blackout-evidence',
   GET_MODULE_AGENT_RUNTIME_SNAPSHOT: 'open-design-acceptance:get-module-agent-runtime-snapshot',
   GET_RUNTIME_BINDING: 'open-design-acceptance:get-runtime-binding',
+  GET_CONNECTION_AUTHORITY: 'open-design-acceptance:get-connection-authority',
+  ARM_CONNECTION_ADMISSION: 'open-design-acceptance:arm-connection-admission',
 })
 
 export const OPEN_DESIGN_BLACKOUT_CASE_IDS = Object.freeze([
@@ -163,6 +165,29 @@ export interface OpenDesignAcceptanceRuntimeBinding {
   readonly runtimeInstanceDigest: string
 }
 
+/** One-time 32-byte H1/A1 authority key. It is accepted but never returned. */
+export interface OpenDesignAcceptanceConnectionAuthorityRequest {
+  readonly keyBase64: string
+}
+
+/** Credential- and identity-free proof for the currently effective Connection. */
+export interface OpenDesignAcceptanceConnectionAuthorityResult {
+  readonly schemaVersion: 1
+  readonly authenticated: true
+  readonly authorityHmacSha256: string
+}
+
+export interface OpenDesignAcceptanceConnectionArmRequest {
+  readonly keyBase64: string
+  readonly expectedHmacSha256: string
+}
+
+export interface OpenDesignAcceptanceConnectionArmResult {
+  readonly schemaVersion: 1
+  readonly armed: true
+  readonly authorityHmacSha256: string
+}
+
 function absolutePath(value: unknown, name: string): string {
   if (typeof value !== 'string' || value.length < 2 || value.length > 4096
     || !value.startsWith('/') || value.includes('\0') || value.endsWith('/')) {
@@ -210,6 +235,67 @@ export function parseOpenDesignAcceptanceRuntimeBinding(
     throw new TypeError('Acceptance runtime binding is invalid')
   }
   return Object.freeze(record) as unknown as OpenDesignAcceptanceRuntimeBinding
+}
+
+function authorityKeyBase64(value: unknown): string {
+  if (typeof value !== 'string' || !/^[A-Za-z0-9+/]{43}=$/.test(value)) {
+    throw new TypeError('Acceptance Connection authority key is invalid')
+  }
+  return value
+}
+
+export function parseOpenDesignAcceptanceConnectionAuthorityRequest(
+  value: unknown,
+): OpenDesignAcceptanceConnectionAuthorityRequest {
+  const record = exactRecord(value, ['keyBase64'], 'Acceptance Connection authority request')
+  return Object.freeze({ keyBase64: authorityKeyBase64(record.keyBase64) })
+}
+
+export function parseOpenDesignAcceptanceConnectionAuthorityResult(
+  value: unknown,
+): OpenDesignAcceptanceConnectionAuthorityResult {
+  const record = exactRecord(
+    value,
+    ['authenticated', 'authorityHmacSha256', 'schemaVersion'],
+    'Acceptance Connection authority result',
+  )
+  if (record.schemaVersion !== 1 || record.authenticated !== true
+    || typeof record.authorityHmacSha256 !== 'string' || !SHA256.test(record.authorityHmacSha256)) {
+    throw new TypeError('Acceptance Connection authority result is invalid')
+  }
+  return Object.freeze(record) as unknown as OpenDesignAcceptanceConnectionAuthorityResult
+}
+
+export function parseOpenDesignAcceptanceConnectionArmRequest(
+  value: unknown,
+): OpenDesignAcceptanceConnectionArmRequest {
+  const record = exactRecord(
+    value,
+    ['expectedHmacSha256', 'keyBase64'],
+    'Acceptance Connection arm request',
+  )
+  if (typeof record.expectedHmacSha256 !== 'string' || !SHA256.test(record.expectedHmacSha256)) {
+    throw new TypeError('Acceptance Connection arm request is invalid')
+  }
+  return Object.freeze({
+    keyBase64: authorityKeyBase64(record.keyBase64),
+    expectedHmacSha256: record.expectedHmacSha256,
+  })
+}
+
+export function parseOpenDesignAcceptanceConnectionArmResult(
+  value: unknown,
+): OpenDesignAcceptanceConnectionArmResult {
+  const record = exactRecord(
+    value,
+    ['armed', 'authorityHmacSha256', 'schemaVersion'],
+    'Acceptance Connection arm result',
+  )
+  if (record.schemaVersion !== 1 || record.armed !== true
+    || typeof record.authorityHmacSha256 !== 'string' || !SHA256.test(record.authorityHmacSha256)) {
+    throw new TypeError('Acceptance Connection arm result is invalid')
+  }
+  return Object.freeze(record) as unknown as OpenDesignAcceptanceConnectionArmResult
 }
 
 export function parseOpenDesignModuleAgentRuntimeSnapshot(
@@ -393,4 +479,12 @@ export interface OpenDesignAcceptanceFacade {
   getModuleAgentRuntimeSnapshot(): Promise<OpenDesignModuleAgentRuntimeSnapshot>
   /** Compares already-known canonical H1 values; it cannot read or mutate path contents. */
   getRuntimeBinding(request: OpenDesignAcceptanceRuntimeBindingRequest): Promise<OpenDesignAcceptanceRuntimeBinding>
+  /** Returns only a keyed digest; raw Connection and credential identity stay in Host memory. */
+  getConnectionAuthority(
+    request: OpenDesignAcceptanceConnectionAuthorityRequest,
+  ): Promise<OpenDesignAcceptanceConnectionAuthorityResult>
+  /** Arms one exact H1-approved authority for this process lifetime. */
+  armConnectionAdmission(
+    request: OpenDesignAcceptanceConnectionArmRequest,
+  ): Promise<OpenDesignAcceptanceConnectionArmResult>
 }

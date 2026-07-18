@@ -181,12 +181,17 @@ async function readMachineView(
     '$machine',
   )
   const host = objectAt(manifest.host, '$machine.host')
+  const h1Authority = objectAt(manifest.h1Authority, '$machine.h1Authority')
   const machineAuthority: MachineEvidenceAuthority = {
     hostHeadSha: authority.machineHeadSha,
     producerRunId: authority.machineRunId,
     producerRunAttempt: authority.machineRunAttempt,
     hostBuildRunId: integerAt(host, 'buildRunId', '$machine.host'),
     hostArtifactSha256: hashAt(host, 'artifactSha256', '$machine.host'),
+    h1: {
+      connectionEvidenceSha256: hashAt(h1Authority, 'connectionEvidenceSha256', '$machine.h1Authority'),
+      handoffSha256: hashAt(h1Authority, 'handoffSha256', '$machine.h1Authority'),
+    },
     lkg: releaseAuthority(manifest.lkg, false, '$machine.lkg'),
     rc: releaseAuthority(manifest.rc, true, '$machine.rc') as ReleaseAuthority & { readonly sourceSha: string },
   }

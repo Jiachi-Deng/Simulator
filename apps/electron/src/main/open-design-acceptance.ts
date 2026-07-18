@@ -22,6 +22,10 @@ import {
   parseOpenDesignBlackoutEvidenceRequest,
   parseOpenDesignAcceptanceRuntimeBinding,
   parseOpenDesignAcceptanceRuntimeBindingRequest,
+  parseOpenDesignAcceptanceConnectionAuthorityRequest,
+  parseOpenDesignAcceptanceConnectionAuthorityResult,
+  parseOpenDesignAcceptanceConnectionArmRequest,
+  parseOpenDesignAcceptanceConnectionArmResult,
   parseOpenDesignModuleAgentRuntimeSnapshot,
   type OpenDesignAcceptanceAction,
   type OpenDesignAcceptanceState,
@@ -33,6 +37,10 @@ import {
   type OpenDesignModuleAgentRuntimeSnapshot,
   type OpenDesignAcceptanceRuntimeBinding,
   type OpenDesignAcceptanceRuntimeBindingRequest,
+  type OpenDesignAcceptanceConnectionAuthorityRequest,
+  type OpenDesignAcceptanceConnectionAuthorityResult,
+  type OpenDesignAcceptanceConnectionArmRequest,
+  type OpenDesignAcceptanceConnectionArmResult,
 } from '../shared/open-design-acceptance-ipc'
 import { OPEN_DESIGN_MODULE_ID } from '../shared/open-design-module-ipc'
 import type { OpenDesignDevelopmentBootstrap } from './open-design-development-bootstrap'
@@ -360,6 +368,12 @@ export interface OpenDesignAcceptanceControllerOptions {
   readonly getRuntimeBinding?: (
     request: OpenDesignAcceptanceRuntimeBindingRequest,
   ) => OpenDesignAcceptanceRuntimeBinding
+  readonly getConnectionAuthority?: (
+    request: OpenDesignAcceptanceConnectionAuthorityRequest,
+  ) => Promise<OpenDesignAcceptanceConnectionAuthorityResult>
+  readonly armConnectionAdmission?: (
+    request: OpenDesignAcceptanceConnectionArmRequest,
+  ) => Promise<OpenDesignAcceptanceConnectionArmResult>
   readonly operationId?: (action: OpenDesignAcceptanceAction) => string
   readonly now?: () => number
 }
@@ -488,6 +502,30 @@ export class OpenDesignAcceptanceController {
     const getRuntimeBinding = this.#options.getRuntimeBinding
     if (!getRuntimeBinding) throw new AcceptanceControlError('ACCEPTANCE_RUNTIME_BINDING_UNAVAILABLE')
     return parseOpenDesignAcceptanceRuntimeBinding(getRuntimeBinding(request))
+  }
+
+  async getConnectionAuthority(
+    request: OpenDesignAcceptanceConnectionAuthorityRequest,
+  ): Promise<OpenDesignAcceptanceConnectionAuthorityResult> {
+    const read = this.#options.getConnectionAuthority
+    if (!read) throw new AcceptanceControlError('ACCEPTANCE_CONNECTION_AUTHORITY_UNAVAILABLE')
+    try {
+      return parseOpenDesignAcceptanceConnectionAuthorityResult(await read(request))
+    } catch {
+      throw new AcceptanceControlError('ACCEPTANCE_CONNECTION_AUTHORITY_UNAVAILABLE')
+    }
+  }
+
+  async armConnectionAdmission(
+    request: OpenDesignAcceptanceConnectionArmRequest,
+  ): Promise<OpenDesignAcceptanceConnectionArmResult> {
+    const arm = this.#options.armConnectionAdmission
+    if (!arm) throw new AcceptanceControlError('ACCEPTANCE_CONNECTION_ADMISSION_UNAVAILABLE')
+    try {
+      return parseOpenDesignAcceptanceConnectionArmResult(await arm(request))
+    } catch {
+      throw new AcceptanceControlError('ACCEPTANCE_CONNECTION_ADMISSION_REJECTED')
+    }
   }
 
   isClaimedSender(sender: unknown): boolean {
@@ -845,6 +883,12 @@ export function registerOpenDesignAcceptanceIpc(
       })
       register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_RUNTIME_BINDING, (args) => (
         readyController.getRuntimeBinding(parseOpenDesignAcceptanceRuntimeBindingRequest(oneInput(args)))
+      ))
+      register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_CONNECTION_AUTHORITY, (args) => (
+        readyController.getConnectionAuthority(parseOpenDesignAcceptanceConnectionAuthorityRequest(oneInput(args)))
+      ))
+      register(readyController, OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_CONNECTION_ADMISSION, (args) => (
+        readyController.armConnectionAdmission(parseOpenDesignAcceptanceConnectionArmRequest(oneInput(args)))
       ))
     }
   } catch (error) {

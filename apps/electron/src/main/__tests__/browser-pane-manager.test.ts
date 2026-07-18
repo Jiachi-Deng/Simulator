@@ -69,7 +69,12 @@ function createMockWebContents() {
     },
     _listeners: listeners,
     _emit: (event: string, ...args: any[]) => {
-      for (const cb of listeners[event] || []) cb({}, ...args)
+      // Electron's did-create-window callback is (window, details), unlike
+      // ordinary WebContents events that begin with an Event argument.
+      for (const cb of listeners[event] || []) {
+        if (event === 'did-create-window') cb(...args)
+        else cb({}, ...args)
+      }
     },
   }
 }
@@ -297,6 +302,18 @@ describe('BrowserPaneManager', () => {
     expect(result).toEqual({ action: 'deny' })
     await Bun.sleep(0)
     expect(mockShellOpenExternal).toHaveBeenCalledWith('craftagents://settings')
+  })
+
+  it('denies local-file popups before Electron can create a readable page', () => {
+    manager.createInstance('popup-file-deny')
+    const instance = (manager as any).instances.get('popup-file-deny')
+    const openHandler = instance.pageView.webContents.setWindowOpenHandler.mock.calls[0][0]
+
+    expect(openHandler({
+      url: 'file:///tmp/workspace/sessions/.module-agent-quarantine/secret/session.jsonl',
+      disposition: 'new-window',
+      frameName: '',
+    })).toEqual({ action: 'deny' })
   })
 
   it('destroys child popups when parent instance is destroyed', () => {
@@ -556,6 +573,51 @@ describe('BrowserPaneManager', () => {
     expect(instance.pageView.webContents.loadURL).toHaveBeenCalledWith(
       'https://duckduckgo.com/?q=craft%20agents%20browser%20tools'
     )
+  })
+
+  it('rejects transient and quarantine file URLs before loadURL', async () => {
+    manager.createInstance('nav-file-deny')
+    const instance = (manager as any).instances.get('nav-file-deny')
+    const protectedUrls = [
+      'file:///tmp/workspace/sessions/transient-run/session.jsonl',
+      'file:///tmp/workspace/sessions/.module-agent-quarantine/recovered/session.jsonl',
+    ]
+
+    for (const protectedUrl of protectedUrls) {
+      await expect(manager.navigate('nav-file-deny', protectedUrl)).rejects.toThrow(
+        'Unsupported browser navigation URL',
+      )
+    }
+    expect(instance.pageView.webContents.loadURL).not.toHaveBeenCalled()
+  })
+
+  it('blocks non-web main-frame navigation and redirect events', () => {
+    manager.createInstance('nav-event-policy')
+    const instance = (manager as any).instances.get('nav-event-policy')
+    const webContents = instance.pageView.webContents
+    const navigateEvent = { preventDefault: mock(() => {}) }
+    const redirectEvent = { preventDefault: mock(() => {}) }
+
+    webContents._listeners['will-navigate'][0](
+      navigateEvent,
+      'file:///tmp/workspace/sessions/transient-run/session.jsonl',
+    )
+    webContents._listeners['will-redirect'][0](
+      redirectEvent,
+      'file:///tmp/workspace/sessions/.module-agent-quarantine/recovered/session.jsonl',
+      false,
+      true,
+    )
+
+    expect(navigateEvent.preventDefault).toHaveBeenCalledTimes(1)
+    expect(redirectEvent.preventDefault).toHaveBeenCalledTimes(1)
+
+    const safeNavigate = { preventDefault: mock(() => {}) }
+    const safeRedirect = { preventDefault: mock(() => {}) }
+    webContents._listeners['will-navigate'][0](safeNavigate, 'https://example.com/path')
+    webContents._listeners['will-redirect'][0](safeRedirect, 'http://localhost:3000/', false, true)
+    expect(safeNavigate.preventDefault).not.toHaveBeenCalled()
+    expect(safeRedirect.preventDefault).not.toHaveBeenCalled()
   })
 
   it('clears navigation timeout timer on success', async () => {

@@ -74,6 +74,10 @@ export interface MachineEvidenceAuthority {
   readonly producerRunAttempt: 1
   readonly hostBuildRunId: number
   readonly hostArtifactSha256: string
+  readonly h1: {
+    readonly connectionEvidenceSha256: string
+    readonly handoffSha256: string
+  }
   readonly lkg: ReleaseAuthority
   readonly rc: ReleaseAuthority & { readonly sourceSha: string }
 }
@@ -270,6 +274,24 @@ function validateHost(value: unknown, authority: MachineEvidenceAuthority, path:
   literal(object.artifactName, OPEN_DESIGN_HOST_ARTIFACT_NAME, `${path}.artifactName`)
   literal(object.artifactSha256, authority.hostArtifactSha256, `${path}.artifactSha256`)
   literal(object.buildRunId, authority.hostBuildRunId, `${path}.buildRunId`)
+}
+
+function validateH1Authority(value: unknown, authority: MachineEvidenceAuthority, path: string): void {
+  const object = objectAt(value, path)
+  exactKeys(object, [
+    'connectionEvidenceSha256',
+    'exactSourceAndArtifactMatched',
+    'handoffSha256',
+    'matchedBeforeFirstPaidTurn',
+    'providerAdmissionPinned',
+    'sameConfigAuthority',
+  ], path)
+  literal(object.connectionEvidenceSha256, authority.h1.connectionEvidenceSha256, `${path}.connectionEvidenceSha256`)
+  literal(object.handoffSha256, authority.h1.handoffSha256, `${path}.handoffSha256`)
+  literal(object.exactSourceAndArtifactMatched, true, `${path}.exactSourceAndArtifactMatched`)
+  literal(object.sameConfigAuthority, true, `${path}.sameConfigAuthority`)
+  literal(object.providerAdmissionPinned, true, `${path}.providerAdmissionPinned`)
+  literal(object.matchedBeforeFirstPaidTurn, true, `${path}.matchedBeforeFirstPaidTurn`)
 }
 
 function validateRelease(
@@ -706,6 +728,7 @@ export async function validateOpenDesignM1MachineEvidence(
   authority: MachineEvidenceAuthority,
 ): Promise<MachineEvidenceValidationResult> {
   if (!COMMIT_SHA.test(authority.hostHeadSha) || !SHA256.test(authority.hostArtifactSha256)
+    || !SHA256.test(authority.h1.connectionEvidenceSha256) || !SHA256.test(authority.h1.handoffSha256)
     || authority.producerRunId < 1 || authority.producerRunAttempt !== 1
     || authority.hostBuildRunId < 1 || authority.rc.sourceSha !== OPEN_DESIGN_RC_SOURCE_SHA) fail('authority')
   const root = resolve(rootInput)
@@ -720,15 +743,16 @@ export async function validateOpenDesignM1MachineEvidence(
   const sums = await verifySha256Sums(root, expectedPaths)
   const manifest = objectAt(await readCanonicalJson(root, 'machine-manifest.json'), '$')
   exactKeys(manifest, [
-    'batch', 'batchDigest', 'caseAuthority', 'files', 'functionalComparisons', 'host', 'kind', 'lkg', 'producer',
+    'batch', 'batchDigest', 'caseAuthority', 'files', 'functionalComparisons', 'h1Authority', 'host', 'kind', 'lkg', 'producer',
     'rc', 'records', 'repository', 'requiredCi', 'rollback', 'schemaVersion', 'workflowPath',
   ], '$')
-  literal(manifest.schemaVersion, 2, '$.schemaVersion')
+  literal(manifest.schemaVersion, 3, '$.schemaVersion')
   literal(manifest.kind, 'open-design-m1-machine-evidence', '$.kind')
   literal(manifest.repository, OPEN_DESIGN_ACCEPTANCE_REPOSITORY, '$.repository')
   literal(manifest.workflowPath, OPEN_DESIGN_M1_MACHINE_WORKFLOW_PATH, '$.workflowPath')
   validateProducer(manifest.producer, authority, '$.producer')
   validateHost(manifest.host, authority, '$.host')
+  validateH1Authority(manifest.h1Authority, authority, '$.h1Authority')
   validateCaseAuthority(manifest.caseAuthority, '$.caseAuthority')
   const lkgWindow = validateRelease(manifest.lkg, authority.lkg, 'old', '$.lkg')
   const rcWindow = validateRelease(manifest.rc, authority.rc, 'new', '$.rc')
@@ -1001,7 +1025,7 @@ export async function createDeterministicMachineEvidenceFixture(
     }
   })
   await writeCanonical(join(root, 'machine-manifest.json'), {
-    schemaVersion: 2,
+    schemaVersion: 3,
     kind: 'open-design-m1-machine-evidence',
     repository: OPEN_DESIGN_ACCEPTANCE_REPOSITORY,
     workflowPath: OPEN_DESIGN_M1_MACHINE_WORKFLOW_PATH,
@@ -1009,6 +1033,14 @@ export async function createDeterministicMachineEvidenceFixture(
     host: {
       artifactName: OPEN_DESIGN_HOST_ARTIFACT_NAME, artifactSha256: authority.hostArtifactSha256,
       buildRunId: authority.hostBuildRunId, version: OPEN_DESIGN_HOST_VERSION,
+    },
+    h1Authority: {
+      connectionEvidenceSha256: authority.h1.connectionEvidenceSha256,
+      handoffSha256: authority.h1.handoffSha256,
+      exactSourceAndArtifactMatched: true,
+      sameConfigAuthority: true,
+      providerAdmissionPinned: true,
+      matchedBeforeFirstPaidTurn: true,
     },
     lkg: release('old'),
     rc: release('new'),

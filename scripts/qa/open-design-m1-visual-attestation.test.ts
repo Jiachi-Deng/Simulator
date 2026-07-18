@@ -34,6 +34,10 @@ const machineAuthority: MachineEvidenceAuthority = Object.freeze({
   producerRunAttempt: 1,
   hostBuildRunId: 8001,
   hostArtifactSha256: 'a'.repeat(64),
+  h1: {
+    connectionEvidenceSha256: 'f'.repeat(64),
+    handoffSha256: '9'.repeat(64),
+  },
   lkg: {
     archiveSha256: 'b'.repeat(64),
     catalogIssuedAt: '2026-07-16T22:00:00.000Z',

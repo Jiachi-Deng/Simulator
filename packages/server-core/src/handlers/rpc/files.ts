@@ -1,4 +1,4 @@
-import { readFile, writeFile, unlink, mkdir, readdir, stat } from 'fs/promises'
+import { readFile, writeFile, unlink, mkdir, readdir, stat, realpath } from 'fs/promises'
 import { isAbsolute, join, resolve, dirname, parse as parsePath } from 'path'
 import { homedir } from 'os'
 import { validatePathFormat } from '../../utils/path-validation'
@@ -30,11 +30,27 @@ export const HANDLED_CHANNELS = [
 ] as const
 
 export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): void {
+  const assertRendererPathAccess = async (path: string): Promise<string> => {
+    await deps.sessionManager.assertRendererPathAccess(path)
+    return path
+  }
+
+  const isRendererPathVisible = async (path: string): Promise<boolean> => {
+    try {
+      await deps.sessionManager.assertRendererPathAccess(path)
+      return true
+    } catch {
+      return false
+    }
+  }
+
   // Read a file (with path validation to prevent traversal attacks)
   server.handle(RPC_CHANNELS.file.READ, async (ctx, path: string) => {
     try {
       const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
-      const safePath = await validateFilePath(path, getWorkspaceAllowedDirs(workspaceId))
+      const safePath = await assertRendererPathAccess(
+        await validateFilePath(path, getWorkspaceAllowedDirs(workspaceId)),
+      )
       const content = await readFile(safePath, 'utf-8')
       return content
     } catch (error) {
@@ -54,7 +70,9 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
   server.handle(RPC_CHANNELS.file.READ_DATA_URL, async (ctx, path: string) => {
     try {
       const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
-      const safePath = await validateFilePath(path, getWorkspaceAllowedDirs(workspaceId))
+      const safePath = await assertRendererPathAccess(
+        await validateFilePath(path, getWorkspaceAllowedDirs(workspaceId)),
+      )
       const buffer = await readFile(safePath)
       const ext = safePath.split('.').pop()?.toLowerCase() ?? ''
 
@@ -86,7 +104,9 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
   server.handle(RPC_CHANNELS.file.READ_PREVIEW_DATA_URL, async (ctx, path: string, maxSize = 64) => {
     try {
       const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
-      const safePath = await validateFilePath(path, getWorkspaceAllowedDirs(workspaceId))
+      const safePath = await assertRendererPathAccess(
+        await validateFilePath(path, getWorkspaceAllowedDirs(workspaceId)),
+      )
       const size = Number.isFinite(maxSize) ? Math.max(16, Math.min(256, Math.floor(maxSize))) : 64
       const preview = await deps.platform.imageProcessor.process(safePath, {
         resize: { width: size, height: size },
@@ -106,7 +126,9 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
   server.handle(RPC_CHANNELS.file.READ_BINARY, async (ctx, path: string) => {
     try {
       const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
-      const safePath = await validateFilePath(path, getWorkspaceAllowedDirs(workspaceId))
+      const safePath = await assertRendererPathAccess(
+        await validateFilePath(path, getWorkspaceAllowedDirs(workspaceId)),
+      )
       const buffer = await readFile(safePath)
       // Return as Uint8Array (serializes to ArrayBuffer over IPC)
       return new Uint8Array(buffer)
@@ -136,7 +158,9 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
   server.handle(RPC_CHANNELS.file.READ_ATTACHMENT, async (ctx, path: string) => {
     try {
       const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
-      const safePath = await validateFilePath(path, getWorkspaceAllowedDirs(workspaceId))
+      const safePath = await assertRendererPathAccess(
+        await validateFilePath(path, getWorkspaceAllowedDirs(workspaceId)),
+      )
       // Use shared utility that handles file type detection, encoding, etc.
       const attachment = await readFileAttachment(safePath)
       if (!attachment) return null
@@ -171,16 +195,19 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
   server.handle(RPC_CHANNELS.file.READ_USER_ATTACHMENT, async (_ctx, path: string) => {
     try {
       if (!path || typeof path !== 'string' || !isAbsolute(path)) return null
-      const info = await stat(path).catch(() => null)
+      const canonicalPath = await realpath(path).catch(() => null)
+      if (!canonicalPath) return null
+      await deps.sessionManager.assertRendererPathAccess(canonicalPath)
+      const info = await stat(canonicalPath).catch(() => null)
       if (!info || !info.isFile()) return null
       if (info.size > USER_ATTACHMENT_MAX_BYTES) {
         deps.platform.logger.warn(`[readUserAttachment] file exceeds ${USER_ATTACHMENT_MAX_BYTES} bytes, skipping: ${path}`)
         return null
       }
-      const attachment = readFileAttachment(path)
+      const attachment = readFileAttachment(canonicalPath)
       if (!attachment) return null
       try {
-        const thumbBuffer = await deps.platform.imageProcessor.process(path, {
+        const thumbBuffer = await deps.platform.imageProcessor.process(canonicalPath, {
           resize: { width: 200, height: 200 },
           format: 'png',
         })
@@ -213,6 +240,7 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
   // Store an attachment to disk and generate thumbnail/markdown conversion
   // This is the core of the persistent file attachment system
   server.handle(RPC_CHANNELS.file.STORE_ATTACHMENT, async (ctx, sessionId: string, attachment: FileAttachment): Promise<StoredAttachment> => {
+    deps.sessionManager.assertRendererSessionAccess(sessionId)
     // Track files we've written for cleanup on error
     const filesToCleanup: string[] = []
 
@@ -441,7 +469,7 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
   // Parallel BFS walk that skips ignored directories BEFORE entering them,
   // avoiding reading node_modules/etc. contents entirely. Uses withFileTypes
   // to get entry types without separate stat calls.
-  server.handle(RPC_CHANNELS.fs.SEARCH, async (_ctx, basePath: string, query: string) => {
+  server.handle(RPC_CHANNELS.fs.SEARCH, async (ctx, basePath: string, query: string) => {
     deps.platform.logger.info('[FS_SEARCH] called:', basePath, query)
     const MAX_RESULTS = 50
 
@@ -456,6 +484,10 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
     const results: Array<{ name: string; path: string; type: 'file' | 'directory'; relativePath: string }> = []
 
     try {
+      const workspaceId = ctx.workspaceId ?? deps.windowManager?.getWorkspaceForWindow(ctx.webContentsId!)
+      const safeBasePath = await assertRendererPathAccess(
+        await validateFilePath(basePath, getWorkspaceAllowedDirs(workspaceId)),
+      )
       // BFS queue: each entry is a relative path prefix ('' for root)
       let queue = ['']
 
@@ -465,8 +497,11 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
 
         const dirResults = await Promise.all(
           queue.map(async (relDir) => {
-            const absDir = relDir ? join(basePath, relDir) : basePath
+            const absDir = relDir ? join(safeBasePath, relDir) : safeBasePath
             try {
+              if (!await isRendererPathVisible(absDir)) {
+                return { relDir, entries: [] as import('fs').Dirent[] }
+              }
               return { relDir, entries: await readdir(absDir, { withFileTypes: true }) }
             } catch {
               // Skip dirs we can't read (permissions, broken symlinks, etc.)
@@ -487,6 +522,8 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
 
             const relativePath = relDir ? `${relDir}/${name}` : name
             const isDir = entry.isDirectory()
+            const entryPath = join(safeBasePath, relativePath)
+            if (!await isRendererPathVisible(entryPath)) continue
 
             // Queue subdirectories for next BFS level
             if (isDir) {
@@ -499,7 +536,7 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
             if (lowerName.includes(lowerQuery) || lowerRelative.includes(lowerQuery)) {
               results.push({
                 name,
-                path: join(basePath, relativePath),
+                path: entryPath,
                 type: isDir ? 'directory' : 'file',
                 relativePath,
               })
@@ -540,13 +577,16 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
 
     // Normalize (collapses .. segments, trailing slashes, etc.)
     const resolved = resolve(dirPath)
+    const canonical = await realpath(resolved)
+    await deps.sessionManager.assertRendererPathAccess(canonical)
 
     // Read entries, filter to directories
-    const raw = await readdir(resolved, { withFileTypes: true })
+    const raw = await readdir(canonical, { withFileTypes: true })
 
     const entries: Array<{ name: string; path: string; isSymlink: boolean }> = []
     for (const entry of raw) {
-      const fullPath = join(resolved, entry.name)
+      const fullPath = join(canonical, entry.name)
+      if (!await isRendererPathVisible(fullPath)) continue
       const isSymlink = entry.isSymbolicLink()
 
       if (entry.isDirectory()) {
@@ -571,11 +611,11 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
     if (truncated) entries.length = 500
 
     // Compute parent path
-    const parentPath = resolved === parsePath(resolved).root ? null : dirname(resolved)
+    const parentPath = canonical === parsePath(canonical).root ? null : dirname(canonical)
 
     // Compute breadcrumbs server-side
     const breadcrumbs: Array<{ name: string; path: string }> = []
-    let current = resolved
+    let current = canonical
     while (true) {
       const parsed = parsePath(current)
       const name = parsed.base || parsed.root
@@ -585,7 +625,7 @@ export function registerFilesHandlers(server: RpcServer, deps: HandlerDeps): voi
     }
 
     return {
-      currentPath: resolved,
+      currentPath: canonical,
       parentPath,
       breadcrumbs,
       platform: process.platform as DirectoryListingResult['platform'],

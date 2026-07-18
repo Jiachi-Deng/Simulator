@@ -271,4 +271,36 @@ describe('validateBundle', () => {
   it('rejects header without createdAt', () => {
     expect(validateBundle({ version: 1, session: { header: { id: 'x' }, messages: [] }, files: [] })).toBe(false)
   })
+
+  it('rejects Session IDs that are not one direct validated path segment', () => {
+    for (const id of ['alias/victim', '../victim', 'victim.json', '']) {
+      expect(validateBundle({
+        version: 1,
+        session: { header: { id, createdAt: 1 }, messages: [] },
+        files: [],
+      })).toBe(false)
+    }
+  })
+
+  it('rejects control files, hidden resources, tmp state, and malformed file entries', () => {
+    const file = (relativePath: string) => ({
+      relativePath,
+      contentBase64: Buffer.from('data').toString('base64'),
+      size: 4,
+    })
+    for (const candidate of [
+      file('session.jsonl'),
+      file('session.jsonl.tmp'),
+      file('.pi-agent/extensions/model.ts'),
+      file('attachments/.hidden'),
+      file('tmp/cache.json'),
+      { relativePath: 'attachments/bad.txt', contentBase64: '', size: 99 },
+    ]) {
+      expect(validateBundle({
+        version: 1,
+        session: { header: { id: 'safe-session', createdAt: 1 }, messages: [] },
+        files: [candidate],
+      })).toBe(false)
+    }
+  })
 })

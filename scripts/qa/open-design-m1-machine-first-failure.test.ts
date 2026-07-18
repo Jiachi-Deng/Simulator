@@ -33,6 +33,10 @@ const authority: OpenDesignM1FirstFailureAuthority = Object.freeze({
   producerRunAttempt: 1,
   hostBuildRunId: 8001,
   hostArtifactSha256: 'a'.repeat(64),
+  h1: {
+    connectionEvidenceSha256: 'b'.repeat(64),
+    handoffSha256: 'c'.repeat(64),
+  },
 })
 
 const cleanupEvidence = Object.freeze({
@@ -208,7 +212,11 @@ describe('OpenDesign M1 first-failure capsule', () => {
     })
     const source = await readFile(join(root, 'first-failure.json'), 'utf8')
     const manifest = JSON.parse(source)
-    expect(manifest.schemaVersion).toBe(2)
+    expect(manifest.schemaVersion).toBe(3)
+    expect(manifest.h1Authority).toEqual({
+      connectionEvidenceSha256: authority.h1.connectionEvidenceSha256,
+      handoffSha256: authority.h1.handoffSha256,
+    })
     expect(manifest.batch).toMatchObject({ caseAttemptsCompleted: 40, paidTurnUpperBound: 40 })
     expect(manifest.firstFailure).toEqual({
       code: 'LIFECYCLE_VERIFICATION_FAILED',
@@ -255,6 +263,8 @@ describe('OpenDesign M1 first-failure capsule', () => {
         GITHUB_RUN_ATTEMPT: '1',
         HOST_BUILD_RUN_ID: String(authority.hostBuildRunId),
         HOST_ARTIFACT_SHA256: authority.hostArtifactSha256,
+        H1_CONNECTION_EVIDENCE_SHA256: authority.h1.connectionEvidenceSha256,
+        H1_A1_AUTHORITY_SHA256: authority.h1.handoffSha256,
       },
       stdout: 'pipe',
       stderr: 'pipe',

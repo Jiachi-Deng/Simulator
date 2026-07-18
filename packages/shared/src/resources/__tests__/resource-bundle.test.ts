@@ -381,6 +381,18 @@ describe('resource-bundle', () => {
       expect(warnings.some(w => w.includes('nonexistent'))).toBe(true)
     })
 
+    it('rejects explicit source and skill traversal selections before reading outside resource roots', () => {
+      const wsDir = createTestWorkspace(tmpDir)
+      const sentinel = join(tmpDir, 'sentinel.txt')
+      writeFileSync(sentinel, 'outside-resource-root')
+
+      expect(() => exportResources(wsDir, { sources: ['../../sentinel.txt'] }))
+        .toThrow('Invalid source slug')
+      expect(() => exportResources(wsDir, { skills: ['../../sentinel.txt'] }))
+        .toThrow('Invalid skill slug')
+      expect(readFileSync(sentinel, 'utf8')).toBe('outside-resource-root')
+    })
+
     it('skips skills without SKILL.md', () => {
       const wsDir = createTestWorkspace(tmpDir)
       // Create a skill dir with no SKILL.md
@@ -437,6 +449,36 @@ describe('resource-bundle', () => {
       const { valid, errors } = validateResourceBundle({ version: 2, exportedAt: 1, resources: {} })
       expect(valid).toBe(false)
       expect(errors.some(e => e.includes('version'))).toBe(true)
+    })
+
+    it('rejects source and skill slugs that are not direct path segments', () => {
+      const bundle = {
+        version: 1,
+        exportedAt: Date.now(),
+        resources: {
+          sources: [{
+            slug: '../sessions/module-run',
+            config: {
+              id: 'source_1',
+              name: 'Source',
+              slug: '../sessions/module-run',
+              enabled: true,
+              provider: 'custom',
+              type: 'api',
+            },
+            files: [],
+          }],
+          skills: [{
+            slug: '..',
+            files: [makeBundleFile('SKILL.md', '---\nname: test\ndescription: test\n---\nBody')],
+          }],
+        },
+      }
+
+      const { valid, errors } = validateResourceBundle(bundle)
+      expect(valid).toBe(false)
+      expect(errors.some(e => e.includes('invalid source slug'))).toBe(true)
+      expect(errors.some(e => e.includes('invalid skill slug'))).toBe(true)
     })
 
     it('rejects duplicate source slugs', () => {
@@ -523,6 +565,34 @@ describe('resource-bundle', () => {
       const { valid, errors } = validateResourceBundle(bundle)
       expect(valid).toBe(false)
       expect(errors.some(e => e.includes('does not match'))).toBe(true)
+    })
+
+    it('rejects a source file that attempts to replace structured config.json', () => {
+      const bundle: ResourceBundle = {
+        version: 1,
+        exportedAt: Date.now(),
+        resources: {
+          sources: [{
+            slug: 'safe-source',
+            config: {
+              id: 'safe-source_1',
+              name: 'Safe Source',
+              slug: 'safe-source',
+              enabled: true,
+              provider: 'custom',
+              type: 'api',
+              api: { baseUrl: 'https://example.com', authType: 'none' },
+              createdAt: 1,
+              updatedAt: 1,
+            },
+            files: [makeBundleFile('config.json', '{"slug":"replaced"}')],
+          }],
+        },
+      }
+
+      const { valid, errors } = validateResourceBundle(bundle)
+      expect(valid).toBe(false)
+      expect(errors.some(e => e.includes('config.json is reserved'))).toBe(true)
     })
 
     it('accepts valid automation entries', () => {
@@ -1047,6 +1117,28 @@ describe('resource-bundle', () => {
 
       expect(result.sources.failed).toHaveLength(1)
       expect(result.sources.failed[0]!.error).toContain('Invalid bundle')
+    })
+
+    it('never removes the workspace for a traversal skill overwrite', async () => {
+      const wsDir = createTestWorkspace(tmpDir)
+      const sentinel = join(wsDir, 'workspace-sentinel.txt')
+      writeFileSync(sentinel, 'preserve')
+      const bundle = {
+        version: 1,
+        exportedAt: Date.now(),
+        resources: {
+          skills: [{
+            slug: '..',
+            files: [makeBundleFile('SKILL.md', '---\nname: test\ndescription: test\n---\nBody')],
+          }],
+        },
+      } as ResourceBundle
+
+      const result = await importResources(wsDir, bundle, 'overwrite', noopDeps)
+
+      expect(readFileSync(sentinel, 'utf8')).toBe('preserve')
+      expect(result.skills.failed).toHaveLength(1)
+      expect(result.skills.failed[0]!.error).toContain('Invalid bundle')
     })
 
     it('handles partial failures gracefully', async () => {

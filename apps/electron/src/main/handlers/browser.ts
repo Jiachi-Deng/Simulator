@@ -27,6 +27,25 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
   const { browserPaneManager, platform } = deps
   if (!browserPaneManager) return
 
+  const hiddenBrowserIds = new Set<string>()
+  const isHiddenBrowserInfo = (info: ReturnType<typeof browserPaneManager.listInstances>[number]): boolean => {
+    return [info.boundSessionId, info.ownerSessionId]
+      .some((sessionId) => sessionId ? deps.sessionManager.isRendererSessionHidden(sessionId) : false)
+  }
+  const rendererVisibleInstances = () => browserPaneManager.listInstances().filter((info) => {
+    const hidden = isHiddenBrowserInfo(info)
+    if (hidden) hiddenBrowserIds.add(info.id)
+    return !hidden
+  })
+  const assertRendererBrowserAccess = (id: string): void => {
+    const info = browserPaneManager.listInstances().find((candidate) => candidate.id === id)
+    if (hiddenBrowserIds.has(id) || (info && isHiddenBrowserInfo(info))) {
+      hiddenBrowserIds.add(id)
+      throw new Error('Browser instance is unavailable')
+    }
+  }
+  rendererVisibleInstances()
+
   server.handle(RPC_CHANNELS.browserPane.CREATE, (ctx, input?: string | BrowserPaneCreateOptions) => {
     // Stamp the window with the requester's workspace so manual UI-opened
     // tabs stay scoped to the workspace where the user clicked. If
@@ -39,6 +58,7 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
     }
 
     if (input?.bindToSessionId) {
+      deps.sessionManager.assertRendererSessionAccess(input.bindToSessionId)
       return browserPaneManager.createForSession(input.bindToSessionId, {
         show: input.show ?? false,
         workspaceId,
@@ -49,6 +69,7 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
   })
 
   server.handle(RPC_CHANNELS.browserPane.DESTROY, (_ctx, id: string) => {
+    assertRendererBrowserAccess(id)
     browserPaneManager.destroyInstance(id)
   })
 
@@ -58,11 +79,12 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
     // and the remote-mirror workspace id for the active workspace. A server-
     // side filter on ctx.workspaceId would miss remote-stamped tabs because
     // ctx.workspaceId is always the local id (set by updateClientWorkspace).
-    return browserPaneManager.listInstances()
+    return rendererVisibleInstances()
   })
 
   server.handle(RPC_CHANNELS.browserPane.NAVIGATE, async (_ctx, id: string, url: string) => {
     try {
+      assertRendererBrowserAccess(id)
       return await browserPaneManager.navigate(id, url)
     } catch (err) {
       platform.logger.error(`[browser-pane] navigate failed for ${id}:`, err)
@@ -72,6 +94,7 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
 
   server.handle(RPC_CHANNELS.browserPane.GO_BACK, async (_ctx, id: string) => {
     try {
+      assertRendererBrowserAccess(id)
       return await browserPaneManager.goBack(id)
     } catch (err) {
       platform.logger.error(`[browser-pane] goBack failed for ${id}:`, err)
@@ -81,6 +104,7 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
 
   server.handle(RPC_CHANNELS.browserPane.GO_FORWARD, async (_ctx, id: string) => {
     try {
+      assertRendererBrowserAccess(id)
       return await browserPaneManager.goForward(id)
     } catch (err) {
       platform.logger.error(`[browser-pane] goForward failed for ${id}:`, err)
@@ -89,14 +113,17 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
   })
 
   server.handle(RPC_CHANNELS.browserPane.RELOAD, (_ctx, id: string) => {
+    assertRendererBrowserAccess(id)
     browserPaneManager.reload(id)
   })
 
   server.handle(RPC_CHANNELS.browserPane.STOP, (_ctx, id: string) => {
+    assertRendererBrowserAccess(id)
     browserPaneManager.stop(id)
   })
 
   server.handle(RPC_CHANNELS.browserPane.FOCUS, (_ctx, id: string) => {
+    assertRendererBrowserAccess(id)
     browserPaneManager.focus(id)
   })
 
@@ -111,6 +138,7 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
 
   server.handle(RPC_CHANNELS.browserPane.SNAPSHOT, async (_ctx, id: string) => {
     try {
+      assertRendererBrowserAccess(id)
       return await browserPaneManager.getAccessibilitySnapshot(id)
     } catch (err) {
       platform.logger.error(`[browser-pane] snapshot failed for ${id}:`, err)
@@ -120,6 +148,7 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
 
   server.handle(RPC_CHANNELS.browserPane.CLICK, async (_ctx, id: string, ref: string) => {
     try {
+      assertRendererBrowserAccess(id)
       return await browserPaneManager.clickElement(id, ref)
     } catch (err) {
       platform.logger.error(`[browser-pane] click failed for ${id} ref=${ref}:`, err)
@@ -129,6 +158,7 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
 
   server.handle(RPC_CHANNELS.browserPane.FILL, async (_ctx, id: string, ref: string, value: string) => {
     try {
+      assertRendererBrowserAccess(id)
       return await browserPaneManager.fillElement(id, ref, value)
     } catch (err) {
       platform.logger.error(`[browser-pane] fill failed for ${id} ref=${ref}:`, err)
@@ -138,6 +168,7 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
 
   server.handle(RPC_CHANNELS.browserPane.SELECT, async (_ctx, id: string, ref: string, value: string) => {
     try {
+      assertRendererBrowserAccess(id)
       return await browserPaneManager.selectOption(id, ref, value)
     } catch (err) {
       platform.logger.error(`[browser-pane] select failed for ${id} ref=${ref}:`, err)
@@ -147,6 +178,7 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
 
   server.handle(RPC_CHANNELS.browserPane.SCREENSHOT, async (_ctx, id: string, options?: BrowserScreenshotOptions) => {
     try {
+      assertRendererBrowserAccess(id)
       const result = await browserPaneManager.screenshot(id, options)
       return {
         base64: result.imageBuffer.toString('base64'),
@@ -161,6 +193,7 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
 
   server.handle(RPC_CHANNELS.browserPane.EVALUATE, async (_ctx, id: string, expression: string) => {
     try {
+      assertRendererBrowserAccess(id)
       return await browserPaneManager.evaluate(id, expression)
     } catch (err) {
       platform.logger.error(`[browser-pane] evaluate failed for ${id}:`, err)
@@ -174,6 +207,7 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
       throw new Error(`Invalid scroll direction: ${direction}`)
     }
     try {
+      assertRendererBrowserAccess(id)
       return await browserPaneManager.scroll(id, direction as 'up' | 'down' | 'left' | 'right', amount)
     } catch (err) {
       platform.logger.error(`[browser-pane] scroll failed for ${id}:`, err)
@@ -194,14 +228,20 @@ export function registerBrowserHandlers(server: RpcServer, deps: HandlerDeps): v
   // renderer is the contract that actually works in both local-only and
   // remote-mirror deployments.
   browserPaneManager.onStateChange((info) => {
+    if (isHiddenBrowserInfo(info)) {
+      hiddenBrowserIds.add(info.id)
+      return
+    }
     pushTyped(server, RPC_CHANNELS.browserPane.STATE_CHANGED, { to: 'all' }, info)
   })
 
   browserPaneManager.onRemoved((id) => {
+    if (hiddenBrowserIds.delete(id)) return
     pushTyped(server, RPC_CHANNELS.browserPane.REMOVED, { to: 'all' }, id)
   })
 
   browserPaneManager.onInteracted((id) => {
+    if (hiddenBrowserIds.has(id)) return
     pushTyped(server, RPC_CHANNELS.browserPane.INTERACTED, { to: 'all' }, id)
   })
 }

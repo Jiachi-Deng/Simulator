@@ -7,6 +7,14 @@ on:
         description: Successful Engineering RC Bundle run ID for the exact main SHA.
         required: true
         type: string
+      h1_connection_evidence_sha256:
+        description: SHA-256 of the owner-only H1 Connection evidence for this exact Host authority.
+        required: true
+        type: string
+      h1_a1_authority_sha256:
+        description: SHA-256 identity of the immutable owner-only H1 to A1 authority.
+        required: true
+        type: string
       paid_turns_approved:
         description: Approve exactly 40 paid real-model Turns; the producer stops on the first failure.
         required: true
@@ -43,6 +51,8 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       HOST_BUILD_RUN_ID: ${{ inputs.host_build_run_id }}
+      H1_CONNECTION_EVIDENCE_SHA256: ${{ inputs.h1_connection_evidence_sha256 }}
+      H1_A1_AUTHORITY_SHA256: ${{ inputs.h1_a1_authority_sha256 }}
       PAID_TURNS_APPROVED: ${{ inputs.paid_turns_approved }}
       ACCEPTANCE_CONFIRMATION: ${{ inputs.acceptance_confirmation }}
       RC_ACCEPTANCE_FREEZE_ENABLED: ${{ vars.OPEN_DESIGN_RC_ACCEPTANCE_ENABLED }}
@@ -78,6 +88,8 @@ jobs:
           test "$(uname -s)" = "Darwin"
           test "$(uname -m)" = "arm64"
           [[ "$HOST_BUILD_RUN_ID" =~ ^[1-9][0-9]*$ ]]
+          [[ "$H1_CONNECTION_EVIDENCE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          [[ "$H1_A1_AUTHORITY_SHA256" =~ ^[0-9a-f]{64}$ ]]
           git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test "$GITHUB_SHA" = "$(git rev-parse refs/remotes/origin/main)"
@@ -98,19 +110,46 @@ jobs:
           artifact_name=$(jq -er .name <<<"$artifact")
           artifact_id=$(jq -er .id <<<"$artifact")
           artifact_size=$(jq -er .size_in_bytes <<<"$artifact")
+          artifact_digest=$(jq -er .digest <<<"$artifact")
           [[ "$artifact_id" =~ ^[1-9][0-9]*$ ]]
           [[ "$artifact_size" =~ ^[1-9][0-9]*$ ]]
           test "$artifact_size" -le 2147483648
+          [[ "$artifact_digest" =~ ^sha256:[0-9a-f]{64}$ ]]
           test "$(jq -r .workflow_run.id <<<"$artifact")" = "$HOST_BUILD_RUN_ID"
           printf 'HOST_ARTIFACT_NAME=%s\n' "$artifact_name" >> "$GITHUB_ENV"
           printf 'HOST_ARTIFACT_ID=%s\n' "$artifact_id" >> "$GITHUB_ENV"
+          printf 'HOST_ARTIFACT_DIGEST=%s\n' "$artifact_digest" >> "$GITHUB_ENV"
 
-          profile_root="$HOME/Library/Application Support/Simulator M1 Acceptance Runner"
-          test -d "$profile_root"
-          test ! -L "$profile_root"
-          test "$(stat -f %Su "$profile_root")" = "$(id -un)"
-          test "$(stat -f %Lp "$profile_root")" = "700"
-          printf 'M1_PACKAGED_PROFILE_ROOT=%s\n' "$profile_root" >> "$GITHUB_ENV"
+      - name: Claim exact owner-only H1 to A1 authority once
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          authority_parent="$HOME/Library/Application Support/Simulator M1 Release Evidence/h1-a1-authority/$GITHUB_SHA-run-$HOST_BUILD_RUN_ID"
+          authority_root="$authority_parent/authority"
+          claim_file="$authority_parent/claims/$H1_A1_AUTHORITY_SHA256/claim.json"
+          claim_result="$RUNNER_TEMP/open-design-m1-h1-a1-claim-result.json"
+          test -d "$authority_root"
+          test ! -e "$claim_file"
+          bun scripts/qa/open-design-m1-h1-a1-authority.ts claim \
+            --authority-root "$authority_root" \
+            --source-sha "$GITHUB_SHA" \
+            --host-build-run-id "$HOST_BUILD_RUN_ID" \
+            --host-artifact-id "$HOST_ARTIFACT_ID" \
+            --host-artifact-name "$HOST_ARTIFACT_NAME" \
+            --host-artifact-digest "$HOST_ARTIFACT_DIGEST" \
+            --handoff-sha256 "$H1_A1_AUTHORITY_SHA256" \
+            --connection-sha256 "$H1_CONNECTION_EVIDENCE_SHA256" \
+            --producer-run-id "$GITHUB_RUN_ID" \
+            --producer-run-attempt "$GITHUB_RUN_ATTEMPT" \
+            > "$claim_result"
+          chmod 600 "$claim_result"
+          test "$(jq -er .claimFileRealpath "$claim_result")" = "$claim_file"
+          test "$(jq -er .authoritySha256 "$claim_result")" = "$H1_A1_AUTHORITY_SHA256"
+          test "$(jq -er .connectionSha256 "$claim_result")" = "$H1_CONNECTION_EVIDENCE_SHA256"
+          test "$(jq -er .producerRunId "$claim_result")" = "$GITHUB_RUN_ID"
+          test "$(jq -er .producerRunAttempt "$claim_result")" = "$GITHUB_RUN_ATTEMPT"
+          printf 'M1_H1_A1_CLAIM_FILE=%s\n' "$claim_file" >> "$GITHUB_ENV"
 
       - name: Download and stage exact packaged Simulator
         shell: bash
@@ -126,6 +165,9 @@ jobs:
             "repos/$GITHUB_REPOSITORY/actions/artifacts/$HOST_ARTIFACT_ID/zip" > "$archive"
           test -s "$archive"
           test "$(wc -c < "$archive" | tr -d ' ')" -le 2147483648
+          archive_sha256=$(shasum -a 256 "$archive" | awk '{print $1}')
+          [[ "$archive_sha256" =~ ^[0-9a-f]{64}$ ]]
+          test "sha256:$archive_sha256" = "$HOST_ARTIFACT_DIGEST"
 
           python3 - "$archive" "$host_bundle" <<'PY'
           import hashlib
@@ -332,6 +374,8 @@ jobs:
             GITHUB_RUN_ATTEMPT="$GITHUB_RUN_ATTEMPT" \
             HOST_BUILD_RUN_ID="$HOST_BUILD_RUN_ID" \
             HOST_ARTIFACT_SHA256="$HOST_ARTIFACT_SHA256" \
+            H1_CONNECTION_EVIDENCE_SHA256="$H1_CONNECTION_EVIDENCE_SHA256" \
+            H1_A1_AUTHORITY_SHA256="$H1_A1_AUTHORITY_SHA256" \
             "$bun_path" scripts/qa/verify-open-design-m1-machine-first-failure.ts \
             "$M1_FIRST_FAILURE_OUTPUT_ROOT" \
             > "$RUNNER_TEMP/open-design-m1-machine-first-failure-result.json"
@@ -387,6 +431,7 @@ jobs:
             "${M1_EVIDENCE_OUTPUT_ROOT:-}" \
             "${M1_FIRST_FAILURE_OUTPUT_ROOT:-}" \
             "$RUNNER_TEMP/open-design-m1-machine-result.json" \
+            "$RUNNER_TEMP/open-design-m1-h1-a1-claim-result.json" \
             "$RUNNER_TEMP/open-design-m1-machine-first-failure-result.json"; do
             if [ -z "$path" ]; then continue; fi
             if [ -e "$path" ]; then rm -rf -- "$path"; fi

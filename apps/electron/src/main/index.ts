@@ -146,6 +146,7 @@ import {
 } from './open-design-acceptance'
 import { createOpenDesignMutationGate } from './open-design-mutation-gate'
 import { createOpenDesignAcceptanceRuntimeBindingReader } from './open-design-acceptance-runtime-binding'
+import { OpenDesignAcceptanceConnectionAdmission } from './open-design-acceptance-connection-admission'
 import {
   loadOpenDesignAcceptanceBlackoutProxy,
   type OpenDesignAcceptanceBlackoutProxy,
@@ -291,6 +292,7 @@ let openDesignModuleIpc: OpenDesignModuleIpcRegistration | null = null
 let openDesignAcceptanceController: OpenDesignAcceptanceController | null = null
 let openDesignAcceptanceIpc: OpenDesignAcceptanceIpcRegistration | null = null
 let openDesignAcceptanceBlackoutProxy: OpenDesignAcceptanceBlackoutProxy | null = null
+let openDesignAcceptanceConnectionAdmission: OpenDesignAcceptanceConnectionAdmission | null = null
 let stopServer: (() => Promise<void>) | null = null
 let embeddedServer: { host: string; port: number } | null = null
 let oauthFlowStore: OAuthFlowStore | null = null
@@ -469,7 +471,13 @@ app.whenReady().then(async () => {
   ensurePresetThemes()
 
   // Register thumbnail:// protocol handler (scheme was registered earlier, before app.whenReady)
-  registerThumbnailHandler()
+  registerThumbnailHandler(async (filePath) => {
+    const manager = sessionManager
+    if (!manager) {
+      throw new Error('Session manager is unavailable')
+    }
+    await manager.assertRendererPathAccess(filePath)
+  })
 
   // Re-apply proxy settings now that Electron sessions are available
   // (first call before app.whenReady only configured Node-level proxy)
@@ -826,8 +834,10 @@ app.whenReady().then(async () => {
 
       // Remove workspace from config (cleanup stale entries)
       ipcMain.handle('workspace:remove', async (_event, workspaceId: string) => {
-        const { removeWorkspace: remove } = await import('@craft-agent/shared/config')
-        return remove(workspaceId)
+        return instance.sessionManager.removeWorkspaceAfterTransientModuleCleanup(workspaceId, async () => {
+          const { removeWorkspace: remove } = await import('@craft-agent/shared/config')
+          return remove(workspaceId)
+        })
       })
 
       // Cross-server RPC — invoke a channel on an arbitrary remote server
@@ -860,6 +870,14 @@ app.whenReady().then(async () => {
 
         const sourceWorkspace = getWorkspaceByNameOrId(sourceWorkspaceLocalId)
         if (!sourceWorkspace) throw new Error(`Source workspace ${sourceWorkspaceLocalId} not found`)
+
+        // A local transfer bypasses the regular server-core RPC dispatcher, so
+        // apply the same exact-ID renderer fence here before export/summary can
+        // read a Host-owned transient Session. Remote-owned sources are fenced
+        // by their `sessions:export*` handlers on the source server.
+        if (!sourceWorkspace.remoteServer) {
+          sessionManager.assertRendererSessionAccess(sessionId)
+        }
 
         let bundle: any = null
 
@@ -1164,6 +1182,22 @@ app.whenReady().then(async () => {
             userDataRoot: realpathSync(app.getPath('userData')),
             mainPid: process.pid,
           })
+          if (!sessionManager) throw new Error('Session manager is unavailable for acceptance Connection authority')
+          const resolveAcceptanceWorkspaceId = () => {
+            const hostWindow = windowManager?.getLastActiveWindow()
+            const activeWorkspaceId = hostWindow
+              ? windowManager?.getWorkspaceForWindow(hostWindow.webContents.id) ?? undefined
+              : undefined
+            return activeWorkspaceId ?? sessionManager?.getWorkspaces()[0]?.id
+          }
+          const connectionAdmission = new OpenDesignAcceptanceConnectionAdmission({
+            sessions: sessionManager,
+            resolveWorkspaceId: resolveAcceptanceWorkspaceId,
+            homeRoot: homedir(),
+            configRoot: realpathSync(CONFIG_DIR),
+            userDataRoot: realpathSync(app.getPath('userData')),
+          })
+          openDesignAcceptanceConnectionAdmission = connectionAdmission
           openDesignAcceptanceController = new OpenDesignAcceptanceController({
             bootstrap: openDesignAcceptanceBootstrap,
             getRuntime: openDesignAcceptanceRuntimeGate.getRuntime,
@@ -1194,6 +1228,8 @@ app.whenReady().then(async () => {
               })
             },
             getRuntimeBinding: readOpenDesignAcceptanceRuntimeBinding,
+            getConnectionAuthority: (request) => connectionAdmission.getConnectionAuthority(request),
+            armConnectionAdmission: (request) => connectionAdmission.armConnectionAdmission(request),
           })
         } else if (process.env[OPEN_DESIGN_ACCEPTANCE_ENV] === '1') {
           mainLog.info('OpenDesign acceptance control surface is not ready', {
@@ -1207,6 +1243,8 @@ app.whenReady().then(async () => {
         openDesignAcceptanceIpc?.dispose()
         openDesignAcceptanceIpc = null
         openDesignAcceptanceController = null
+        openDesignAcceptanceConnectionAdmission?.dispose()
+        openDesignAcceptanceConnectionAdmission = null
         await openDesignAcceptanceBlackoutProxy?.dispose().catch(() => undefined)
         openDesignAcceptanceBlackoutProxy = null
       }
@@ -1225,6 +1263,8 @@ app.whenReady().then(async () => {
         openDesignAcceptanceIpc?.dispose()
         openDesignAcceptanceIpc = null
         openDesignAcceptanceController = null
+        openDesignAcceptanceConnectionAdmission?.dispose()
+        openDesignAcceptanceConnectionAdmission = null
         await openDesignAcceptanceBlackoutProxy?.dispose().catch(() => undefined)
         openDesignAcceptanceBlackoutProxy = null
         try {
@@ -1294,6 +1334,7 @@ app.whenReady().then(async () => {
           workerEntryPath: resolveHostAgentWorkerEntry(app.getAppPath()),
           shimPath: join(app.getAppPath(), 'dist', 'resources', 'host-agent', 'simulator-host-agent.mjs'),
           acceptanceBlackoutProxy: openDesignAcceptanceBlackoutProxy ?? undefined,
+          connectionAdmission: openDesignAcceptanceConnectionAdmission ?? undefined,
           resolveWorkspaceId: () => {
             const hostWindow = windowManager?.getLastActiveWindow()
             const activeWorkspaceId = hostWindow
@@ -1598,6 +1639,8 @@ async function cleanupBeforeQuit(): Promise<void> {
   openDesignAcceptanceIpc?.dispose()
   openDesignAcceptanceIpc = null
   openDesignAcceptanceController = null
+  openDesignAcceptanceConnectionAdmission?.dispose()
+  openDesignAcceptanceConnectionAdmission = null
   openDesignModuleIpc?.dispose()
   openDesignModuleIpc = null
   openDesignModuleController?.dispose()

@@ -55,6 +55,10 @@ import {
   type OpenDesignModuleAgentRuntimeSnapshot,
   type OpenDesignAcceptanceRuntimeBinding,
   type OpenDesignAcceptanceRuntimeBindingRequest,
+  type OpenDesignAcceptanceConnectionAuthorityRequest,
+  type OpenDesignAcceptanceConnectionAuthorityResult,
+  type OpenDesignAcceptanceConnectionArmRequest,
+  type OpenDesignAcceptanceConnectionArmResult,
 } from '../shared/open-design-acceptance-ipc'
 
 type OpenDesignIpcRenderer = Pick<typeof ipcRenderer, 'invoke' | 'on' | 'removeListener' | 'sendSync'>
@@ -105,6 +109,16 @@ export function createOpenDesignAcceptanceFacade(
       request: OpenDesignAcceptanceRuntimeBindingRequest,
     ): Promise<OpenDesignAcceptanceRuntimeBinding> => (
       ipc.invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_RUNTIME_BINDING, request)
+    ),
+    getConnectionAuthority: (
+      request: OpenDesignAcceptanceConnectionAuthorityRequest,
+    ): Promise<OpenDesignAcceptanceConnectionAuthorityResult> => (
+      ipc.invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.GET_CONNECTION_AUTHORITY, request)
+    ),
+    armConnectionAdmission: (
+      request: OpenDesignAcceptanceConnectionArmRequest,
+    ): Promise<OpenDesignAcceptanceConnectionArmResult> => (
+      ipc.invoke(OPEN_DESIGN_ACCEPTANCE_CHANNELS.ARM_CONNECTION_ADMISSION, request)
     ),
   })
 }

@@ -59,15 +59,17 @@ describe('createManagedSession', () => {
     }, workspace as any)
     ;(manager as unknown as { sessions: Map<string, unknown> }).sessions.set(managed.id, managed)
 
-    const [rendererSession] = manager.getSessions(workspace.id)
-    expect(rendererSession).toBeDefined()
-    expect(rendererSession).not.toHaveProperty('moduleAgentRun')
-    expect(JSON.stringify(rendererSession)).not.toContain('idempotencyKeyDigest')
+    const rendererSessions = manager.getSessions(workspace.id)
+    expect(rendererSessions).toEqual([])
+    expect(JSON.stringify(rendererSessions)).not.toContain('idempotencyKeyDigest')
     expect(manager.getModuleAgentSessionResidueSnapshot()).toEqual({
       hiddenSessions: 1,
       transientSessions: 1,
       quarantinedSessions: 0,
     })
+    expect(manager.isModuleAgentSessionForHostEvidence(managed.id, workspace.id)).toBe(true)
+    expect(manager.isModuleAgentSessionForHostEvidence(managed.id, 'other-workspace')).toBe(false)
+    expect(manager.isModuleAgentSessionForHostEvidence('missing-session', workspace.id)).toBe(false)
   })
 
   it('atomically persists valid transient Run state transitions', async () => {

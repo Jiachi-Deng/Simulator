@@ -26,13 +26,17 @@ describe('OpenDesign M1 machine evidence workflow', () => {
     expect(releaseWorkflow.concurrency).toEqual(workflow.concurrency)
   })
 
-  it('has exactly three non-evidence workflow inputs', () => {
+  it('accepts only scalar Host, H1 authority, and paid-budget workflow inputs', () => {
     expect(Object.keys(dispatch.inputs).sort()).toEqual([
-      'acceptance_confirmation', 'host_build_run_id', 'paid_turns_approved',
+      'acceptance_confirmation', 'h1_a1_authority_sha256', 'h1_connection_evidence_sha256',
+      'host_build_run_id', 'paid_turns_approved',
     ])
     expect(source).not.toContain('records_base64')
     expect(source).not.toContain('evidence_bundle_base64')
     expect(source).not.toContain('result_path')
+    expect(source).not.toContain('h1_authority_path')
+    expect(source).not.toContain('connection_slug')
+    expect(source).not.toContain('binding_key')
   })
 
   it('is fixed to the protected Apple Silicon self-hosted runner and Environment', () => {
@@ -50,6 +54,46 @@ describe('OpenDesign M1 machine evidence workflow', () => {
     ))
     expect(authority.run).toContain('test "$RC_ACCEPTANCE_FREEZE_ENABLED" = "true"')
     expect(runnerSource).toContain("requiredEnv('RC_ACCEPTANCE_FREEZE_ENABLED') !== 'true'")
+  })
+
+  it('claims the fixed owner-only H1 to A1 handoff once before App work', () => {
+    const authorityIndex = job.steps.findIndex((step: Record<string, any>) => (
+      step.name === 'Verify protected runner and exact Host build authority'
+    ))
+    const claimIndex = job.steps.findIndex((step: Record<string, any>) => (
+      step.name === 'Claim exact owner-only H1 to A1 authority once'
+    ))
+    const downloadIndex = job.steps.findIndex((step: Record<string, any>) => (
+      step.name === 'Download and stage exact packaged Simulator'
+    ))
+    expect(claimIndex).toBeGreaterThan(authorityIndex)
+    expect(downloadIndex).toBeGreaterThan(claimIndex)
+    const claim = job.steps[claimIndex]!.run as string
+    expect(claim).toContain('h1-a1-authority/$GITHUB_SHA-run-$HOST_BUILD_RUN_ID')
+    expect(claim).toContain('open-design-m1-h1-a1-authority.ts claim')
+    expect(claim).toContain('--handoff-sha256 "$H1_A1_AUTHORITY_SHA256"')
+    expect(claim).toContain('--connection-sha256 "$H1_CONNECTION_EVIDENCE_SHA256"')
+    expect(claim).toContain('--producer-run-id "$GITHUB_RUN_ID"')
+    expect(claim).toContain('test ! -e "$claim_file"')
+    expect(claim).toContain("printf 'M1_H1_A1_CLAIM_FILE=%s\\n'")
+    expect(claim).not.toContain('authority-key.bin')
+    expect(claim).not.toContain('keyBase64')
+
+    const download = job.steps[downloadIndex]!.run as string
+    const downloadArchive = download.indexOf('actions/artifacts/$HOST_ARTIFACT_ID/zip')
+    const hashArchive = download.indexOf('shasum -a 256 "$archive"')
+    const bindServiceDigest = download.indexOf('test "sha256:$archive_sha256" = "$HOST_ARTIFACT_DIGEST"')
+    const extractArchive = download.indexOf('python3 - "$archive" "$host_bundle"')
+    expect(downloadArchive).toBeGreaterThan(-1)
+    expect(hashArchive).toBeGreaterThan(downloadArchive)
+    expect(bindServiceDigest).toBeGreaterThan(hashArchive)
+    expect(extractArchive).toBeGreaterThan(bindServiceDigest)
+
+    const main = runnerSource.slice(runnerSource.indexOf('async function main()'))
+    const validation = main.indexOf('await validateOpenDesignM1H1A1Claim(')
+    expect(validation).toBeGreaterThan(-1)
+    expect(validation).toBeLessThan(main.indexOf("const token = requiredEnv('GH_TOKEN')"))
+    expect(validation).toBeLessThan(main.indexOf('app = await appLaunch('))
   })
 
   it('fails closed around the paid batch when a Release transaction or Catalog drift exists', () => {
@@ -105,6 +149,7 @@ describe('OpenDesign M1 machine evidence workflow', () => {
     for (const authority of [
       'GITHUB_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT',
       'HOST_BUILD_RUN_ID', 'HOST_ARTIFACT_SHA256',
+      'H1_CONNECTION_EVIDENCE_SHA256', 'H1_A1_AUTHORITY_SHA256',
     ]) expect(verifier.run).toContain(`${authority}="$${authority}"`)
     expect(verifier.run).toContain('"$bun_path" scripts/qa/verify-open-design-m1-machine-first-failure.ts')
     const verifierEnvironment = verifier.run.slice(
@@ -162,7 +207,8 @@ describe('OpenDesign M1 machine evidence workflow', () => {
     expect(cleanupSource).toContain('ownedModuleProcessesRemaining')
     expect(failureSeal).toContain('knownProcessTree: [...knownProcessTree.values()]')
     expect(failureSource).toContain("code: 'LIFECYCLE_VERIFICATION_FAILED'")
-    expect(failureSource).toContain('schemaVersion: 2')
+    expect(failureSource).toContain('schemaVersion: 3')
+    expect(failureSource).toContain('h1Authority: {')
   })
 
   it('protects every capsule-capable producer preflight with the zero-paid catch/finally boundary', () => {
@@ -182,10 +228,10 @@ describe('OpenDesign M1 machine evidence workflow', () => {
       'await fetchReleaseAuthority(OPEN_DESIGN_RC_VERSION)',
       'await requiredCiEvidence(hostHeadSha, token)',
       'await preflightExternalBlackoutProxyChild(blackoutProxyChild, staging)',
-      "const userData = resolve(requiredEnv('M1_PACKAGED_PROFILE_ROOT'))",
+      'const userData = h1A1Claim.acceptance.userDataRealpath',
       "const controlDescriptor = join(controlDirectory, 'rc-control-v1.json')",
       "await mkdir(artifactRoot, { mode: 0o700 })",
-      'app = await appLaunch(executable, userData, blackoutProxyChild)',
+      'app = await appLaunch(',
       'await runFixedPaidTurnBatch(OPEN_DESIGN_M1_CASES',
     ]) {
       const position = main.indexOf(operation)
@@ -238,8 +284,10 @@ describe('OpenDesign M1 machine evidence workflow', () => {
     expect(runnerSource).not.toContain('fetch(`${origin}/health`')
     expect(runnerSource.indexOf('await requireExternalBlackoutProxy(craftCdp)'))
       .toBeLessThan(runnerSource.indexOf("stack: 'old'"))
-    expect(runnerSource.indexOf('await requireAuthenticatedCraftRuntime(craftCdp)'))
+    expect(runnerSource.indexOf('await armExactAcceptanceConnection(craftCdp, h1A1Claim)'))
       .toBeLessThan(runnerSource.indexOf("stack: 'old'"))
+    expect(runnerSource.match(/await armExactAcceptanceConnection\(craftCdp, h1A1Claim\)/g))
+      .toHaveLength(4)
     expect(runnerSource.indexOf('await requireRuntimeCleanup(craftCdp, 1_000)'))
       .toBeLessThan(runnerSource.indexOf("stack: 'old'"))
     expect(runnerSource).toContain('await requireOpenDesignHostRuntime(origin)')
@@ -249,7 +297,7 @@ describe('OpenDesign M1 machine evidence workflow', () => {
     expect(source).toContain('proxy_script=$(realpath scripts/qa/run-host-agent-blackout-proxy.ts)')
     expect(source).toContain('(( (8#$mode & 8#022) == 0 ))')
     expect(runnerSource.indexOf('await preflightExternalBlackoutProxyChild(blackoutProxyChild, staging)'))
-      .toBeLessThan(runnerSource.indexOf('app = await appLaunch(executable, userData, blackoutProxyChild)'))
+      .toBeLessThan(runnerSource.indexOf('app = await appLaunch('))
     const main = runnerSource.slice(runnerSource.indexOf('async function main()'))
     expect(main.indexOf('await preflightRealPackagedV2ProxyAttach({'))
       .toBeLessThan(main.indexOf('await runFixedPaidTurnBatch('))
@@ -274,7 +322,9 @@ describe('OpenDesign M1 machine evidence workflow', () => {
     for (const forbidden of ['GH_TOKEN', 'GITHUB_TOKEN', 'ACTIONS_', 'RUNNER_']) {
       expect(launch).not.toContain(forbidden)
     }
-    expect(launch).toContain("['HOME', 'PATH', 'TMPDIR', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', '__CF_USER_TEXT_ENCODING']")
+    expect(launch).toContain("['PATH', 'TMPDIR', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'LC_ALL', '__CF_USER_TEXT_ENCODING']")
+    expect(launch).toContain('environment.HOME = acceptanceHome')
+    expect(launch).toContain('environment.CRAFT_CONFIG_DIR = configRoot')
     expect(launch).toContain("environment.SIMULATOR_HOST_MODULE_ACCEPTANCE = '1'")
     expect(launch).toContain('environment.SIMULATOR_HOST_AGENT_BLACKOUT_PROXY_BUN_PATH = blackoutProxyChild.bunPath')
     expect(launch).toContain('environment.SIMULATOR_HOST_AGENT_BLACKOUT_PROXY_SCRIPT_PATH = blackoutProxyChild.scriptPath')
@@ -324,7 +374,7 @@ describe('OpenDesign M1 machine evidence workflow', () => {
     expect(commandContainsBoundedPath('other --user-data-dir=/tmp/m1-profile-suffix', '/tmp/m1-profile')).toBe(false)
     expect(runnerSource).toContain('await requireDedicatedAcceptanceProcessesAbsent(userData, blackoutProxyChild.scriptPath)')
     expect(runnerSource.indexOf('await requireDedicatedAcceptanceProcessesAbsent(userData, blackoutProxyChild.scriptPath)'))
-      .toBeLessThan(runnerSource.indexOf('app = await appLaunch(executable, userData, blackoutProxyChild)'))
+      .toBeLessThan(runnerSource.indexOf('app = await appLaunch('))
     const cleanupSource = runnerSource.slice(
       runnerSource.indexOf('async function bestEffortFailureCleanup'),
       runnerSource.indexOf('async function sealArtifact'),

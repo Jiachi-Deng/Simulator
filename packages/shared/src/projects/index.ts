@@ -20,6 +20,7 @@ export {
   getProjectPath,
   getProjectAssetsPath,
   getProjectMemoryPath,
+  validateProjectSlug,
   MEMORY_FILENAME,
   // Config operations
   loadProjectConfig,
