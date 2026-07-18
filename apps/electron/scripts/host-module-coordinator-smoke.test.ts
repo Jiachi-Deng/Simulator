@@ -18,6 +18,17 @@ const v2FixturePath = join(
 )
 const workflowPath = join(repositoryRoot, '.github/workflows/module-coordinator.yml')
 
+function workflowPathFilterCovers(filters: unknown, requiredPath: string): boolean {
+  if (!Array.isArray(filters)) return false
+  return filters.some((filter) => {
+    if (typeof filter !== 'string') return false
+    if (filter === requiredPath) return true
+    if (!filter.endsWith('/**')) return false
+    const directory = filter.slice(0, -3)
+    return requiredPath === directory || requiredPath.startsWith(`${directory}/`)
+  })
+}
+
 async function invoke(
   arguments_: readonly string[],
   environment: Readonly<Record<string, string>> = {},
@@ -62,6 +73,15 @@ function processOrGroupExists(pid: number): boolean {
 }
 
 describe('Electron packaged Host Agent smoke scenarios', () => {
+  it('treats a directory wildcard as coverage without matching sibling prefixes', () => {
+    const filters = ['exact/file.ts', 'packages/pi-agent-server/src/**']
+    expect(workflowPathFilterCovers(filters, 'exact/file.ts')).toBe(true)
+    expect(workflowPathFilterCovers(filters, 'packages/pi-agent-server/src/index.ts')).toBe(true)
+    expect(workflowPathFilterCovers(filters, 'packages/pi-agent-server/src')).toBe(true)
+    expect(workflowPathFilterCovers(filters, 'packages/pi-agent-server/src-escape/index.ts')).toBe(false)
+    expect(workflowPathFilterCovers(filters, 'packages/pi-agent-server/index.ts')).toBe(false)
+  })
+
   it('publishes only fixed wrapper codes and byte/status detail keys', () => {
     const known = new Error('SMOKE_CHILD_FAILED status=64 phase=90 resultBytes=12 stdoutBytes=3 stderrBytes=9')
     expect(publicWrapperFailure(known)).toBe(known.message)
@@ -236,8 +256,8 @@ describe('Electron packaged Host Agent smoke scenarios', () => {
       'apps/electron/src/main/host-module-smoke-deadline.test.ts',
     ]
     for (const path of requiredIsolationPaths) {
-      expect(workflow.on.pull_request.paths).toContain(path)
-      expect(workflow.on.push.paths).toContain(path)
+      expect(workflowPathFilterCovers(workflow.on.pull_request.paths, path)).toBe(true)
+      expect(workflowPathFilterCovers(workflow.on.push.paths, path)).toBe(true)
     }
     const job = workflow.jobs['module-coordinator-electron-packaged-smoke']
     const isolationIndex = job.steps.findIndex((step: Record<string, unknown>) => (
