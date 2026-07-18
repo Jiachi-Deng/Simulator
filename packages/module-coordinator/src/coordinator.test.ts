@@ -402,7 +402,7 @@ describe('ModuleCoordinator packaged fake module E2E', () => {
       expect(result.error).toContain('Catalog evidence')
     }
     expect(fixture.fetch.artifactRequests).toBe(0)
-  })
+  }, FILESYSTEM_TEST_TIMEOUT_MS)
 
   it('accepts a valid higher-sequence Catalog refresh with identical release evidence', async () => {
     const fixture = await createFixture([
