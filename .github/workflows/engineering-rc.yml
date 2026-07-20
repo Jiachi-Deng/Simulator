@@ -702,14 +702,14 @@ jobs:
 
       - name: Attest ZIP with independently derived SPDX SBOM
         id: attest_sbom
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.0.0
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.0.0
         with:
           subject-path: engineering-rc-bundle/Simulator-arm64.zip
           sbom-path: engineering-rc-bundle/sbom.spdx.json
 
       - name: Attest DMG and ZIP build provenance
         id: attest_provenance
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.0.0
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.0.0
         with:
           subject-path: |
             engineering-rc-bundle/Simulator-arm64.dmg
