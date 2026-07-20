@@ -154,7 +154,7 @@
   },
   "devDependencies": {
     "@aws-sdk/client-s3": "^3.947.0",
-    "@electron/osx-sign": "2.3.0",
+    "@electron/osx-sign": "2.6.0",
     "@electron/packager": "^19.0.1",
     "@rollup/rollup-win32-arm64-msvc": "^4.55.1",
     "@sentry/vite-plugin": "^4.8.0",
@@ -175,7 +175,7 @@
     "autoprefixer": "^10.4.23",
     "concurrently": "^9.2.1",
     "electron": "^39.2.7",
-    "electron-builder": "^26.0.12",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.25.0",
     "eslint": "^9.39.2",
     "eslint-plugin-react": "^7.37.5",
