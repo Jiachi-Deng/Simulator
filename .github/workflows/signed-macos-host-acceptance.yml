@@ -87,7 +87,7 @@ jobs:
 
     steps:
       - name: Checkout exact main authority
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 0
@@ -197,7 +197,7 @@ jobs:
           test "$(jq -r .size_in_bytes <<<"$artifact_json")" -gt 0
 
       - name: Download exact authenticated Engineering RC Artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ steps.authority.outputs.artifact_id }}
           path: ${{ runner.temp }}/engineering-rc
@@ -214,7 +214,7 @@ jobs:
           mkdir -m 700 "$raw_root"
 
       - name: Download exact raw final OpenDesign acceptance Artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ steps.authority.outputs.acceptance_artifact_id }}
           path: ${{ runner.temp }}/open-design-acceptance-raw
@@ -647,7 +647,7 @@ jobs:
 
     steps:
       - name: Checkout exact attestation authority
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.source_sha }}
           fetch-depth: 1
@@ -762,7 +762,7 @@ jobs:
           mkdir -m 700 "$raw_root"
 
       - name: Download exact raw Engineering RC Artifact for finalizer
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ fromJSON(inputs.engineering_rc_authority).artifactId }}
           path: ${{ runner.temp }}/engineering-rc-finalizer-raw
@@ -820,7 +820,7 @@ jobs:
           printf 'FINALIZER_BASELINE_APP=%s\n' "$baseline/Simulator.app" >> "$GITHUB_ENV"
 
       - name: Download exact raw final OpenDesign acceptance Artifact for finalizer
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ fromJSON(inputs.open_design_acceptance_authority).artifactId }}
           path: ${{ runner.temp }}/open-design-acceptance-finalizer-raw
@@ -860,7 +860,7 @@ jobs:
           printf 'FINALIZER_OPEN_DESIGN_ACCEPTANCE_BINDING=%s\n' "$binding" >> "$GITHUB_ENV"
 
       - name: Download exact raw pre-attestation Candidate Artifact
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           artifact-ids: ${{ needs.build-signed-candidate.outputs.pre_artifact_id }}
           path: ${{ runner.temp }}/signed-host-pre-raw
@@ -989,7 +989,7 @@ jobs:
 
       - name: Attest exact final DMG and ZIP provenance without Apple credentials
         id: attest_provenance
-        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.0.0
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.0.0
         with:
           subject-path: |
             signed-host-candidate/Simulator-arm64.dmg
